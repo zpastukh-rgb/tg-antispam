@@ -251,8 +251,9 @@ async def cb_log_bind(cb: CallbackQuery):
 
         await session.commit()
 
+        protected_title = chat_row.title or str(protected_chat_id)
+
     log_title = cb.message.chat.title or str(log_chat_id)
-    protected_title = chat_row.title or str(protected_chat_id)
 
     await cb.message.edit_text(
         "✅ *Готово.*\n\n"

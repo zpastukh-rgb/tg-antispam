@@ -10,11 +10,15 @@ from dotenv import load_dotenv
 from app.db.session import engine
 from app.db.models import Base
 
+from app.handlers.health import router as health_router
 from app.handlers.start import router as start_router
 from app.handlers.onboarding import router as onboarding_router
 from app.handlers.panel_dm import router as panel_router
 from app.handlers.log_setup import router as log_setup_router
+from app.handlers.log_actions import router as log_actions_router
 from app.handlers.moderation import router as moderation_router
+from app.handlers.whitelist import router as whitelist_router
+from app.handlers.stopwords import router as stopwords_router
 
 load_dotenv()
 
@@ -32,11 +36,15 @@ async def on_startup() -> None:
 
 
 async def main() -> None:
+    dp.include_router(health_router)
     dp.include_router(moderation_router)
     dp.include_router(start_router)
     dp.include_router(onboarding_router)
     dp.include_router(panel_router)
     dp.include_router(log_setup_router)
+    dp.include_router(log_actions_router)
+    dp.include_router(whitelist_router)
+    dp.include_router(stopwords_router)
 
     await bot.delete_webhook(drop_pending_updates=True)
     await on_startup()

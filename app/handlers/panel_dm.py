@@ -534,12 +534,16 @@ async def render_pick_reports_chat(bot, user_id: int) -> Tuple[str, InlineKeyboa
         if not chats:
             return "😈 Нет доступных чатов.", _kb_back_to_main()
 
+        # Собираем id и title внутри сессии (объекты Chat после выхода из session отвязываются)
+        chat_items = [(ch.id, (ch.title or "").strip() or str(ch.id)) for ch in chats]
+
     b = InlineKeyboardBuilder()
     b.button(text="🚫 Не слать отчёты (снять)", callback_data=CB_CLEAR_REPORTS_CHAT)
 
-    for ch in chats:
-        title = (ch.title or "").strip() or await _get_chat_title(bot, ch.id)
-        b.button(text=f"📍 {title}", callback_data=f"{CB_SET_REPORTS_CHAT}{ch.id}")
+    for chat_id, title in chat_items:
+        if title == str(chat_id):
+            title = await _get_chat_title(bot, chat_id)
+        b.button(text=f"📍 {title}", callback_data=f"{CB_SET_REPORTS_CHAT}{chat_id}")
 
     b.button(text="⬅️ Назад", callback_data=CB_REPORTS)
     b.adjust(1)

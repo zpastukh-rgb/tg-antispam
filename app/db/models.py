@@ -233,7 +233,7 @@ class UserContext(Base):
 class ChatManager(Base):
     __tablename__ = "chat_managers"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
     chat_id: Mapped[int] = mapped_column(
         BigInteger,
@@ -262,7 +262,7 @@ class ChatManager(Base):
 class NewMember(Base):
     __tablename__ = "new_members"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
     chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
 
@@ -285,7 +285,7 @@ class NewMember(Base):
 class ModerationLog(Base):
     __tablename__ = "moderation_logs"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
     chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
 

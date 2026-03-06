@@ -47,7 +47,7 @@ URL_RE = re.compile(
     \b(
         (?:https?://|tg://|www\.)[^\s<>{}\[\]|\\^`"]+
         |
-        t\.me/[^\s<>{}$begin:math:display$$end:math:display$|\\^`"]+
+        t\.me/[^\s<>{}\[\]|\\^`"]+
     )\b
     """
 )
