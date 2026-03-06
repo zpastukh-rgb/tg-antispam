@@ -1,0 +1,35 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: antispam_postgres
+    environment:
+      POSTGRES_DB: antispam
+      POSTGRES_USER: antispam_user
+      POSTGRES_PASSWORD: antispam_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - antispam_pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    container_name: antispam_redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  bot:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: antispam_bot
+    env_file:
+      - .env.docker
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+volumes:
+  antispam_pgdata:
