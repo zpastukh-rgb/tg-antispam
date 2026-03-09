@@ -5,6 +5,7 @@ import asyncio
 import os
 
 from aiogram import Bot, Dispatcher
+from aiogram.types import BotCommand
 from dotenv import load_dotenv
 
 from app.db.session import engine
@@ -29,10 +30,23 @@ if not TOKEN:
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+# ТЗ: Меню команд Telegram (синяя кнопка) — только основные команды
+BOT_COMMANDS = [
+    BotCommand(command="start", description="Начать работу с ботом"),
+    BotCommand(command="group", description="Управление одной группой"),
+    BotCommand(command="groups", description="Управление всеми группами"),
+    BotCommand(command="buy", description="Тариф и подписка"),
+    BotCommand(command="support", description="Техподдержка"),
+]
+
 
 async def on_startup() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    try:
+        await bot.set_my_commands(BOT_COMMANDS)
+    except Exception:
+        pass
 
 
 async def main() -> None:
@@ -49,6 +63,10 @@ async def main() -> None:
 
     await bot.delete_webhook(drop_pending_updates=True)
     await on_startup()
+
+    # ТЗ Напоминания + Автоотчёты: фоновый цикл (напоминания 12ч/24ч/3д, Guardian раз в 3 дня, дайджест раз в сутки)
+    from app.services.reminders import reminder_loop
+    asyncio.create_task(reminder_loop(bot, interval_sec=900))
 
     print("😈 AntiSpam Guardian запущен / BUILD 777")
 

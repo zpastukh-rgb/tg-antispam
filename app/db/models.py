@@ -63,6 +63,11 @@ class User(Base):
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String(32), default="active")
 
+    # ТЗ Напоминания: первое /start, этапы напоминаний (0=none, 1=12h, 2=24h, 3=3d, 4=done)
+    first_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reminder_stage: Mapped[int] = mapped_column(Integer, default=0)
+    reports_reminder_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now()
@@ -98,6 +103,9 @@ class Chat(Base):
     messages_checked: Mapped[int] = mapped_column(Integer, default=0)
     messages_deleted: Mapped[int] = mapped_column(Integer, default=0)
     users_banned: Mapped[int] = mapped_column(Integer, default=0)
+
+    # ТЗ Напоминания: активность чата для «Guardian сообщения раз в 3 дня» (обновляется при модерации)
+    last_activity_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[str] = mapped_column(
         DateTime(timezone=True),
@@ -176,6 +184,28 @@ class Rule(Base):
     public_alerts_last_sent_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+    # ТЗ Напоминания: Guardian сообщения в группе (раз в 3 дня, не чаще 72ч)
+    guardian_messages_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_guardian_message_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # ТЗ Автоматические отчёты: дайджест в чат отчётов раз в сутки
+    auto_reports_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_auto_report_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # ТЗ доработка Защита: капча на первое сообщение, фильтры (режимы allow/captcha/forbid)
+    first_message_captcha_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_links_mode: Mapped[str] = mapped_column(String(16), default="forbid")
+    filter_media_mode: Mapped[str] = mapped_column(String(16), default="allow")
+    filter_buttons_mode: Mapped[str] = mapped_column(String(16), default="allow")
+    all_captcha_minutes: Mapped[int] = mapped_column(Integer, default=0)
+    delete_join_messages: Mapped[bool] = mapped_column(Boolean, default=True)
+    silence_minutes: Mapped[int] = mapped_column(Integer, default=0)
+    master_anti_spam: Mapped[bool] = mapped_column(Boolean, default=True)
 
     created_at: Mapped[str] = mapped_column(
         DateTime(timezone=True),

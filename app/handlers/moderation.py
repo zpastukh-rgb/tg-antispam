@@ -19,7 +19,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 
 from app.db.session import get_session
-from app.db.models import Chat, Rule, StopWord, WhitelistDomain, WhitelistUser
+from app.db.models import Chat, Rule, StopWord, WhitelistDomain, WhitelistUser, ModerationLog
 from app.services.public_alerts import maybe_send_public_alert
 
 router = Router()
@@ -603,6 +603,14 @@ async def send_log(
             parse_mode="Markdown",
             reply_markup=log_keyboard(v.action, message.chat.id, user.id),
         )
+        # ТЗ Автоотчёты: пишем в moderation_logs для дайджеста раз в сутки
+        session.add(ModerationLog(
+            chat_id=message.chat.id,
+            user_id=user.id,
+            action=v.action,
+            reason=v.reason,
+            message_text=(message.text or message.caption or "")[:2000],
+        ))
     except Exception as e:
         logger.warning(f"[log send failed] chat={message.chat.id} -> log_chat={log_chat_id}: {e}")
 
@@ -637,6 +645,12 @@ async def pipeline(message: Message, *, edited: bool = False) -> None:
                 await maybe_send_public_alert(
                     message.bot, message.chat.id, rule, v.reason, v.action, session
                 )
+            # ТЗ Напоминания: активность чата для Guardian-сообщений раз в 3 дня
+            chat_row = await session.get(Chat, message.chat.id)
+            if chat_row:
+                from datetime import datetime, timezone
+                chat_row.last_activity_at = datetime.now(timezone.utc)
+            await session.commit()
         except Exception as e:
             logger.exception(f"[pipeline error] chat={message.chat.id} msg={message.message_id}: {e}")
 

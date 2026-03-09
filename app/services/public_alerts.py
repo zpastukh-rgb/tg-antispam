@@ -70,7 +70,10 @@ def _get_phrase(reason: str, action: str = "delete") -> str:
 async def maybe_send_public_alert(bot, chat_id: int, rule, reason: str, action: str, session) -> None:
     """
     После успешного удаления: увеличить счётчик; при достижении N и интервала — отправить фразу в чат.
+    ТЗ Напоминания: также проверяем guardian_messages_enabled (общий переключатель Guardian сообщения).
     """
+    if not getattr(rule, "guardian_messages_enabled", True):
+        return
     if not getattr(rule, "public_alerts_enabled", False):
         return
     every_n = max(1, getattr(rule, "public_alerts_every_n", 5))

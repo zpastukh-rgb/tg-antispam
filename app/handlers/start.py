@@ -194,11 +194,34 @@ async def _edit_or_send(message: Message, text: str, kb):
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
-
+    """ТЗ Меню: /start открывает главную панель. ТЗ Напоминания: фиксируем first_start_at."""
     if message.chat.type != "private":
         return
-
-    await _edit_or_send(message, START_TEXT, start_kb())
+    if not message.from_user:
+        return
+    # ТЗ Напоминания: при первом /start записываем время для напоминаний (12ч, 24ч, 3д)
+    try:
+        from app.db.session import get_session
+        from app.services.user_service import get_or_create_user
+        from datetime import datetime, timezone
+        async with await get_session() as session:
+            user = await get_or_create_user(
+                session,
+                message.from_user.id,
+                username=getattr(message.from_user, "username", None),
+                first_name=getattr(message.from_user, "first_name", None),
+            )
+            if getattr(user, "first_start_at", None) is None:
+                user.first_start_at = datetime.now(timezone.utc)
+                await session.commit()
+    except Exception:
+        pass
+    try:
+        from app.handlers.panel_dm import show_panel, _cache_clear
+        _cache_clear(message.from_user.id)
+        await show_panel(message.bot, message.from_user.id)
+    except Exception:
+        await _edit_or_send(message, START_TEXT, start_kb())
 
 
 # =========================================================

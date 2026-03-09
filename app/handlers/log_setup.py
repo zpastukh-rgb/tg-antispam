@@ -77,6 +77,38 @@ async def on_my_chat_member(update: ChatMemberUpdated):
     old_status = update.old_chat_member.status
     new_status = update.new_chat_member.status
 
+    # ТЗ ЧЕККК + ТЗ Отчёты: бота удалили из группы — is_active = False; если это был чат отчётов — уведомить владельцев
+    if old_status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR) and new_status in (
+        ChatMemberStatus.LEFT,
+        ChatMemberStatus.KICKED,
+    ):
+        try:
+            async with await get_session() as session:
+                chat_row = await session.get(Chat, chat.id)
+                if chat_row:
+                    chat_row.is_active = False
+                    chat_row.is_log_chat = False
+                # Найти защищаемые чаты, у которых log_chat_id == этот чат — уведомить владельцев
+                res = await session.execute(
+                    select(Chat).where(Chat.log_chat_id == chat.id)
+                )
+                affected = list(res.scalars().all())
+                for row in affected:
+                    row.log_chat_id = None
+                    try:
+                        await update.bot.send_message(
+                            row.owner_user_id,
+                            "⚠ Чат отчётов больше недоступен. Похоже, бот был удалён или потерял права.\n"
+                            "Подключите новый чат отчётов в панели: *Отчёты* → *➕ Подключить чат отчётов*.",
+                            parse_mode="Markdown",
+                        )
+                    except Exception:
+                        pass
+                await session.commit()
+        except Exception:
+            pass
+        return
+
     # Бот добавлен в группу или повышен до админа
     added = old_status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED) and new_status in (
         ChatMemberStatus.MEMBER,
@@ -112,8 +144,28 @@ async def on_my_chat_member(update: ChatMemberUpdated):
         except Exception:
             pass
 
-    # ТЗ правки: в личку «Подключить группу к защите?» только когда бот уже админ (можно подключить)
+    # ТЗ ЧЕККК: когда бот назначен админом — удаляем сообщение «назначьте админом», если было
+    _promote_msg_ids = getattr(on_my_chat_member, "_promote_msg_ids", {})
+    if bot_is_admin and chat.id in _promote_msg_ids:
+        try:
+            await update.bot.delete_message(chat.id, _promote_msg_ids[chat.id])
+        except Exception:
+            pass
+        del _promote_msg_ids[chat.id]
+
+    # ТЗ ЧЕККК: когда бот назначен админом — сразу подключаем (приветствие в группу + сообщение в личку)
     if bot_is_admin:
+        from app.handlers.panel_dm import connect_chat_after_bot_added
+        connected = await connect_chat_after_bot_added(
+            update.bot,
+            chat.id,
+            chat.title or "",
+            update.from_user.id,
+            getattr(update.from_user, "username", None),
+            getattr(update.from_user, "first_name", None),
+        )
+        if connected:
+            return
         from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
         try:
             await update.bot.send_message(
@@ -126,25 +178,24 @@ async def on_my_chat_member(update: ChatMemberUpdated):
             )
         except Exception:
             pass
+        return
 
     if not added:
         return
 
+    # ТЗ ЧЕККК: бот в группе, но не админ — просим назначить
     if not await _is_admin(update.bot, chat.id, update.from_user.id):
         return
-
-    # В группе: предложить сделать лог-чатом
-    text = (
-        "😈 *AntiSpam Guardian на месте.*\n\n"
-        f"Вижу новую берлогу: *{title}*\n\n"
-        "Сделать эту группу *журналом отчётов*?"
-    )
-    await update.bot.send_message(
-        chat.id,
-        text,
-        parse_mode="Markdown",
-        reply_markup=_kb_make_logs(),
-    )
+    try:
+        msg = await update.bot.send_message(
+            chat.id,
+            "Чтобы включить защиту, назначьте меня администратором.",
+        )
+        if not hasattr(on_my_chat_member, "_promote_msg_ids"):
+            on_my_chat_member._promote_msg_ids = {}
+        on_my_chat_member._promote_msg_ids[chat.id] = msg.message_id
+    except Exception:
+        pass
 
 
 # =========================================================

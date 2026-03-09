@@ -283,56 +283,18 @@ async def cb_panel(cb: CallbackQuery):
 
 @router.message(Command(commands=["setlog"], ignore_mention=True))
 async def setlog_command(message: Message):
-    """Регистрирует текущую группу как лог-чат (куда слать отчёты)."""
+    """ТЗ Отчёты: /setlog убран — подсказка про панель."""
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return
     if not message.from_user:
         return
-
-    try:
-        member = await message.bot.get_chat_member(
-            message.chat.id,
-            message.from_user.id,
-        )
-    except Exception:
-        await message.answer("❌ Не смог проверить права.")
-        return
-
-    if member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
-        await message.answer("❌ Только админ может вызвать /setlog.")
-        return
-
     try:
         await message.delete()
     except Exception:
         pass
-
-    async with await get_session() as session:
-        await get_or_create_user(
-            session,
-            message.from_user.id,
-            username=message.from_user.username,
-            first_name=message.from_user.first_name,
-        )
-        chat = await session.get(Chat, message.chat.id)
-        if not chat:
-            chat = Chat(
-                id=message.chat.id,
-                title=message.chat.title,
-                owner_user_id=message.from_user.id,
-                is_log_chat=True,
-                is_active=False,
-            )
-            session.add(chat)
-        else:
-            chat.is_log_chat = True
-            chat.title = message.chat.title
-            chat.owner_user_id = message.from_user.id
-        await session.commit()
-
     await message.answer(
-        "✅ *Эта группа теперь лог-чат.*\n\n"
-        "В панели управления: *Отчёты* → *Куда слать* — выбери эту группу для нужного чата.",
+        "Подключение чата отчётов теперь делается через панель.\n"
+        "Откройте настройки группы и нажмите: *Подключить чат отчётов*.",
         parse_mode="Markdown",
     )
 
@@ -343,206 +305,19 @@ async def setlog_command(message: Message):
 
 @router.message(Command(commands=["check"], ignore_mention=True))
 async def check_command(message: Message):
+    """ТЗ ЧЕККК: /check только как fallback — подсказка про панель."""
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        print("### CHECK STOP: not_group", getattr(message.chat, "id", None), flush=True)
         return
-
     if not message.from_user:
-        print("### CHECK STOP: no_from_user", getattr(message.chat, "id", None), flush=True)
-        await message.answer("❌ Не вижу пользователя, который вызвал /check")
         return
-
-    bot = message.bot
-
-    print(
-        "### CHECK HIT ###",
-        "chat=", message.chat.id,
-        "user=", message.from_user.id,
-        "text=", message.text,
-        flush=True,
-    )
 
     try:
         await message.delete()
-    except Exception as e:
-        print("### CHECK WARN: delete_failed", repr(e), flush=True)
+    except Exception:
+        pass
 
-    # проверка админа, который вызвал /check
-    try:
-        member = await bot.get_chat_member(
-            message.chat.id,
-            message.from_user.id,
-        )
-    except Exception as e:
-        print("### CHECK STOP: cannot_get_member", repr(e), flush=True)
-        await message.answer("❌ Не смог проверить твои права в чате")
-        return
-
-    print("### CHECK member.status =", member.status, flush=True)
-
-    if member.status not in (
-        ChatMemberStatus.ADMINISTRATOR,
-        ChatMemberStatus.CREATOR,
-    ):
-        print("### CHECK STOP: caller_not_admin", flush=True)
-        await message.answer("❌ Команду /check может вызывать только админ группы")
-        return
-
-    # проверка прав бота
-    try:
-        me = await bot.get_me()
-        bot_member = await bot.get_chat_member(
-            message.chat.id,
-            me.id,
-        )
-    except Exception as e:
-        print("### CHECK STOP: cannot_get_bot_member", repr(e), flush=True)
-        await message.answer("❌ Не смог проверить права бота в чате")
-        return
-
-    print(
-        "### CHECK bot_member.status =",
-        bot_member.status,
-        "can_delete_messages =",
-        getattr(bot_member, "can_delete_messages", None),
-        flush=True,
+    await message.answer(
+        "Подключение групп теперь делается через панель.\n"
+        "Открой личный чат с ботом и нажми: *➕ Добавить группу* (или *➕ Подключить чат*).",
+        parse_mode="Markdown",
     )
-
-    if bot_member.status not in (
-        ChatMemberStatus.ADMINISTRATOR,
-        ChatMemberStatus.CREATOR,
-    ):
-        print("### CHECK STOP: bot_not_admin", flush=True)
-        await message.answer(
-            "❌ Бот не админ в этой группе\n\n"
-            "Выдай ему админку и право:\n"
-            "✅ Удалять сообщения"
-        )
-        return
-
-    if not getattr(bot_member, "can_delete_messages", False):
-        print("### CHECK STOP: bot_no_delete_rights", flush=True)
-        await message.answer(
-            "❌ Дай боту права:\n\n"
-            "✅ Удалять сообщения"
-        )
-        return
-
-    # проверка лимита чатов по тарифу
-    try:
-        async with await get_session() as session:
-            await get_or_create_user(
-                session,
-                message.from_user.id,
-                username=message.from_user.username,
-                first_name=message.from_user.first_name,
-            )
-            can_add, current_count, limit = await can_add_chat(session, message.from_user.id)
-            if not can_add:
-                # ТЗ: сообщение о лимите — только в личку владельцу, не в группу
-                try:
-                    await bot.send_message(
-                        message.from_user.id,
-                        f"❌ Лимит чатов: {current_count} из {limit}.\n\n"
-                        "Чтобы подключить ещё один чат, повысь тариф в панели:\n"
-                        "💳 *Тариф и оплата*",
-                        parse_mode="Markdown",
-                    )
-                except Exception:
-                    pass
-                return
-    except Exception as e:
-        print("### CHECK STOP: limit_check_error", repr(e), flush=True)
-        await message.answer("❌ Ошибка проверки лимита. Попробуй позже.")
-        return
-
-    # сохранение чата
-    try:
-        async with await get_session() as session:
-            chat = await session.get(Chat, message.chat.id)
-
-            if not chat:
-                chat = Chat(
-                    id=message.chat.id,
-                    title=message.chat.title,
-                    owner_user_id=message.from_user.id,
-                    is_active=True,
-                    is_log_chat=False,
-                )
-                session.add(chat)
-                print("### CHECK DB: new_chat_added", message.chat.id, flush=True)
-            else:
-                chat.title = message.chat.title
-                chat.owner_user_id = message.from_user.id
-                chat.is_active = True
-                chat.is_log_chat = False
-                print("### CHECK DB: chat_exists_updated", message.chat.id, flush=True)
-
-            rule = await session.get(Rule, message.chat.id)
-
-            if not rule:
-                rule = Rule(
-                    chat_id=message.chat.id,
-                    filter_links=True,
-                    filter_mentions=True,
-                    action_mode="delete",
-                    mute_minutes=30,
-                    anti_edit=True,
-                    newbie_enabled=True,
-                    newbie_minutes=10,
-                    log_enabled=True,
-                )
-                session.add(rule)
-                print("### CHECK DB: new_rule_added", message.chat.id, flush=True)
-
-            await session.commit()
-            print("### CHECK DB: commit_ok", message.chat.id, flush=True)
-
-    except Exception as e:
-        print("### CHECK STOP: db_error", repr(e), flush=True)
-        await message.answer(f"❌ Ошибка при сохранении чата: {e}")
-        return
-
-    # Успех: приветственное сообщение в группу (ТЗ) + уведомление в личку с кнопкой панели
-    chat_title = (message.chat.title or "Чат").replace("*", "\\*")
-    welcome_group = (
-        "😈 AntiSpam Guardian на месте.\n\n"
-        f"Группа *«{chat_title}»* теперь под защитой.\n\n"
-        "Я слежу за порядком:\n"
-        "• режу спам\n"
-        "• давлю подозрительные ссылки\n"
-        "• останавливаю мусор, рейды и лишний шум\n\n"
-        "_Что важно:_\n"
-        "1. Не спамить.\n"
-        "2. Не кидать ссылки без необходимости.\n"
-        "3. Не устраивать помойку в чате.\n"
-        "4. Не лезть с враждой, оскорблениями и провокациями.\n\n"
-        "Нормальным людям — спокойно общаться.\n"
-        "Спамерам — будет больно.\n\n"
-        "_Админ управляет защитой._"
-    )
-    try:
-        await bot.send_message(
-            message.chat.id,
-            welcome_group,
-            parse_mode="Markdown",
-        )
-        print("### CHECK OK: welcome sent to group", message.chat.id, flush=True)
-    except Exception as e:
-        print("### CHECK WARN: welcome_failed", repr(e), flush=True)
-
-    try:
-        bot_username = (await bot.get_me()).username
-        panel_url = f"https://t.me/{bot_username}?start=panel"
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="🧨 Открыть панель", url=panel_url)]
-            ]
-        )
-        await bot.send_message(
-            message.from_user.id,
-            "✅ Чат подключён. Управление — в панели.",
-            reply_markup=keyboard,
-        )
-    except Exception as e:
-        print("### CHECK WARN: panel_link_dm_failed", repr(e), flush=True)
