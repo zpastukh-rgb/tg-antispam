@@ -1800,15 +1800,26 @@ async def cb_toggle_reports(cb: CallbackQuery):
 @router.callback_query(F.data == CB_CONNECT_REPORTS)
 async def cb_connect_reports(cb: CallbackQuery):
     """ТЗ Отчёты: открыть выбор чата отчётов (модалка Telegram)."""
-    await cb.answer()
     protected_chat_id = await _get_selected_or_alert(cb)
     if not protected_chat_id:
         return
+    await cb.answer()
     _pending_reports_for[cb.from_user.id] = protected_chat_id
-    await cb.message.answer(
-        "Нажми кнопку ниже — выбери группу, куда слать отчёты. Telegram добавит бота в неё.",
-        reply_markup=_kb_connect_reports_chat(),
-    )
+    try:
+        await cb.message.answer(
+            "Нажми кнопку ниже — выбери группу, куда слать отчёты. Если бота там ещё нет — добавь его в ту группу и выбери снова.",
+            reply_markup=_kb_connect_reports_chat(),
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("cb_connect_reports answer failed: %s", e)
+        try:
+            await cb.message.answer(
+                "Не удалось показать кнопку выбора. Убедись, что бот добавлен в группу для отчётов, затем попробуй снова из раздела *Отчёты*.",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
 
 
 @router.callback_query(F.data == CB_PICK_REPORTS_CHAT)
@@ -1904,7 +1915,7 @@ BOT_ADMIN_RIGHTS = ChatAdministratorRights(
 
 
 def _kb_connect_reports_chat() -> ReplyKeyboardMarkup:
-    """ТЗ Отчёты: выбор чата для отчётов — Telegram добавит бота в выбранную группу."""
+    """ТЗ Отчёты: выбор чата для отчётов — только группы, где бот уже есть (чтобы туда слать отчёты)."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [
@@ -1913,9 +1924,8 @@ def _kb_connect_reports_chat() -> ReplyKeyboardMarkup:
                     request_chat=KeyboardButtonRequestChat(
                         request_id=REPORTS_REQUEST_ID,
                         chat_is_channel=False,
-                        bot_is_member=False,
+                        bot_is_member=True,
                         request_title=True,
-                        bot_administrator_rights=BOT_ADMIN_RIGHTS,
                     ),
                 )
             ]

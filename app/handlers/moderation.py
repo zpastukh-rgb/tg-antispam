@@ -358,8 +358,14 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     mute_min = int(getattr(rule, "mute_minutes", 30) or 30)
     mute_min = max(1, min(1440, mute_min))
 
-    # toggles
-    filter_links = bool(getattr(rule, "filter_links", True))
+    # toggles (ТЗ доработка: filter_links_mode "allow" = ссылки разрешены, не мутить)
+    _links_mode = getattr(rule, "filter_links_mode", None)
+    if _links_mode == "allow":
+        filter_links = False
+    elif _links_mode in ("forbid", "captcha"):
+        filter_links = True
+    else:
+        filter_links = bool(getattr(rule, "filter_links", True))
     filter_mentions = bool(getattr(rule, "filter_mentions", True))
     anti_edit = bool(getattr(rule, "anti_edit", True))
     newbie_enabled = bool(getattr(rule, "newbie_enabled", True))
