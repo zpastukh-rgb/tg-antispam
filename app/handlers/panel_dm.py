@@ -717,10 +717,26 @@ async def render_pick_chat(
     page = max(0, min(page, max_page))
 
     chunk = chats[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
+    titles_to_update: Dict[int, str] = {}
 
     for ch in chunk:
-        title = (ch.title or "").strip() or str(ch.id)
+        title = (ch.title or "").strip()
+        if not title:
+            try:
+                tg_chat = await bot.get_chat(ch.id)
+                title = (tg_chat.title or "").strip() or str(ch.id)
+                titles_to_update[ch.id] = title
+            except Exception:
+                title = str(ch.id)
         b.button(text=f"🛡 {title}", callback_data=f"{CB_SET_CHAT}{ch.id}")
+
+    if titles_to_update:
+        async with await get_session() as session:
+            for cid, t in titles_to_update.items():
+                chat_row = await session.get(Chat, cid)
+                if chat_row:
+                    chat_row.title = t
+            await session.commit()
 
     if max_page > 0:
         nav = InlineKeyboardBuilder()

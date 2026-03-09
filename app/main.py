@@ -17,6 +17,7 @@ from app.handlers.onboarding import router as onboarding_router
 from app.handlers.panel_dm import router as panel_router
 from app.handlers.log_setup import router as log_setup_router
 from app.handlers.log_actions import router as log_actions_router
+from app.handlers.first_message_captcha import router as first_message_captcha_router
 from app.handlers.moderation import router as moderation_router
 from app.handlers.whitelist import router as whitelist_router
 from app.handlers.stopwords import router as stopwords_router
@@ -54,6 +55,7 @@ async def main() -> None:
     dp.include_router(health_router)
     dp.include_router(start_router)
     dp.include_router(onboarding_router)
+    dp.include_router(first_message_captcha_router)  # callback «Я не бот»
     dp.include_router(moderation_router)
     dp.include_router(panel_router)
     dp.include_router(log_setup_router)

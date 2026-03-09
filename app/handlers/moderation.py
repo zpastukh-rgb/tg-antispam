@@ -625,6 +625,11 @@ async def pipeline(message: Message, *, edited: bool = False) -> None:
     if not (message.text or message.caption):
         return
 
+    # Капча на первое сообщение: только в личку пользователю, не в чат
+    from app.handlers.first_message_captcha import check_first_message_captcha
+    if await check_first_message_captcha(message):
+        return
+
     async with await get_session() as session:
         try:
             v = await evaluate(session, message, edited=edited)
