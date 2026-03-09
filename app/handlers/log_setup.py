@@ -90,6 +90,28 @@ async def on_my_chat_member(update: ChatMemberUpdated):
 
     title = (chat.title or "эта группа").replace("*", "\\*")
 
+    # ТЗ: при добавлении бота в группу — сохраняем чат в список «ожидающих», чтобы он появился в «Подключить чат»
+    if added:
+        try:
+            async with await get_session() as session:
+                chat_row = await session.get(Chat, chat.id)
+                if not chat_row:
+                    chat_row = Chat(
+                        id=chat.id,
+                        title=chat.title or "",
+                        owner_user_id=update.from_user.id,
+                        is_active=False,
+                        is_log_chat=False,
+                    )
+                    session.add(chat_row)
+                else:
+                    chat_row.title = chat.title or chat_row.title or ""
+                    chat_row.owner_user_id = update.from_user.id
+                    # не трогаем is_active — подключит пользователь из панели
+                await session.commit()
+        except Exception:
+            pass
+
     # ТЗ правки: в личку «Подключить группу к защите?» только когда бот уже админ (можно подключить)
     if bot_is_admin:
         from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
