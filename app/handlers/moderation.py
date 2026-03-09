@@ -20,6 +20,7 @@ from sqlalchemy import select
 
 from app.db.session import get_session
 from app.db.models import Chat, Rule, StopWord, WhitelistDomain, WhitelistUser
+from app.services.public_alerts import maybe_send_public_alert
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -631,6 +632,11 @@ async def pipeline(message: Message, *, edited: bool = False) -> None:
                 ok_action=ok_action,
                 deleted_ok=deleted_ok,
             )
+            if deleted_ok:
+                rule = await get_rule(session, message.chat.id)
+                await maybe_send_public_alert(
+                    message.bot, message.chat.id, rule, v.reason, v.action, session
+                )
         except Exception as e:
             logger.exception(f"[pipeline error] chat={message.chat.id} msg={message.message_id}: {e}")
 

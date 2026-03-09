@@ -439,11 +439,17 @@ async def check_command(message: Message):
             )
             can_add, current_count, limit = await can_add_chat(session, message.from_user.id)
             if not can_add:
-                await message.answer(
-                    f"❌ Лимит чатов: {current_count} из {limit}.\n\n"
-                    "Повысь тариф в панели: *Тариф и оплата*.",
-                    parse_mode="Markdown",
-                )
+                # ТЗ: сообщение о лимите — только в личку владельцу, не в группу
+                try:
+                    await bot.send_message(
+                        message.from_user.id,
+                        f"❌ Лимит чатов: {current_count} из {limit}.\n\n"
+                        "Чтобы подключить ещё один чат, повысь тариф в панели:\n"
+                        "💳 *Тариф и оплата*",
+                        parse_mode="Markdown",
+                    )
+                except Exception:
+                    pass
                 return
     except Exception as e:
         print("### CHECK STOP: limit_check_error", repr(e), flush=True)
@@ -497,31 +503,46 @@ async def check_command(message: Message):
         await message.answer(f"❌ Ошибка при сохранении чата: {e}")
         return
 
-    # успех
+    # Успех: приветственное сообщение в группу (ТЗ) + уведомление в личку с кнопкой панели
+    chat_title = (message.chat.title or "Чат").replace("*", "\\*")
+    welcome_group = (
+        "😈 AntiSpam Guardian на месте.\n\n"
+        f"Группа *«{chat_title}»* теперь под защитой.\n\n"
+        "Я слежу за порядком:\n"
+        "• режу спам\n"
+        "• давлю подозрительные ссылки\n"
+        "• останавливаю мусор, рейды и лишний шум\n\n"
+        "_Что важно:_\n"
+        "1. Не спамить.\n"
+        "2. Не кидать ссылки без необходимости.\n"
+        "3. Не устраивать помойку в чате.\n"
+        "4. Не лезть с враждой, оскорблениями и провокациями.\n\n"
+        "Нормальным людям — спокойно общаться.\n"
+        "Спамерам — будет больно.\n\n"
+        "_Админ управляет защитой._"
+    )
+    try:
+        await bot.send_message(
+            message.chat.id,
+            welcome_group,
+            parse_mode="Markdown",
+        )
+        print("### CHECK OK: welcome sent to group", message.chat.id, flush=True)
+    except Exception as e:
+        print("### CHECK WARN: welcome_failed", repr(e), flush=True)
+
     try:
         bot_username = (await bot.get_me()).username
         panel_url = f"https://t.me/{bot_username}?start=panel"
-
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="🧨 Открыть панель",
-                        url=panel_url,
-                    )
-                ]
+                [InlineKeyboardButton(text="🧨 Открыть панель", url=panel_url)]
             ]
         )
-
-        await message.answer(
-            "✅ *Чат подключён*\n\n"
-            "Теперь я защищаю эту группу.",
-            parse_mode="Markdown",
+        await bot.send_message(
+            message.from_user.id,
+            "✅ Чат подключён. Управление — в панели.",
             reply_markup=keyboard,
         )
-
-        print("### CHECK OK: finished", message.chat.id, flush=True)
-
     except Exception as e:
-        print("### CHECK STOP: success_message_failed", repr(e), flush=True)
-        await message.answer("✅ Чат сохранил, но не смог отправить кнопку панели")
+        print("### CHECK WARN: panel_link_dm_failed", repr(e), flush=True)

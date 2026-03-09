@@ -77,33 +77,46 @@ async def on_my_chat_member(update: ChatMemberUpdated):
     old_status = update.old_chat_member.status
     new_status = update.new_chat_member.status
 
-    added = (
-        old_status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED)
-        and new_status in (
-            ChatMemberStatus.MEMBER,
-            ChatMemberStatus.ADMINISTRATOR,
-        )
+    # Бот добавлен в группу или повышен до админа
+    added = old_status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED) and new_status in (
+        ChatMemberStatus.MEMBER,
+        ChatMemberStatus.ADMINISTRATOR,
+        ChatMemberStatus.CREATOR,
     )
-
-    if not added:
-        return
+    bot_is_admin = new_status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
 
     if not update.from_user:
         return
 
-    # сообщение показываем только если добавил админ
+    title = (chat.title or "эта группа").replace("*", "\\*")
+
+    # ТЗ правки: в личку «Подключить группу к защите?» только когда бот уже админ (можно подключить)
+    if bot_is_admin:
+        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+        try:
+            await update.bot.send_message(
+                update.from_user.id,
+                f"😈 *Бот в группе «{title}»*\n\nПодключить эту группу к защите?",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="✅ Подключить", callback_data=f"p:connect_confirm:{chat.id}")],
+                ]),
+            )
+        except Exception:
+            pass
+
+    if not added:
+        return
 
     if not await _is_admin(update.bot, chat.id, update.from_user.id):
         return
 
-    title = chat.title or "эта группа"
-
+    # В группе: предложить сделать лог-чатом
     text = (
         "😈 *AntiSpam Guardian на месте.*\n\n"
         f"Вижу новую берлогу: *{title}*\n\n"
         "Сделать эту группу *журналом отчётов*?"
     )
-
     await update.bot.send_message(
         chat.id,
         text,

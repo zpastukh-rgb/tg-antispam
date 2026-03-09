@@ -169,6 +169,14 @@ class Rule(Base):
     # логи
     log_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # Публичные сообщения Guardian раз в N удалений (ТЗ ПРАВКИ 2)
+    public_alerts_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    public_alerts_every_n: Mapped[int] = mapped_column(Integer, default=5)
+    public_alerts_min_interval_sec: Mapped[int] = mapped_column(Integer, default=300)
+    public_alerts_last_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     created_at: Mapped[str] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now()
