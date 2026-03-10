@@ -201,6 +201,7 @@ CB_REPORTS_HELP = "p:reports_help"
 
 # Подключение
 CB_CONNECT = "p:connect"
+CB_ADDGROUP = "p:addgroup"  # кнопка «добавить в группу + выдать права» — Reply-клавиатура
 CB_CONNECT_PICK_MODAL = "p:connect_pick_modal"   # открыть модалку выбора чата
 CB_CONNECT_CONFIRM_PREFIX = "p:connect_confirm:"
 CONNECT_REQUEST_ID = 0x7E17  # request_id для KeyboardButtonRequestChat
@@ -416,11 +417,17 @@ def _kb_cancel() -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
+ADDGROUP_PANEL_TEXT = (
+    "➕ *Добавить бота в группу*\n\n"
+    "Нажми *синюю кнопку под полем ввода* — откроется выбор группы, затем Telegram предложит выдать боту права администратора."
+)
+
 def _kb_main() -> InlineKeyboardMarkup:
-    """Главное меню: 3 кнопки (ТЗ правки). Защита и Отчёты — только внутри выбранного чата."""
+    """Главное меню: Подключённые чаты, Тариф, Подключить чат, Добавить бота в группу (выбор + права)."""
     b = InlineKeyboardBuilder()
     b.button(text="📂 Подключённые чаты", callback_data=CB_CHATS)
     b.button(text="💳 Тариф и оплата", callback_data=CB_BILLING)
+    b.button(text="➕ Добавить бота в группу (выбор + права)", callback_data=CB_ADDGROUP)
     b.button(text="➕ Подключить чат", callback_data=CB_CONNECT)
     b.adjust(1)
     return b.as_markup()
@@ -2023,6 +2030,23 @@ def _kb_connect_request_chat_with_admin() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         one_time_keyboard=True,
     )
+
+
+@router.callback_query(F.data == CB_ADDGROUP)
+async def cb_addgroup(cb: CallbackQuery):
+    """Показать Reply-кнопку «выбор группы + выдача прав» — видна под полем ввода в этом чате."""
+    await cb.answer()
+    if not cb.from_user:
+        return
+    try:
+        await cb.bot.send_message(
+            cb.from_user.id,
+            ADDGROUP_PANEL_TEXT,
+            parse_mode="Markdown",
+            reply_markup=_kb_connect_request_chat_with_admin(),
+        )
+    except Exception:
+        await cb.message.answer(ADDGROUP_PANEL_TEXT, parse_mode="Markdown")
 
 
 @router.callback_query(F.data == CB_CONNECT)

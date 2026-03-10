@@ -44,7 +44,7 @@ git push -u origin main
    - **Start Command:** `python -m app.main`  
    Либо используй **Procfile**: Railway подхватит `worker: python -m app.main` и запустит его как worker.
 
-5. Деплой запустится по push в выбранную ветку.
+5. Деплой запустится по push в выбранную ветку. Если после `git push` бот не обновился: в Railway открой сервис бота → **Deployments** → убедись, что последний деплой после твоего push; при необходимости нажми **Redeploy** (или включи **Auto Deploy** в Settings).
 
 ---
 
