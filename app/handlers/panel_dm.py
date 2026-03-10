@@ -2003,6 +2003,28 @@ def _kb_connect_request_chat() -> ReplyKeyboardMarkup:
     )
 
 
+def _kb_connect_request_chat_with_admin() -> ReplyKeyboardMarkup:
+    """Добавить бота в группу и сразу выдать права: Telegram откроет выбор группы и диалог назначения админа."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(
+                    text="📋 Выбрать группу (добавить бота + выдать права)",
+                    request_chat=KeyboardButtonRequestChat(
+                        request_id=CONNECT_REQUEST_ID,
+                        chat_is_channel=False,
+                        bot_is_member=False,
+                        request_title=True,
+                        bot_administrator_rights=BOT_ADMIN_RIGHTS,
+                    ),
+                )
+            ]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
 @router.callback_query(F.data == CB_CONNECT)
 async def cb_connect(cb: CallbackQuery):
     """ТЗ: подключение — выбор группы из списка или нативная модалка Telegram."""

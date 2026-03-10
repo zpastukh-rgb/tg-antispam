@@ -93,7 +93,7 @@ async def api_bot_info(
     username = await _get_bot_username()
     if not username:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Bot username not available")
-    return {"username": username, "add_to_group_url": f"https://t.me/{username}?startgroup"}
+    return {"username": username, "add_to_group_url": f"https://t.me/{username}?start=addgroup"}
 
 
 # ---------- GET /api/me ----------

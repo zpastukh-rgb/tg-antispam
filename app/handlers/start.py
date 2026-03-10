@@ -192,13 +192,35 @@ async def _edit_or_send(message: Message, text: str, kb):
 # START
 # =========================================================
 
+ADDGROUP_TEXT = (
+    "➕ *Добавить бота в группу*\n\n"
+    "Нажмите кнопку ниже — откроется выбор группы. После выбора группы Telegram *сразу предложит выдать боту права администратора* (одним шагом).\n\n"
+    "Минимум нужно право: ✅ *Удалять сообщения*."
+)
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message):
-    """ТЗ Меню: /start открывает главную панель. ТЗ Напоминания: фиксируем first_start_at."""
+    """ТЗ Меню: /start открывает главную панель. Deep link addgroup — кнопка «добавить в группу + выдать права»."""
     if message.chat.type != "private":
         return
     if not message.from_user:
         return
+
+    # Deep link из Mini App: t.me/bot?start=addgroup — показываем кнопку с назначением админа в один шаг
+    args = (message.text or "").strip().split()
+    if len(args) >= 2 and args[1].lower() == "addgroup":
+        try:
+            from app.handlers.panel_dm import _kb_connect_request_chat_with_admin
+            await message.answer(
+                ADDGROUP_TEXT,
+                parse_mode="Markdown",
+                reply_markup=_kb_connect_request_chat_with_admin(),
+            )
+        except Exception:
+            await message.answer(ADDGROUP_TEXT, parse_mode="Markdown")
+        return
+
     # ТЗ Напоминания: при первом /start записываем время для напоминаний (12ч, 24ч, 3д)
     try:
         from app.db.session import get_session
