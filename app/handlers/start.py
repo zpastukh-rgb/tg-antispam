@@ -194,8 +194,8 @@ async def _edit_or_send(message: Message, text: str, kb):
 
 ADDGROUP_TEXT = (
     "➕ *Добавить бота в группу*\n\n"
-    "Нажмите кнопку ниже — откроется выбор группы. После выбора группы Telegram *сразу предложит выдать боту права администратора* (одним шагом).\n\n"
-    "Минимум нужно право: ✅ *Удалять сообщения*."
+    "Нажмите *синюю кнопку под полем ввода* — откроется выбор группы, затем Telegram предложит выдать боту права администратора.\n\n"
+    "Если кнопки под полем ввода нет (например, открыли из панели) — нажмите кнопку *под этим сообщением*."
 )
 
 
@@ -207,16 +207,27 @@ async def cmd_start(message: Message):
     if not message.from_user:
         return
 
-    # Deep link из Mini App: t.me/bot?start=addgroup — показываем кнопку с назначением админа в один шаг
+    # Deep link из Mini App: t.me/bot?start=addgroup — Reply-кнопка (выбор группы + права) + инлайн на случай превью
     args = (message.text or "").strip().split()
     if len(args) >= 2 and args[1].lower() == "addgroup":
         try:
+            from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
             from app.handlers.panel_dm import _kb_connect_request_chat_with_admin
+            me = await message.bot.get_me()
+            username = me.username or "bot"
+            add_url = f"https://t.me/{username}?start=addgroup"
+            add_simple_url = f"https://t.me/{username}?startgroup"
+            inline_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📋 Выбрать группу и выдать права", url=add_url)],
+                [InlineKeyboardButton(text="➕ Только добавить в группу (права — вручную)", url=add_simple_url)],
+            ])
+            # Сначала сообщение с Reply-кнопкой (под полем ввода); под текстом — инлайн (видна в превью)
             await message.answer(
                 ADDGROUP_TEXT,
                 parse_mode="Markdown",
                 reply_markup=_kb_connect_request_chat_with_admin(),
             )
+            await message.answer("Если кнопки под полем ввода нет — нажмите:", reply_markup=inline_kb)
         except Exception:
             await message.answer(ADDGROUP_TEXT, parse_mode="Markdown")
         return
