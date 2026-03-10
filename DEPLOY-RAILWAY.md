@@ -32,10 +32,12 @@ git push -u origin main
 
 2. Добавь **PostgreSQL** (Add Service → Database → PostgreSQL).
 
-3. В сервисе приложения (бота) открой **Variables** → **Add Variable** / **Reference**:
+3. В сервисе бота открой **Variables**:
    - `BOT_TOKEN` — токен от @BotFather (значение вручную).
-   - `DATABASE_URL` — **не пиши вручную**. Нажми **Add Reference** (или "Reference variable from another service"), выбери свой сервис PostgreSQL и переменную `DATABASE_URL` (или `DATABASE_PRIVATE_URL`). Тогда подставится полная строка вида `postgresql://user:pass@host:5432/railway` с реальным портом БД. Код сам заменит схему на `postgresql+asyncpg://` при необходимости.
-   - **Не подставляй в DATABASE_URL переменную PORT** — это порт твоего приложения, а не БД; из-за этого и была ошибка `invalid literal for int() with base 10: 'PORT'`.
+   - Подключение к БД — **один из вариантов**:
+     - **Reference** `DATABASE_URL` из сервиса PostgreSQL (Add Reference → Postgres → DATABASE_URL). Если после деплоя будет ошибка «Name or service not known», используй вариант ниже.
+     - **Надёжный вариант:** добавь по Reference из Postgres переменные **PGHOST**, **PGPORT**, **PGUSER**, **PGPASSWORD**, **PGDATABASE** (те же имена). Код сам соберёт строку подключения из них. Так хост и порт точно подставятся из БД.
+   - Не используй в URL переменную **PORT** приложения — только порт БД (5432).
 
 4. В **Settings** сервиса приложения укажи:
    - **Build Command:** `pip install -r requirements.txt` (или оставь авто)
