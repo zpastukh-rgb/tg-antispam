@@ -69,7 +69,7 @@ git push -u origin main
    - **Root Directory:** пусто (корень).
    - **Build Command:** `pip install -r requirements.txt` (или оставь авто).
    - **Start Command:** `uvicorn app.api.main:app --host 0.0.0.0 --port $PORT`
-3. **Variables:** те же, что у бота: `BOT_TOKEN`, Reference из Postgres — `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` (или один Reference `DATABASE_URL`).
+3. **Variables:** те же, что у бота: `BOT_TOKEN` (обязателен — для проверки init data и для ссылки «Добавить бота в группу» во фронте), Reference из Postgres — `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` (или один Reference `DATABASE_URL`).
 4. **Settings** → **Networking** → **Generate Domain.** Запомни URL API, например: `https://tg-antispam-api-production-xxxx.up.railway.app`
 
 ---
@@ -97,3 +97,45 @@ git push -u origin main
 4. В боте добавь кнопку/команду, открывающую этот URL (Mini App). При открытии из Telegram в запросы попадёт `initData`, API сможет авторизовать пользователя.
 
 **CORS:** в API по умолчанию `CORS_ORIGINS=*`. Если захочешь ограничить доменом фронта, в сервисе API добавь переменную `CORS_ORIGINS=https://твой-фронт-url.up.railway.app`.
+
+---
+
+## Как добавить ссылку на фронт (Mini App) в BotFather
+
+Нужен **публичный HTTPS-URL** твоего фронта (сервис 3 на Railway), например:  
+`https://tg-antispam-web-production-xxxx.up.railway.app`
+
+### Вариант 1: Кнопка меню (Menu Button)
+
+При открытии чата с ботом под полем ввода можно показать кнопку, которая открывает Mini App.
+
+1. Открой [@BotFather](https://t.me/BotFather) в Telegram.
+2. Отправь команду **`/mybots`**.
+3. Выбери своего бота из списка.
+4. Нажми **Bot Settings** (Настройки бота).
+5. Выбери **Menu Button** (Кнопка меню).
+6. Выбери **Configure menu button** (Настроить кнопку меню).
+7. **BotFather попросит URL** — отправь ссылку на фронт **одной строкой**, без пробелов, например:
+   ```
+   https://tg-antispam-web-production-xxxx.up.railway.app
+   ```
+8. При необходимости BotFather попросит текст кнопки — можно написать, например: **«Открыть панель»** или **«Панель управления»**.
+
+После этого в чате с ботом под полем ввода появится кнопка (часто синяя «Web App» / «Открыть»), по нажатию откроется твой фронт в Mini App.
+
+---
+
+### Вариант 2: Команда /panel в боте
+
+У тебя уже есть команда в коде (например `/panel` или через `/start`). Можно оставить команду, которая **отправляет пользователю кнопку** с ссылкой на Mini App (InlineKeyboard с `WebAppInfo`). Тогда пользователь нажимает кнопку и открывается фронт. В этом случае в BotFather **не обязательно** настраивать Menu Button — достаточно, чтобы в боте по команде показывалась кнопка с твоим URL.  
+Если хочешь, чтобы панель открывалась ещё и **главной кнопкой под полем ввода** — настрой Menu Button по варианту 1.
+
+---
+
+### Вариант 3: Описание и ссылка в профиле бота
+
+В BotFather: **Bot Settings** → **Edit Bot Description** / **Edit About** — в описание можно добавить текст вроде: «Панель: https://твой-фронт.up.railway.app». Это не открывает Mini App автоматически, но даёт пользователю ссылку. Для полноценного Mini App лучше использовать вариант 1 или кнопку в чате (вариант 2).
+
+---
+
+**Итог:** быстрее всего — в BotFather: **Menu Button** → **Configure** → вставить URL фронта (Railway, сервис 3). Тогда у пользователей в чате с ботом появится кнопка для открытия панели.

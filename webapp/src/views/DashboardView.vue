@@ -4,15 +4,27 @@ import { useApi } from '../composables/useApi'
 
 const { api, loading, error, fetch, hasInitData } = useApi()
 const me = ref(null)
+const addToGroupUrl = ref(null)
 
 onMounted(async () => {
   if (!hasInitData.value) return
   try {
     me.value = await fetch(() => api.me())
+    const botData = await fetch(() => api.botInfo()).catch(() => null)
+    addToGroupUrl.value = botData?.add_to_group_url ?? null
   } catch {
-    // error already in error ref
+    //
   }
 })
+
+function openAddToGroup() {
+  if (!addToGroupUrl.value) return
+  if (window.Telegram?.WebApp?.openTelegramLink) {
+    window.Telegram.WebApp.openTelegramLink(addToGroupUrl.value)
+  } else {
+    window.open(addToGroupUrl.value, '_blank')
+  }
+}
 </script>
 
 <template>
@@ -40,6 +52,15 @@ onMounted(async () => {
           <dt class="text-gray-500 dark:text-gray-400">Подписка до</dt>
           <dd class="font-medium text-gray-900 dark:text-white">{{ me.subscription_until || '—' }}</dd>
         </dl>
+        <p v-if="addToGroupUrl" class="mt-4 border-t border-gray-200 pt-4 dark:border-gray-600">
+          <button
+            type="button"
+            class="text-primary-600 hover:underline dark:text-primary-400"
+            @click="openAddToGroup"
+          >
+            Добавить бота в новую группу →
+          </button>
+        </p>
       </div>
     </div>
 

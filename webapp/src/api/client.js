@@ -66,4 +66,5 @@ export const api = {
   updateRule: (chatId, rule) => api.patch(`/api/chat/${chatId}/rule`, rule),
   connectPending: () => api.get('/api/connect/pending'),
   billing: () => api.get('/api/billing'),
+  botInfo: () => api.get('/api/bot-info'),
 }

@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 
+import aiohttp
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +26,28 @@ from app.db.models import Chat, Rule
 from app.services.user_service import get_or_create_user, can_add_chat
 
 router = APIRouter(prefix="/api", tags=["webapp"])
+
+# Кэш username бота для ссылки «Добавить в группу»
+_bot_username: str | None = None
+
+
+async def _get_bot_username() -> str | None:
+    global _bot_username
+    if _bot_username:
+        return _bot_username
+    token = os.getenv("BOT_TOKEN")
+    if not token:
+        return None
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://api.telegram.org/bot{token}/getMe") as resp:
+                data = await resp.json()
+                if data.get("ok") and data.get("result"):
+                    _bot_username = data["result"].get("username")
+                    return _bot_username
+    except Exception:
+        pass
+    return None
 
 
 def _format_dt(dt):
@@ -58,6 +82,18 @@ def _rule_to_dict(rule: Rule, stopwords_count: int = 0) -> dict:
         "auto_reports_enabled": bool(getattr(rule, "auto_reports_enabled", True)),
         "stopwords_count": stopwords_count,
     }
+
+
+# ---------- GET /api/bot-info ----------
+@router.get("/bot-info")
+async def api_bot_info(
+    user_id: int = Depends(require_init_data),
+):
+    """Username бота для ссылки «Добавить в группу» (t.me/username?startgroup)."""
+    username = await _get_bot_username()
+    if not username:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Bot username not available")
+    return {"username": username, "add_to_group_url": f"https://t.me/{username}?startgroup"}
 
 
 # ---------- GET /api/me ----------

@@ -4,16 +4,31 @@ import { useApi } from '../composables/useApi'
 
 const { api, loading, error, fetch, hasInitData } = useApi()
 const pending = ref([])
+const addToGroupUrl = ref(null)
 
 onMounted(async () => {
   if (!hasInitData.value) return
   try {
-    const data = await fetch(() => api.connectPending())
-    pending.value = data.chats || []
+    const [pendingData, botData] = await Promise.all([
+      fetch(() => api.connectPending()).catch(() => ({ chats: [] })),
+      fetch(() => api.botInfo()).catch(() => null),
+    ])
+    pending.value = pendingData?.chats ?? []
+    addToGroupUrl.value = botData?.add_to_group_url ?? null
   } catch {
     //
   }
 })
+
+function openAddToGroup() {
+  const url = addToGroupUrl.value
+  if (!url) return
+  if (window.Telegram?.WebApp?.openTelegramLink) {
+    window.Telegram.WebApp.openTelegramLink(url)
+  } else {
+    window.open(url, '_blank')
+  }
+}
 </script>
 
 <template>
@@ -28,20 +43,34 @@ onMounted(async () => {
       {{ error }}
     </div>
 
-    <div v-else class="rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-800">
-      <p class="text-gray-600 dark:text-gray-400">
-        Добавьте бота в группу как администратора (с правом удалять сообщения), затем в боте нажмите «Подключить чат» и выберите группу из списка или через кнопку Telegram.
-      </p>
-      <p v-if="pending.length" class="mt-4 text-sm font-medium text-gray-700 dark:text-gray-300">Чаты, ожидающие подключения:</p>
-      <ul v-if="pending.length" class="mt-2 list-inside list-disc text-sm text-gray-600 dark:text-gray-400">
-        <li v-for="c in pending" :key="c.id">{{ c.title }}</li>
-      </ul>
-      <p v-else class="mt-4 text-sm text-gray-500 dark:text-gray-500">
-        Пока нет чатов в ожидании. Добавьте бота в новую группу и выберите её в боте.
-      </p>
+    <div v-else class="space-y-4">
+      <div class="rounded-xl border border-primary-200 bg-primary-50 p-6 dark:border-primary-800 dark:bg-primary-900/20">
+        <p class="mb-4 text-gray-700 dark:text-gray-300">
+          Нажмите кнопку ниже — откроется выбор группы в Telegram. Добавьте бота в нужную группу, затем выдайте ему права администратора (минимум «Удалять сообщения»). После этого группа появится в списке ниже и в боте можно будет завершить подключение.
+        </p>
+        <button
+          v-if="addToGroupUrl"
+          type="button"
+          class="inline-flex items-center gap-2 rounded-xl bg-primary-500 px-5 py-3 font-medium text-white shadow-sm transition hover:bg-primary-600"
+          @click="openAddToGroup"
+        >
+          Добавить бота в группу
+        </button>
+        <p v-else class="text-sm text-gray-500 dark:text-gray-400">Загрузка ссылки…</p>
+      </div>
+
+      <div class="rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-800">
+        <p v-if="pending.length" class="text-sm font-medium text-gray-700 dark:text-gray-300">Чаты, ожидающие подключения (добавьте бота и выберите здесь):</p>
+        <ul v-if="pending.length" class="mt-2 list-inside list-disc text-sm text-gray-600 dark:text-gray-400">
+          <li v-for="c in pending" :key="c.id">{{ c.title }}</li>
+        </ul>
+        <p v-else class="text-sm text-gray-500 dark:text-gray-500">
+          Пока нет чатов в ожидании. Нажмите «Добавить бота в группу» выше, выберите группу и выдайте боту права.
+        </p>
+      </div>
     </div>
 
-    <div v-if="loading && !pending.length" class="rounded-xl border border-gray-200 bg-white p-8 text-center dark:border-gray-700 dark:bg-gray-800">
+    <div v-if="loading && !pending.length && !addToGroupUrl" class="rounded-xl border border-gray-200 bg-white p-8 text-center dark:border-gray-700 dark:bg-gray-800">
       <span class="text-gray-500 dark:text-gray-400">Загрузка…</span>
     </div>
   </div>
