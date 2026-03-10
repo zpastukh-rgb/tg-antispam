@@ -8,9 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import User, Chat, Tariff
 
-# Лимит чатов по тарифу (по ТЗ)
+# Лимит чатов по тарифу: бесплатный — 3 группы, PRO — 5, BUSINESS — 20
 TARIFF_CHAT_LIMITS = {
-    Tariff.FREE.value: 1,
+    Tariff.FREE.value: 3,
     Tariff.PRO.value: 5,
     Tariff.BUSINESS.value: 20,
 }
@@ -23,7 +23,7 @@ async def get_or_create_user(
     username: str | None = None,
     first_name: str | None = None,
 ) -> User:
-    """Получить или создать пользователя. По умолчанию FREE, chat_limit=1."""
+    """Получить или создать пользователя. По умолчанию FREE, chat_limit=3."""
     res = await session.execute(select(User).where(User.telegram_id == telegram_id))
     user = res.scalar_one_or_none()
     if user:

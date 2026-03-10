@@ -860,7 +860,7 @@ async def connect_chat_after_bot_added(
         from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
         await bot.send_message(
             user_id,
-            f"✅ *Группа подключена.*\n\nНазвание: *{title_esc}*\nID: `{chat_id}`\n\nНастрой защиту в панели.",
+            f"✅ *Группа подключена.*\n\nГруппа: *{title_esc}*\n\nНастрой защиту в панели.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="⚙ Открыть настройки", url=panel_url)]

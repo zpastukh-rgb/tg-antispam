@@ -57,7 +57,7 @@ class User(Base):
     first_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     tariff: Mapped[str] = mapped_column(String(32), default=Tariff.FREE.value)
-    chat_limit: Mapped[int] = mapped_column(Integer, default=1)
+    chat_limit: Mapped[int] = mapped_column(Integer, default=3)
     subscription_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)

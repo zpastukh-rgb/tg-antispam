@@ -59,6 +59,11 @@ defineProps({
     <template v-else-if="name === 'moon'">
       <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
     </template>
+    <!-- back / arrow-left -->
+    <template v-else-if="name === 'back' || name === 'arrow-left'">
+      <line x1="19" y1="12" x2="5" y2="12" />
+      <polyline points="12 19 5 12 12 5" />
+    </template>
     <!-- menu -->
     <template v-else-if="name === 'menu'">
       <line x1="3" y1="12" x2="21" y2="12" />

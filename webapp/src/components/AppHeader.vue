@@ -1,7 +1,11 @@
 <script setup>
+import { computed } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import { useTheme } from '../composables/useTheme'
 import NavIcon from './NavIcon.vue'
 
+const router = useRouter()
+const route = useRoute()
 const { isDark, toggle } = useTheme()
 
 defineProps({
@@ -9,20 +13,40 @@ defineProps({
 })
 
 const emit = defineEmits(['menu-click'])
+
+const showBack = computed(() => route.path !== '/' && route.path !== '')
+
+function goBack() {
+  if (window.history.length > 1) {
+    router.back()
+  } else {
+    router.push('/')
+  }
+}
 </script>
 
 <template>
   <header class="sticky top-0 z-30 flex h-14 items-center justify-between border-b border-gray-200 bg-white px-4 dark:border-gray-700 dark:bg-gray-800 md:px-6">
     <div class="flex items-center gap-3">
       <button
+        v-if="showBack"
         type="button"
-        class="flex h-9 w-9 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200 md:hidden"
+        class="flex h-9 w-9 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
+        aria-label="Назад"
+        @click="goBack"
+      >
+        <NavIcon name="back" class="w-5 h-5" />
+      </button>
+      <button
+        v-else
+        type="button"
+        class="flex h-9 w-9 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
         aria-label="Меню"
         @click="emit('menu-click')"
       >
         <NavIcon name="menu" class="w-5 h-5" />
       </button>
-      <a href="#" class="flex items-center gap-2" @click.prevent="$router.push('/')">
+      <a href="#" class="flex items-center gap-2" @click.prevent="router.push('/')">
         <span class="flex h-9 w-9 items-center justify-center rounded-lg bg-primary-500 text-white shadow-sm">
           <NavIcon name="shield" class="w-5 h-5" />
         </span>

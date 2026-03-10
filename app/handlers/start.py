@@ -213,8 +213,32 @@ async def cmd_start(message: Message):
     if not message.from_user:
         return
 
-    # Deep link из Mini App: t.me/bot?start=addgroup — Reply-кнопка (выбор группы + права) + инлайн на случай превью
     args = (message.text or "").strip().split()
+    # Deep link из Mini App: t.me/bot?start=reportschat — выбор чата отчётов (для выбранной в панели группы)
+    if len(args) >= 2 and args[1].lower() == "reportschat":
+        try:
+            from app.db.session import get_session
+            from app.api.service import get_selected_chat_id
+            from app.handlers import panel_dm
+            async with await get_session() as session:
+                selected = await get_selected_chat_id(session, message.from_user.id)
+            if not selected:
+                await message.answer(
+                    "Сначала выберите чат в панели: *Подключённые чаты* → нажмите «Выбрать» у нужной группы, "
+                    "затем снова нажмите «Подключить чат отчётов» в разделе Отчёты.",
+                    parse_mode="Markdown",
+                )
+            else:
+                panel_dm._pending_reports_for[message.from_user.id] = selected
+                await message.answer(
+                    "Нажми кнопку ниже — выбери группу, куда слать отчёты. Если бота там ещё нет — добавь его в ту группу и выбери снова.",
+                    reply_markup=panel_dm._kb_connect_reports_chat(),
+                )
+        except Exception:
+            await message.answer("Не удалось открыть выбор чата отчётов. Выберите чат в панели и попробуйте снова.")
+        return
+
+    # Deep link из Mini App: t.me/bot?start=addgroup — Reply-кнопка (выбор группы + права) + инлайн на случай превью
     if len(args) >= 2 and args[1].lower() == "addgroup":
         try:
             from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup

@@ -93,7 +93,11 @@ async def api_bot_info(
     username = await _get_bot_username()
     if not username:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Bot username not available")
-    return {"username": username, "add_to_group_url": f"https://t.me/{username}?start=addgroup"}
+    return {
+        "username": username,
+        "add_to_group_url": f"https://t.me/{username}?start=addgroup",
+        "reports_chat_url": f"https://t.me/{username}?start=reportschat",
+    }
 
 
 # ---------- GET /api/me ----------
@@ -178,10 +182,18 @@ async def api_chat(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
     rule = await get_or_create_rule(session, int(chat_id))
     stopwords_count = await count_stopwords(session, int(chat_id))
+    log_chat_title = None
+    if getattr(chat, "log_chat_id", None):
+        log_chat_row = await session.get(Chat, chat.log_chat_id)
+        if log_chat_row and getattr(log_chat_row, "title", None):
+            log_chat_title = (log_chat_row.title or "").strip() or str(chat.log_chat_id)
+        else:
+            log_chat_title = str(chat.log_chat_id)
     return {
         "id": chat.id,
         "title": (chat.title or "").strip() or str(chat.id),
         "log_chat_id": chat.log_chat_id,
+        "log_chat_title": log_chat_title,
         "rule": _rule_to_dict(rule, stopwords_count),
     }
 
