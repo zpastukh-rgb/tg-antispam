@@ -48,13 +48,52 @@ git push -u origin main
 
 ---
 
-## API (Mini App) на Railway
+## Всё на Railway: бот + API + фронт (3 сервиса)
 
-Если нужен отдельный сервис для API (панель):
+В одном проекте Railway — три сервиса из одного репозитория: **бот**, **API**, **фронт**.
 
-1. В том же проекте Railway добавь ещё один сервис из того же репо.
-2. В **Settings** этого сервиса задай **Start Command:** `uvicorn app.api.main:app --host 0.0.0.0 --port $PORT`
-3. В **Variables** продублируй `BOT_TOKEN` и `DATABASE_URL`.
-4. Railway выдаст URL (например `https://xxx.up.railway.app`). Для CORS в API можно задать переменную `CORS_ORIGINS=https://твой-miniapp-url`.
+---
 
-Фронт (webapp) собери отдельно (Vercel, Netlify или статика в другом сервисе) и укажи в нём `VITE_API_BASE_URL` на этот URL.
+### Сервис 1: Бот (уже есть)
+
+- **Root Directory:** пусто (корень репо).
+- **Variables:** `BOT_TOKEN`, ссылки на Postgres: `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`.
+- **Start Command:** `python -m app.main` (или через Procfile: `worker: python -m app.main`).
+
+---
+
+### Сервис 2: API (бэкенд для панели)
+
+1. В том же проекте нажми **Add Service** → **GitHub Repo** → выбери тот же репозиторий.
+2. **Settings:**
+   - **Root Directory:** пусто (корень).
+   - **Build Command:** `pip install -r requirements.txt` (или оставь авто).
+   - **Start Command:** `uvicorn app.api.main:app --host 0.0.0.0 --port $PORT`
+3. **Variables:** те же, что у бота: `BOT_TOKEN`, Reference из Postgres — `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` (или один Reference `DATABASE_URL`).
+4. **Settings** → **Networking** → **Generate Domain.** Запомни URL API, например: `https://tg-antispam-api-production-xxxx.up.railway.app`
+
+---
+
+### Сервис 3: Фронт (Mini App)
+
+1. **Add Service** → **GitHub Repo** → тот же репо.
+2. **Settings:**
+   - **Root Directory:** `webapp` (важно — сборка из папки webapp).
+   - **Build Command:** `npm ci && npm run build`
+   - **Start Command:** `npx serve -s dist -l $PORT`  
+     (флаг `-s` — SPA: все маршруты отдают `index.html`; `$PORT` задаёт Railway.)
+3. **Variables:**
+   - `VITE_API_BASE_URL` = **URL твоего API** из шага «Сервис 2» (например `https://tg-antispam-api-production-xxxx.up.railway.app`).  
+     Эта переменная подставляется при **сборке**, поэтому после первого деплоя API нужно прописать сюда реальный URL и заново задеплоить фронт.
+4. **Networking** → **Generate Domain.** Это и есть URL Mini App для BotFather и для кнопки в боте.
+
+---
+
+### Порядок и проверка
+
+1. Задеплой **API** (сервис 2), сгенерируй домен, скопируй URL.
+2. В сервисе **фронта** (3) задай `VITE_API_BASE_URL` = URL API, сохрани, задеплой фронт.
+3. В **BotFather** → твой бот → Bot Settings → Menu Button или Configure Mini App — укажи URL фронта (домен сервиса 3).
+4. В боте добавь кнопку/команду, открывающую этот URL (Mini App). При открытии из Telegram в запросы попадёт `initData`, API сможет авторизовать пользователя.
+
+**CORS:** в API по умолчанию `CORS_ORIGINS=*`. Если захочешь ограничить доменом фронта, в сервисе API добавь переменную `CORS_ORIGINS=https://твой-фронт-url.up.railway.app`.
