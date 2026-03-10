@@ -13,7 +13,9 @@ magic-filter==1.0.12
 multidict==6.7.1
 propcache==0.4.1
 psycopg2-binary==2.9.11
+fastapi==0.115.6
 pydantic==2.12.5
+uvicorn[standard]==0.34.0
 pydantic_core==2.41.5
 python-dotenv==1.2.2
 SQLAlchemy==2.0.48

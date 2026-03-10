@@ -20,10 +20,10 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from sqlalchemy import select, or_
+from sqlalchemy import select, or_, func
 
 from app.db.session import get_session
-from app.db.models import Chat, Rule, UserContext, ChatManager
+from app.db.models import Chat, Rule, UserContext, ChatManager, StopWord
 from app.services.user_service import get_or_create_user, can_add_chat, TARIFF_CHAT_LIMITS
 
 
@@ -1023,13 +1023,60 @@ async def cb_main(cb: CallbackQuery):
 
 
 async def _render_protection_screen(bot, user_id: int, chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
-    """Текст и клавиатура экрана Защита (для CB_PROTECTION и CB_BACK_TO_PROTECTION)."""
+    """Текст и клавиатура экрана Защита: перечислены все текущие настройки раздела."""
     async with await get_session() as session:
         chat_row = await session.get(Chat, chat_id)
+        rule = await _get_or_create_rule(session, chat_id)
+        # количество стоп-слов для чата
+        r = await session.execute(select(func.count()).select_from(StopWord).where(StopWord.chat_id == chat_id))
+        stopwords_count = r.scalar() or 0
+
     title = (getattr(chat_row, "title", None) or "").strip() if chat_row else str(chat_id)
     if not title:
         title = await _get_chat_title(bot, chat_id)
-    txt = f"🛡 *Защита*\n\nЧат: *{title}*\n\nКапча, фильтры, наказания, новички, стоп-слова, публичные сообщения, анти-рейд."
+
+    # Текущие значения настроек раздела «Защита»
+    cap_first = "ВКЛ" if getattr(rule, "first_message_captcha_enabled", False) else "ВЫКЛ"
+    links_mode = _get_filter_links_mode(rule)
+    links_label = _filter_policy_label(links_mode)
+    media_mode = getattr(rule, "filter_media_mode", "allow")
+    media_label = _filter_policy_label(media_mode)
+    buttons_mode = getattr(rule, "filter_buttons_mode", "allow")
+    buttons_label = _filter_policy_label(buttons_mode)
+    all_captcha_m = getattr(rule, "all_captcha_minutes", 0) or 0
+    all_captcha = "ВЫКЛ" if all_captcha_m == 0 else f"на {all_captcha_m} мин"
+    join_msg = "Удалять" if getattr(rule, "delete_join_messages", True) else "Оставлять"
+    silence_m = getattr(rule, "silence_minutes", 0) or 0
+    silence = "ВЫКЛ" if silence_m == 0 else f"{silence_m} мин"
+    anti_spam = "ВКЛ" if getattr(rule, "master_anti_spam", True) else "ВЫКЛ"
+    punish_mode = _human_mode(getattr(rule, "action_mode", "delete"))
+    mute_m = int(rule.mute_minutes or 30)
+    newbie_on = "ВКЛ" if rule.newbie_enabled else "ВЫКЛ"
+    newbie_m = int(rule.newbie_minutes or 10)
+    stopwords_str = f"{stopwords_count} слов" if stopwords_count else "не настроены"
+    guardian = "ВКЛ" if getattr(rule, "guardian_messages_enabled", True) else "ВЫКЛ"
+    every_n = getattr(rule, "public_alerts_every_n", 5)
+    interval_sec = getattr(rule, "public_alerts_min_interval_sec", 300)
+    interval_min = interval_sec // 60
+
+    txt = (
+        f"🛡 *Защита*\n\nЧат: *{title}*\n\n"
+        "*Текущие настройки раздела:*\n"
+        f"• 🧩 Капча на первое сообщение: *{cap_first}*\n"
+        f"• 🔗 Ссылки: *{links_label}*\n"
+        f"• 🖼 Медиа / стикеры: *{media_label}*\n"
+        f"• 🔘 Кнопки: *{buttons_label}*\n"
+        f"• 🧩 Проверка всех капчей: *{all_captcha}*\n"
+        f"• 👥 Сообщения «вступил в группу»: *{join_msg}*\n"
+        f"• 🔇 Режим тишины: *{silence}*\n"
+        f"• 🛡 Защита от спама: *{anti_spam}*\n"
+        f"• 😈 Наказания: *{punish_mode}*, мут *{mute_m}* мин\n"
+        f"• 👶 Новички: *{newbie_on}*, окно *{newbie_m}* мин\n"
+        f"• 🧠 Стоп-слова: *{stopwords_str}*\n"
+        f"• 📢 Guardian сообщения: *{guardian}*, раз в *{every_n}* удалений, интервал *{interval_min}* мин\n"
+        "• 🚨 Анти-рейд: тариф PRO\n\n"
+        "_Выберите пункт ниже для изменения._"
+    )
     return txt, _kb_protection()
 
 
