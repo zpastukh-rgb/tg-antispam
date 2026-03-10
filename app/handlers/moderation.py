@@ -150,6 +150,54 @@ def stopword_hit(text_norm: str, stopwords: Set[str]) -> Optional[str]:
 def find_links(text: str) -> List[str]:
     return [m.group(1) for m in URL_RE.finditer(text or "")]
 
+
+def _slice_utf16(s: str, offset: int, length: int) -> str:
+    """Срез строки по смещению и длине в UTF-16 code units (Telegram API)."""
+    if not s or length <= 0:
+        return ""
+    try:
+        enc = s.encode("utf-16-le")
+        start = offset * 2
+        end = min((offset + length) * 2, len(enc))
+        if start >= len(enc):
+            return ""
+        return enc[start:end].decode("utf-16-le", errors="replace")
+    except Exception:
+        return ""
+
+
+def find_links_in_message(message: Message) -> List[str]:
+    """Все ссылки в сообщении: из текста (regex) и из entities (url, text_link)."""
+    text = message.text or ""
+    caption = message.caption or ""
+    links: List[str] = []
+    seen: Set[str] = set()
+
+    for raw in find_links(text) + find_links(caption):
+        r = (raw or "").strip()
+        if r and r not in seen:
+            seen.add(r)
+            links.append(r)
+
+    for content, entities in [(text, getattr(message, "entities", None)), (caption, getattr(message, "caption_entities", None))]:
+        if not content or not entities:
+            continue
+        for e in entities:
+            t = getattr(e, "type", None)
+            if t == "url":
+                part = _slice_utf16(content, getattr(e, "offset", 0), getattr(e, "length", 0))
+                if part and part not in seen:
+                    seen.add(part)
+                    links.append(part)
+            elif t == "text_link":
+                url = getattr(e, "url", None)
+                if url and (url not in seen):
+                    seen.add(url)
+                    links.append(url)
+
+    return links
+
+
 def _domain_from_url(raw: str) -> Optional[str]:
     s = (raw or "").strip().lower()
     if not s:
@@ -179,6 +227,16 @@ def extract_domains(text: str) -> Set[str]:
     out: Set[str] = set()
     for m in URL_RE.finditer(text or ""):
         dom = _domain_from_url(m.group(1))
+        if dom:
+            out.add(dom)
+    return out
+
+
+def extract_domains_from_links(links: List[str]) -> Set[str]:
+    """Домены из списка URL (для whitelist после find_links_in_message)."""
+    out: Set[str] = set()
+    for raw in links or []:
+        dom = _domain_from_url(raw)
         if dom:
             out.add(dom)
     return out
@@ -396,12 +454,12 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
         )
 
     # -------------------------------------------------
-    # 2) links
+    # 2) links (текст + entities: url, text_link — иначе кликабельные ссылки проходят)
     # -------------------------------------------------
     if filter_links:
-        links = find_links(text)
+        links = find_links_in_message(message)
         if links:
-            domains = extract_domains(text)
+            domains = extract_domains_from_links(links)
 
             allowed = False
             for d in domains:
