@@ -1966,6 +1966,21 @@ BOT_ADMIN_RIGHTS = ChatAdministratorRights(
     can_delete_stories=False,
     can_pin_messages=True,
 )
+# Для модалки «назначить админа»: права пользователя в чате (superset прав бота) — без этого клиент может не показать диалог
+USER_ADMIN_RIGHTS_FOR_REQUEST = ChatAdministratorRights(
+    is_anonymous=False,
+    can_manage_chat=True,
+    can_delete_messages=True,
+    can_manage_video_chats=False,
+    can_restrict_members=True,
+    can_promote_members=False,
+    can_change_info=True,
+    can_invite_users=True,
+    can_post_stories=False,
+    can_edit_stories=False,
+    can_delete_stories=False,
+    can_pin_messages=True,
+)
 
 
 def _kb_connect_reports_chat() -> ReplyKeyboardMarkup:
@@ -2011,7 +2026,7 @@ def _kb_connect_request_chat() -> ReplyKeyboardMarkup:
 
 
 def _kb_connect_request_chat_with_admin() -> ReplyKeyboardMarkup:
-    """Добавить бота в группу и сразу выдать права: Telegram откроет выбор группы и диалог назначения админа."""
+    """Добавить бота в группу и сразу выдать права: Telegram откроет выбор группы и модалку назначения админа."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [
@@ -2020,9 +2035,10 @@ def _kb_connect_request_chat_with_admin() -> ReplyKeyboardMarkup:
                     request_chat=KeyboardButtonRequestChat(
                         request_id=CONNECT_REQUEST_ID,
                         chat_is_channel=False,
-                        bot_is_member=False,
                         request_title=True,
+                        user_administrator_rights=USER_ADMIN_RIGHTS_FOR_REQUEST,
                         bot_administrator_rights=BOT_ADMIN_RIGHTS,
+                        bot_is_member=False,
                     ),
                 )
             ]
@@ -2062,7 +2078,7 @@ async def cb_addgroup(cb: CallbackQuery):
         ])
         await cb.bot.send_message(
             cb.from_user.id,
-            "Если синей кнопки под полем ввода нет — нажмите кнопку ниже: откроется выбор группы. После добавления бота выдайте ему права админа в группе.",
+            "Если синей кнопки под полем ввода нет — нажмите кнопку ниже: откроется выбор группы. По этой ссылке права админа нужно будет выдать боту вручную в группе. Модалка «назначить админа» показывается только при нажатии синей кнопки под полем ввода.",
             reply_markup=fallback_kb,
         )
     except Exception as e:
