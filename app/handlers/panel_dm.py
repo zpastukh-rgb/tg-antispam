@@ -2034,10 +2034,13 @@ def _kb_connect_request_chat_with_admin() -> ReplyKeyboardMarkup:
 
 @router.callback_query(F.data == CB_ADDGROUP)
 async def cb_addgroup(cb: CallbackQuery):
-    """Показать Reply-кнопку «выбор группы + выдача прав» — видна под полем ввода в этом чате."""
+    """Показать Reply-кнопку «выбор группы + выдача прав»; если не отображается — даём ссылку в инлайне."""
     await cb.answer()
     if not cb.from_user:
         return
+    import logging
+    log = logging.getLogger(__name__)
+    # Пробуем отправить сообщение с Reply-клавиатурой (синяя кнопка под полем ввода)
     try:
         await cb.bot.send_message(
             cb.from_user.id,
@@ -2045,8 +2048,25 @@ async def cb_addgroup(cb: CallbackQuery):
             parse_mode="Markdown",
             reply_markup=_kb_connect_request_chat_with_admin(),
         )
-    except Exception:
+    except Exception as e:
+        log.warning("cb_addgroup: reply keyboard send failed: %s", e, exc_info=True)
         await cb.message.answer(ADDGROUP_PANEL_TEXT, parse_mode="Markdown")
+    # Всегда добавляем инлайн-кнопку: если синяя кнопка не показывается (клиент/превью), пользователь может нажать ссылку
+    try:
+        from aiogram.types import InlineKeyboardButton
+        me = await cb.bot.get_me()
+        username = me.username or "bot"
+        add_url = f"https://t.me/{username}?startgroup"
+        fallback_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Добавить бота в группу (затем выдайте права вручную)", url=add_url)],
+        ])
+        await cb.bot.send_message(
+            cb.from_user.id,
+            "Если синей кнопки под полем ввода нет — нажмите кнопку ниже: откроется выбор группы. После добавления бота выдайте ему права админа в группе.",
+            reply_markup=fallback_kb,
+        )
+    except Exception as e:
+        log.warning("cb_addgroup: fallback inline send failed: %s", e)
 
 
 @router.callback_query(F.data == CB_CONNECT)
