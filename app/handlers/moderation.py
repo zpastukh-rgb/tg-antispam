@@ -180,10 +180,15 @@ def find_links_in_message(message: Message) -> List[str]:
             links.append(r)
 
     for content, entities in [(text, getattr(message, "entities", None)), (caption, getattr(message, "caption_entities", None))]:
-        if not content or not entities:
+        if not entities:
             continue
+        # content может быть пустым для caption_entities при только подписи к фото
+        content = content or ""
         for e in entities:
             t = getattr(e, "type", None)
+            if t is not None and hasattr(t, "value"):
+                t = t.value
+            t = str(t) if t is not None else ""
             if t == "url":
                 part = _slice_utf16(content, getattr(e, "offset", 0), getattr(e, "length", 0))
                 if part and part not in seen:
@@ -422,6 +427,10 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
 
     rule = await get_rule(session, chat_id)
 
+    # главный выключатель антиспама: если ВЫКЛ — не фильтруем
+    if not bool(getattr(rule, "master_anti_spam", True)):
+        return Verdict(False, "master_off", "", "delete", log_it=False)
+
     # do not touch admins
     if user and await is_admin(message.bot, chat_id, user_id):
         return Verdict(False, "admin_skip", "", "delete", log_it=False)
@@ -441,14 +450,15 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     mute_min = int(getattr(rule, "mute_minutes", 30) or 30)
     mute_min = max(1, min(1440, mute_min))
 
-    # toggles (ТЗ доработка: filter_links_mode "allow" = ссылки разрешены, не мутить)
+    # toggles: filter_links_mode "allow" = ссылки разрешены; иначе (forbid/captcha/пусто) = режем
     _links_mode = getattr(rule, "filter_links_mode", None)
+    if _links_mode is not None:
+        _links_mode = str(_links_mode).strip().lower()
     if _links_mode == "allow":
         filter_links = False
-    elif _links_mode in ("forbid", "captcha"):
-        filter_links = True
     else:
-        filter_links = bool(getattr(rule, "filter_links", True))
+        # forbid, captcha, None, пусто — считаем фильтр ссылок включённым
+        filter_links = True
     filter_mentions = bool(getattr(rule, "filter_mentions", True))
     _media_mode = getattr(rule, "filter_media_mode", "allow")
     filter_media = _media_mode in ("forbid", "captcha")
