@@ -48,6 +48,102 @@ git push -u origin main
 
 ---
 
+## Запуск миграций БД на Railway
+
+Миграции добавляют новые колонки в таблицы (например, `filter_links_mode`, `master_anti_spam`). Запускать их нужно **один раз** после деплоя или при обновлении кода с новыми миграциями.
+
+### Способ 1: через Railway Dashboard
+
+В сервисе **PostgreSQL** во вкладке **Data** в Railway часто **нет** кнопки Query/Console — встроенный SQL-редактор там не предусмотрен. В этом случае используй **Способ 2 (DBeaver)** или Способ 3 (psql).
+
+### Способ 2: DBeaver (без установки PostgreSQL, только одна программа)
+
+[DBeaver](https://dbeaver.io/download/) — бесплатный клиент для БД (Windows/Mac/Linux). Через него подключаешься к Postgres на Railway и выполняешь SQL из файлов миграций.
+
+1. Установи [DBeaver Community](https://dbeaver.io/download/) (достаточно одной установки).
+2. В Railway открой сервис **PostgreSQL** → вкладка **Variables** (или **Connect**). Скопируй **DATABASE_PUBLIC_URL** или **DATABASE_URL**.  
+   Если есть только приватный URL — в **Connect** посмотри, есть ли публичный хост/порт для подключения извне; при необходимости включи **Public Networking** / TCP Proxy для Postgres в настройках сервиса.
+3. В DBeaver: **База данных** → **Новое подключение** → **PostgreSQL**. Вставь данные из URL:
+   - Хост, порт, база, пользователь, пароль — всё есть в строке вида `postgresql://user:password@host:port/railway`.
+4. Подключись к базе, затем **SQL Editor** → **New SQL Script** (или Ctrl+]). Вставь содержимое файла `migrations/004_protection_panel_tz.sql` и нажми **Execute** (Ctrl+Enter).
+5. Аналогично можно выполнить остальные миграции из папки `migrations/` по очереди.
+
+### Способ 3: с локального компьютера через psql
+
+1. В Railway открой сервис **PostgreSQL** → вкладка **Variables** или **Connect**.
+2. Скопируй **DATABASE_URL** или **DATABASE_PUBLIC_URL** (публичный URL нужен для подключения с твоего ПК). Если видишь только приватный URL — в **Connect** иногда есть строка для подключения извне.
+3. Установи [psql](https://www.postgresql.org/download/) (или используй уже установленный PostgreSQL).
+4. В терминале из **корня проекта** выполни (подставь свой URL в кавычки):
+
+```bash
+# Одна миграция (подставь свой URL из Railway)
+psql "postgresql://postgres:ПАРОЛЬ@host.railway.app:ПОРТ/railway" -f migrations/004_protection_panel_tz.sql
+
+# Все миграции по порядку (если их несколько)
+psql "postgresql://..." -f migrations/001_add_user_and_is_log_chat.sql
+psql "postgresql://..." -f migrations/002_public_alerts.sql
+psql "postgresql://..." -f migrations/003_reminders_and_guardian_messages.sql
+psql "postgresql://..." -f migrations/004_protection_panel_tz.sql
+psql "postgresql://..." -f migrations/005_free_tariff_3_chats.sql
+```
+
+На Windows в PowerShell URL в кавычках может требовать экранирования; можно задать переменную:
+
+```powershell
+$env:DATABASE_URL = "postgresql://postgres:xxx@xxx.railway.app:5432/railway"
+Get-Content migrations\004_protection_panel_tz.sql | psql $env:DATABASE_URL
+```
+
+### Способ 4: Railway CLI (нужен установленный psql)
+
+Команды `railway run psql ...` и `railway connect` требуют **установленного на твоём ПК клиента PostgreSQL (psql)**. Если видишь ошибку *«psql не является внутренней или внешней командой»* — значит psql не установлен.
+
+**Вариант А — не ставить psql:** выполни миграцию через **Способ 1 (Dashboard)** или **Способ 2**, предварительно скопировав `DATABASE_PUBLIC_URL` из Railway вручную.
+
+**Вариант Б — поставить psql, потом использовать CLI:**
+
+1. Установи [PostgreSQL для Windows](https://www.postgresql.org/download/windows/) (или только [Command Line Tools](https://www.postgresql.org/download/windows/)) и добавь `bin` в PATH.
+2. В папке проекта: `railway link` → выбери проект и сервис (бот или Postgres).
+3. Выполни (в PowerShell подставь URL вручную, если `$env:DATABASE_URL` пустой):
+
+```powershell
+# Сначала скопируй DATABASE_URL из Railway (Postgres → Variables) и подставь ниже
+railway run psql $env:DATABASE_URL -f migrations/004_protection_panel_tz.sql
+```
+
+Если Railway подставляет переменные в `railway run`, достаточно:
+
+```bash
+railway run psql $DATABASE_URL -f migrations/004_protection_panel_tz.sql
+```
+
+(На Windows в CMD используй `%DATABASE_URL%` вместо `$DATABASE_URL`.)
+
+### Способ 3b: скрипт в репозитории (Railway run без psql)
+
+В проекте есть скрипт, который выполняет миграцию по номеру, используя те же переменные окружения (DATABASE_URL или PG*), что и бот. Устанавливать psql не нужно.
+
+1. В папке проекта выполни `railway link` и выбери проект и сервис, где заданы переменные БД (бот или API — у них есть ссылка на Postgres).
+2. Запусти миграцию по номеру (005, 004 и т.д.):
+
+```bash
+railway run python -m scripts.run_migration 005
+```
+
+Чтобы выполнить несколько миграций подряд:
+
+```bash
+railway run python -m scripts.run_migration 001
+railway run python -m scripts.run_migration 002
+railway run python -m scripts.run_migration 003
+railway run python -m scripts.run_migration 004
+railway run python -m scripts.run_migration 005
+```
+
+Скрипт ищет файл `migrations/<номер>_*.sql` (например, `005_free_tariff_3_chats.sql`) и выполняет его SQL против базы из переменных Railway.
+
+---
+
 ## Всё на Railway: бот + API + фронт (3 сервиса)
 
 В одном проекте Railway — три сервиса из одного репозитория: **бот**, **API**, **фронт**.
