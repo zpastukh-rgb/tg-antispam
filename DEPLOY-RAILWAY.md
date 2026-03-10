@@ -30,11 +30,12 @@ git push -u origin main
 
 1. В [Railway](https://railway.app) создай проект, выбери **Deploy from GitHub repo** и укажи `reprobate-music/tg-antispam`.
 
-2. Добавь **PostgreSQL** (Add Service → Database → PostgreSQL). В настройках сервиса с БД скопируй переменную `DATABASE_URL` (или сформируй строку вида `postgresql+asyncpg://USER:PASSWORD@HOST:PORT/railway`).
+2. Добавь **PostgreSQL** (Add Service → Database → PostgreSQL).
 
-3. В сервисе приложения (не БД) открой **Variables** и задай:
-   - `BOT_TOKEN` — токен от @BotFather
-   - `DATABASE_URL` — строка подключения к PostgreSQL (Railway подставит свою, если добавил плагин; для asyncpg замени схему на `postgresql+asyncpg://...`).
+3. В сервисе приложения (бота) открой **Variables** → **Add Variable** / **Reference**:
+   - `BOT_TOKEN` — токен от @BotFather (значение вручную).
+   - `DATABASE_URL` — **не пиши вручную**. Нажми **Add Reference** (или "Reference variable from another service"), выбери свой сервис PostgreSQL и переменную `DATABASE_URL` (или `DATABASE_PRIVATE_URL`). Тогда подставится полная строка вида `postgresql://user:pass@host:5432/railway` с реальным портом БД. Код сам заменит схему на `postgresql+asyncpg://` при необходимости.
+   - **Не подставляй в DATABASE_URL переменную PORT** — это порт твоего приложения, а не БД; из-за этого и была ошибка `invalid literal for int() with base 10: 'PORT'`.
 
 4. В **Settings** сервиса приложения укажи:
    - **Build Command:** `pip install -r requirements.txt` (или оставь авто)
