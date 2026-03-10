@@ -29,6 +29,17 @@ function openAddToGroup() {
     window.open(url, '_blank')
   }
 }
+
+/** Открыть ссылку в браузере — затем «Открыть в Telegram»: так кнопки в чате с ботом видны */
+function openAddToGroupInBrowser() {
+  const url = addToGroupUrl.value
+  if (!url) return
+  if (window.Telegram?.WebApp?.openLink) {
+    window.Telegram.WebApp.openLink(url)
+  } else {
+    window.open(url, '_blank')
+  }
+}
 </script>
 
 <template>
@@ -46,16 +57,24 @@ function openAddToGroup() {
     <div v-else class="space-y-4">
       <div class="rounded-xl border border-primary-200 bg-primary-50 p-6 dark:border-primary-800 dark:bg-primary-900/20">
         <p class="mb-4 text-gray-700 dark:text-gray-300">
-          Нажмите кнопку ниже — откроется выбор группы в Telegram. Добавьте бота в нужную группу, затем выдайте ему права администратора (минимум «Удалять сообщения»). После этого группа появится в списке ниже и в боте можно будет завершить подключение.
+          Выберите способ открытия. Если кнопок в чате с ботом не видно — нажмите «Открыть в браузере», затем в браузере нажмите «Открыть в Telegram»: откроется полный чат с кнопками.
         </p>
-        <button
-          v-if="addToGroupUrl"
-          type="button"
-          class="inline-flex items-center gap-2 rounded-xl bg-primary-500 px-5 py-3 font-medium text-white shadow-sm transition hover:bg-primary-600"
-          @click="openAddToGroup"
-        >
-          Добавить бота в группу
-        </button>
+        <div v-if="addToGroupUrl" class="flex flex-wrap gap-3">
+          <button
+            type="button"
+            class="inline-flex items-center gap-2 rounded-xl bg-primary-500 px-5 py-3 font-medium text-white shadow-sm transition hover:bg-primary-600"
+            @click="openAddToGroup"
+          >
+            Добавить бота в группу
+          </button>
+          <button
+            type="button"
+            class="inline-flex items-center gap-2 rounded-xl border border-gray-300 bg-white px-5 py-3 font-medium text-gray-700 shadow-sm transition hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
+            @click="openAddToGroupInBrowser"
+          >
+            Открыть в браузере (если кнопок не видно)
+          </button>
+        </div>
         <p v-else class="text-sm text-gray-500 dark:text-gray-400">Загрузка ссылки…</p>
       </div>
 
