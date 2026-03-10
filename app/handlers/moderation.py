@@ -270,6 +270,31 @@ def find_mentions_any(message: Message) -> List[str]:
     return [m.group(0) for m in MENTION_RE.finditer(text)]
 
 
+def has_media(message: Message) -> bool:
+    """Сообщение содержит медиа: фото, видео, стикер, документ, голос, и т.д."""
+    return bool(
+        getattr(message, "photo", None)
+        or getattr(message, "video", None)
+        or getattr(message, "sticker", None)
+        or getattr(message, "document", None)
+        or getattr(message, "animation", None)
+        or getattr(message, "voice", None)
+        or getattr(message, "video_note", None)
+        or getattr(message, "audio", None)
+    )
+
+
+def has_buttons(message: Message) -> bool:
+    """Сообщение содержит инлайн- или reply-клавиатуру."""
+    rm = getattr(message, "reply_markup", None)
+    if not rm:
+        return False
+    return bool(
+        getattr(rm, "inline_keyboard", None)
+        or getattr(rm, "keyboard", None)
+    )
+
+
 # =========================================================
 # Telegram helpers (roles)
 # =========================================================
@@ -425,6 +450,10 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     else:
         filter_links = bool(getattr(rule, "filter_links", True))
     filter_mentions = bool(getattr(rule, "filter_mentions", True))
+    _media_mode = getattr(rule, "filter_media_mode", "allow")
+    filter_media = _media_mode in ("forbid", "captcha")
+    _buttons_mode = getattr(rule, "filter_buttons_mode", "allow")
+    filter_buttons = _buttons_mode in ("forbid", "captcha")
     anti_edit = bool(getattr(rule, "anti_edit", True))
     newbie_enabled = bool(getattr(rule, "newbie_enabled", True))
     newbie_window = int(getattr(rule, "newbie_minutes", 10) or 10)
@@ -506,7 +535,45 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
             )
 
     # -------------------------------------------------
-    # 4) anti-edit (сам факт правки — не преступление)
+    # 4) media / стикеры (filter_media_mode: forbid | captcha)
+    # -------------------------------------------------
+    if filter_media and has_media(message):
+        if newbie and action == "delete":
+            return Verdict(
+                True, "media_newbie", "медиа/стикер",
+                "mute",
+                mute_minutes=mute_min,
+                log_it=log_enabled,
+                log_extra=f"newbie окно {newbie_window} мин" + (" | anti-edit" if edited else ""),
+            )
+        return Verdict(
+            True, "media", "медиа/стикер", action,
+            mute_minutes=mute_min,
+            log_it=log_enabled,
+            log_extra=("anti-edit" if edited else ""),
+        )
+
+    # -------------------------------------------------
+    # 5) сообщения с кнопками (filter_buttons_mode: forbid | captcha)
+    # -------------------------------------------------
+    if filter_buttons and has_buttons(message):
+        if newbie and action == "delete":
+            return Verdict(
+                True, "buttons_newbie", "сообщение с кнопками",
+                "mute",
+                mute_minutes=mute_min,
+                log_it=log_enabled,
+                log_extra=f"newbie окно {newbie_window} мин" + (" | anti-edit" if edited else ""),
+            )
+        return Verdict(
+            True, "buttons", "сообщение с кнопками", action,
+            mute_minutes=mute_min,
+            log_it=log_enabled,
+            log_extra=("anti-edit" if edited else ""),
+        )
+
+    # -------------------------------------------------
+    # 6) anti-edit (сам факт правки — не преступление)
     # Если после правки появилось нарушение — оно уже отработало выше.
     # -------------------------------------------------
     if edited and anti_edit:
@@ -597,6 +664,10 @@ _REASON_HUMAN = {
     "link_newbie": "🔗 ссылка (новичок)",
     "mention": "🏷 упоминание",
     "mention_newbie": "🏷 упоминание (новичок)",
+    "media": "🖼 медиа/стикер",
+    "media_newbie": "🖼 медиа/стикер (новичок)",
+    "buttons": "🔘 сообщение с кнопками",
+    "buttons_newbie": "🔘 сообщение с кнопками (новичок)",
     "edited_clean": "✏️ edit (чисто)",
 }
 
@@ -686,7 +757,8 @@ async def pipeline(message: Message, *, edited: bool = False) -> None:
     # если сообщение от имени канала/чата — from_user может быть None
     if not message.from_user and not getattr(message, "sender_chat", None):
         return
-    if not (message.text or message.caption):
+    # обрабатываем сообщения с текстом, подписью, медиа или кнопками (иначе стикеры/фото без подписи не проверяются)
+    if not (message.text or message.caption or has_media(message) or has_buttons(message)):
         return
 
     # Капча на первое сообщение: только в личку пользователю, не в чат
