@@ -2,8 +2,11 @@
 """
 Запуск миграции из папки migrations/ на той БД, что задана в DATABASE_URL (или PG*).
 Использование:
+  # Локально: сначала активируй venv (venv\\Scripts\\activate на Windows)
   python -m scripts.run_migration 005
-  railway run python -m scripts.run_migration 005   # на Railway с подставленным DATABASE_URL
+
+  # На Railway (переменные БД подставятся автоматически):
+  railway run python -m scripts.run_migration 005
 """
 from __future__ import annotations
 
@@ -15,6 +18,17 @@ import sys
 # Корень проекта = родитель папки scripts
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
+
+# Проверка: зависимости должны быть установлены (venv или pip install -r requirements.txt)
+try:
+    import sqlalchemy  # noqa: F401
+except ModuleNotFoundError:
+    print("Ошибка: не найден модуль sqlalchemy. Активируй виртуальное окружение проекта:")
+    print("  Windows (PowerShell):  .\\venv\\Scripts\\Activate.ps1")
+    print("  Windows (cmd):         venv\\Scripts\\activate.bat")
+    print("  Linux/Mac:             source venv/bin/activate")
+    print("Затем:  pip install -r requirements.txt   и снова запусти скрипт.")
+    sys.exit(1)
 
 
 async def main() -> None:
@@ -41,10 +55,32 @@ async def main() -> None:
 
     print(f"Выполняю миграцию: {os.path.basename(path)}")
 
-    # Подключаемся к БД так же, как приложение (те же переменные окружения)
+    # Для локального railway run нужен DATABASE_PUBLIC_URL (приватный хост не резолвится с ПК)
     from sqlalchemy import text
-    from app.db.session import engine
+    from sqlalchemy.ext.asyncio import create_async_engine
 
+    url = (
+        os.getenv("DATABASE_PUBLIC_URL")
+        or os.getenv("DATABASE_URL")
+        or os.getenv("DATABASE_PRIVATE_URL")
+    )
+    if not url or ("${{" in url or "}}" in url):
+        pg_host = os.getenv("PGHOST")
+        pg_port = os.getenv("PGPORT", "5432")
+        pg_user = os.getenv("PGUSER")
+        pg_pass = os.getenv("PGPASSWORD", "")
+        pg_db = os.getenv("PGDATABASE", "railway")
+        if pg_host and pg_user:
+            from urllib.parse import quote_plus
+            safe_pass = quote_plus(pg_pass) if pg_pass else ""
+            url = f"postgresql://{pg_user}:{safe_pass}@{pg_host}:{pg_port}/{pg_db}"
+    if not url:
+        print("Ошибка: не задан DATABASE_URL или DATABASE_PUBLIC_URL. Для локального запуска привяжись к сервису Postgres и используй DATABASE_PUBLIC_URL.")
+        sys.exit(1)
+    if url.startswith("postgresql://") and "postgresql+asyncpg" not in url:
+        url = "postgresql+asyncpg://" + url.split("://", 1)[1]
+
+    engine = create_async_engine(url, echo=False)
     async with engine.begin() as conn:
         # Несколько операторов в файле — разбиваем по ; и выполняем по одному
         for raw in sql_stripped.replace("\r\n", "\n").split(";"):

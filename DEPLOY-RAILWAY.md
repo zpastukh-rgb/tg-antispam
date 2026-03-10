@@ -121,14 +121,24 @@ railway run psql $DATABASE_URL -f migrations/004_protection_panel_tz.sql
 
 ### Способ 3b: скрипт в репозитории (Railway run без psql)
 
-В проекте есть скрипт, который выполняет миграцию по номеру, используя те же переменные окружения (DATABASE_URL или PG*), что и бот. Устанавливать psql не нужно.
+В проекте есть скрипт, который выполняет миграцию по номеру. `railway run` подставляет переменные БД из твоего проекта, но **команда выполняется локально** — нужен Python с зависимостями (venv) и **доступный с твоего ПК** URL базы.
 
-1. В папке проекта выполни `railway link` и выбери проект и сервис, где заданы переменные БД (бот или API — у них есть ссылка на Postgres).
-2. Запусти миграцию по номеру (005, 004 и т.д.):
+1. В папке проекта: **активируй venv**, затем `railway link` — выбери проект и **сервис PostgreSQL** (не бот и не API). Так подставятся переменные с **DATABASE_PUBLIC_URL**, по которому можно подключиться с твоего компьютера. (Если привязать бота/API, часто подставляется только приватный DATABASE_URL — с ПК к нему не подключиться, будет ошибка `getaddrinfo failed`.)
+2. Запусти миграцию (в том же терминале, где активирован venv):
 
-```bash
+```powershell
+# Windows (PowerShell)
+.\venv\Scripts\Activate.ps1
 railway run python -m scripts.run_migration 005
 ```
+
+```bash
+# Linux / Mac
+source venv/bin/activate
+railway run python -m scripts.run_migration 005
+```
+
+Если venv ещё нет: `python -m venv venv`, активируй, затем `pip install -r requirements.txt`, после этого команду выше.
 
 Чтобы выполнить несколько миграций подряд:
 
