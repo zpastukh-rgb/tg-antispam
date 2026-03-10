@@ -57,7 +57,7 @@ function openAddToGroupInBrowser() {
     <div v-else class="space-y-4">
       <div class="rounded-xl border border-primary-200 bg-primary-50 p-6 dark:border-primary-800 dark:bg-primary-900/20">
         <p class="mb-4 text-gray-700 dark:text-gray-300">
-          Выберите способ открытия. Если кнопок в чате с ботом не видно — нажмите «Открыть в браузере», затем в браузере нажмите «Открыть в Telegram»: откроется полный чат с кнопками.
+          Нажмите кнопку ниже — откроется чат с ботом. В меню под сообщением бота выберите <strong>«Добавить бота в группу (выбор + права)»</strong> — тогда под полем ввода появится синяя кнопка выбора группы и выдачи прав.
         </p>
         <div v-if="addToGroupUrl" class="flex flex-wrap gap-3">
           <button
@@ -65,14 +65,7 @@ function openAddToGroupInBrowser() {
             class="inline-flex items-center gap-2 rounded-xl bg-primary-500 px-5 py-3 font-medium text-white shadow-sm transition hover:bg-primary-600"
             @click="openAddToGroup"
           >
-            Добавить бота в группу
-          </button>
-          <button
-            type="button"
-            class="inline-flex items-center gap-2 rounded-xl border border-gray-300 bg-white px-5 py-3 font-medium text-gray-700 shadow-sm transition hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
-            @click="openAddToGroupInBrowser"
-          >
-            Открыть в браузере (если кнопок не видно)
+            Открыть бота в Telegram
           </button>
         </div>
         <p v-else class="text-sm text-gray-500 dark:text-gray-400">Загрузка ссылки…</p>

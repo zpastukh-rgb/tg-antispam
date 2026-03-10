@@ -19,6 +19,7 @@ CB_CONNECT = "st:connect"
 CB_PANEL = "st:panel"
 CB_RULES = "st:rules"
 CB_BACK = "st:back"
+CB_ADDGROUP = "st:addgroup"
 
 # =========================================================
 # LRU + TTL CACHE
@@ -121,6 +122,11 @@ RULES_TEXT = (
 def start_kb():
 
     kb = InlineKeyboardBuilder()
+
+    kb.button(
+        text="➕ Добавить бота в группу (выбор + права)",
+        callback_data=CB_ADDGROUP,
+    )
 
     kb.button(
         text="➕ Подключить защиту",
@@ -272,6 +278,29 @@ async def cb_back(cb: CallbackQuery):
         parse_mode="Markdown",
         reply_markup=start_kb(),
     )
+
+
+async def _send_addgroup_keyboard(bot, user_id: int):
+    """Отправить сообщение с Reply-кнопкой «выбор группы + выдача прав» (видна в обычном чате)."""
+    from app.handlers.panel_dm import _kb_connect_request_chat_with_admin
+    await bot.send_message(
+        user_id,
+        ADDGROUP_TEXT,
+        parse_mode="Markdown",
+        reply_markup=_kb_connect_request_chat_with_admin(),
+    )
+
+
+@router.callback_query(F.data == CB_ADDGROUP)
+async def cb_addgroup(cb: CallbackQuery):
+    """По нажатию «Добавить бота в группу» — сразу показываем Reply-кнопку в этом чате (без ссылки)."""
+    await cb.answer()
+    if not cb.from_user:
+        return
+    try:
+        await _send_addgroup_keyboard(cb.bot, cb.from_user.id)
+    except Exception:
+        await cb.message.answer(ADDGROUP_TEXT, parse_mode="Markdown")
 
 
 @router.callback_query(F.data == CB_CONNECT)
