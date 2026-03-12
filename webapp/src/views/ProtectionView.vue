@@ -2,9 +2,11 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
+import { useToast } from '../composables/useToast'
 
 const router = useRouter()
 const { api, loading, error, fetch, hasInitData } = useApi()
+const { showToast } = useToast()
 const chat = ref(null)
 const saving = ref(false)
 
@@ -23,19 +25,13 @@ onMounted(async () => {
   }
 })
 
-function showSavedToast() {
-  if (window.Telegram?.WebApp?.showAlert) {
-    window.Telegram.WebApp.showAlert('Настройки успешно сохранены')
-  }
-}
-
 async function updateRule(patch) {
   if (!chat.value?.id || chat.value.noSelection) return
   saving.value = true
   try {
     const data = await fetch(() => api.updateRule(chat.value.id, patch))
     chat.value.rule = data.rule
-    showSavedToast()
+    showToast('Настройки успешно сохранены')
   } finally {
     saving.value = false
   }

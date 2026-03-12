@@ -450,16 +450,16 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     mute_min = int(getattr(rule, "mute_minutes", 30) or 30)
     mute_min = max(1, min(1440, mute_min))
 
-    # toggles: только "allow" = ссылки разрешены; "forbid"/"captcha" = фильтруем (явно, чтобы не путать с NULL)
+    # Ссылки: не фильтруем только при явном "allow" или при legacy filter_links=False
     _links_mode = getattr(rule, "filter_links_mode", None)
     if _links_mode is not None:
         _links_mode = str(_links_mode).strip().lower()
-    if _links_mode == "allow":
-        filter_links = False
-    elif _links_mode in ("forbid", "captcha"):
-        filter_links = True
     else:
-        # NULL, пусто, неизвестное — по умолчанию запрещаем ссылки (как "forbid")
+        _links_mode = ""
+    _legacy_filter_links = getattr(rule, "filter_links", True)
+    if _links_mode == "allow" or (_links_mode not in ("forbid", "captcha") and _legacy_filter_links is False):
+        filter_links = False
+    else:
         filter_links = True
     filter_mentions = bool(getattr(rule, "filter_mentions", True))
     _media_mode = getattr(rule, "filter_media_mode", "allow")
@@ -644,10 +644,15 @@ async def apply_action(message: Message, v: Verdict) -> Tuple[bool, str, bool]:
         return deleted_ok, "delete", deleted_ok
 
     if v.action == "captcha":
-        from app.handlers.first_message_captcha import send_captcha_dm
+        from app.handlers.first_message_captcha import send_captcha_dm, send_captcha_in_chat
         if message.from_user:
-            await send_captcha_dm(message.bot, message.from_user.id, message.chat.id)
-        return True, "капча в ЛС", deleted_ok
+            ok = await send_captcha_dm(message.bot, message.from_user.id, message.chat.id)
+            if not ok:
+                mention = f"<a href=\"tg://user?id={message.from_user.id}\">{message.from_user.full_name}</a>"
+                await send_captcha_in_chat(
+                    message.bot, message.chat.id, message.from_user.id, mention
+                )
+        return True, "капча", deleted_ok
 
     if v.action == "mute":
         ok = await _try_mute(message, v.mute_minutes)

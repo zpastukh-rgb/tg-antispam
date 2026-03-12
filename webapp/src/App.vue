@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import AppHeader from './components/AppHeader.vue'
 import AppSidebar from './components/AppSidebar.vue'
+import AppToast from './components/AppToast.vue'
 
 const sidebarOpen = ref(false)
 
@@ -16,6 +17,7 @@ function closeSidebar() {
 
 <template>
   <div class="min-h-screen bg-gray-50 dark:bg-gray-900">
+    <AppToast />
     <AppHeader :sidebar-open="sidebarOpen" @menu-click="openMenu" />
     <AppSidebar :open="sidebarOpen" @close="closeSidebar" />
     <main class="min-h-[calc(100vh-3.5rem)] md:pl-64">

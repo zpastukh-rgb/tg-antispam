@@ -222,6 +222,10 @@ async def api_chat_rule(
     for key, value in body.items():
         if key in allowed and hasattr(rule, key):
             setattr(rule, key, value)
+    # Синхронизация ссылок: при "allow" выключаем и legacy filter_links
+    if "filter_links_mode" in body and hasattr(rule, "filter_links"):
+        mode = (body.get("filter_links_mode") or "").strip().lower()
+        rule.filter_links = mode != "allow"
     await session.commit()
     await session.refresh(rule)
     stopwords_count = await count_stopwords(session, int(chat_id))

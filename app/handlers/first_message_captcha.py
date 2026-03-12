@@ -29,20 +29,42 @@ def _set_captcha_passed(chat_id: int, user_id: int) -> None:
     _CAPTCHA_PASSED.add((chat_id, user_id))
 
 
+def _captcha_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Я не бот", callback_data=f"{CB_CAPTCHA_FIRST_OK}{chat_id}")],
+    ])
+
+
 async def send_captcha_dm(bot, user_id: int, chat_id: int) -> bool:
     """Отправить капчу «Я не бот» пользователю в ЛС. Возвращает True при успехе."""
     try:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Я не бот", callback_data=f"{CB_CAPTCHA_FIRST_OK}{chat_id}")],
-        ])
         await bot.send_message(
             user_id,
             "😈 Подтверди, что ты не бот: нажми кнопку ниже. После этого сможешь писать в чат.",
-            reply_markup=kb,
+            reply_markup=_captcha_keyboard(chat_id),
         )
         return True
     except Exception as e:
         logger.warning("send_captcha_dm user_id=%s chat_id=%s: %s", user_id, chat_id, e)
+        return False
+
+
+async def send_captcha_in_chat(bot, chat_id: int, user_id: int, user_mention: str) -> bool:
+    """
+    Отправить капчу в группу (если ЛС недоступен). Сообщение видят все, но кнопку нажимает нужный пользователь.
+    В Telegram нельзя показать сообщение в группе только одному пользователю.
+    user_mention может быть HTML (например <a href="tg://user?id=...">Имя</a>).
+    """
+    try:
+        await bot.send_message(
+            chat_id,
+            f"😈 {user_mention}, подтверди, что ты не бот — нажми кнопку ниже:",
+            parse_mode="HTML",
+            reply_markup=_captcha_keyboard(chat_id),
+        )
+        return True
+    except Exception as e:
+        logger.warning("send_captcha_in_chat chat_id=%s user_id=%s: %s", chat_id, user_id, e)
         return False
 
 
