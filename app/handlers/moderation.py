@@ -536,25 +536,24 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
                 if _links_mode == "allow":
                     pass
                 else:
-                    # Режим "капча": если пользователь уже проходил капчу в этом чате — ссылку разрешаем
-                    from app.handlers.first_message_captcha import _captcha_passed as captcha_passed_check
-                    if _links_mode == "captcha" and user and captcha_passed_check(chat_id, user_id):
-                        pass  # уже проходил — не наказываем
-                    else:
-                        link_action = "captcha" if _links_mode == "captcha" else action
-                        if newbie and link_action == "delete":
-                            return Verdict(
-                                True, "link_newbie", links[0], "mute",
-                                mute_minutes=mute_min,
-                                log_it=log_enabled,
-                                log_extra=f"newbie окно {newbie_window} мин" + (" | anti-edit" if edited else ""),
-                            )
+                    # Капча на паузе: режим "captcha" обрабатываем как обычное действие (delete/mute/ban)
+                    # from app.handlers.first_message_captcha import _captcha_passed as captcha_passed_check
+                    # if _links_mode == "captcha" and user and captcha_passed_check(chat_id, user_id):
+                    #     pass
+                    link_action = action  # капча на паузе — не "captcha", всегда action
+                    if newbie and link_action == "delete":
                         return Verdict(
-                            True, "link", links[0], link_action,
+                            True, "link_newbie", links[0], "mute",
                             mute_minutes=mute_min,
                             log_it=log_enabled,
-                            log_extra=("anti-edit" if edited else ""),
+                            log_extra=f"newbie окно {newbie_window} мин" + (" | anti-edit" if edited else ""),
                         )
+                    return Verdict(
+                        True, "link", links[0], link_action,
+                        mute_minutes=mute_min,
+                        log_it=log_enabled,
+                        log_extra=("anti-edit" if edited else ""),
+                    )
 
     # -------------------------------------------------
     # 3) mentions
@@ -578,52 +577,50 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
             )
 
     # -------------------------------------------------
-    # 4) media / стикеры (filter_media_mode: forbid | captcha)
+    # 4) media / стикеры (filter_media_mode: forbid | captcha). Капча на паузе — captcha как action
     # -------------------------------------------------
     if filter_media and has_media(message):
-        from app.handlers.first_message_captcha import _captcha_passed as captcha_passed_check
-        if _media_mode == "captcha" and user and captcha_passed_check(chat_id, user_id):
-            pass  # уже проходил капчу — не наказываем
-        else:
-            media_action = "captcha" if _media_mode == "captcha" else action
-            if newbie and media_action == "delete":
-                return Verdict(
-                    True, "media_newbie", "медиа/стикер",
-                    "mute",
-                    mute_minutes=mute_min,
-                    log_it=log_enabled,
-                    log_extra=f"newbie окно {newbie_window} мин" + (" | anti-edit" if edited else ""),
-                )
+        # from app.handlers.first_message_captcha import _captcha_passed as captcha_passed_check
+        # if _media_mode == "captcha" and user and captcha_passed_check(chat_id, user_id):
+        #     pass
+        media_action = action  # капча на паузе: "captcha" -> action (delete/mute/ban)
+        if newbie and media_action == "delete":
             return Verdict(
-                True, "media", "медиа/стикер", media_action,
+                True, "media_newbie", "медиа/стикер",
+                "mute",
                 mute_minutes=mute_min,
                 log_it=log_enabled,
-                log_extra=("anti-edit" if edited else ""),
+                log_extra=f"newbie окно {newbie_window} мин" + (" | anti-edit" if edited else ""),
             )
+        return Verdict(
+            True, "media", "медиа/стикер", media_action,
+            mute_minutes=mute_min,
+            log_it=log_enabled,
+            log_extra=("anti-edit" if edited else ""),
+        )
 
     # -------------------------------------------------
-    # 5) сообщения с кнопками (filter_buttons_mode: forbid | captcha)
+    # 5) сообщения с кнопками (filter_buttons_mode: forbid | captcha). Капча на паузе — captcha как action
     # -------------------------------------------------
     if filter_buttons and has_buttons(message):
-        from app.handlers.first_message_captcha import _captcha_passed as captcha_passed_check
-        if _buttons_mode == "captcha" and user and captcha_passed_check(chat_id, user_id):
-            pass  # уже проходил капчу — не наказываем
-        else:
-            buttons_action = "captcha" if _buttons_mode == "captcha" else action
-            if newbie and buttons_action == "delete":
-                return Verdict(
-                    True, "buttons_newbie", "сообщение с кнопками",
-                    "mute",
-                    mute_minutes=mute_min,
-                    log_it=log_enabled,
-                    log_extra=f"newbie окно {newbie_window} мин" + (" | anti-edit" if edited else ""),
-                )
+        # from app.handlers.first_message_captcha import _captcha_passed as captcha_passed_check
+        # if _buttons_mode == "captcha" and user and captcha_passed_check(chat_id, user_id):
+        #     pass
+        buttons_action = action  # капча на паузе: "captcha" -> action (delete/mute/ban)
+        if newbie and buttons_action == "delete":
             return Verdict(
-                True, "buttons", "сообщение с кнопками", buttons_action,
+                True, "buttons_newbie", "сообщение с кнопками",
+                "mute",
                 mute_minutes=mute_min,
                 log_it=log_enabled,
-                log_extra=("anti-edit" if edited else ""),
+                log_extra=f"newbie окно {newbie_window} мин" + (" | anti-edit" if edited else ""),
             )
+        return Verdict(
+            True, "buttons", "сообщение с кнопками", buttons_action,
+            mute_minutes=mute_min,
+            log_it=log_enabled,
+            log_extra=("anti-edit" if edited else ""),
+        )
 
     # -------------------------------------------------
     # 6) anti-edit (сам факт правки — не преступление)
@@ -680,16 +677,17 @@ async def apply_action(message: Message, v: Verdict) -> Tuple[bool, str, bool]:
     if v.action == "delete":
         return deleted_ok, "delete", deleted_ok
 
-    if v.action == "captcha":
-        from app.handlers.first_message_captcha import send_captcha_dm, send_captcha_fallback_instruction
-        if message.from_user:
-            ok = await send_captcha_dm(message.bot, message.from_user.id, message.chat.id)
-            if not ok:
-                mention = f"<a href=\"tg://user?id={message.from_user.id}\">{message.from_user.full_name}</a>"
-                await send_captcha_fallback_instruction(
-                    message.bot, message.chat.id, message.from_user.id, mention
-                )
-        return True, "капча", deleted_ok
+    # Капча на паузе — блок не вызывается (в evaluate не возвращаем action "captcha")
+    # if v.action == "captcha":
+    #     from app.handlers.first_message_captcha import send_captcha_dm, send_captcha_fallback_instruction
+    #     if message.from_user:
+    #         ok = await send_captcha_dm(message.bot, message.from_user.id, message.chat.id)
+    #         if not ok:
+    #             mention = f"<a href=\"tg://user?id={message.from_user.id}\">{message.from_user.full_name}</a>"
+    #             await send_captcha_fallback_instruction(
+    #                 message.bot, message.chat.id, message.from_user.id, mention
+    #             )
+    #     return True, "капча", deleted_ok
 
     if v.action == "mute":
         ok = await _try_mute(message, v.mute_minutes)
@@ -825,10 +823,10 @@ async def pipeline(message: Message, *, edited: bool = False) -> None:
     if not (message.text or message.caption or has_media(message) or has_buttons(message)):
         return
 
-    # Капча на первое сообщение: только в личку пользователю, не в чат
-    from app.handlers.first_message_captcha import check_first_message_captcha
-    if await check_first_message_captcha(message):
-        return
+    # Капча на паузе
+    # from app.handlers.first_message_captcha import check_first_message_captcha
+    # if await check_first_message_captcha(message):
+    #     return
 
     async with await get_session() as session:
         try:

@@ -69,7 +69,6 @@ async function removeStopword(word) {
 
 const policyOptions = [
   { value: 'allow', label: 'Разрешено' },
-  { value: 'captcha', label: 'Капча' },
   { value: 'forbid', label: 'Запрещено' },
 ]
 
@@ -81,14 +80,6 @@ const actionOptions = [
 
 const mutePresets = [5, 10, 30, 60, 1440]
 const newbiePresets = [5, 10, 15, 30, 60]
-const allCaptchaPresets = [
-  { value: 0, label: 'Выкл' },
-  { value: 10, label: '10 мин' },
-  { value: 60, label: '1 ч' },
-  { value: 120, label: '2 ч' },
-  { value: 360, label: '6 ч' },
-  { value: 1440, label: '24 ч' },
-]
 const silencePresets = [
   { value: 0, label: 'Выкл' },
   { value: 5, label: '5 мин' },
@@ -135,14 +126,6 @@ const silencePresets = [
             @click="updateRule({ master_anti_spam: !chat.rule.master_anti_spam })"
           >
             Защита от спама: {{ chat.rule.master_anti_spam ? 'ВКЛ' : 'ВЫКЛ' }}
-          </button>
-          <button
-            type="button"
-            :class="chat.rule.first_message_captcha_enabled ? 'bg-primary-500 text-white' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
-            class="rounded-lg px-3 py-1.5 text-sm"
-            @click="updateRule({ first_message_captcha_enabled: !chat.rule.first_message_captcha_enabled })"
-          >
-            Капча на первое сообщение: {{ chat.rule.first_message_captcha_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
           </button>
         </div>
       </section>
@@ -206,21 +189,6 @@ const silencePresets = [
             >
               {{ chat.rule.delete_join_messages ? 'Да' : 'Нет' }}
             </button>
-          </div>
-          <div>
-            <p class="mb-1 text-xs text-gray-500 dark:text-gray-400">Проверка всех сообщений капчей (мин)</p>
-            <div class="flex flex-wrap gap-2">
-              <button
-                v-for="p in allCaptchaPresets"
-                :key="p.value"
-                type="button"
-                :class="(chat.rule.all_captcha_minutes || 0) === p.value ? 'bg-primary-500 text-white' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
-                class="rounded-lg px-3 py-1.5 text-sm"
-                @click="updateRule({ all_captcha_minutes: p.value })"
-              >
-                {{ p.label }}
-              </button>
-            </div>
           </div>
           <div>
             <p class="mb-1 text-xs text-gray-500 dark:text-gray-400">Режим тишины (мин)</p>
