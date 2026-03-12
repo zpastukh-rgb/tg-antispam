@@ -74,8 +74,47 @@ async def user_can_access_chat(session: AsyncSession, user_id: int, chat_id: int
     return any(c.id == chat_id for c in chats)
 
 
+def _norm_stopword(s: str) -> str:
+    s = (s or "").strip().lower().replace("ё", "е")
+    return s[:64]  # модель: String(64)
+
+
 async def count_stopwords(session: AsyncSession, chat_id: int) -> int:
     """Количество стоп-слов чата."""
     from sqlalchemy import func
     r = await session.execute(select(func.count()).select_from(StopWord).where(StopWord.chat_id == chat_id))
     return r.scalar() or 0
+
+
+async def list_stopwords(session: AsyncSession, chat_id: int) -> list[str]:
+    """Список стоп-слов чата (отсортированы)."""
+    res = await session.execute(
+        select(StopWord.word).where(StopWord.chat_id == chat_id).order_by(StopWord.word.asc())
+    )
+    return [row[0] for row in res.all()]
+
+
+async def add_stopword(session: AsyncSession, chat_id: int, word: str) -> bool:
+    """Добавить стоп-слово. Возвращает True если добавлено, False если уже было."""
+    w = _norm_stopword(word)
+    if not w:
+        return False
+    exists = await session.execute(
+        select(StopWord).where(StopWord.chat_id == chat_id, StopWord.word == w).limit(1)
+    )
+    if exists.scalar_one_or_none():
+        return False
+    session.add(StopWord(chat_id=chat_id, word=w))
+    await session.commit()
+    return True
+
+
+async def delete_stopword(session: AsyncSession, chat_id: int, word: str) -> bool:
+    """Удалить стоп-слово. Возвращает True если удалено."""
+    from sqlalchemy import delete as sql_delete
+    w = _norm_stopword(word)
+    if not w:
+        return False
+    await session.execute(sql_delete(StopWord).where(StopWord.chat_id == chat_id, StopWord.word == w))
+    await session.commit()
+    return True

@@ -137,10 +137,20 @@ def normalize(text: str) -> str:
 def token_set(text_norm: str) -> Set[str]:
     return {t for t in re.split(r"[^a-zа-я0-9_]+", text_norm) if t}
 
-def stopword_hit(text_norm: str, stopwords: Set[str]) -> Optional[str]:
+
+def _text_without_urls_for_stopwords(text: str) -> str:
+    """Убирает URL из текста (замена на пробел), чтобы стоп-слова не срабатывали на части ссылок."""
+    if not text:
+        return ""
+    return URL_RE.sub(" ", text)
+
+
+def stopword_hit(text_norm: str, stopwords: Set[str], text_without_urls_norm: Optional[str] = None) -> Optional[str]:
+    """Проверка стоп-слов. Если передан text_without_urls_norm — используем его (ссылки не участвуют)."""
     if not stopwords:
         return None
-    toks = token_set(text_norm)
+    base = (text_without_urls_norm if text_without_urls_norm is not None else text_norm)
+    toks = token_set(base)
     for w in stopwords:
         ww = (w or "").strip().lower().replace("ё", "е")
         if ww and ww in toks:
@@ -441,6 +451,8 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
 
     text = message.text or message.caption or ""
     text_norm = normalize(text)
+    # Для стоп-слов не учитываем текст внутри URL (чтобы «разрешено» для ссылок не ломалось из-за слов в ссылке)
+    text_for_stopwords_norm = normalize(_text_without_urls_for_stopwords(text))
 
     # base action
     action = (getattr(rule, "action_mode", "delete") or "delete").lower()
@@ -450,14 +462,15 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     mute_min = int(getattr(rule, "mute_minutes", 30) or 30)
     mute_min = max(1, min(1440, mute_min))
 
-    # Ссылки: не фильтруем только при явном "allow" или при legacy filter_links=False
-    _links_mode = getattr(rule, "filter_links_mode", None)
-    if _links_mode is not None:
-        _links_mode = str(_links_mode).strip().lower()
-    else:
-        _links_mode = ""
+    # Ссылки: единственный источник истины — filter_links_mode; "allow" = не трогаем ссылки
+    _links_mode_raw = getattr(rule, "filter_links_mode", None)
+    _links_mode = str(_links_mode_raw).strip().lower() if _links_mode_raw is not None else ""
     _legacy_filter_links = getattr(rule, "filter_links", True)
-    if _links_mode == "allow" or (_links_mode not in ("forbid", "captcha") and _legacy_filter_links is False):
+    if _links_mode == "allow":
+        filter_links = False
+    elif _links_mode in ("forbid", "captcha"):
+        filter_links = True
+    elif _legacy_filter_links is False:
         filter_links = False
     else:
         filter_links = True
@@ -475,10 +488,10 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     newbie = newbie_enabled and _is_newbie(chat_id, user_id, newbie_window)
 
     # -------------------------------------------------
-    # 1) stopwords
+    # 1) stopwords (без учёта токенов внутри URL)
     # -------------------------------------------------
     stopwords = await load_stopwords(session, chat_id)
-    hit = stopword_hit(text_norm, stopwords)
+    hit = stopword_hit(text_norm, stopwords, text_without_urls_norm=text_for_stopwords_norm)
     if hit:
         if newbie and action == "delete":
             return Verdict(
@@ -495,9 +508,11 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
         )
 
     # -------------------------------------------------
-    # 2) links (текст + entities: url, text_link — иначе кликабельные ссылки проходят)
+    # 2) links (текст + entities: url, text_link). При "allow" блок не выполняется.
     # -------------------------------------------------
-    if filter_links and _links_mode != "allow":
+    if not filter_links:
+        pass  # ссылки разрешены — не проверяем
+    else:
         links = find_links_in_message(message)
         if links:
             domains = extract_domains_from_links(links)

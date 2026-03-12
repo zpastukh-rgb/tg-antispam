@@ -9,6 +9,8 @@ const { api, loading, error, fetch, hasInitData } = useApi()
 const { showToast } = useToast()
 const chat = ref(null)
 const saving = ref(false)
+const newStopword = ref('')
+const stopwordLoading = ref(false)
 
 onMounted(async () => {
   if (!hasInitData.value) return
@@ -34,6 +36,34 @@ async function updateRule(patch) {
     showToast('Настройки успешно сохранены')
   } finally {
     saving.value = false
+  }
+}
+
+async function addStopword() {
+  const word = (newStopword.value || '').trim()
+  if (!word || !chat.value?.id || chat.value.noSelection) return
+  stopwordLoading.value = true
+  try {
+    const data = await fetch(() => api.addStopword(chat.value.id, word))
+    chat.value.stopwords = data.stopwords || []
+    if (chat.value.rule) chat.value.rule.stopwords_count = chat.value.stopwords.length
+    newStopword.value = ''
+    showToast('Стоп-слово добавлено')
+  } finally {
+    stopwordLoading.value = false
+  }
+}
+
+async function removeStopword(word) {
+  if (!chat.value?.id || chat.value.noSelection) return
+  stopwordLoading.value = true
+  try {
+    const data = await fetch(() => api.deleteStopword(chat.value.id, word))
+    chat.value.stopwords = data.stopwords || []
+    if (chat.value.rule) chat.value.rule.stopwords_count = chat.value.stopwords.length
+    showToast('Стоп-слово удалено')
+  } finally {
+    stopwordLoading.value = false
   }
 }
 
@@ -207,8 +237,48 @@ const silencePresets = [
               </button>
             </div>
           </div>
-          <p class="text-xs text-gray-500 dark:text-gray-400">
-            Стоп-слов: {{ chat.rule.stopwords_count }}. Настраиваются в боте (раздел Защита → Стоп-слова).
+          <h3 class="mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">Стоп-слова</h3>
+          <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
+            Сообщения, содержащие эти слова (в тексте, не внутри ссылок), будут удаляться или наказываться по правилам выше.
+          </p>
+          <div class="mb-3 flex flex-wrap gap-2">
+            <input
+              v-model="newStopword"
+              type="text"
+              placeholder="Добавить слово"
+              class="min-w-0 flex-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+              :disabled="stopwordLoading"
+              @keydown.enter.prevent="addStopword()"
+            />
+            <button
+              type="button"
+              class="rounded-lg bg-primary-500 px-4 py-2 text-sm font-medium text-white hover:bg-primary-600 disabled:opacity-50"
+              :disabled="stopwordLoading || !(newStopword || '').trim()"
+              @click="addStopword()"
+            >
+              Добавить
+            </button>
+          </div>
+          <ul v-if="(chat.stopwords || []).length" class="space-y-1">
+            <li
+              v-for="w in (chat.stopwords || [])"
+              :key="w"
+              class="flex items-center justify-between rounded-lg bg-gray-100 px-3 py-2 text-sm dark:bg-gray-700"
+            >
+              <span class="text-gray-800 dark:text-gray-200">{{ w }}</span>
+              <button
+                type="button"
+                class="rounded p-1 text-red-600 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-900/30"
+                :disabled="stopwordLoading"
+                aria-label="Удалить"
+                @click="removeStopword(w)"
+              >
+                ✕
+              </button>
+            </li>
+          </ul>
+          <p v-else class="text-sm text-gray-500 dark:text-gray-400">
+            Нет стоп-слов. Добавьте слово выше.
           </p>
         </div>
       </section>

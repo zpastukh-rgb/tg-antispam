@@ -21,6 +21,9 @@ from app.api.service import (
     set_selected_chat,
     user_can_access_chat,
     count_stopwords,
+    list_stopwords,
+    add_stopword,
+    delete_stopword,
 )
 from app.db.models import Chat, Rule
 from app.services.user_service import get_or_create_user, can_add_chat
@@ -181,7 +184,8 @@ async def api_chat(
     if not chat:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
     rule = await get_or_create_rule(session, int(chat_id))
-    stopwords_count = await count_stopwords(session, int(chat_id))
+    stopwords_list = await list_stopwords(session, int(chat_id))
+    stopwords_count = len(stopwords_list)
     log_chat_title = None
     if getattr(chat, "log_chat_id", None):
         log_chat_row = await session.get(Chat, chat.log_chat_id)
@@ -195,6 +199,7 @@ async def api_chat(
         "log_chat_id": chat.log_chat_id,
         "log_chat_title": log_chat_title,
         "rule": _rule_to_dict(rule, stopwords_count),
+        "stopwords": stopwords_list,
     }
 
 
@@ -230,6 +235,53 @@ async def api_chat_rule(
     await session.refresh(rule)
     stopwords_count = await count_stopwords(session, int(chat_id))
     return {"rule": _rule_to_dict(rule, stopwords_count)}
+
+
+# ---------- GET /api/chat/:id/stopwords (список уже в GET /api/chat/:id)
+# ---------- POST /api/chat/:id/stopwords ----------
+@router.post("/chat/{chat_id}/stopwords")
+async def api_add_stopword(
+    chat_id: int,
+    body: dict,
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Добавить стоп-слово. Body: { "word": "казино" } или { "words": ["казино", "реклама"] }."""
+    ok = await user_can_access_chat(session, user_id, int(chat_id))
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+    word = (body.get("word") or "").strip()
+    words = body.get("words")
+    if word:
+        words = [word] if not words else list(words) + [word]
+    elif not words:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Need 'word' or 'words'")
+    else:
+        words = list(words) if isinstance(words, (list, tuple)) else [str(words)]
+    added = []
+    for w in words:
+        if (w or "").strip():
+            if await add_stopword(session, int(chat_id), w):
+                added.append((w or "").strip().lower())
+    return {"added": added, "stopwords": await list_stopwords(session, int(chat_id))}
+
+
+# ---------- DELETE /api/chat/:id/stopwords ----------
+@router.delete("/chat/{chat_id}/stopwords")
+async def api_delete_stopword(
+    chat_id: int,
+    word: str,
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Удалить стоп-слово. Query: ?word=казино"""
+    ok = await user_can_access_chat(session, user_id, int(chat_id))
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+    if not (word or "").strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Need query param 'word'")
+    await delete_stopword(session, int(chat_id), word)
+    return {"stopwords": await list_stopwords(session, int(chat_id))}
 
 
 # ---------- GET /api/connect/pending ----------
