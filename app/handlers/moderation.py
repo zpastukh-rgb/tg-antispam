@@ -450,14 +450,16 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     mute_min = int(getattr(rule, "mute_minutes", 30) or 30)
     mute_min = max(1, min(1440, mute_min))
 
-    # toggles: filter_links_mode "allow" = ссылки разрешены; иначе (forbid/captcha/пусто) = режем
+    # toggles: только "allow" = ссылки разрешены; "forbid"/"captcha" = фильтруем (явно, чтобы не путать с NULL)
     _links_mode = getattr(rule, "filter_links_mode", None)
     if _links_mode is not None:
         _links_mode = str(_links_mode).strip().lower()
     if _links_mode == "allow":
         filter_links = False
+    elif _links_mode in ("forbid", "captcha"):
+        filter_links = True
     else:
-        # forbid, captcha, None, пусто — считаем фильтр ссылок включённым
+        # NULL, пусто, неизвестное — по умолчанию запрещаем ссылки (как "forbid")
         filter_links = True
     filter_mentions = bool(getattr(rule, "filter_mentions", True))
     _media_mode = getattr(rule, "filter_media_mode", "allow")
@@ -495,7 +497,7 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     # -------------------------------------------------
     # 2) links (текст + entities: url, text_link — иначе кликабельные ссылки проходят)
     # -------------------------------------------------
-    if filter_links:
+    if filter_links and _links_mode != "allow":
         links = find_links_in_message(message)
         if links:
             domains = extract_domains_from_links(links)
@@ -509,7 +511,9 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
                     break
 
             if not allowed:
-                if newbie and action == "delete":
+                # Режим "капча" — удаляем сообщение и шлём капчу в ЛС; иначе delete/mute/ban
+                link_action = "captcha" if _links_mode == "captcha" else action
+                if newbie and link_action == "delete":
                     return Verdict(
                         True, "link_newbie", links[0], "mute",
                         mute_minutes=mute_min,
@@ -517,7 +521,7 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
                         log_extra=f"newbie окно {newbie_window} мин" + (" | anti-edit" if edited else ""),
                     )
                 return Verdict(
-                    True, "link", links[0], action,
+                    True, "link", links[0], link_action,
                     mute_minutes=mute_min,
                     log_it=log_enabled,
                     log_extra=("anti-edit" if edited else ""),
@@ -548,7 +552,8 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     # 4) media / стикеры (filter_media_mode: forbid | captcha)
     # -------------------------------------------------
     if filter_media and has_media(message):
-        if newbie and action == "delete":
+        media_action = "captcha" if _media_mode == "captcha" else action
+        if newbie and media_action == "delete":
             return Verdict(
                 True, "media_newbie", "медиа/стикер",
                 "mute",
@@ -557,7 +562,7 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
                 log_extra=f"newbie окно {newbie_window} мин" + (" | anti-edit" if edited else ""),
             )
         return Verdict(
-            True, "media", "медиа/стикер", action,
+            True, "media", "медиа/стикер", media_action,
             mute_minutes=mute_min,
             log_it=log_enabled,
             log_extra=("anti-edit" if edited else ""),
@@ -567,7 +572,8 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     # 5) сообщения с кнопками (filter_buttons_mode: forbid | captcha)
     # -------------------------------------------------
     if filter_buttons and has_buttons(message):
-        if newbie and action == "delete":
+        buttons_action = "captcha" if _buttons_mode == "captcha" else action
+        if newbie and buttons_action == "delete":
             return Verdict(
                 True, "buttons_newbie", "сообщение с кнопками",
                 "mute",
@@ -576,7 +582,7 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
                 log_extra=f"newbie окно {newbie_window} мин" + (" | anti-edit" if edited else ""),
             )
         return Verdict(
-            True, "buttons", "сообщение с кнопками", action,
+            True, "buttons", "сообщение с кнопками", buttons_action,
             mute_minutes=mute_min,
             log_it=log_enabled,
             log_extra=("anti-edit" if edited else ""),
@@ -636,6 +642,12 @@ async def apply_action(message: Message, v: Verdict) -> Tuple[bool, str, bool]:
 
     if v.action == "delete":
         return deleted_ok, "delete", deleted_ok
+
+    if v.action == "captcha":
+        from app.handlers.first_message_captcha import send_captcha_dm
+        if message.from_user:
+            await send_captcha_dm(message.bot, message.from_user.id, message.chat.id)
+        return True, "капча в ЛС", deleted_ok
 
     if v.action == "mute":
         ok = await _try_mute(message, v.mute_minutes)

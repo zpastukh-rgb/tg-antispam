@@ -5,7 +5,12 @@ import asyncio
 import os
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import BotCommand
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeDefault,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllChatAdministrators,
+)
 from dotenv import load_dotenv
 
 from app.db.session import engine
@@ -44,8 +49,11 @@ BOT_COMMANDS = [
 async def on_startup() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    # Меню команд: в ЛС — полный список; в группах — только у админов, у обычных пользователей пусто
     try:
-        await bot.set_my_commands(BOT_COMMANDS)
+        await bot.set_my_commands(BOT_COMMANDS, scope=BotCommandScopeDefault())
+        await bot.set_my_commands([], scope=BotCommandScopeAllGroupChats())
+        await bot.set_my_commands(BOT_COMMANDS, scope=BotCommandScopeAllChatAdministrators())
     except Exception:
         pass
 

@@ -23,12 +23,19 @@ onMounted(async () => {
   }
 })
 
+function showSavedToast() {
+  if (window.Telegram?.WebApp?.showAlert) {
+    window.Telegram.WebApp.showAlert('Настройки успешно сохранены')
+  }
+}
+
 async function updateRule(patch) {
   if (!chat.value?.id || chat.value.noSelection) return
   saving.value = true
   try {
     const data = await fetch(() => api.updateRule(chat.value.id, patch))
     chat.value.rule = data.rule
+    showSavedToast()
   } finally {
     saving.value = false
   }

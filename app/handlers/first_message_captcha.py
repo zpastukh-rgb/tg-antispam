@@ -29,6 +29,23 @@ def _set_captcha_passed(chat_id: int, user_id: int) -> None:
     _CAPTCHA_PASSED.add((chat_id, user_id))
 
 
+async def send_captcha_dm(bot, user_id: int, chat_id: int) -> bool:
+    """Отправить капчу «Я не бот» пользователю в ЛС. Возвращает True при успехе."""
+    try:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Я не бот", callback_data=f"{CB_CAPTCHA_FIRST_OK}{chat_id}")],
+        ])
+        await bot.send_message(
+            user_id,
+            "😈 Подтверди, что ты не бот: нажми кнопку ниже. После этого сможешь писать в чат.",
+            reply_markup=kb,
+        )
+        return True
+    except Exception as e:
+        logger.warning("send_captcha_dm user_id=%s chat_id=%s: %s", user_id, chat_id, e)
+        return False
+
+
 async def check_first_message_captcha(message: Message) -> bool:
     """
     Если включена капча на первое сообщение и пользователь не проходил:
