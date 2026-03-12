@@ -436,6 +436,10 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
         return Verdict(False, "inactive", "", "delete", log_it=False)
 
     rule = await get_rule(session, chat_id)
+    try:
+        await session.refresh(rule)  # свежие данные из БД (настройки из Mini App)
+    except Exception:
+        pass
 
     # главный выключатель антиспама: если ВЫКЛ — не фильтруем
     if not bool(getattr(rule, "master_anti_spam", True)):
@@ -465,6 +469,8 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     # Ссылки: единственный источник истины — filter_links_mode; "allow" = не трогаем ссылки
     _links_mode_raw = getattr(rule, "filter_links_mode", None)
     _links_mode = str(_links_mode_raw).strip().lower() if _links_mode_raw is not None else ""
+    if "allow" in _links_mode:
+        _links_mode = "allow"
     _legacy_filter_links = getattr(rule, "filter_links", True)
     if _links_mode == "allow":
         filter_links = False
@@ -526,21 +532,29 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
                     break
 
             if not allowed:
-                # Режим "капча" — удаляем сообщение и шлём капчу в ЛС; иначе delete/mute/ban
-                link_action = "captcha" if _links_mode == "captcha" else action
-                if newbie and link_action == "delete":
-                    return Verdict(
-                        True, "link_newbie", links[0], "mute",
-                        mute_minutes=mute_min,
-                        log_it=log_enabled,
-                        log_extra=f"newbie окно {newbie_window} мин" + (" | anti-edit" if edited else ""),
-                    )
-                return Verdict(
-                    True, "link", links[0], link_action,
-                    mute_minutes=mute_min,
-                    log_it=log_enabled,
-                    log_extra=("anti-edit" if edited else ""),
-                )
+                # Ещё раз: при "allow" ссылки не наказываем
+                if _links_mode == "allow":
+                    pass
+                else:
+                    # Режим "капча": если пользователь уже проходил капчу в этом чате — ссылку разрешаем
+                    from app.handlers.first_message_captcha import _captcha_passed as captcha_passed_check
+                    if _links_mode == "captcha" and user and captcha_passed_check(chat_id, user_id):
+                        pass  # уже проходил — не наказываем
+                    else:
+                        link_action = "captcha" if _links_mode == "captcha" else action
+                        if newbie and link_action == "delete":
+                            return Verdict(
+                                True, "link_newbie", links[0], "mute",
+                                mute_minutes=mute_min,
+                                log_it=log_enabled,
+                                log_extra=f"newbie окно {newbie_window} мин" + (" | anti-edit" if edited else ""),
+                            )
+                        return Verdict(
+                            True, "link", links[0], link_action,
+                            mute_minutes=mute_min,
+                            log_it=log_enabled,
+                            log_extra=("anti-edit" if edited else ""),
+                        )
 
     # -------------------------------------------------
     # 3) mentions
@@ -567,41 +581,49 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     # 4) media / стикеры (filter_media_mode: forbid | captcha)
     # -------------------------------------------------
     if filter_media and has_media(message):
-        media_action = "captcha" if _media_mode == "captcha" else action
-        if newbie and media_action == "delete":
+        from app.handlers.first_message_captcha import _captcha_passed as captcha_passed_check
+        if _media_mode == "captcha" and user and captcha_passed_check(chat_id, user_id):
+            pass  # уже проходил капчу — не наказываем
+        else:
+            media_action = "captcha" if _media_mode == "captcha" else action
+            if newbie and media_action == "delete":
+                return Verdict(
+                    True, "media_newbie", "медиа/стикер",
+                    "mute",
+                    mute_minutes=mute_min,
+                    log_it=log_enabled,
+                    log_extra=f"newbie окно {newbie_window} мин" + (" | anti-edit" if edited else ""),
+                )
             return Verdict(
-                True, "media_newbie", "медиа/стикер",
-                "mute",
+                True, "media", "медиа/стикер", media_action,
                 mute_minutes=mute_min,
                 log_it=log_enabled,
-                log_extra=f"newbie окно {newbie_window} мин" + (" | anti-edit" if edited else ""),
+                log_extra=("anti-edit" if edited else ""),
             )
-        return Verdict(
-            True, "media", "медиа/стикер", media_action,
-            mute_minutes=mute_min,
-            log_it=log_enabled,
-            log_extra=("anti-edit" if edited else ""),
-        )
 
     # -------------------------------------------------
     # 5) сообщения с кнопками (filter_buttons_mode: forbid | captcha)
     # -------------------------------------------------
     if filter_buttons and has_buttons(message):
-        buttons_action = "captcha" if _buttons_mode == "captcha" else action
-        if newbie and buttons_action == "delete":
+        from app.handlers.first_message_captcha import _captcha_passed as captcha_passed_check
+        if _buttons_mode == "captcha" and user and captcha_passed_check(chat_id, user_id):
+            pass  # уже проходил капчу — не наказываем
+        else:
+            buttons_action = "captcha" if _buttons_mode == "captcha" else action
+            if newbie and buttons_action == "delete":
+                return Verdict(
+                    True, "buttons_newbie", "сообщение с кнопками",
+                    "mute",
+                    mute_minutes=mute_min,
+                    log_it=log_enabled,
+                    log_extra=f"newbie окно {newbie_window} мин" + (" | anti-edit" if edited else ""),
+                )
             return Verdict(
-                True, "buttons_newbie", "сообщение с кнопками",
-                "mute",
+                True, "buttons", "сообщение с кнопками", buttons_action,
                 mute_minutes=mute_min,
                 log_it=log_enabled,
-                log_extra=f"newbie окно {newbie_window} мин" + (" | anti-edit" if edited else ""),
+                log_extra=("anti-edit" if edited else ""),
             )
-        return Verdict(
-            True, "buttons", "сообщение с кнопками", buttons_action,
-            mute_minutes=mute_min,
-            log_it=log_enabled,
-            log_extra=("anti-edit" if edited else ""),
-        )
 
     # -------------------------------------------------
     # 6) anti-edit (сам факт правки — не преступление)
@@ -659,12 +681,12 @@ async def apply_action(message: Message, v: Verdict) -> Tuple[bool, str, bool]:
         return deleted_ok, "delete", deleted_ok
 
     if v.action == "captcha":
-        from app.handlers.first_message_captcha import send_captcha_dm, send_captcha_in_chat
+        from app.handlers.first_message_captcha import send_captcha_dm, send_captcha_fallback_instruction
         if message.from_user:
             ok = await send_captcha_dm(message.bot, message.from_user.id, message.chat.id)
             if not ok:
                 mention = f"<a href=\"tg://user?id={message.from_user.id}\">{message.from_user.full_name}</a>"
-                await send_captcha_in_chat(
+                await send_captcha_fallback_instruction(
                     message.bot, message.chat.id, message.from_user.id, mention
                 )
         return True, "капча", deleted_ok

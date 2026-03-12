@@ -49,22 +49,22 @@ async def send_captcha_dm(bot, user_id: int, chat_id: int) -> bool:
         return False
 
 
-async def send_captcha_in_chat(bot, chat_id: int, user_id: int, user_mention: str) -> bool:
+async def send_captcha_fallback_instruction(bot, chat_id: int, user_id: int, user_mention: str) -> bool:
     """
-    Отправить капчу в группу (если ЛС недоступен). Сообщение видят все, но кнопку нажимает нужный пользователь.
-    В Telegram нельзя показать сообщение в группе только одному пользователю.
-    user_mention может быть HTML (например <a href="tg://user?id=...">Имя</a>).
+    Если ЛС недоступен — отправить в группу только текст-инструкцию (без кнопки).
+    Капчу с кнопкой видит только тот, кому пришла в ЛС; в группе не показываем кнопку, чтобы не видели все.
     """
     try:
+        me = await bot.get_me()
+        username = getattr(me, "username", None) or "bot"
         await bot.send_message(
             chat_id,
-            f"😈 {user_mention}, подтверди, что ты не бот — нажми кнопку ниже:",
+            f"😈 {user_mention}, откройте бота в личку (@{username}) и нажмите Start — там подтверждение.",
             parse_mode="HTML",
-            reply_markup=_captcha_keyboard(chat_id),
         )
         return True
     except Exception as e:
-        logger.warning("send_captcha_in_chat chat_id=%s user_id=%s: %s", chat_id, user_id, e)
+        logger.warning("send_captcha_fallback_instruction chat_id=%s user_id=%s: %s", chat_id, user_id, e)
         return False
 
 
