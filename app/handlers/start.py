@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Optional, Tuple
 from collections import OrderedDict
 
@@ -200,9 +201,32 @@ async def _edit_or_send(message: Message, text: str, kb):
 
 ADDGROUP_TEXT = (
     "➕ *Добавить бота в группу*\n\n"
-    "Нажмите *кнопку под полем ввода* — откроется выбор группы, затем Telegram предложит выдать боту права администратора.\n\n"
-    "Если кнопки под полем ввода нет (например, открыли из панели) — нажмите кнопку *под этим сообщением*."
+    "Нажмите *кнопку под полем ввода* — откроется выбор группы, затем Telegram предложит выдать боту права администратора.\n"
 )
+
+# Путь к скриншотам (положите addgroup_step1.png и addgroup_step2.png в static/ в корне проекта)
+_STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
+ADDGROUP_SCREENSHOTS = (
+    (_STATIC_DIR / "addgroup_step1.png", "1️⃣ Нажмите *кнопку под полем ввода* — откроется выбор группы."),
+    (_STATIC_DIR / "addgroup_step2.png", "2️⃣ Выберите группу и выдайте боту права администратора."),
+)
+
+
+async def _send_addgroup_screenshots(bot, chat_id: int) -> None:
+    """Отправить 2 скриншота-подсказки, если файлы есть."""
+    from aiogram.types import FSInputFile
+    for path, caption in ADDGROUP_SCREENSHOTS:
+        if not path.exists():
+            continue
+        try:
+            await bot.send_photo(
+                chat_id,
+                FSInputFile(path),
+                caption=caption,
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
 
 
 @router.message(CommandStart())
@@ -249,7 +273,6 @@ async def cmd_start(message: Message):
             add_simple_url = f"https://t.me/{username}?startgroup"
             inline_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📋 Выбрать группу и выдать права", url=add_url)],
-                [InlineKeyboardButton(text="➕ Только добавить в группу (права — вручную)", url=add_simple_url)],
             ])
             # Сначала сообщение с Reply-кнопкой (под полем ввода); под текстом — инлайн (видна в превью)
             await message.answer(
@@ -257,7 +280,7 @@ async def cmd_start(message: Message):
                 parse_mode="Markdown",
                 reply_markup=_kb_connect_request_chat_with_admin(),
             )
-            await message.answer("Если кнопки под полем ввода нет — нажмите:", reply_markup=inline_kb)
+            await _send_addgroup_screenshots(message.bot, message.chat.id)
         except Exception:
             await message.answer(ADDGROUP_TEXT, parse_mode="Markdown")
         return
@@ -313,6 +336,7 @@ async def _send_addgroup_keyboard(bot, user_id: int):
         parse_mode="Markdown",
         reply_markup=_kb_connect_request_chat_with_admin(),
     )
+    await _send_addgroup_screenshots(bot, user_id)
 
 
 @router.callback_query(F.data == CB_ADDGROUP)

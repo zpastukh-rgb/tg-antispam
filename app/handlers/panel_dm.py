@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple, List, Dict
@@ -788,6 +789,18 @@ async def render_pick_reports_chat(bot, user_id: int) -> Tuple[str, InlineKeyboa
     return "🧾 *Сменить чат отчётов*\nВыбери, куда слать отчёты:", b.as_markup()
 
 
+# Кэш chat_id, для которых уже отправили приветствие (защита от двойного my_chat_member)
+_WELCOME_SENT_AT: Dict[int, float] = {}
+_WELCOME_SENT_TTL = 60  # секунд
+
+
+def _purge_old_welcome_sent() -> None:
+    now = time.monotonic()
+    to_del = [cid for cid, t in _WELCOME_SENT_AT.items() if now - t > _WELCOME_SENT_TTL]
+    for cid in to_del:
+        del _WELCOME_SENT_AT[cid]
+
+
 async def connect_chat_after_bot_added(
     bot, chat_id: int, chat_title: str, user_id: int, username: str | None, first_name: str | None
 ) -> bool:
@@ -849,6 +862,12 @@ async def connect_chat_after_bot_added(
 
             await _set_selected_chat(session, user_id, chat_id)
             await session.commit()
+
+        # Защита от двойного приветствия при двух почти одновременных my_chat_member
+        _purge_old_welcome_sent()
+        if chat_id in _WELCOME_SENT_AT:
+            return True
+        _WELCOME_SENT_AT[chat_id] = time.monotonic()
 
         title_esc = (chat_title or "Чат").replace("*", "\\*")
         welcome = (
@@ -2036,7 +2055,7 @@ def _kb_connect_request_chat_with_admin() -> ReplyKeyboardMarkup:
         keyboard=[
             [
                 KeyboardButton(
-                    text="📋 Выбрать группу (добавить бота + выдать права)",
+                    text="📋 Выбрать группу",
                     request_chat=KeyboardButtonRequestChat(
                         request_id=CONNECT_REQUEST_ID,
                         chat_is_channel=False,
