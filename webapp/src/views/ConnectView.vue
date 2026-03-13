@@ -20,22 +20,18 @@ onMounted(async () => {
   }
 })
 
+/** Открыть чат с ботом. На мобильном закрываем мини-приложение, чтобы пользователь увидел чат и кнопку под полем ввода. */
 function openAddToGroup() {
   const url = addToGroupUrl.value
   if (!url) return
   if (window.Telegram?.WebApp?.openTelegramLink) {
     window.Telegram.WebApp.openTelegramLink(url)
-  } else {
-    window.open(url, '_blank')
-  }
-}
-
-/** Открыть ссылку в браузере — затем «Открыть в Telegram»: так кнопки в чате с ботом видны */
-function openAddToGroupInBrowser() {
-  const url = addToGroupUrl.value
-  if (!url) return
-  if (window.Telegram?.WebApp?.openLink) {
-    window.Telegram.WebApp.openLink(url)
+    // Закрываем мини-приложение, чтобы на телефоне пользователь оказался в чате с ботом и увидел кнопку выбора группы
+    setTimeout(() => {
+      if (window.Telegram?.WebApp?.close) {
+        window.Telegram.WebApp.close()
+      }
+    }, 400)
   } else {
     window.open(url, '_blank')
   }
@@ -55,9 +51,18 @@ function openAddToGroupInBrowser() {
     </div>
 
     <div v-else class="space-y-4">
+      <!-- Подсказка для мобильных: что произойдёт после нажатия и что делать в чате с ботом -->
+      <div class="rounded-xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-900/20">
+        <p class="mb-2 font-medium text-amber-900 dark:text-amber-100">📱 На телефоне</p>
+        <ol class="list-decimal list-inside space-y-1 text-sm text-amber-800 dark:text-amber-200">
+          <li>Нажмите кнопку ниже — откроется <strong>чат с ботом</strong> (мини-приложение закроется).</li>
+          <li>В чате с ботом нажмите <strong>синюю кнопку под полем ввода</strong> «Выбрать группу» и выберите группу.</li>
+        </ol>
+      </div>
+
       <div class="rounded-xl border border-primary-200 bg-primary-50 p-6 dark:border-primary-800 dark:bg-primary-900/20">
         <p class="mb-4 text-gray-700 dark:text-gray-300">
-          Нажмите кнопку ниже — откроется чат с ботом. В меню под сообщением бота выберите <strong>«Добавить бота в группу (выбор + права)»</strong> — тогда под полем ввода появится синяя кнопка выбора группы и выдачи прав.
+          Нажмите кнопку ниже — откроется чат с ботом. Там под полем ввода появится кнопка выбора группы и выдачи прав администратора.
         </p>
         <div v-if="addToGroupUrl" class="flex flex-wrap gap-3">
           <button
@@ -65,7 +70,7 @@ function openAddToGroupInBrowser() {
             class="inline-flex items-center gap-2 rounded-xl bg-primary-500 px-5 py-3 font-medium text-white shadow-sm transition hover:bg-primary-600"
             @click="openAddToGroup"
           >
-            Открыть бота в Telegram
+            Открыть чат с ботом
           </button>
         </div>
         <p v-else class="text-sm text-gray-500 dark:text-gray-400">Загрузка ссылки…</p>
