@@ -1,29 +1,23 @@
 <script setup>
 import { ref, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
 
+const router = useRouter()
 const { api, loading, error, fetch, hasInitData } = useApi()
 const me = ref(null)
-const addToGroupUrl = ref(null)
 
 onMounted(async () => {
   if (!hasInitData.value) return
   try {
     me.value = await fetch(() => api.me())
-    const botData = await fetch(() => api.botInfo()).catch(() => null)
-    addToGroupUrl.value = botData?.add_to_group_url ?? null
   } catch {
     //
   }
 })
 
-function openAddToGroup() {
-  if (!addToGroupUrl.value) return
-  if (window.Telegram?.WebApp?.openTelegramLink) {
-    window.Telegram.WebApp.openTelegramLink(addToGroupUrl.value)
-  } else {
-    window.open(addToGroupUrl.value, '_blank')
-  }
+function goToConnect() {
+  router.push('/connect')
 }
 </script>
 
@@ -52,13 +46,13 @@ function openAddToGroup() {
           <dt class="text-gray-500 dark:text-gray-400">Подписка до</dt>
           <dd class="font-medium text-gray-900 dark:text-white">{{ me.subscription_until || '—' }}</dd>
         </dl>
-        <p v-if="addToGroupUrl" class="mt-4 border-t border-gray-200 pt-4 dark:border-gray-600">
+        <p class="mt-4 border-t border-gray-200 pt-4 dark:border-gray-600">
           <button
             type="button"
-            class="text-primary-600 hover:underline dark:text-primary-400"
-            @click="openAddToGroup"
+            class="inline-flex items-center gap-2 rounded-xl bg-primary-500 px-5 py-3 font-medium text-white shadow-sm transition hover:bg-primary-600"
+            @click="goToConnect"
           >
-            Добавить бота в новую группу →
+            Добавить бота в новую группу
           </button>
         </p>
       </div>

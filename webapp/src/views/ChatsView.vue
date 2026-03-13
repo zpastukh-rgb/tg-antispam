@@ -56,7 +56,7 @@ function goToReports(chatId) {
 
     <div v-else-if="!chats.length" class="rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-800">
       <p class="text-gray-600 dark:text-gray-400">Пока нет подключённых чатов.</p>
-      <p class="mt-2 text-sm text-gray-500 dark:text-gray-500">Добавьте бота в группу и подключите чат в разделе «Подключить чат».</p>
+      <p class="mt-2 text-sm text-gray-500 dark:text-gray-500">Добавьте бота в группу и подключите чат в разделе «Подключить группу».</p>
     </div>
 
     <div v-else class="space-y-3">

@@ -419,15 +419,15 @@ def _kb_cancel() -> InlineKeyboardMarkup:
 
 ADDGROUP_PANEL_TEXT = (
     "➕ *Добавить бота в группу*\n\n"
-    "Нажми *синюю кнопку под полем ввода* — откроется выбор группы, затем Telegram предложит выдать боту права администратора."
+    "Нажми *кнопку под полем ввода* — откроется выбор группы, затем Telegram предложит выдать боту права администратора."
 )
 
 def _kb_main() -> InlineKeyboardMarkup:
-    """Главное меню: Подключённые чаты, Тариф, Подключить чат, Добавить бота в группу (выбор + права)."""
+    """Главное меню: Подключённые чаты, Тариф, Подключить чат, Добавить бота в группу."""
     b = InlineKeyboardBuilder()
     b.button(text="📂 Подключённые чаты", callback_data=CB_CHATS)
     b.button(text="💳 Тариф и оплата", callback_data=CB_BILLING)
-    b.button(text="➕ Добавить бота в группу (выбор + права)", callback_data=CB_ADDGROUP)
+    b.button(text="➕ Добавить бота в группу", callback_data=CB_ADDGROUP)
     b.button(text="➕ Подключить чат", callback_data=CB_CONNECT)
     b.adjust(1)
     return b.as_markup()
@@ -436,7 +436,6 @@ def _kb_main() -> InlineKeyboardMarkup:
 def _kb_protection() -> InlineKeyboardMarkup:
     """ТЗ доработка Защита: Капча, Фильтры, Наказания, Новички, Стоп-слова, Публичные сообщения, Анти-рейд. Назад → управление группой."""
     b = InlineKeyboardBuilder()
-    b.button(text="🧩 Капча на первое сообщение", callback_data=CB_CAPTCHA_FIRST)
     b.button(text="⚙ Фильтры", callback_data=CB_FILTERS)
     b.button(text="🔨 Наказания", callback_data=CB_PUNISH)
     b.button(text="👶 Новички", callback_data=CB_NEWBIE)
@@ -512,7 +511,6 @@ def _kb_filters_main(rule: Rule, chat_title: str) -> InlineKeyboardMarkup:
     b.button(text="🔗 Ссылки", callback_data=CB_FILTER_LINKS)
     b.button(text="🖼 Медиа / стикеры", callback_data=CB_FILTER_MEDIA)
     b.button(text="🔘 Сообщения с кнопками", callback_data=CB_FILTER_BUTTONS)
-    b.button(text="🧩 Проверка всех сообщений капчей", callback_data=CB_FILTER_ALL_CAPTCHA)
     b.button(text="👥 Сообщения «вступил в группу»", callback_data=CB_FILTER_JOIN_MSG)
     b.button(text="🔇 Режим тишины", callback_data=CB_FILTER_SILENCE)
     b.button(text="🛡 Защита от спама", callback_data=CB_FILTER_SPAM)
@@ -528,7 +526,6 @@ def _kb_filter_policy(rule: Rule, key: str) -> InlineKeyboardMarkup:
         mode = "forbid" if rule.filter_links else "allow"
     b = InlineKeyboardBuilder()
     b.button(text="✅ Разрешить", callback_data=f"{CB_FILTER_SET}allow:{key}")
-    b.button(text="🧩 Проверять капчей", callback_data=f"{CB_FILTER_SET}captcha:{key}")
     b.button(text="🚫 Запретить", callback_data=f"{CB_FILTER_SET}forbid:{key}")
     b.button(text="⬅️ Назад", callback_data=CB_FILTERS)
     b.adjust(1)
@@ -796,6 +793,7 @@ async def connect_chat_after_bot_added(
 ) -> bool:
     """ТЗ ЧЕККК: после добавления бота как админа — подключить чат, приветствие в группу, сообщение в личку. Returns True если подключили."""
     try:
+        already_connected = False
         async with await get_session() as session:
             await get_or_create_user(session, user_id, username=username, first_name=first_name)
             can_add, current_count, limit = await can_add_chat(session, user_id)
@@ -810,6 +808,16 @@ async def connect_chat_after_bot_added(
                 return False
 
             chat_row = await session.get(Chat, chat_id)
+            rule = await session.get(Rule, chat_id)
+            # Чат уже подключён (повторный my_chat_member) — не дублируем приветствие
+            if chat_row and chat_row.is_active and rule is not None:
+                already_connected = True
+                chat_row.title = chat_title
+                chat_row.owner_user_id = user_id
+                await _set_selected_chat(session, user_id, chat_id)
+                await session.commit()
+                return True
+
             if not chat_row:
                 chat_row = Chat(
                     id=chat_id,
@@ -825,7 +833,6 @@ async def connect_chat_after_bot_added(
                 chat_row.is_active = True
                 chat_row.is_log_chat = False
 
-            rule = await session.get(Rule, chat_id)
             if not rule:
                 rule = Rule(
                     chat_id=chat_id,
@@ -1069,11 +1076,9 @@ async def _render_protection_screen(bot, user_id: int, chat_id: int) -> tuple[st
     txt = (
         f"🛡 *Защита*\n\nЧат: *{title}*\n\n"
         "*Текущие настройки раздела:*\n"
-        f"• 🧩 Капча на первое сообщение: *{cap_first}*\n"
         f"• 🔗 Ссылки: *{links_label}*\n"
         f"• 🖼 Медиа / стикеры: *{media_label}*\n"
         f"• 🔘 Кнопки: *{buttons_label}*\n"
-        f"• 🧩 Проверка всех капчей: *{all_captcha}*\n"
         f"• 👥 Сообщения «вступил в группу»: *{join_msg}*\n"
         f"• 🔇 Режим тишины: *{silence}*\n"
         f"• 🛡 Защита от спама: *{anti_spam}*\n"

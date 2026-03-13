@@ -4,5 +4,5 @@ export const navItems = [
   { path: '/protection', name: 'Protection', label: 'Защита', icon: 'shield' },
   { path: '/reports', name: 'Reports', label: 'Отчёты', icon: 'reports' },
   { path: '/billing', name: 'Billing', label: 'Тариф и оплата', icon: 'billing' },
-  { path: '/connect', name: 'Connect', label: 'Подключить чат', icon: 'connect' },
+  { path: '/connect', name: 'Connect', label: 'Подключить группу', icon: 'connect' },
 ]

@@ -6,7 +6,7 @@ const routes = [
   { path: '/protection', name: 'Protection', component: () => import('../views/ProtectionView.vue'), meta: { title: 'Защита' } },
   { path: '/reports', name: 'Reports', component: () => import('../views/ReportsView.vue'), meta: { title: 'Отчёты' } },
   { path: '/billing', name: 'Billing', component: () => import('../views/BillingView.vue'), meta: { title: 'Тариф и оплата' } },
-  { path: '/connect', name: 'Connect', component: () => import('../views/ConnectView.vue'), meta: { title: 'Подключить чат' } },
+  { path: '/connect', name: 'Connect', component: () => import('../views/ConnectView.vue'), meta: { title: 'Подключить группу' } },
 ]
 
 export default createRouter({

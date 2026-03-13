@@ -136,9 +136,6 @@ function openReportsChat() {
             </button>
           </div>
         </div>
-        <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
-          Раз в N удалений и интервал — настраиваются в боте (раздел Отчёты).
-        </p>
       </section>
 
       <p v-if="saving" class="text-sm text-gray-500 dark:text-gray-400">Сохранение…</p>

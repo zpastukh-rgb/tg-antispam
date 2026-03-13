@@ -44,7 +44,7 @@ function openAddToGroupInBrowser() {
 
 <template>
   <div class="space-y-6">
-    <h1 class="text-xl font-semibold text-gray-900 dark:text-white md:text-2xl">Подключить чат</h1>
+    <h1 class="text-xl font-semibold text-gray-900 dark:text-white md:text-2xl">Подключить группу</h1>
 
     <div v-if="!hasInitData" class="rounded-xl border border-amber-200 bg-amber-50 p-4 text-amber-800 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-200">
       Откройте панель из Telegram.
