@@ -13,7 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_session
 from app.db.models import User, Chat, Rule
-from app.services.user_service import count_protected_chats
+from app.services.user_service import count_protected_chats, TARIFF_CHAT_LIMITS
+from app.db.models import Tariff
+from app.texts.guardian_billing import (
+    REMINDER_PREMIUM_WEEKLY,
+    REMINDER_PREMIUM_SOFT,
+    SUBSCRIPTION_EXPIRED,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -259,6 +265,41 @@ async def _run_auto_reports(bot, session: AsyncSession, now: datetime) -> None:
             await session.rollback()
 
 
+async def _run_subscription_expired(bot, session: AsyncSession, now: datetime) -> None:
+    """Проверка истечения подписки: перевод на FREE, уведомление."""
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+    CB_BILLING = "p:billing"
+
+    res = await session.execute(
+        select(User).where(
+            User.subscription_until.isnot(None),
+            User.subscription_until < now,
+            User.telegram_id.isnot(None),
+        )
+    )
+    for user in res.scalars().all():
+        try:
+            if (user.tariff or "").lower() not in ("premium", "pro", "business"):
+                continue
+            user.tariff = Tariff.FREE.value
+            user.chat_limit = TARIFF_CHAT_LIMITS[Tariff.FREE.value]
+            user.subscription_until = None
+            await session.commit()
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💳 Продлить Premium", callback_data=CB_BILLING)],
+            ])
+            await bot.send_message(
+                user.telegram_id,
+                SUBSCRIPTION_EXPIRED,
+                parse_mode="Markdown",
+                reply_markup=kb,
+            )
+        except Exception as e:
+            logger.warning("subscription_expired user=%s: %s", getattr(user, "telegram_id"), e)
+            await session.rollback()
+
+
 async def run_reminders_and_guardian(bot) -> None:
     """Запуск всех проверок: напоминания, Guardian раз в 3 дня, автоотчёты раз в сутки."""
     now = datetime.now(timezone.utc)
@@ -266,6 +307,8 @@ async def run_reminders_and_guardian(bot) -> None:
         await _run_reminders_no_group(bot, session, now)
     async with await get_session() as session:
         await _run_reminders_reports_chat(bot, session, now)
+    async with await get_session() as session:
+        await _run_subscription_expired(bot, session, now)
     async with await get_session() as session:
         await _run_guardian_periodic_messages(bot, session, now)
     async with await get_session() as session:

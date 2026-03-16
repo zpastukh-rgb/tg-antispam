@@ -56,7 +56,7 @@ function openAddToGroup() {
         <p class="mb-2 font-medium text-amber-900 dark:text-amber-100">📱 На телефоне</p>
         <ol class="list-decimal list-inside space-y-1 text-sm text-amber-800 dark:text-amber-200">
           <li>Нажмите кнопку ниже — откроется <strong>чат с ботом</strong> (мини-приложение закроется).</li>
-          <li>В чате с ботом нажмите <strong>синюю кнопку под полем ввода</strong> «Выбрать группу» и выберите группу.</li>
+          <li>В чате с ботом нажмите <strong>кнопку под полем ввода</strong> «Выбрать группу» и выберите группу.</li>
         </ol>
       </div>
 

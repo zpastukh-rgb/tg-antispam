@@ -7,10 +7,13 @@ import random
 from datetime import datetime, timezone
 
 # Фразы по категориям (стиль AntiSpam Guardian)
+from app.texts.guardian_billing import SPAM_DELETED_WITH_PREMIUM_HINT
+
 SPAM_MESSAGES = [
     "😈 Guardian зачистил спам. Чат дышит свободнее.",
     "🧹 Спам снесён. Помойка закрыта.",
     "🚫 Ещё пачка мусора уничтожена.",
+    SPAM_DELETED_WITH_PREMIUM_HINT,
 ]
 LINK_MESSAGES = [
     "🔗 Левые ссылки срезаны. Проход закрыт.",

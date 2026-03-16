@@ -1,11 +1,16 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
 
 const router = useRouter()
 const { api, loading, error, fetch, hasInitData } = useApi()
 const me = ref(null)
+
+const tariffLabel = computed(() => {
+  const t = (me.value?.tariff || 'free').toLowerCase()
+  return ['premium', 'pro', 'business'].includes(t) ? 'PREMIUM' : 'FREE'
+})
 
 onMounted(async () => {
   if (!hasInitData.value) return
@@ -40,9 +45,9 @@ function goToConnect() {
         </p>
         <dl class="grid gap-2 text-sm sm:grid-cols-2">
           <dt class="text-gray-500 dark:text-gray-400">Тариф</dt>
-          <dd class="font-medium text-gray-900 dark:text-white">{{ (me.tariff || 'free').toUpperCase() }}</dd>
+          <dd class="font-medium text-gray-900 dark:text-white">{{ tariffLabel }}</dd>
           <dt class="text-gray-500 dark:text-gray-400">Подключено чатов</dt>
-          <dd class="font-medium text-gray-900 dark:text-white">{{ me.chats_count }} из {{ me.chat_limit }}</dd>
+          <dd class="font-medium text-gray-900 dark:text-white">{{ me.chats_count }} / {{ me.chat_limit }}</dd>
           <dt class="text-gray-500 dark:text-gray-400">Подписка до</dt>
           <dd class="font-medium text-gray-900 dark:text-white">{{ me.subscription_until || '—' }}</dd>
         </dl>

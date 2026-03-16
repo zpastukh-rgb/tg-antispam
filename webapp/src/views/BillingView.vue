@@ -1,9 +1,14 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useApi } from '../composables/useApi'
 
 const { api, loading, error, fetch, hasInitData } = useApi()
 const billing = ref(null)
+
+const tariffLabel = computed(() => {
+  const t = (billing.value?.tariff || 'free').toLowerCase()
+  return ['premium', 'pro', 'business'].includes(t) ? 'PREMIUM' : 'FREE'
+})
 
 onMounted(async () => {
   if (!hasInitData.value) return
@@ -31,11 +36,11 @@ onMounted(async () => {
       <dl class="grid gap-3 text-sm">
         <div>
           <dt class="text-gray-500 dark:text-gray-400">Тариф</dt>
-          <dd class="font-medium text-gray-900 dark:text-white">{{ (billing.tariff || 'free').toUpperCase() }}</dd>
+          <dd class="font-medium text-gray-900 dark:text-white">{{ tariffLabel }}</dd>
         </div>
         <div>
           <dt class="text-gray-500 dark:text-gray-400">Подключено чатов</dt>
-          <dd class="font-medium text-gray-900 dark:text-white">{{ billing.chats_count }} из {{ billing.chat_limit }}</dd>
+          <dd class="font-medium text-gray-900 dark:text-white">{{ billing.chats_count }} / {{ billing.chat_limit }}</dd>
         </div>
         <div>
           <dt class="text-gray-500 dark:text-gray-400">Подписка до</dt>

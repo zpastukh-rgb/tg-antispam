@@ -32,6 +32,8 @@ class ActionMode(str, enum.Enum):
 
 class Tariff(str, enum.Enum):
     FREE = "free"
+    PREMIUM = "premium"
+    # Оставлены для обратной совместимости, считаются как premium
     PRO = "pro"
     BUSINESS = "business"
 

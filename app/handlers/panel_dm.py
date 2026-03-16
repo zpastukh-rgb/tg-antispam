@@ -26,6 +26,20 @@ from sqlalchemy import select, or_, func
 from app.db.session import get_session
 from app.db.models import Chat, Rule, UserContext, ChatManager, StopWord
 from app.services.user_service import get_or_create_user, can_add_chat, TARIFF_CHAT_LIMITS
+from app.texts.guardian_billing import (
+    PREMIUM_DESCRIPTION,
+    PREMIUM_PLANS,
+    PREMIUM_ACTIVATED,
+    PREMIUM_FEATURE_BLOCK,
+    BUTTON_OPEN_SUBSCRIPTION,
+    CMD_PREMIUM_RESPONSE,
+    REMINDER_PREMIUM_WEEKLY,
+    REMINDER_PREMIUM_SOFT,
+    SPAM_DELETED_WITH_PREMIUM_HINT,
+    NEWBIE_MODE_ACTIVATED,
+    ANTIRAID_ACTIVATED,
+    SUBSCRIPTION_EXPIRED,
+)
 
 
 router = Router()
@@ -143,6 +157,8 @@ CB_CHATS_LIST = "p:chats_list"
 CB_CHATS_LOGS = "p:chats_logs"
 CB_PICK_CHAT = "p:pick_chat"     # сменить чат (внутри управления чатом)
 CB_BILLING = "p:billing"
+CB_PLAN = "p:plan:"           # p:plan:1, p:plan:3, ... p:plan:24
+CB_PLAN_COMPARE = "p:plan:compare"
 CB_CHAT_PAGE = "p:chat_page:"
 CB_SET_CHAT = "p:set_chat:"      # выбор чата из списка → экран управления группой
 
@@ -653,9 +669,22 @@ def _kb_stopwords_stub() -> InlineKeyboardMarkup:
 
 
 def _kb_raid_stub() -> InlineKeyboardMarkup:
-    """Анти-рейд: заглушка (тариф PRO). Назад → Защита."""
+    """Анти-рейд: заглушка (Guardian Premium). Кнопка «Открыть подписку» + Назад."""
     b = InlineKeyboardBuilder()
+    b.button(text=BUTTON_OPEN_SUBSCRIPTION, callback_data=CB_BILLING)
     b.button(text="⬅️ Назад", callback_data=CB_BACK_TO_PROTECTION)
+    b.adjust(1)
+    return b.as_markup()
+
+
+def _kb_premium_plans(back_callback: str = CB_MAIN) -> InlineKeyboardMarkup:
+    """Клавиатура выбора периода подписки (Guardian Premium)."""
+    b = InlineKeyboardBuilder()
+    for months, label, _price, _savings in PREMIUM_PLANS:
+        # Первая строка — только текст кнопки до перевода строки (для отображения в Telegram)
+        first_line = label.split("\n")[0].strip()
+        b.button(text=first_line, callback_data=f"{CB_PLAN}{months}")
+    b.button(text="⬅️ Назад", callback_data=back_callback)
     b.adjust(1)
     return b.as_markup()
 
@@ -677,13 +706,15 @@ async def render_main(bot, user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
     async with await get_session() as session:
         user = await get_or_create_user(session, user_id)
         chats = await _managed_chats(session, user_id)
-        tariff_label = (user.tariff or "FREE").upper()
+        t = (user.tariff or "free").lower()
+        tariff_label = "PREMIUM" if t in ("premium", "pro", "business") else "FREE"
         sub_until = _format_subscription_until(user.subscription_until)
         txt = (
             "😈 *AntiSpam Guardian* на страже порядка.\n\n"
             "Я защищаю чаты от:\n"
             "• спама\n• рейдов\n• мусорных ссылок\n• ботов\n\n"
-            f"Тариф: *{tariff_label}*  |  Подключено: *{len(chats)} из {user.chat_limit}*\n"
+            f"Тариф: *{tariff_label}*\n"
+            f"Подключено чатов: *{len(chats)} / {user.chat_limit}*\n"
             f"Подписка до: *{sub_until}*\n\n"
             "_Выберите действие:_"
         )
@@ -993,6 +1024,13 @@ async def cmd_groups(message: Message):
     await _edit_panel(message.bot, message.from_user.id, txt, kb.as_markup())
 
 
+async def _send_premium_screen(bot, user_id: int, back_callback: str = CB_MAIN) -> None:
+    """Показать экран Guardian Premium: описание + кнопки периодов подписки."""
+    txt = CMD_PREMIUM_RESPONSE
+    kb = _kb_premium_plans(back_callback=back_callback)
+    await _edit_panel(bot, user_id, txt, kb)
+
+
 @router.message(Command("buy"))
 async def cmd_buy(message: Message):
     if message.chat.type != "private":
@@ -1001,26 +1039,30 @@ async def cmd_buy(message: Message):
     if not message.from_user:
         return
     _cache_clear(message.from_user.id)
-    async with await get_session() as session:
-        user = await get_or_create_user(session, message.from_user.id)
-        count = len(await _managed_chats(session, message.from_user.id))
-    tariff = (user.tariff or "FREE").upper()
-    sub_until = _format_subscription_until(user.subscription_until)
-    limit = user.chat_limit
-    txt = (
-        "💳 *Подписка AntiSpam Guardian*\n\n"
-        f"Ваш тариф: *{tariff}*\n"
-        f"Лимит: *{count} из {limit}* чатов\n"
-        f"Подписка до: *{sub_until}*\n\n"
-        "_Оплата — в следующих версиях._"
-    )
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🔥 PRO", callback_data="p:plan:pro")
-    kb.button(text="🚀 BUSINESS", callback_data="p:plan:business")
-    kb.button(text="📊 Сравнить тарифы", callback_data="p:plan:compare")
-    kb.button(text="⬅️ Назад", callback_data=CB_MAIN)
-    kb.adjust(2, 1)
-    await _edit_panel(message.bot, message.from_user.id, txt, kb.as_markup())
+    await _send_premium_screen(message.bot, message.from_user.id)
+
+
+@router.message(Command("premium"))
+async def cmd_premium(message: Message):
+    """Команда /premium — тот же экран, что и тариф/подписка."""
+    if message.chat.type != "private":
+        return
+    if not message.from_user:
+        return
+    _cache_clear(message.from_user.id)
+    await _send_premium_screen(message.bot, message.from_user.id)
+
+
+@router.message(
+    F.chat.type == "private",
+    F.text.func(lambda t: (t or "").strip().lower() == "тариф"),
+)
+async def cmd_text_tariff(message: Message):
+    """Ответ на текст «тариф» — экран Guardian Premium."""
+    if not message.from_user:
+        return
+    _cache_clear(message.from_user.id)
+    await _send_premium_screen(message.bot, message.from_user.id)
 
 
 @router.message(Command("support"))
@@ -1105,7 +1147,7 @@ async def _render_protection_screen(bot, user_id: int, chat_id: int) -> tuple[st
         f"• 👶 Новички: *{newbie_on}*, окно *{newbie_m}* мин\n"
         f"• 🧠 Стоп-слова: *{stopwords_str}*\n"
         f"• 📢 Guardian сообщения: *{guardian}*, раз в *{every_n}* удалений, интервал *{interval_min}* мин\n"
-        "• 🚨 Анти-рейд: тариф PRO\n\n"
+        "• 🚨 Анти-рейд: Guardian Premium\n\n"
         "_Выберите пункт ниже для изменения._"
     )
     return txt, _kb_protection()
@@ -1180,12 +1222,7 @@ async def cb_captcha_first_off(cb: CallbackQuery):
 @router.callback_query(F.data == CB_RAID)
 async def cb_raid(cb: CallbackQuery):
     await cb.answer()
-    txt = (
-        "🚨 *Анти-рейд*\n\n"
-        "Защита от массового входа ботов и рейдов.\n\n"
-        "🔒 Доступно на тарифе *PRO*.\n"
-        "Повысь тариф в разделе *Тариф и оплата*."
-    )
+    txt = "🚨 *Анти-рейд*\n\n" + PREMIUM_FEATURE_BLOCK
     await _edit_or_send(cb, txt, _kb_raid_stub())
 
 
@@ -1287,18 +1324,40 @@ async def cb_billing(cb: CallbackQuery):
     async with await get_session() as session:
         user = await get_or_create_user(session, cb.from_user.id)
         count = len(await _managed_chats(session, cb.from_user.id))
-    tariff = (user.tariff or "FREE").upper()
+    t = (user.tariff or "free").lower()
+    tariff_label = "PREMIUM" if t in ("premium", "pro", "business") else "FREE"
     sub_until = _format_subscription_until(user.subscription_until)
     limit = user.chat_limit
     txt = (
-        "💳 *Тариф и оплата*\n\n"
-        f"Тариф: *{tariff}*\n"
-        f"Подключено чатов: *{count} из {limit}*\n"
+        "🛡 *Guardian Premium*\n\n"
+        f"Тариф: *{tariff_label}*\n"
+        f"Подключено чатов: *{count} / {limit}*\n"
         f"Подписка до: *{sub_until}*\n\n"
-        "_Оплата и смена тарифа — в следующих версиях._"
+        + PREMIUM_DESCRIPTION
+    )
+    kb = _kb_premium_plans(back_callback=CB_MAIN)
+    await _edit_or_send(cb, txt, kb)
+
+
+@router.callback_query(F.data.startswith(CB_PLAN))
+async def cb_plan_select(cb: CallbackQuery):
+    """Выбор периода подписки (1, 3, 6, 12, 24 мес). Пока заглушка оплаты."""
+    await cb.answer()
+    if cb.data == CB_PLAN_COMPARE:
+        await _send_premium_screen(cb.bot, cb.from_user.id)
+        return
+    try:
+        months = int(cb.data.replace(CB_PLAN, ""))
+    except ValueError:
+        return
+    plan_label = next((p[1].split("\n")[0] for p in PREMIUM_PLANS if p[0] == months), f"{months} мес")
+    txt = (
+        f"💳 *{plan_label}*\n\n"
+        "Оплата будет подключена в следующей версии.\n"
+        "Сейчас можно оформить подписку через @pastukh_viscera."
     )
     kb = InlineKeyboardBuilder()
-    kb.button(text="⬅️ Назад", callback_data=CB_MAIN)
+    kb.button(text="⬅️ К тарифам", callback_data=CB_BILLING)
     kb.adjust(1)
     await _edit_or_send(cb, txt, kb.as_markup())
 

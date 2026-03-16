@@ -43,6 +43,7 @@ BOT_COMMANDS = [
     BotCommand(command="group", description="Управление одной группой"),
     BotCommand(command="groups", description="Управление всеми группами"),
     BotCommand(command="buy", description="Тариф и подписка"),
+    BotCommand(command="premium", description="Guardian Premium"),
     BotCommand(command="support", description="Техподдержка"),
 ]
 
