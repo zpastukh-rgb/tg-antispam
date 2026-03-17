@@ -2743,69 +2743,75 @@ async def on_chat_shared(message: Message):
         await message.answer("Не удалось проверить чат 😈", reply_markup=ReplyKeyboardRemove())
         return
 
-    async with await get_session() as session:
-        await get_or_create_user(session, user_id, username=message.from_user.username, first_name=message.from_user.first_name)
-        can_add, current_count, limit = await can_add_chat(session, user_id)
-        if not can_add:
-            await message.answer(
-                f"❌ Лимит чатов: {current_count} из {limit}. Повысь тариф в панели: 💳 Тариф и оплата.",
-                reply_markup=ReplyKeyboardRemove(),
-            )
-            return
-
-        chat_row = await session.get(Chat, chat_id)
-        if not chat_row:
-            chat_row = Chat(
-                id=chat_id,
-                title=chat.title,
-                owner_user_id=user_id,
-                is_active=True,
-                is_log_chat=False,
-            )
-            session.add(chat_row)
-        else:
-            chat_row.title = chat.title
-            chat_row.owner_user_id = user_id
-            chat_row.is_active = True
-            chat_row.is_log_chat = False
-
-        rule = await session.get(Rule, chat_id)
-        if not rule:
-            rule = Rule(
-                chat_id=chat_id,
-                filter_links=True,
-                filter_mentions=True,
-                action_mode="delete",
-                mute_minutes=30,
-                anti_edit=True,
-                newbie_enabled=True,
-                newbie_minutes=10,
-                log_enabled=True,
-            )
-            session.add(rule)
-
-        await _set_selected_chat(session, user_id, chat_id)
-        await session.commit()
-
-    title_esc = (chat.title or "Чат").replace("*", "\\*")
-    welcome = (
-        "😈 AntiSpam Guardian на месте.\n\n"
-        f"Группа *«{title_esc}»* теперь под защитой.\n\n"
-        "Я слежу за порядком:\n• режу спам\n• давлю подозрительные ссылки\n"
-        "• останавливаю мусор, рейды и лишний шум\n\n"
-        "_Что важно:_\n1. Не спамить.\n2. Не кидать ссылки без необходимости.\n"
-        "3. Не устраивать помойку в чате.\n4. Не лезть с враждой, оскорблениями и провокациями.\n\n"
-        "Нормальным людям — спокойно общаться.\nСпамерам — будет больно.\n\n_Админ управляет защитой._"
-    )
     try:
-        await bot.send_message(chat_id, welcome, parse_mode="Markdown")
-    except Exception:
-        pass
+        async with await get_session() as session:
+            await get_or_create_user(session, user_id, username=message.from_user.username, first_name=message.from_user.first_name)
+            can_add, current_count, limit = await can_add_chat(session, user_id)
+            if not can_add:
+                await message.answer(
+                    f"❌ Лимит чатов: {current_count} из {limit}. Повысь тариф в панели: 💳 Тариф и оплата.",
+                    reply_markup=ReplyKeyboardRemove(),
+                )
+                return
 
-    await message.answer(
-        "✅ Группа подключена к защите. Управление — в панели.",
-        reply_markup=ReplyKeyboardRemove(),
-    )
+            chat_row = await session.get(Chat, chat_id)
+            if not chat_row:
+                chat_row = Chat(
+                    id=chat_id,
+                    title=chat.title,
+                    owner_user_id=user_id,
+                    is_active=True,
+                    is_log_chat=False,
+                )
+                session.add(chat_row)
+            else:
+                chat_row.title = chat.title
+                chat_row.owner_user_id = user_id
+                chat_row.is_active = True
+                chat_row.is_log_chat = False
+
+            rule = await session.get(Rule, chat_id)
+            if not rule:
+                rule = Rule(
+                    chat_id=chat_id,
+                    filter_links=True,
+                    filter_mentions=True,
+                    action_mode="delete",
+                    mute_minutes=30,
+                    anti_edit=True,
+                    newbie_enabled=True,
+                    newbie_minutes=10,
+                    log_enabled=True,
+                )
+                session.add(rule)
+
+            await _set_selected_chat(session, user_id, chat_id)
+            await session.commit()
+
+        title_esc = (chat.title or "Чат").replace("*", "\\*")
+        welcome = (
+            "😈 AntiSpam Guardian на месте.\n\n"
+            f"Группа *«{title_esc}»* теперь под защитой.\n\n"
+            "Я слежу за порядком:\n• режу спам\n• давлю подозрительные ссылки\n"
+            "• останавливаю мусор, рейды и лишний шум\n\n"
+            "_Что важно:_\n1. Не спамить.\n2. Не кидать ссылки без необходимости.\n"
+            "3. Не устраивать помойку в чате.\n4. Не лезть с враждой, оскорблениями и провокациями.\n\n"
+            "Нормальным людям — спокойно общаться.\nСпамерам — будет больно.\n\n_Админ управляет защитой._"
+        )
+        try:
+            await bot.send_message(chat_id, welcome, parse_mode="Markdown")
+        except Exception:
+            pass
+
+        await message.answer(
+            "✅ Группа подключена к защите. Управление — в панели.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+    except Exception:
+        await message.answer(
+            "Ошибка базы данных. Администратору нужно применить миграцию 008 (см. DEPLOY-RAILWAY.md).",
+            reply_markup=ReplyKeyboardRemove(),
+        )
 
 
 # =========================================================
