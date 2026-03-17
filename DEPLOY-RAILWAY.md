@@ -148,9 +148,18 @@ railway run python -m scripts.run_migration 002
 railway run python -m scripts.run_migration 003
 railway run python -m scripts.run_migration 004
 railway run python -m scripts.run_migration 005
+railway run python -m scripts.run_migration 006
+railway run python -m scripts.run_migration 007
+railway run python -m scripts.run_migration 008
 ```
 
-Скрипт ищет файл `migrations/<номер>_*.sql` (например, `005_free_tariff_3_chats.sql`) и выполняет его SQL против базы из переменных Railway.
+**Если в логах бота ошибка** `column rules.antinakrutka_enabled does not exist` **или группа не подключается после добавления бота** — в БД не применены миграции 006/007. Выполни одну команду (она добавит все недостающие колонки и таблицы):
+
+```bash
+railway run python -m scripts.run_migration 008
+```
+
+Скрипт ищет файл `migrations/<номер>_*.sql` (например, `008_ensure_rules_columns.sql`) и выполняет его SQL против базы из переменных Railway.
 
 ---
 
