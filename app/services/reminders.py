@@ -309,10 +309,22 @@ async def run_reminders_and_guardian(bot) -> None:
         await _run_reminders_reports_chat(bot, session, now)
     async with await get_session() as session:
         await _run_subscription_expired(bot, session, now)
-    async with await get_session() as session:
-        await _run_guardian_periodic_messages(bot, session, now)
-    async with await get_session() as session:
-        await _run_auto_reports(bot, session, now)
+    try:
+        async with await get_session() as session:
+            await _run_guardian_periodic_messages(bot, session, now)
+    except Exception as e:
+        if "antinakrutka_enabled" in str(e) or "UndefinedColumnError" in str(e):
+            logger.warning("guardian_periodic skipped (run migration 008): %s", e)
+        else:
+            raise
+    try:
+        async with await get_session() as session:
+            await _run_auto_reports(bot, session, now)
+    except Exception as e:
+        if "antinakrutka_enabled" in str(e) or "UndefinedColumnError" in str(e):
+            logger.warning("auto_reports skipped (run migration 008): %s", e)
+        else:
+            raise
 
 
 async def reminder_loop(bot, interval_sec: int = 900) -> None:

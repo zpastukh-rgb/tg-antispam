@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.types import (
@@ -12,6 +13,7 @@ from aiogram.types import (
     BotCommandScopeAllChatAdministrators,
 )
 from dotenv import load_dotenv
+from sqlalchemy import text
 
 from app.db.session import engine
 from app.db.models import Base
@@ -48,9 +50,50 @@ BOT_COMMANDS = [
 ]
 
 
+# Критичные ALTER для rules — если файл миграции недоступен при деплое, выполняем их из кода
+_RULES_ALTER_008 = (
+    "ALTER TABLE rules ADD COLUMN IF NOT EXISTS antinakrutka_enabled BOOLEAN DEFAULT FALSE",
+    "ALTER TABLE rules ADD COLUMN IF NOT EXISTS antinakrutka_joins_threshold INTEGER DEFAULT 10",
+    "ALTER TABLE rules ADD COLUMN IF NOT EXISTS antinakrutka_window_minutes INTEGER DEFAULT 5",
+    "ALTER TABLE rules ADD COLUMN IF NOT EXISTS antinakrutka_action VARCHAR(32) DEFAULT 'alert'",
+    "ALTER TABLE rules ADD COLUMN IF NOT EXISTS antinakrutka_restrict_minutes INTEGER DEFAULT 30",
+    "ALTER TABLE rules ADD COLUMN IF NOT EXISTS use_global_antispam_db BOOLEAN DEFAULT FALSE",
+)
+
+
+async def _run_ensure_rules_migration() -> None:
+    """При старте бота применить миграцию 008 к той же БД (колонки rules). Каждый оператор — в своей транзакции."""
+    import logging
+    log = logging.getLogger(__name__)
+    # Сначала пробуем из файла
+    root = Path(__file__).resolve().parent.parent
+    path = root / "migrations" / "008_ensure_rules_columns.sql"
+    statements = []
+    if path.exists():
+        raw = path.read_text(encoding="utf-8").replace("\r\n", "\n").strip()
+        for part in raw.split(";"):
+            part = part.strip()
+            if not part or part.startswith("--"):
+                continue
+            if not part.endswith(";"):
+                part = part + ";"
+            statements.append(part)
+    if not statements:
+        # Запасной вариант: только ALTER для rules (таблицы chat_seen_members и global_antispam_users создаст create_all при наличии моделей)
+        for st in _RULES_ALTER_008:
+            statements.append(st + ";")
+    for part in statements:
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(part))
+        except Exception as e:
+            log.warning("ensure_rules migration statement skipped: %s", e)
+
+
 async def on_startup() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await _run_ensure_rules_migration()
     # Меню команд: в ЛС — полный список; в группах — только у админов, у обычных пользователей пусто
     try:
         await bot.set_my_commands(BOT_COMMANDS, scope=BotCommandScopeDefault())
