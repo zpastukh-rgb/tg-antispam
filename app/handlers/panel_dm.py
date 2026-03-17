@@ -1110,6 +1110,39 @@ async def cmd_text_tariff(message: Message):
     await _send_premium_screen(message.bot, message.from_user.id)
 
 
+@router.message(
+    F.chat.type.in_({"group", "supergroup"}),
+    Command("addantispam"),
+    F.reply_to_message,
+)
+async def cmd_addantispam_group(message: Message):
+    """В группе: ответьте на сообщение пользователя и отправьте /addantispam — автор будет добавлен в антиспам базу."""
+    if not message.from_user or not message.reply_to_message or not message.reply_to_message.from_user:
+        return
+    target = message.reply_to_message.from_user
+    if target.is_bot:
+        await message.reply("Добавлять ботов в антиспам базу нельзя.")
+        return
+    try:
+        mem = await message.bot.get_chat_member(message.chat.id, message.from_user.id)
+        if mem.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
+            await message.reply("Только администратор группы может добавить пользователя в антиспам базу.")
+            return
+    except Exception:
+        return
+    from app.api.service import user_can_access_chat
+    from app.services.global_antispam import add_to_global_antispam
+    async with await get_session() as session:
+        if not await user_can_access_chat(session, message.from_user.id, message.chat.id):
+            await message.reply("Эта группа не подключена к вашему аккаунту. Управление — в боте в личке.")
+            return
+        added = await add_to_global_antispam(session, target.id, reason=f"из группы {message.chat.id}")
+    if added:
+        await message.reply(f"✅ Пользователь {target.id} добавлен в антиспам базу. При включённой проверке он будет исключаться при входе в ваши группы.")
+    else:
+        await message.reply(f"Пользователь {target.id} уже был в антиспам базе.")
+
+
 @router.message(Command("support"))
 async def cmd_support(message: Message):
     if message.chat.type != "private":
@@ -1688,7 +1721,8 @@ async def cb_global_antispam(cb: CallbackQuery):
         f"📋 *Антиспам база*\n\n"
         f"Общая база пользователей по всем группам бота. При включении проверка при *вступлении* в этот чат.\n\n"
         f"• Использовать в этом чате: *{on_off}*\n"
-        f"• Записей в базе: *{len(items)}*"
+        f"• Записей в базе: *{len(items)}*\n\n"
+        f"_Как добавить без ID:_ в группе ответьте на сообщение пользователя и отправьте /addantispam — бот добавит его в базу."
     )
     if items:
         lines = []
@@ -1726,7 +1760,9 @@ async def cb_global_antispam_add(cb: CallbackQuery):
     _pending_antispam_add[cb.from_user.id] = True
     await cb.message.answer(
         "📋 Отправь *user_id* (число) пользователя для добавления в антиспам базу.\n"
-        "Например: `123456789`\nОтмена: /cancel",
+        "Например: `123456789`\n\n"
+        "Либо в группе: ответь на сообщение пользователя и отправь /addantispam — бот добавит его по автору ответа.\n"
+        "Отмена: /cancel",
         parse_mode="Markdown",
     )
 

@@ -17,11 +17,17 @@ const antispamLoading = ref(false)
 const newAntispamUserId = ref('')
 const copyTargetId = ref(null)
 const copyLoading = ref(false)
+const botUsername = ref(null)
 
 onMounted(async () => {
   if (!hasInitData.value) return
   try {
-    const { chats, selected_chat_id } = await fetch(() => api.chats())
+    const [chatsRes, botData] = await Promise.all([
+      fetch(() => api.chats()),
+      fetch(() => api.botInfo()).catch(() => null),
+    ])
+    const { chats, selected_chat_id } = chatsRes || {}
+    botUsername.value = botData?.username ?? null
     chatsList.value = chats || []
     if (!selected_chat_id) {
       chat.value = { noSelection: true }
@@ -111,6 +117,19 @@ async function removeAntispamUser(userId) {
     showToast('Удалено из базы')
   } finally {
     antispamLoading.value = false
+  }
+}
+
+/** Открыть бота по deep link для запуска очистки от удалённых (на мобильном — в Telegram, можно закрыть мини-приложение). */
+function openCleanDeleted(event) {
+  if (!chat.value?.id || !botUsername.value) return
+  const url = `https://t.me/${botUsername.value}?start=cleandeleted_${chat.value.id}`
+  if (window.Telegram?.WebApp?.openTelegramLink) {
+    event?.preventDefault()
+    window.Telegram.WebApp.openTelegramLink(url)
+    setTimeout(() => {
+      if (window.Telegram?.WebApp?.close) window.Telegram.WebApp.close()
+    }, 400)
   }
 }
 
@@ -441,6 +460,9 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
         <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
           Общая база пользователей по всем группам бота. При включении пользователи из базы будут исключаться при входе в этот чат.
         </p>
+        <p class="mb-3 rounded-lg bg-amber-50 p-2 text-xs text-amber-800 dark:bg-amber-900/30 dark:text-amber-200">
+          <strong>Откуда взять User ID?</strong> В группе ответьте на сообщение пользователя и отправьте команду <code>/addantispam</code> — бот добавит его в базу. Либо введите числовой ID, если знаете его.
+        </p>
         <div class="space-y-3">
           <div class="flex items-center justify-between gap-2">
             <span class="text-sm text-gray-600 dark:text-gray-400">Проверять при входе в этот чат</span>
@@ -496,8 +518,21 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
       <!-- Очистка от удалённых аккаунтов -->
       <section class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
         <h2 class="mb-3 text-sm font-medium text-gray-700 dark:text-gray-300">🧹 Очистка от удалённых аккаунтов</h2>
-        <p class="text-xs text-gray-500 dark:text-gray-400">
-          Проверка группы на удалённые аккаунты и исключение их из чата. Запускается в боте: Защита → Очистить от удалённых.
+        <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
+          Проверка группы на удалённые аккаунты и исключение их из чата. Нажмите кнопку — откроется чат с ботом, очистка запустится для выбранной группы.
+        </p>
+        <a
+          v-if="chat?.id && botUsername"
+          :href="`https://t.me/${botUsername}?start=cleandeleted_${chat.id}`"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="inline-flex items-center gap-2 rounded-xl bg-primary-500 px-4 py-3 font-medium text-white shadow-sm transition hover:bg-primary-600"
+          @click="openCleanDeleted"
+        >
+          Запустить очистку
+        </a>
+        <p v-else class="text-xs text-gray-500 dark:text-gray-400">
+          Выберите чат выше или откройте очистку в боте: Защита → Очистить от удалённых.
         </p>
       </section>
 

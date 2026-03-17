@@ -94,10 +94,13 @@ async def on_startup() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _run_ensure_rules_migration()
-    # Меню команд: в ЛС — полный список; в группах — только у админов, у обычных пользователей пусто
+    # Меню команд: в ЛС — полный список; в группах у админов — /addantispam для добавления по ответу
+    GROUP_COMMANDS = [
+        BotCommand(command="addantispam", description="Добавить автора ответа в антиспам базу"),
+    ]
     try:
         await bot.set_my_commands(BOT_COMMANDS, scope=BotCommandScopeDefault())
-        await bot.set_my_commands([], scope=BotCommandScopeAllGroupChats())
+        await bot.set_my_commands(GROUP_COMMANDS, scope=BotCommandScopeAllGroupChats())
         await bot.set_my_commands(BOT_COMMANDS, scope=BotCommandScopeAllChatAdministrators())
     except Exception:
         pass

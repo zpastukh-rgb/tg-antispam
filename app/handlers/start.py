@@ -238,6 +238,30 @@ async def cmd_start(message: Message):
         return
 
     args = (message.text or "").strip().split()
+    # Deep link из Mini App: t.me/bot?start=cleandeleted_CHATID — запуск очистки от удалённых в группе
+    if len(args) >= 2 and args[1].lower().startswith("cleandeleted_"):
+        try:
+            chat_id = int(args[1].split("_", 1)[1])
+        except (ValueError, IndexError):
+            chat_id = 0
+        if chat_id and message.from_user:
+            from app.db.session import get_session
+            from app.api.service import user_can_access_chat
+            from app.services.chat_cleanup import clean_deleted_accounts
+            async with await get_session() as session:
+                if await user_can_access_chat(session, message.from_user.id, chat_id):
+                    try:
+                        kicked, checked = await clean_deleted_accounts(message.bot, session, chat_id)
+                        await message.answer(
+                            f"🧹 *Очистка от удалённых*\n\nПроверено: {checked}\nИсключено удалённых аккаунтов: {kicked}",
+                            parse_mode="Markdown",
+                        )
+                    except Exception as e:
+                        await message.answer(f"Ошибка при очистке: {e}")
+                else:
+                    await message.answer("Нет доступа к этой группе.")
+        return
+
     # Deep link из Mini App: t.me/bot?start=reportschat — выбор чата отчётов (для выбранной в панели группы)
     if len(args) >= 2 and args[1].lower() == "reportschat":
         try:
