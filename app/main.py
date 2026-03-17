@@ -61,14 +61,15 @@ async def on_startup() -> None:
 
 
 async def main() -> None:
-    # Сначала роутеры с командами (/health, /check и т.д.), иначе moderation перехватит все сообщения в группе
+    # log_setup ДО moderation: иначе chat_member в moderation перехватывает добавление бота в группу,
+    # и my_chat_member в log_setup не срабатывает — группа не подключается, приветствие не уходит
     dp.include_router(health_router)
     dp.include_router(start_router)
     dp.include_router(onboarding_router)
     # dp.include_router(first_message_captcha_router)  # капча на паузе
+    dp.include_router(log_setup_router)
     dp.include_router(moderation_router)
     dp.include_router(panel_router)
-    dp.include_router(log_setup_router)
     dp.include_router(log_actions_router)
     dp.include_router(whitelist_router)
     dp.include_router(stopwords_router)
