@@ -70,4 +70,8 @@ export const api = {
   connectPending: () => api.get('/api/connect/pending'),
   billing: () => api.get('/api/billing'),
   botInfo: () => api.get('/api/bot-info'),
+  globalAntispamList: () => api.get('/api/global-antispam'),
+  globalAntispamAdd: (userId, reason) => api.post('/api/global-antispam', { user_id: userId, reason: reason || '' }),
+  globalAntispamRemove: (userId) => api.delete(`/api/global-antispam/${userId}`),
+  copySettings: (chatId, targetChatId) => api.post(`/api/chat/${chatId}/copy-settings`, { target_chat_id: targetChatId }),
 }

@@ -118,3 +118,20 @@ async def delete_stopword(session: AsyncSession, chat_id: int, word: str) -> boo
     await session.execute(sql_delete(StopWord).where(StopWord.chat_id == chat_id, StopWord.word == w))
     await session.commit()
     return True
+
+
+async def copy_rule_to_chat(session: AsyncSession, source_chat_id: int, target_chat_id: int) -> Rule:
+    """Перенести настройки (Rule) из source_chat_id в target_chat_id. Возвращает правило целевого чата."""
+    source = await session.get(Rule, source_chat_id)
+    if not source:
+        raise ValueError("Source chat has no rule")
+    target = await get_or_create_rule(session, target_chat_id)
+    # Копируем все поля кроме chat_id и created_at
+    skip = {"chat_id", "created_at"}
+    for col in Rule.__table__.columns:
+        if col.name in skip:
+            continue
+        setattr(target, col.name, getattr(source, col.name))
+    await session.commit()
+    await session.refresh(target)
+    return target

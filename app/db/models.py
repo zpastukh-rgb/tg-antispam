@@ -209,10 +209,46 @@ class Rule(Base):
     silence_minutes: Mapped[int] = mapped_column(Integer, default=0)
     master_anti_spam: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # Антинакрутка: оповещение и реакция на массовый вход
+    antinakrutka_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    antinakrutka_joins_threshold: Mapped[int] = mapped_column(Integer, default=10)
+    antinakrutka_window_minutes: Mapped[int] = mapped_column(Integer, default=5)
+    antinakrutka_action: Mapped[str] = mapped_column(String(32), default="alert")  # alert | alert_restrict
+    antinakrutka_restrict_minutes: Mapped[int] = mapped_column(Integer, default=30)
+
+    # Антиспам база: проверять вступивших по общей базе пользователей
+    use_global_antispam_db: Mapped[bool] = mapped_column(Boolean, default=False)
+
     created_at: Mapped[str] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now()
     )
+
+
+# =========================================================
+# CHAT SEEN MEMBER (для очистки от удалённых аккаунтов)
+# =========================================================
+
+class ChatSeenMember(Base):
+    """Участники, которых видели в чате (сообщения или вход). Нужны для проверки на удалённые аккаунты."""
+    __tablename__ = "chat_seen_members"
+
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+# =========================================================
+# GLOBAL ANTISPAM USER (общая база по всем группам бота)
+# =========================================================
+
+class GlobalAntispamUser(Base):
+    """Глобальный чёрный список пользователей: проверка при вступлении в любую группу."""
+    __tablename__ = "global_antispam_users"
+
+    user_id: Mapped[int] = mapped_column(BigInteger, unique=True, primary_key=True)
+    reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 # =========================================================

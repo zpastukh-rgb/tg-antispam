@@ -11,17 +11,26 @@ const chat = ref(null)
 const saving = ref(false)
 const newStopword = ref('')
 const stopwordLoading = ref(false)
+const chatsList = ref([])
+const antispamItems = ref([])
+const antispamLoading = ref(false)
+const newAntispamUserId = ref('')
+const copyTargetId = ref(null)
+const copyLoading = ref(false)
 
 onMounted(async () => {
   if (!hasInitData.value) return
   try {
     const { chats, selected_chat_id } = await fetch(() => api.chats())
+    chatsList.value = chats || []
     if (!selected_chat_id) {
       chat.value = { noSelection: true }
       return
     }
     const data = await fetch(() => api.chat(selected_chat_id))
     chat.value = data
+    const antispam = await fetch(() => api.globalAntispamList()).catch(() => ({ items: [] }))
+    antispamItems.value = antispam?.items || []
   } catch {
     chat.value = { noSelection: false, loadError: true }
   }
@@ -67,6 +76,60 @@ async function removeStopword(word) {
   }
 }
 
+async function loadAntispamList() {
+  antispamLoading.value = true
+  try {
+    const data = await fetch(() => api.globalAntispamList())
+    antispamItems.value = data?.items || []
+  } finally {
+    antispamLoading.value = false
+  }
+}
+
+async function addAntispamUser() {
+  const uid = (newAntispamUserId.value || '').trim()
+  if (!uid || !/^\d+$/.test(uid)) {
+    showToast('Введите числовой user_id')
+    return
+  }
+  antispamLoading.value = true
+  try {
+    await fetch(() => api.globalAntispamAdd(Number(uid)))
+    newAntispamUserId.value = ''
+    await loadAntispamList()
+    showToast('Добавлено в антиспам базу')
+  } finally {
+    antispamLoading.value = false
+  }
+}
+
+async function removeAntispamUser(userId) {
+  antispamLoading.value = true
+  try {
+    await fetch(() => api.globalAntispamRemove(userId))
+    antispamItems.value = antispamItems.value.filter((i) => i.user_id !== userId)
+    showToast('Удалено из базы')
+  } finally {
+    antispamLoading.value = false
+  }
+}
+
+async function doCopySettings() {
+  if (!chat.value?.id || !copyTargetId.value || chat.value.noSelection) return
+  if (Number(copyTargetId.value) === chat.value.id) {
+    showToast('Выберите другой чат')
+    return
+  }
+  copyLoading.value = true
+  try {
+    await fetch(() => api.copySettings(chat.value.id, Number(copyTargetId.value)))
+    showToast('Настройки перенесены')
+    copyTargetId.value = null
+  } finally {
+    copyLoading.value = false
+  }
+}
+
 const policyOptions = [
   { value: 'allow', label: 'Разрешено' },
   { value: 'forbid', label: 'Запрещено' },
@@ -87,6 +150,13 @@ const silencePresets = [
   { value: 60, label: '1 ч' },
   { value: 1440, label: '24 ч' },
 ]
+const antinakrutkaThresholdPresets = [5, 10, 15, 20]
+const antinakrutkaWindowPresets = [3, 5, 10]
+const antinakrutkaActionOptions = [
+  { value: 'alert', label: 'Только оповещение' },
+  { value: 'alert_restrict', label: 'Оповещение + мут' },
+]
+const antinakrutkaRestrictPresets = [15, 30, 60]
 </script>
 
 <template>
@@ -285,6 +355,180 @@ const silencePresets = [
               </button>
             </div>
           </div>
+        </div>
+      </section>
+
+      <!-- Антинакрутка -->
+      <section class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
+        <h2 class="mb-3 text-sm font-medium text-gray-700 dark:text-gray-300">📈 Антинакрутка</h2>
+        <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
+          Оповещение и реакция на массовый вход в группу или чат комментариев канала.
+        </p>
+        <div class="space-y-3">
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-sm text-gray-600 dark:text-gray-400">Включить</span>
+            <button
+              type="button"
+              :class="chat.rule.antinakrutka_enabled ? 'bg-primary-500 text-white' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+              class="rounded-lg px-3 py-1.5 text-sm"
+              @click="updateRule({ antinakrutka_enabled: !chat.rule.antinakrutka_enabled })"
+            >
+              {{ chat.rule.antinakrutka_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+            </button>
+          </div>
+          <div v-if="chat.rule.antinakrutka_enabled">
+            <p class="mb-1 text-xs text-gray-500 dark:text-gray-400">Порог (участников за окно)</p>
+            <div class="flex flex-wrap gap-2">
+              <button
+                v-for="n in antinakrutkaThresholdPresets"
+                :key="n"
+                type="button"
+                :class="(chat.rule.antinakrutka_joins_threshold || 10) === n ? 'bg-primary-500 text-white' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+                class="rounded-lg px-3 py-1.5 text-sm"
+                @click="updateRule({ antinakrutka_joins_threshold: n })"
+              >
+                {{ n }}
+              </button>
+            </div>
+            <p class="mb-1 mt-2 text-xs text-gray-500 dark:text-gray-400">Окно (мин)</p>
+            <div class="flex flex-wrap gap-2">
+              <button
+                v-for="w in antinakrutkaWindowPresets"
+                :key="w"
+                type="button"
+                :class="(chat.rule.antinakrutka_window_minutes || 5) === w ? 'bg-primary-500 text-white' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+                class="rounded-lg px-3 py-1.5 text-sm"
+                @click="updateRule({ antinakrutka_window_minutes: w })"
+              >
+                {{ w }} мин
+              </button>
+            </div>
+            <p class="mb-1 mt-2 text-xs text-gray-500 dark:text-gray-400">Действие</p>
+            <div class="flex flex-wrap gap-2">
+              <button
+                v-for="opt in antinakrutkaActionOptions"
+                :key="opt.value"
+                type="button"
+                :class="(chat.rule.antinakrutka_action || 'alert') === opt.value ? 'bg-primary-500 text-white' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+                class="rounded-lg px-3 py-1.5 text-sm"
+                @click="updateRule({ antinakrutka_action: opt.value })"
+              >
+                {{ opt.label }}
+              </button>
+            </div>
+            <div v-if="(chat.rule.antinakrutka_action || 'alert') === 'alert_restrict'">
+              <p class="mb-1 mt-2 text-xs text-gray-500 dark:text-gray-400">Мут (мин)</p>
+              <div class="flex flex-wrap gap-2">
+                <button
+                  v-for="r in antinakrutkaRestrictPresets"
+                  :key="r"
+                  type="button"
+                  :class="(chat.rule.antinakrutka_restrict_minutes || 30) === r ? 'bg-primary-500 text-white' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+                  class="rounded-lg px-3 py-1.5 text-sm"
+                  @click="updateRule({ antinakrutka_restrict_minutes: r })"
+                >
+                  {{ r }}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Антиспам база (общая по всем группам) -->
+      <section class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
+        <h2 class="mb-3 text-sm font-medium text-gray-700 dark:text-gray-300">📋 Антиспам база</h2>
+        <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
+          Общая база пользователей по всем группам бота. При включении пользователи из базы будут исключаться при входе в этот чат.
+        </p>
+        <div class="space-y-3">
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-sm text-gray-600 dark:text-gray-400">Проверять при входе в этот чат</span>
+            <button
+              type="button"
+              :class="chat.rule.use_global_antispam_db ? 'bg-primary-500 text-white' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+              class="rounded-lg px-3 py-1.5 text-sm"
+              @click="updateRule({ use_global_antispam_db: !chat.rule.use_global_antispam_db })"
+            >
+              {{ chat.rule.use_global_antispam_db ? 'ВКЛ' : 'ВЫКЛ' }}
+            </button>
+          </div>
+          <p class="text-xs text-gray-500 dark:text-gray-400">Записей в базе: {{ (antispamItems || []).length }}</p>
+          <div class="flex flex-wrap gap-2">
+            <input
+              v-model="newAntispamUserId"
+              type="text"
+              placeholder="User ID (число)"
+              class="min-w-0 flex-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+              :disabled="antispamLoading"
+              @keydown.enter.prevent="addAntispamUser()"
+            />
+            <button
+              type="button"
+              class="rounded-lg bg-primary-500 px-4 py-2 text-sm font-medium text-white hover:bg-primary-600 disabled:opacity-50"
+              :disabled="antispamLoading || !(newAntispamUserId || '').trim()"
+              @click="addAntispamUser()"
+            >
+              Добавить
+            </button>
+          </div>
+          <ul v-if="(antispamItems || []).length" class="max-h-40 space-y-1 overflow-y-auto">
+            <li
+              v-for="item in antispamItems"
+              :key="item.user_id"
+              class="flex items-center justify-between rounded-lg bg-gray-100 px-3 py-2 text-sm dark:bg-gray-700"
+            >
+              <span class="text-gray-800 dark:text-gray-200">{{ item.user_id }}{{ item.reason ? ` — ${item.reason}` : '' }}</span>
+              <button
+                type="button"
+                class="rounded p-1 text-red-600 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-900/30"
+                :disabled="antispamLoading"
+                aria-label="Удалить"
+                @click="removeAntispamUser(item.user_id)"
+              >
+                ✕
+              </button>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- Очистка от удалённых аккаунтов -->
+      <section class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
+        <h2 class="mb-3 text-sm font-medium text-gray-700 dark:text-gray-300">🧹 Очистка от удалённых аккаунтов</h2>
+        <p class="text-xs text-gray-500 dark:text-gray-400">
+          Проверка группы на удалённые аккаунты и исключение их из чата. Запускается в боте: Защита → Очистить от удалённых.
+        </p>
+      </section>
+
+      <!-- Перенести настройки в другой чат -->
+      <section class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
+        <h2 class="mb-3 text-sm font-medium text-gray-700 dark:text-gray-300">📤 Перенести настройки</h2>
+        <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
+          Скопировать все настройки защиты из текущего чата в выбранный.
+        </p>
+        <div class="flex flex-wrap items-center gap-2">
+          <select
+            v-model="copyTargetId"
+            class="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+          >
+            <option :value="null">Выберите чат</option>
+            <option
+              v-for="c in (chatsList || []).filter((x) => x.id !== chat?.id)"
+              :key="c.id"
+              :value="String(c.id)"
+            >
+              {{ c.title || c.id }}
+            </option>
+          </select>
+          <button
+            type="button"
+            class="rounded-lg bg-primary-500 px-4 py-2 text-sm font-medium text-white hover:bg-primary-600 disabled:opacity-50"
+            :disabled="copyLoading || !copyTargetId || String(copyTargetId) === String(chat?.id)"
+            @click="doCopySettings()"
+          >
+            Перенести
+          </button>
         </div>
       </section>
 

@@ -24,6 +24,7 @@ from app.api.service import (
     list_stopwords,
     add_stopword,
     delete_stopword,
+    copy_rule_to_chat,
 )
 from app.db.models import Chat, Rule
 from app.services.user_service import get_or_create_user, can_add_chat
@@ -78,6 +79,12 @@ def _rule_to_dict(rule: Rule, stopwords_count: int = 0) -> dict:
         "delete_join_messages": bool(getattr(rule, "delete_join_messages", True)),
         "silence_minutes": int(getattr(rule, "silence_minutes", 0) or 0),
         "master_anti_spam": bool(getattr(rule, "master_anti_spam", True)),
+        "antinakrutka_enabled": bool(getattr(rule, "antinakrutka_enabled", False)),
+        "antinakrutka_joins_threshold": int(getattr(rule, "antinakrutka_joins_threshold", 10) or 10),
+        "antinakrutka_window_minutes": int(getattr(rule, "antinakrutka_window_minutes", 5) or 5),
+        "antinakrutka_action": str(getattr(rule, "antinakrutka_action", "alert") or "alert"),
+        "antinakrutka_restrict_minutes": int(getattr(rule, "antinakrutka_restrict_minutes", 30) or 30),
+        "use_global_antispam_db": bool(getattr(rule, "use_global_antispam_db", False)),
         "log_enabled": bool(rule.log_enabled),
         "guardian_messages_enabled": bool(getattr(rule, "guardian_messages_enabled", True)),
         "public_alerts_every_n": int(getattr(rule, "public_alerts_every_n", 5)),
@@ -220,7 +227,11 @@ async def api_chat_rule(
         "filter_links", "filter_links_mode", "filter_media_mode", "filter_buttons_mode", "filter_mentions",
         "action_mode", "mute_minutes", "newbie_enabled", "newbie_minutes",
         "first_message_captcha_enabled", "all_captcha_minutes", "delete_join_messages",
-        "silence_minutes", "master_anti_spam", "log_enabled",
+        "silence_minutes", "master_anti_spam",
+        "antinakrutka_enabled", "antinakrutka_joins_threshold", "antinakrutka_window_minutes",
+        "antinakrutka_action", "antinakrutka_restrict_minutes",
+        "use_global_antispam_db",
+        "log_enabled",
         "guardian_messages_enabled", "public_alerts_every_n", "public_alerts_min_interval_sec",
         "auto_reports_enabled",
     }
@@ -314,3 +325,72 @@ async def api_billing(
         "can_add_more": can_add,
         "subscription_until": _format_dt(user.subscription_until),
     }
+
+
+# ---------- GET /api/global-antispam ----------
+@router.get("/global-antispam")
+async def api_global_antispam_list(
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Список пользователей в глобальной антиспам базе (общая для бота)."""
+    from app.services.global_antispam import list_global_antispam
+    items = await list_global_antispam(session, limit=500)
+    return {"items": items}
+
+
+# ---------- POST /api/global-antispam ----------
+@router.post("/global-antispam")
+async def api_global_antispam_add(
+    body: dict,
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Добавить user_id в глобальную антиспам базу. Body: { "user_id": number, "reason": "optional" }."""
+    from app.services.global_antispam import add_to_global_antispam
+    uid = body.get("user_id")
+    if uid is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="user_id required")
+    added = await add_to_global_antispam(session, int(uid), body.get("reason"))
+    return {"added": added, "user_id": int(uid)}
+
+
+# ---------- DELETE /api/global-antispam/:target_uid ----------
+@router.delete("/global-antispam/{target_uid}")
+async def api_global_antispam_remove(
+    target_uid: int,
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Удалить target_uid из глобальной антиспам базы."""
+    from app.services.global_antispam import remove_from_global_antispam
+    removed = await remove_from_global_antispam(session, target_uid)
+    return {"removed": removed}
+
+
+# ---------- POST /api/chat/:id/copy-settings ----------
+@router.post("/chat/{chat_id}/copy-settings")
+async def api_chat_copy_settings(
+    chat_id: int,
+    body: dict,
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Перенести настройки из текущего чата в другой. Body: { "target_chat_id": number }."""
+    ok = await user_can_access_chat(session, user_id, int(chat_id))
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+    target_id = body.get("target_chat_id")
+    if target_id is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target_chat_id required")
+    target_id = int(target_id)
+    ok_target = await user_can_access_chat(session, user_id, target_id)
+    if not ok_target:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Target chat not found or access denied")
+    if int(chat_id) == target_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Source and target must differ")
+    try:
+        rule = await copy_rule_to_chat(session, int(chat_id), target_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return {"target_chat_id": target_id, "ok": True}

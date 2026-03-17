@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 from aiogram import Router, F
 from aiogram.enums import ChatType, ChatMemberStatus
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.types import Message, ChatPermissions
+from aiogram.types import Message, ChatPermissions, ChatMemberUpdated
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from sqlalchemy import select
@@ -21,6 +21,8 @@ from sqlalchemy import select
 from app.db.session import get_session
 from app.db.models import Chat, Rule, StopWord, WhitelistDomain, WhitelistUser, ModerationLog
 from app.services.public_alerts import maybe_send_public_alert
+from app.services.chat_cleanup import record_seen_member as record_seen_member_cleanup
+from app.services.global_antispam import is_in_global_antispam
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -89,6 +91,72 @@ def _is_newbie(chat_id: int, user_id: int, window_min: int) -> bool:
         return False
     first_seen = _newbie_seen(chat_id, user_id)
     return (datetime.now(timezone.utc) - first_seen) <= timedelta(minutes=window_min)
+
+
+# =========================================================
+# ✅ Режим тишины: время входа в чат (LRU + TTL)
+# =========================================================
+SILENCE_JOIN_LRU: "OrderedDict[Tuple[int, int], datetime]" = OrderedDict()
+SILENCE_JOIN_MAX = 200_000
+SILENCE_JOIN_TTL = timedelta(days=2)
+
+
+def _silence_join_cleanup(now: datetime) -> None:
+    while SILENCE_JOIN_LRU:
+        _k, ts = next(iter(SILENCE_JOIN_LRU.items()))
+        if now - ts <= SILENCE_JOIN_TTL:
+            break
+        SILENCE_JOIN_LRU.popitem(last=False)
+
+
+def _silence_join_record(chat_id: int, user_id: int) -> None:
+    """Записать время входа пользователя в чат (для режима тишины)."""
+    now = datetime.now(timezone.utc)
+    _silence_join_cleanup(now)
+    key = (chat_id, user_id)
+    SILENCE_JOIN_LRU[key] = now
+    SILENCE_JOIN_LRU.move_to_end(key)
+    while len(SILENCE_JOIN_LRU) > SILENCE_JOIN_MAX:
+        SILENCE_JOIN_LRU.popitem(last=False)
+
+
+def _is_in_silence_window(chat_id: int, user_id: int, silence_minutes: int) -> bool:
+    """Пользователь вступил в чат менее silence_minutes назад."""
+    if silence_minutes <= 0:
+        return False
+    key = (chat_id, user_id)
+    if key not in SILENCE_JOIN_LRU:
+        return False
+    join_at = SILENCE_JOIN_LRU[key]
+    return (datetime.now(timezone.utc) - join_at) <= timedelta(minutes=silence_minutes)
+
+
+# =========================================================
+# ✅ Антинакрутка: буфер входов по чатам для детекции массового входа
+# =========================================================
+# chat_id -> [(user_id, join_time), ...], храним только за последние window_minutes
+_ANTINAKRUTKA_JOINS: Dict[int, List[Tuple[int, datetime]]] = {}
+_ANTINAKRUTKA_MAX_LIST = 500  # макс. записей на чат
+
+
+def _antinakrutka_add_join(chat_id: int, user_id: int, window_minutes: int) -> List[Tuple[int, datetime]]:
+    """Добавить вход, обрезать старые, вернуть текущий список за окно."""
+    now = datetime.now(timezone.utc)
+    window = timedelta(minutes=max(1, min(60, window_minutes)))
+    if chat_id not in _ANTINAKRUTKA_JOINS:
+        _ANTINAKRUTKA_JOINS[chat_id] = []
+    lst = _ANTINAKRUTKA_JOINS[chat_id]
+    lst.append((user_id, now))
+    # оставить только за окно
+    lst[:] = [(uid, t) for uid, t in lst if now - t <= window]
+    if len(lst) > _ANTINAKRUTKA_MAX_LIST:
+        lst[:] = lst[-_ANTINAKRUTKA_MAX_LIST:]
+    return lst
+
+
+def _antinakrutka_clear(chat_id: int) -> None:
+    """Сбросить буфер после срабатывания."""
+    _ANTINAKRUTKA_JOINS.pop(chat_id, None)
 
 
 # =========================================================
@@ -490,8 +558,24 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     newbie_window = int(getattr(rule, "newbie_minutes", 10) or 10)
     newbie_window = max(0, min(1440, newbie_window))
     log_enabled = bool(getattr(rule, "log_enabled", True))
+    silence_minutes = int(getattr(rule, "silence_minutes", 0) or 0)
+    silence_minutes = max(0, min(10080, silence_minutes))  # до 7 суток
 
     newbie = newbie_enabled and _is_newbie(chat_id, user_id, newbie_window)
+
+    # -------------------------------------------------
+    # 0) Режим тишины: новички в чате не могут писать N минут после входа
+    # -------------------------------------------------
+    if silence_minutes > 0 and user and _is_in_silence_window(chat_id, user_id, silence_minutes):
+        return Verdict(
+            True,
+            "silence",
+            f"режим тишины ({silence_minutes} мин)",
+            "mute",
+            mute_minutes=mute_min,
+            log_it=log_enabled,
+            log_extra=f"тишина {silence_minutes} мин",
+        )
 
     # -------------------------------------------------
     # 1) stopwords (без учёта токенов внутри URL)
@@ -730,6 +814,7 @@ _REASON_HUMAN = {
     "media_newbie": "🖼 медиа/стикер (новичок)",
     "buttons": "🔘 сообщение с кнопками",
     "buttons_newbie": "🔘 сообщение с кнопками (новичок)",
+    "silence": "🔇 режим тишины",
     "edited_clean": "✏️ edit (чисто)",
 }
 
@@ -830,6 +915,9 @@ async def pipeline(message: Message, *, edited: bool = False) -> None:
 
     async with await get_session() as session:
         try:
+            if message.from_user:
+                from app.services.chat_cleanup import record_seen_member as record_seen_member_cleanup
+                await record_seen_member_cleanup(session, message.chat.id, message.from_user.id)
             v = await evaluate(session, message, edited=edited)
             if not v.should_act:
                 return
@@ -861,6 +949,88 @@ async def pipeline(message: Message, *, edited: bool = False) -> None:
 # =========================================================
 # Handlers
 # =========================================================
+
+@router.chat_member(F.chat.type.in_({"group", "supergroup"}))
+async def on_chat_member(event: ChatMemberUpdated):
+    """Записать время входа (режим тишины) и проверить антинакрутку."""
+    old = event.old_chat_member.status
+    new = event.new_chat_member.status
+    if old not in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
+        return
+    if new not in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
+        return
+    user = getattr(event.new_chat_member, "user", None)
+    if not user:
+        return
+    chat_id = event.chat.id
+    user_id = user.id
+    bot = event.bot
+    try:
+        async with await get_session() as session:
+            chat_row = await session.get(Chat, chat_id)
+            if not chat_row or not getattr(chat_row, "is_active", True):
+                return
+            await record_seen_member_cleanup(session, chat_id, user_id)
+
+            rule = await get_rule(session, chat_id)
+            if bool(getattr(rule, "use_global_antispam_db", False)):
+                if await is_in_global_antispam(session, user_id):
+                    try:
+                        await bot.ban_chat_member(chat_id, user_id)
+                    except Exception as e:
+                        logger.debug("global_antispam kick %s: %s", user_id, e)
+                    return
+            _silence_join_record(chat_id, user_id)
+
+            enabled = bool(getattr(rule, "antinakrutka_enabled", False))
+            if not enabled:
+                return
+            threshold = max(2, min(100, int(getattr(rule, "antinakrutka_joins_threshold", 10) or 10)))
+            window_min = max(1, min(60, int(getattr(rule, "antinakrutka_window_minutes", 5) or 5)))
+            action = (getattr(rule, "antinakrutka_action", None) or "alert").strip().lower()
+            restrict_min = max(1, min(1440, int(getattr(rule, "antinakrutka_restrict_minutes", 30) or 30)))
+
+            joins_list = _antinakrutka_add_join(chat_id, user_id, window_min)
+            if len(joins_list) < threshold:
+                return
+
+            # Срабатывание: массовый вход
+            chat_title = (event.chat.title or "").strip() or str(chat_id)
+            log_chat_id = getattr(chat_row, "log_chat_id", None)
+            alert_text = (
+                f"⚠ *Антинакрутка*\n\n"
+                f"Обнаружен массовый вход в чат *{chat_title}*.\n"
+                f"За последние *{window_min}* мин вступило *{len(joins_list)}* участников (порог {threshold})."
+            )
+            if log_chat_id:
+                try:
+                    await bot.send_message(log_chat_id, alert_text, parse_mode="Markdown")
+                except Exception as e:
+                    logger.warning("antinakrutka log send: %s", e)
+            try:
+                await bot.send_message(chat_id, alert_text, parse_mode="Markdown")
+            except Exception as e:
+                logger.debug("antinakrutka chat send: %s", e)
+
+            if action == "alert_restrict":
+                until = datetime.now(timezone.utc) + timedelta(minutes=restrict_min)
+                for uid, _ in joins_list:
+                    if uid == user_id or await is_admin(bot, chat_id, uid):
+                        continue
+                    try:
+                        await bot.restrict_chat_member(
+                            chat_id,
+                            uid,
+                            permissions=ChatPermissions(can_send_messages=False),
+                            until_date=until,
+                        )
+                    except Exception as e:
+                        logger.debug("antinakrutka restrict %s: %s", uid, e)
+
+            _antinakrutka_clear(chat_id)
+    except Exception as e:
+        logger.exception("on_chat_member: %s", e)
+
 
 @router.message(F.chat.type.in_({"group", "supergroup"}))
 async def on_message(message: Message):
