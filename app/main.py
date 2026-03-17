@@ -50,44 +50,44 @@ BOT_COMMANDS = [
 ]
 
 
-# Критичные ALTER для rules — если файл миграции недоступен при деплое, выполняем их из кода
-_RULES_ALTER_008 = (
-    "ALTER TABLE rules ADD COLUMN IF NOT EXISTS antinakrutka_enabled BOOLEAN DEFAULT FALSE",
-    "ALTER TABLE rules ADD COLUMN IF NOT EXISTS antinakrutka_joins_threshold INTEGER DEFAULT 10",
-    "ALTER TABLE rules ADD COLUMN IF NOT EXISTS antinakrutka_window_minutes INTEGER DEFAULT 5",
-    "ALTER TABLE rules ADD COLUMN IF NOT EXISTS antinakrutka_action VARCHAR(32) DEFAULT 'alert'",
-    "ALTER TABLE rules ADD COLUMN IF NOT EXISTS antinakrutka_restrict_minutes INTEGER DEFAULT 30",
-    "ALTER TABLE rules ADD COLUMN IF NOT EXISTS use_global_antispam_db BOOLEAN DEFAULT FALSE",
+# Критичные колонки rules для миграции 008 (имя, тип, default)
+_RULES_COLUMNS_008 = (
+    ("antinakrutka_enabled", "BOOLEAN", "FALSE"),
+    ("antinakrutka_joins_threshold", "INTEGER", "10"),
+    ("antinakrutka_window_minutes", "INTEGER", "5"),
+    ("antinakrutka_action", "VARCHAR(32)", "'alert'"),
+    ("antinakrutka_restrict_minutes", "INTEGER", "30"),
+    ("use_global_antispam_db", "BOOLEAN", "FALSE"),
 )
 
 
 async def _run_ensure_rules_migration() -> None:
-    """При старте бота применить миграцию 008 к той же БД (колонки rules). Каждый оператор — в своей транзакции."""
+    """При старте бота добавить колонки в rules через information_schema (работает везде)."""
     import logging
     log = logging.getLogger(__name__)
-    # Сначала пробуем из файла
-    root = Path(__file__).resolve().parent.parent
-    path = root / "migrations" / "008_ensure_rules_columns.sql"
-    statements = []
-    if path.exists():
-        raw = path.read_text(encoding="utf-8").replace("\r\n", "\n").strip()
-        for part in raw.split(";"):
-            part = part.strip()
-            if not part or part.startswith("--"):
-                continue
-            if not part.endswith(";"):
-                part = part + ";"
-            statements.append(part)
-    if not statements:
-        # Запасной вариант: только ALTER для rules (таблицы chat_seen_members и global_antispam_users создаст create_all при наличии моделей)
-        for st in _RULES_ALTER_008:
-            statements.append(st + ";")
-    for part in statements:
+    ok = 0
+    for col_name, col_type, default in _RULES_COLUMNS_008:
+        # В EXECUTE кавычки в default удваиваем для plpgsql
+        default_esc = default.replace("'", "''")
+        sql_str = f"""
+            DO $$
+            BEGIN
+              IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'rules' AND column_name = '{col_name}'
+              ) THEN
+                EXECUTE 'ALTER TABLE rules ADD COLUMN {col_name} {col_type} DEFAULT {default_esc}';
+              END IF;
+            END $$;
+        """
         try:
             async with engine.begin() as conn:
-                await conn.execute(text(part))
+                await conn.execute(text(sql_str))
+            ok += 1
         except Exception as e:
-            log.warning("ensure_rules migration statement skipped: %s", e)
+            log.warning("ensure_rules column %s failed: %s", col_name, e)
+    if ok > 0:
+        log.info("ensure_rules migration: %s/%s columns ensured", ok, len(_RULES_COLUMNS_008))
 
 
 async def on_startup() -> None:
