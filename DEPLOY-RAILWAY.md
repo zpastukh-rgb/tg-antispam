@@ -151,6 +151,20 @@ railway run python -m scripts.run_migration 005
 railway run python -m scripts.run_migration 006
 railway run python -m scripts.run_migration 007
 railway run python -m scripts.run_migration 008
+railway run python -m scripts.run_migration 009
+```
+
+После миграции 009 (фильтр мата + промокоды) можно заполнить таблицу мата и создать тестовый промокод:
+
+```bash
+# Заполнить таблицу profanity_words распространёнными словами
+railway run python -m scripts.seed_profanity
+```
+
+Промокод для теста Premium на 3 дня создаётся вручную в БД (например через DBeaver или psql):
+
+```sql
+INSERT INTO promo_codes (code, tariff, days) VALUES ('TRIAL3', 'premium', 3);
 ```
 
 **Если в логах бота ошибка** `column rules.antinakrutka_enabled does not exist` **или группа не подключается после добавления бота** — в БД не применены миграции 006/007. Выполни одну команду (она добавит все недостающие колонки и таблицы):

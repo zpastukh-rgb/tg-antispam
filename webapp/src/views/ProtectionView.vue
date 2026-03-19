@@ -18,15 +18,21 @@ const newAntispamUserId = ref('')
 const copyTargetId = ref(null)
 const copyLoading = ref(false)
 const botUsername = ref(null)
+const isPremium = ref(false)
+const profanityItems = ref([])
+const newProfanityWord = ref('')
+const profanityLoading = ref(false)
 
 onMounted(async () => {
   if (!hasInitData.value) return
   try {
-    const [chatsRes, botData] = await Promise.all([
+    const [chatsRes, botData, meData] = await Promise.all([
       fetch(() => api.chats()),
       fetch(() => api.botInfo()).catch(() => null),
+      fetch(() => api.me()).catch(() => ({ is_premium: false })),
     ])
     const { chats, selected_chat_id } = chatsRes || {}
+    isPremium.value = !!meData?.is_premium
     botUsername.value = botData?.username ?? null
     chatsList.value = chats || []
     if (!selected_chat_id) {
@@ -35,8 +41,12 @@ onMounted(async () => {
     }
     const data = await fetch(() => api.chat(selected_chat_id))
     chat.value = data
-    const antispam = await fetch(() => api.globalAntispamList()).catch(() => ({ items: [] }))
+    const [antispam, profanity] = await Promise.all([
+      fetch(() => api.globalAntispamList()).catch(() => ({ items: [] })),
+      fetch(() => api.profanityList()).catch(() => ({ items: [] })),
+    ])
     antispamItems.value = antispam?.items || []
+    profanityItems.value = profanity?.items || []
   } catch {
     chat.value = { noSelection: false, loadError: true }
   }
@@ -117,6 +127,32 @@ async function removeAntispamUser(userId) {
     showToast('Удалено из базы')
   } finally {
     antispamLoading.value = false
+  }
+}
+
+async function addProfanityWord() {
+  const word = (newProfanityWord.value || '').trim()
+  if (!word) return
+  profanityLoading.value = true
+  try {
+    await fetch(() => api.profanityAdd(word))
+    newProfanityWord.value = ''
+    const data = await fetch(() => api.profanityList())
+    profanityItems.value = data?.items || []
+    showToast('Слово добавлено в фильтр мата')
+  } finally {
+    profanityLoading.value = false
+  }
+}
+
+async function removeProfanityWord(word) {
+  profanityLoading.value = true
+  try {
+    await fetch(() => api.profanityRemove(word))
+    profanityItems.value = profanityItems.value.filter((i) => i.word !== word)
+    showToast('Слово удалено из фильтра')
+  } finally {
+    profanityLoading.value = false
   }
 }
 
@@ -280,7 +316,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
             </button>
           </div>
           <div>
-            <p class="mb-1 text-xs text-gray-500 dark:text-gray-400">Режим тишины (мин)</p>
+            <p class="mb-1 text-xs text-gray-500 dark:text-gray-400">Режим тишины (мин) <span v-if="!isPremium" class="text-amber-600 dark:text-amber-400">🔒 Premium</span></p>
             <div class="flex flex-wrap gap-2">
               <button
                 v-for="p in silencePresets"
@@ -288,7 +324,8 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
                 type="button"
                 :class="(chat.rule.silence_minutes || 0) === p.value ? 'bg-primary-500 text-white' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
                 class="rounded-lg px-3 py-1.5 text-sm"
-                @click="updateRule({ silence_minutes: p.value })"
+                :disabled="!isPremium"
+                @click="isPremium && updateRule({ silence_minutes: p.value })"
               >
                 {{ p.label }}
               </button>
@@ -337,6 +374,61 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
           <p v-else class="text-sm text-gray-500 dark:text-gray-400">
             Нет стоп-слов. Добавьте слово выше.
           </p>
+
+          <h3 class="mb-2 mt-4 text-sm font-medium text-gray-700 dark:text-gray-300">Фильтр мата</h3>
+          <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
+            Сообщения, содержащие слова из списка мата, будут удаляться или наказываться по правилам. Общий список по всем чатам; можно добавлять свои слова.
+          </p>
+          <div class="flex items-center justify-between gap-2 mb-3">
+            <span class="text-sm text-gray-600 dark:text-gray-400">Включить фильтр мата</span>
+            <button
+              type="button"
+              :class="chat.rule.filter_profanity_enabled ? 'bg-primary-500 text-white' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+              class="rounded-lg px-3 py-1.5 text-sm"
+              @click="updateRule({ filter_profanity_enabled: !chat.rule.filter_profanity_enabled })"
+            >
+              {{ chat.rule.filter_profanity_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+            </button>
+          </div>
+          <div class="mb-3 flex flex-wrap gap-2">
+            <input
+              v-model="newProfanityWord"
+              type="text"
+              placeholder="Добавить слово"
+              class="min-w-0 flex-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+              :disabled="profanityLoading"
+              @keydown.enter.prevent="addProfanityWord()"
+            />
+            <button
+              type="button"
+              class="rounded-lg bg-primary-500 px-4 py-2 text-sm font-medium text-white hover:bg-primary-600 disabled:opacity-50"
+              :disabled="profanityLoading || !(newProfanityWord || '').trim()"
+              @click="addProfanityWord()"
+            >
+              Добавить
+            </button>
+          </div>
+          <ul v-if="(profanityItems || []).length" class="max-h-32 space-y-1 overflow-y-auto">
+            <li
+              v-for="item in (profanityItems || []).slice(0, 30)"
+              :key="item.word"
+              class="flex items-center justify-between rounded-lg bg-gray-100 px-3 py-1.5 text-sm dark:bg-gray-700"
+            >
+              <span class="text-gray-800 dark:text-gray-200">{{ item.word }}</span>
+              <button
+                type="button"
+                class="rounded p-1 text-red-600 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-900/30"
+                :disabled="profanityLoading"
+                aria-label="Удалить"
+                @click="removeProfanityWord(item.word)"
+              >
+                ✕
+              </button>
+            </li>
+          </ul>
+          <p v-if="(profanityItems || []).length > 30" class="text-xs text-gray-500 dark:text-gray-400">
+            Показано 30 из {{ profanityItems.length }}. Остальные в боте.
+          </p>
         </div>
       </section>
 
@@ -377,9 +469,9 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
         </div>
       </section>
 
-      <!-- Антинакрутка -->
+      <!-- Антинакрутка (Premium) -->
       <section class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
-        <h2 class="mb-3 text-sm font-medium text-gray-700 dark:text-gray-300">📈 Антинакрутка</h2>
+        <h2 class="mb-3 text-sm font-medium text-gray-700 dark:text-gray-300">📈 Антинакрутка <span v-if="!isPremium" class="text-amber-600 dark:text-amber-400">🔒 Premium</span></h2>
         <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
           Оповещение и реакция на массовый вход в группу или чат комментариев канала.
         </p>
@@ -390,12 +482,13 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
               type="button"
               :class="chat.rule.antinakrutka_enabled ? 'bg-primary-500 text-white' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
               class="rounded-lg px-3 py-1.5 text-sm"
-              @click="updateRule({ antinakrutka_enabled: !chat.rule.antinakrutka_enabled })"
+              :disabled="!isPremium"
+              @click="isPremium && updateRule({ antinakrutka_enabled: !chat.rule.antinakrutka_enabled })"
             >
               {{ chat.rule.antinakrutka_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
             </button>
           </div>
-          <div v-if="chat.rule.antinakrutka_enabled">
+          <div v-if="chat.rule.antinakrutka_enabled && isPremium">
             <p class="mb-1 text-xs text-gray-500 dark:text-gray-400">Порог (участников за окно)</p>
             <div class="flex flex-wrap gap-2">
               <button
@@ -454,9 +547,9 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
         </div>
       </section>
 
-      <!-- Антиспам база (общая по всем группам) -->
+      <!-- Антиспам база (Premium) -->
       <section class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
-        <h2 class="mb-3 text-sm font-medium text-gray-700 dark:text-gray-300">📋 Антиспам база</h2>
+        <h2 class="mb-3 text-sm font-medium text-gray-700 dark:text-gray-300">📋 Антиспам база <span v-if="!isPremium" class="text-amber-600 dark:text-amber-400">🔒 Premium</span></h2>
         <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
           Общая база пользователей по всем группам бота. При включении пользователи из базы будут исключаться при входе в этот чат.
         </p>
@@ -470,7 +563,8 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
               type="button"
               :class="chat.rule.use_global_antispam_db ? 'bg-primary-500 text-white' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
               class="rounded-lg px-3 py-1.5 text-sm"
-              @click="updateRule({ use_global_antispam_db: !chat.rule.use_global_antispam_db })"
+              :disabled="!isPremium"
+              @click="isPremium && updateRule({ use_global_antispam_db: !chat.rule.use_global_antispam_db })"
             >
               {{ chat.rule.use_global_antispam_db ? 'ВКЛ' : 'ВЫКЛ' }}
             </button>
@@ -494,21 +588,23 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
               Добавить
             </button>
           </div>
-          <ul v-if="(antispamItems || []).length" class="max-h-40 space-y-1 overflow-y-auto">
+          <p v-if="(antispamItems || []).length" class="text-xs text-gray-500 dark:text-gray-400">
+            Чтобы убрать пользователя из базы — нажмите «Удалить» рядом с записью.
+          </p>
+          <ul v-if="(antispamItems || []).length" class="max-h-48 space-y-2 overflow-y-auto">
             <li
               v-for="item in antispamItems"
               :key="item.user_id"
-              class="flex items-center justify-between rounded-lg bg-gray-100 px-3 py-2 text-sm dark:bg-gray-700"
+              class="flex items-center justify-between gap-2 rounded-lg bg-gray-100 px-3 py-2 text-sm dark:bg-gray-700"
             >
-              <span class="text-gray-800 dark:text-gray-200">{{ item.user_id }}{{ item.reason ? ` — ${item.reason}` : '' }}</span>
+              <span class="min-w-0 flex-1 text-gray-800 dark:text-gray-200">{{ item.user_id }}{{ item.reason ? ` — ${item.reason}` : '' }}</span>
               <button
                 type="button"
-                class="rounded p-1 text-red-600 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-900/30"
+                class="shrink-0 rounded-lg border border-red-300 bg-red-50 px-2.5 py-1 text-xs font-medium text-red-700 hover:bg-red-100 dark:border-red-800 dark:bg-red-900/30 dark:text-red-300 dark:hover:bg-red-900/50"
                 :disabled="antispamLoading"
-                aria-label="Удалить"
                 @click="removeAntispamUser(item.user_id)"
               >
-                ✕
+                Удалить
               </button>
             </li>
           </ul>
@@ -536,9 +632,9 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
         </p>
       </section>
 
-      <!-- Перенести настройки в другой чат -->
+      <!-- Перенести настройки (доступно при нескольких чатах / Premium) -->
       <section class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
-        <h2 class="mb-3 text-sm font-medium text-gray-700 dark:text-gray-300">📤 Перенести настройки</h2>
+        <h2 class="mb-3 text-sm font-medium text-gray-700 dark:text-gray-300">📤 Перенести настройки <span v-if="!isPremium && (chatsList || []).length > 1" class="text-amber-600 dark:text-amber-400">🔒 Premium</span></h2>
         <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
           Скопировать все настройки защиты из текущего чата в выбранный.
         </p>
@@ -559,17 +655,17 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
           <button
             type="button"
             class="rounded-lg bg-primary-500 px-4 py-2 text-sm font-medium text-white hover:bg-primary-600 disabled:opacity-50"
-            :disabled="copyLoading || !copyTargetId || String(copyTargetId) === String(chat?.id)"
-            @click="doCopySettings()"
+            :disabled="copyLoading || !copyTargetId || String(copyTargetId) === String(chat?.id) || (!isPremium && (chatsList || []).length > 1)"
+            @click="(isPremium || (chatsList || []).length <= 1) && doCopySettings()"
           >
             Перенести
           </button>
         </div>
       </section>
 
-      <!-- Новички -->
+      <!-- Новички (Premium) -->
       <section class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
-        <h2 class="mb-3 text-sm font-medium text-gray-700 dark:text-gray-300">Новички</h2>
+        <h2 class="mb-3 text-sm font-medium text-gray-700 dark:text-gray-300">Новички <span v-if="!isPremium" class="text-amber-600 dark:text-amber-400">🔒 Premium</span></h2>
         <div class="space-y-3">
           <div class="flex items-center justify-between gap-2">
             <span class="text-sm text-gray-600 dark:text-gray-400">Режим новичков</span>
@@ -577,12 +673,13 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
               type="button"
               :class="chat.rule.newbie_enabled ? 'bg-primary-500 text-white' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
               class="rounded-lg px-3 py-1.5 text-sm"
-              @click="updateRule({ newbie_enabled: !chat.rule.newbie_enabled })"
+              :disabled="!isPremium"
+              @click="isPremium && updateRule({ newbie_enabled: !chat.rule.newbie_enabled })"
             >
               {{ chat.rule.newbie_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
             </button>
           </div>
-          <div v-if="chat.rule.newbie_enabled">
+          <div v-if="chat.rule.newbie_enabled && isPremium">
             <p class="mb-1 text-xs text-gray-500 dark:text-gray-400">Окно (мин)</p>
             <div class="flex flex-wrap gap-2">
               <button

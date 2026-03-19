@@ -219,6 +219,9 @@ class Rule(Base):
     # Антиспам база: проверять вступивших по общей базе пользователей
     use_global_antispam_db: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Фильтр мата: удалять/наказывать сообщения с матерными словами (общая таблица profanity_words)
+    filter_profanity_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+
     created_at: Mapped[str] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now()
@@ -236,6 +239,18 @@ class ChatSeenMember(Base):
     chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+# =========================================================
+# PROFANITY WORDS (общая таблица матерных слов для фильтра)
+# =========================================================
+
+class ProfanityWord(Base):
+    """Глобальный список матерных слов для фильтрации сообщений."""
+    __tablename__ = "profanity_words"
+
+    word: Mapped[str] = mapped_column(String(64), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 # =========================================================
@@ -417,6 +432,22 @@ class ModerationLog(Base):
     __table_args__ = (
         Index("idx_modlog_chat", "chat_id"),
     )
+
+
+# =========================================================
+# PROMO CODE (промокоды для активации Premium / пробного периода)
+# =========================================================
+
+class PromoCode(Base):
+    __tablename__ = "promo_codes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    tariff: Mapped[str] = mapped_column(String(32), default=Tariff.PREMIUM.value)  # premium, premium_trial
+    days: Mapped[int] = mapped_column(Integer, default=0)  # 0 = бессрочно до явной отмены, 3 = пробный 3 дня
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    used_by_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 # =========================================================

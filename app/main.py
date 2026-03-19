@@ -58,6 +58,7 @@ _RULES_COLUMNS_008 = (
     ("antinakrutka_action", "VARCHAR(32)", "'alert'"),
     ("antinakrutka_restrict_minutes", "INTEGER", "30"),
     ("use_global_antispam_db", "BOOLEAN", "FALSE"),
+    ("filter_profanity_enabled", "BOOLEAN", "FALSE"),
 )
 
 

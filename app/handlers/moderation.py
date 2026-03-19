@@ -19,7 +19,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 
 from app.db.session import get_session
-from app.db.models import Chat, Rule, StopWord, WhitelistDomain, WhitelistUser, ModerationLog
+from app.db.models import Chat, Rule, StopWord, WhitelistDomain, WhitelistUser, ModerationLog, ProfanityWord
 from app.services.public_alerts import maybe_send_public_alert
 from app.services.chat_cleanup import record_seen_member as record_seen_member_cleanup
 from app.services.global_antispam import is_in_global_antispam
@@ -165,6 +165,7 @@ def _antinakrutka_clear(chat_id: int) -> None:
 CACHE_TTL = 60  # seconds
 
 _STOPWORDS_CACHE: Dict[int, Tuple[float, Set[str]]] = {}
+_PROFANITY_CACHE: Tuple[float, Set[str]] = (0.0, set())  # (ts, words) глобальный список мата
 _WLUSER_CACHE: "OrderedDict[Tuple[int, int], Tuple[float, bool]]" = OrderedDict()
 _WLDOM_CACHE: "OrderedDict[Tuple[int, str], Tuple[float, bool]]" = OrderedDict()
 
@@ -224,6 +225,20 @@ def stopword_hit(text_norm: str, stopwords: Set[str], text_without_urls_norm: Op
         if ww and ww in toks:
             return ww
     return None
+
+
+def profanity_hit(text_norm: str, profanity_words: Set[str], text_without_urls_norm: Optional[str] = None) -> Optional[str]:
+    """Проверка на мат (по токенам, без учёта текста внутри URL)."""
+    if not profanity_words:
+        return None
+    base = (text_without_urls_norm if text_without_urls_norm is not None else text_norm)
+    toks = token_set(base)
+    for w in profanity_words:
+        ww = (w or "").strip().lower().replace("ё", "е")
+        if ww and ww in toks:
+            return ww
+    return None
+
 
 def find_links(text: str) -> List[str]:
     return [m.group(1) for m in URL_RE.finditer(text or "")]
@@ -430,6 +445,19 @@ async def load_stopwords(session, chat_id: int) -> Set[str]:
     _STOPWORDS_CACHE[chat_id] = (now, words)
     return words
 
+
+async def load_profanity_words(session) -> Set[str]:
+    """Глобальный список матерных слов (общая таблица profanity_words)."""
+    global _PROFANITY_CACHE
+    now = time.time()
+    if _PROFANITY_CACHE[0] and now - _PROFANITY_CACHE[0] < CACHE_TTL:
+        return _PROFANITY_CACHE[1]
+    res = await session.execute(select(ProfanityWord.word))
+    words = {str(w).strip().lower().replace("ё", "е") for (w,) in res.all() if w}
+    _PROFANITY_CACHE = (now, words)
+    return words
+
+
 async def whitelist_user(session, chat_id: int, user_id: int) -> bool:
     now = time.time()
     key = (chat_id, user_id)
@@ -596,6 +624,27 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
             log_it=log_enabled,
             log_extra=("anti-edit" if edited else ""),
         )
+
+    # -------------------------------------------------
+    # 1b) Мат (filter_profanity_enabled, общая таблица profanity_words)
+    # -------------------------------------------------
+    if getattr(rule, "filter_profanity_enabled", False):
+        profanity_set = await load_profanity_words(session)
+        hit_prof = profanity_hit(text_norm, profanity_set, text_without_urls_norm=text_for_stopwords_norm)
+        if hit_prof:
+            if newbie and action == "delete":
+                return Verdict(
+                    True, "profanity_newbie", hit_prof, "mute",
+                    mute_minutes=mute_min,
+                    log_it=log_enabled,
+                    log_extra=f"мат (новичок)" + (" | anti-edit" if edited else ""),
+                )
+            return Verdict(
+                True, "profanity", hit_prof, action,
+                mute_minutes=mute_min,
+                log_it=log_enabled,
+                log_extra=("anti-edit" if edited else ""),
+            )
 
     # -------------------------------------------------
     # 2) links (текст + entities: url, text_link). При "allow" блок не выполняется.
@@ -806,6 +855,8 @@ def log_keyboard(action: str, chat_id: int, user_id: int):
 _REASON_HUMAN = {
     "stopword": "🧨 стоп-слово",
     "stopword_newbie": "🧨 стоп-слово (новичок)",
+    "profanity": "🚫 мат",
+    "profanity_newbie": "🚫 мат (новичок)",
     "link": "🔗 ссылка",
     "link_newbie": "🔗 ссылка (новичок)",
     "mention": "🏷 упоминание",

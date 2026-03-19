@@ -6,8 +6,10 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Chat, Rule, UserContext, ChatManager, StopWord
-from app.services.user_service import get_or_create_user, can_add_chat
+from datetime import datetime, timezone, timedelta
+
+from app.db.models import Chat, Rule, UserContext, ChatManager, StopWord, ProfanityWord, PromoCode, User
+from app.services.user_service import get_or_create_user, can_add_chat, TARIFF_CHAT_LIMITS
 
 
 async def get_managed_chats(session: AsyncSession, user_id: int) -> list[Chat]:
@@ -118,6 +120,77 @@ async def delete_stopword(session: AsyncSession, chat_id: int, word: str) -> boo
     await session.execute(sql_delete(StopWord).where(StopWord.chat_id == chat_id, StopWord.word == w))
     await session.commit()
     return True
+
+
+def _norm_profanity(s: str) -> str:
+    s = (s or "").strip().lower().replace("ё", "е")
+    return s[:64]
+
+
+async def list_profanity(session: AsyncSession, limit: int = 500) -> list[dict]:
+    """Список матерных слов (глобальная таблица)."""
+    res = await session.execute(
+        select(ProfanityWord.word).order_by(ProfanityWord.word.asc()).limit(limit)
+    )
+    return [{"word": row[0]} for row in res.all()]
+
+
+async def add_profanity(session: AsyncSession, word: str) -> bool:
+    """Добавить слово в таблицу мата. Возвращает True если добавлено."""
+    w = _norm_profanity(word)
+    if not w:
+        return False
+    existing = await session.get(ProfanityWord, w)
+    if existing:
+        return False
+    session.add(ProfanityWord(word=w))
+    await session.commit()
+    return True
+
+
+async def remove_profanity(session: AsyncSession, word: str) -> bool:
+    """Удалить слово из таблицы мата. Возвращает True если удалено."""
+    w = _norm_profanity(word)
+    if not w:
+        return False
+    row = await session.get(ProfanityWord, w)
+    if not row:
+        return False
+    await session.delete(row)
+    await session.commit()
+    return True
+
+
+async def apply_promo_code(session: AsyncSession, user_id: int, code: str) -> tuple[bool, str]:
+    """
+    Активировать промокод для пользователя.
+    Returns: (success, message).
+    """
+    from sqlalchemy import select
+    code_clean = (code or "").strip().upper()
+    if not code_clean:
+        return False, "Введите промокод"
+    res = await session.execute(select(PromoCode).where(PromoCode.code == code_clean).limit(1))
+    promo = res.scalar_one_or_none()
+    if not promo:
+        return False, "Промокод не найден"
+    if promo.used_at is not None:
+        return False, "Промокод уже использован"
+    res_user = await session.execute(select(User).where(User.telegram_id == user_id).limit(1))
+    user = res_user.scalar_one_or_none()
+    if not user:
+        return False, "Пользователь не найден"
+    user.tariff = promo.tariff or "premium"
+    if promo.days and promo.days > 0:
+        user.subscription_until = datetime.now(timezone.utc) + timedelta(days=promo.days)
+    else:
+        user.subscription_until = None  # бессрочно
+    user.chat_limit = TARIFF_CHAT_LIMITS.get(user.tariff, 20)
+    promo.used_at = datetime.now(timezone.utc)
+    promo.used_by_user_id = user_id
+    await session.commit()
+    days_msg = f" на {promo.days} дн." if promo.days else ""
+    return True, f"Premium активирован{days_msg}"
 
 
 async def copy_rule_to_chat(session: AsyncSession, source_chat_id: int, target_chat_id: int) -> Rule:

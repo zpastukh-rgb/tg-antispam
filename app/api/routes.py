@@ -25,6 +25,10 @@ from app.api.service import (
     add_stopword,
     delete_stopword,
     copy_rule_to_chat,
+    list_profanity,
+    add_profanity,
+    remove_profanity,
+    apply_promo_code,
 )
 from app.db.models import Chat, Rule
 from app.services.user_service import get_or_create_user, can_add_chat
@@ -85,6 +89,7 @@ def _rule_to_dict(rule: Rule, stopwords_count: int = 0) -> dict:
         "antinakrutka_action": str(getattr(rule, "antinakrutka_action", "alert") or "alert"),
         "antinakrutka_restrict_minutes": int(getattr(rule, "antinakrutka_restrict_minutes", 30) or 30),
         "use_global_antispam_db": bool(getattr(rule, "use_global_antispam_db", False)),
+        "filter_profanity_enabled": bool(getattr(rule, "filter_profanity_enabled", False)),
         "log_enabled": bool(rule.log_enabled),
         "guardian_messages_enabled": bool(getattr(rule, "guardian_messages_enabled", True)),
         "public_alerts_every_n": int(getattr(rule, "public_alerts_every_n", 5)),
@@ -120,11 +125,16 @@ async def api_me(
     user = await get_or_create_user(session, user_id)
     chats = await get_managed_chats(session, user_id)
     can_add, current_count, limit = await can_add_chat(session, user_id)
+    tariff = (user.tariff or "free").lower()
+    sub_until = user.subscription_until
+    now = datetime.now(timezone.utc)
+    is_premium = tariff in ("premium", "pro", "business") or (sub_until and sub_until > now)
     return {
         "telegram_id": user_id,
         "username": user.username,
         "first_name": user.first_name,
         "tariff": user.tariff or "free",
+        "is_premium": is_premium,
         "chat_limit": user.chat_limit,
         "chats_count": len(chats),
         "can_add_more": can_add,
@@ -231,6 +241,7 @@ async def api_chat_rule(
         "antinakrutka_enabled", "antinakrutka_joins_threshold", "antinakrutka_window_minutes",
         "antinakrutka_action", "antinakrutka_restrict_minutes",
         "use_global_antispam_db",
+        "filter_profanity_enabled",
         "log_enabled",
         "guardian_messages_enabled", "public_alerts_every_n", "public_alerts_min_interval_sec",
         "auto_reports_enabled",
@@ -318,8 +329,13 @@ async def api_billing(
     user = await get_or_create_user(session, user_id)
     chats = await get_managed_chats(session, user_id)
     can_add, current_count, limit = await can_add_chat(session, user_id)
+    tariff = (user.tariff or "free").lower()
+    sub_until = user.subscription_until
+    now = datetime.now(timezone.utc)
+    is_premium = tariff in ("premium", "pro", "business") or (sub_until and sub_until > now)
     return {
         "tariff": user.tariff or "free",
+        "is_premium": is_premium,
         "chat_limit": limit,
         "chats_count": len(chats),
         "can_add_more": can_add,
@@ -365,6 +381,59 @@ async def api_global_antispam_remove(
     """Удалить target_uid из глобальной антиспам базы."""
     from app.services.global_antispam import remove_from_global_antispam
     removed = await remove_from_global_antispam(session, target_uid)
+    return {"removed": removed}
+
+
+# ---------- POST /api/promo/apply ----------
+@router.post("/promo/apply")
+async def api_promo_apply(
+    body: dict,
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Активировать промокод. Body: { "code": "TRIAL3" }. Для теста Premium на 3 дня создайте промокод с days=3."""
+    code = (body.get("code") or "").strip()
+    success, message = await apply_promo_code(session, user_id, code)
+    if not success:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=message)
+    return {"ok": True, "message": message}
+
+
+# ---------- GET /api/profanity ----------
+@router.get("/profanity")
+async def api_profanity_list(
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Список матерных слов (глобальная таблица для фильтра)."""
+    items = await list_profanity(session)
+    return {"items": items}
+
+
+# ---------- POST /api/profanity ----------
+@router.post("/profanity")
+async def api_profanity_add(
+    body: dict,
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Добавить слово в фильтр мата. Body: { "word": "..." }."""
+    word = (body.get("word") or "").strip()
+    if not word:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="word required")
+    added = await add_profanity(session, word)
+    return {"added": added, "word": word}
+
+
+# ---------- DELETE /api/profanity/:word ----------
+@router.delete("/profanity/{word:path}")
+async def api_profanity_remove(
+    word: str,
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Удалить слово из фильтра мата."""
+    removed = await remove_profanity(session, word)
     return {"removed": removed}
 
 
