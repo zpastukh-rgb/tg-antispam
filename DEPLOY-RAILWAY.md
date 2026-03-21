@@ -197,10 +197,10 @@ railway run python -m scripts.run_migration 008
 2. **Settings:**
    - **Root Directory:** пусто (корень).
    - **Builder:** Dockerfile (не Railpack).
-   - **Start Command:** оставь **пустым**, если используешь `Dockerfile.api` (команда уже внутри образа).  
-     Если без отдельного Dockerfile — тогда полная строка:  
-     `uvicorn app.api.main:app --host 0.0.0.0 --port $PORT`  
-     (недостаточно одного слова `uvicorn` — иначе будет `Usage: uvicorn [OPTIONS] APP`).
+   - **Start Command:** явная команда (перебивает `CMD` бота из корневого `Dockerfile`).  
+     **Важно:** Railway часто запускает команду **без shell**, поэтому `$PORT` не раскрывается и даёт ошибку `Invalid value for '--port': '$PORT'`. Нужна обёртка в `sh -c`:  
+     `sh -c "uvicorn app.api.main:app --host 0.0.0.0 --port ${PORT:-8000}"`  
+     Если в логах API видно **«😈 AntiSpam Guardian запущен / BUILD 777»** — всё ещё стартует бот, а не uvicorn; проверь, что сохранена именно строка выше.
 3. **Variables:**
    - **`RAILWAY_DOCKERFILE_PATH`** = `Dockerfile.api` — иначе подтянется корневой `Dockerfile` с ботом, а не uvicorn.
    - Как у бота: `BOT_TOKEN` (обязателен для init data и ссылок во фронте), Postgres: `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` (или Reference `DATABASE_URL`).

@@ -27,6 +27,12 @@ from app.services.global_antispam import is_in_global_antispam
 router = Router()
 logger = logging.getLogger(__name__)
 
+
+def _should_run_moderation_pipeline(message: Message) -> bool:
+    """Команды (/...) обрабатываются другими роутерами; иначе catch-all moderation перехватывает апдейт до panel."""
+    chunk = (message.text or message.caption or "").lstrip()
+    return not chunk.startswith("/")
+
 # =========================================================
 # 😈 AntiSpam Guardian — MODERATION CORE (Step A "железобетон")
 # =========================================================
@@ -1071,12 +1077,16 @@ async def on_chat_member(event: ChatMemberUpdated):
         logger.exception("on_chat_member: %s", e)
 
 
-@router.message(F.chat.type.in_({"group", "supergroup"}))
+@router.message(
+    F.chat.type.in_({"group", "supergroup"}),
+    F.func(_should_run_moderation_pipeline),
+)
 async def on_message(message: Message):
-    if message.text and message.text.startswith("/"):
-        return
     await pipeline(message, edited=False)
 
-@router.edited_message(F.chat.type.in_({"group", "supergroup"}))
+@router.edited_message(
+    F.chat.type.in_({"group", "supergroup"}),
+    F.func(_should_run_moderation_pipeline),
+)
 async def on_edit(message: Message):
     await pipeline(message, edited=True)

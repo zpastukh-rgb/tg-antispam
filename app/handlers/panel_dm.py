@@ -8,7 +8,7 @@ from collections import OrderedDict
 
 from aiogram import Router, F
 from aiogram.enums import ChatMemberStatus
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command
 from aiogram.types import (
     Message,
@@ -1127,9 +1127,16 @@ async def cmd_text_tariff(message: Message):
     await _send_premium_screen(message.bot, message.from_user.id)
 
 
+async def _try_delete_quiet(bot, chat_id: int, message_id: int) -> None:
+    try:
+        await bot.delete_message(chat_id, message_id)
+    except (TelegramBadRequest, TelegramForbiddenError):
+        pass
+
+
 @router.message(
     F.chat.type.in_({"group", "supergroup"}),
-    Command("addantispam"),
+    Command(commands=["addantispam"], ignore_mention=True),
     F.reply_to_message,
 )
 async def cmd_addantispam_group(message: Message):
@@ -1142,15 +1149,26 @@ async def cmd_addantispam_group(message: Message):
         return
     try:
         mem = await message.bot.get_chat_member(message.chat.id, message.from_user.id)
-        if mem.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
-            await message.reply("Только администратор группы может добавить пользователя в антиспам базу.")
-            return
     except TelegramBadRequest:
         await message.reply("Не удалось проверить ваши права в группе. Проверьте, что бот — администратор.")
         return
     except Exception as e:
         await message.reply(f"Не удалось выполнить команду: {e}")
         return
+
+    if mem.status == ChatMemberStatus.CREATOR:
+        pass
+    elif mem.status == ChatMemberStatus.ADMINISTRATOR:
+        if not getattr(mem, "can_restrict_members", False):
+            await message.reply(
+                "Добавлять в антиспам базу могут только администраторы с правом *ограничивать участников*.",
+                parse_mode="Markdown",
+            )
+            return
+    else:
+        await message.reply("Только *администратор* группы может добавить пользователя в антиспам базу.", parse_mode="Markdown")
+        return
+
     from app.api.service import user_can_access_chat
     from app.services.global_antispam import add_to_global_antispam
     async with await get_session() as session:
@@ -1159,14 +1177,18 @@ async def cmd_addantispam_group(message: Message):
             return
         added = await add_to_global_antispam(session, target.id, reason=f"из группы {message.chat.id}")
     if added:
-        await message.reply(f"✅ Пользователь {target.id} добавлен в антиспам базу. При включённой проверке он будет исключаться при входе в ваши группы.")
+        bot_reply = await message.reply(
+            f"✅ Пользователь {target.id} добавлен в антиспам базу. При включённой проверке он будет исключаться при входе в ваши группы."
+        )
+        await _try_delete_quiet(message.bot, message.chat.id, message.message_id)
+        await _try_delete_quiet(message.bot, bot_reply.chat.id, bot_reply.message_id)
     else:
         await message.reply(f"Пользователь {target.id} уже был в антиспам базе.")
 
 
 @router.message(
     F.chat.type.in_({"group", "supergroup"}),
-    Command("addantispam"),
+    Command(commands=["addantispam"], ignore_mention=True),
     ~F.reply_to_message,
 )
 async def cmd_addantispam_group_no_reply(message: Message):
