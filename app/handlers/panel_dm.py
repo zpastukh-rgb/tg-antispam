@@ -8,6 +8,7 @@ from collections import OrderedDict
 
 from aiogram import Router, F
 from aiogram.enums import ChatMemberStatus
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import (
     Message,
@@ -705,8 +706,11 @@ def _kb_raid_stub() -> InlineKeyboardMarkup:
 
 
 def _kb_antinakrutka(rule: Rule) -> InlineKeyboardMarkup:
-    """Антинакрутка: вкл/выкл, порог, окно, действие, мут."""
+    """Антинакрутка: вкл/выкл, порог, окно, действие; мут — только при «оповещение + мут»."""
     on_off = "ВКЛ" if getattr(rule, "antinakrutka_enabled", False) else "ВЫКЛ"
+    act = (getattr(rule, "antinakrutka_action", None) or "alert").strip().lower()
+    if act not in ("alert", "alert_restrict"):
+        act = "alert"
     b = InlineKeyboardBuilder()
     b.button(text=f"{'❌ Выключить' if on_off == 'ВКЛ' else '✅ Включить'}", callback_data=CB_ANTINAKRUTKA_TOGGLE)
     for n in (5, 10, 15, 20):
@@ -715,10 +719,14 @@ def _kb_antinakrutka(rule: Rule) -> InlineKeyboardMarkup:
         b.button(text=f"Окно {m}м", callback_data=f"{CB_ANTINAKRUTKA_WINDOW}{m}")
     b.button(text="Только оповещение", callback_data=f"{CB_ANTINAKRUTKA_ACTION}alert")
     b.button(text="Оповещение + мут", callback_data=f"{CB_ANTINAKRUTKA_ACTION}alert_restrict")
-    for r in (15, 30, 60):
-        b.button(text=f"Мут {r}м", callback_data=f"{CB_ANTINAKRUTKA_RESTRICT}{r}")
+    if act == "alert_restrict":
+        for r in (15, 30, 60):
+            b.button(text=f"Мут {r}м", callback_data=f"{CB_ANTINAKRUTKA_RESTRICT}{r}")
     b.button(text="⬅️ Назад", callback_data=CB_BACK_TO_PROTECTION)
-    b.adjust(1, 4, 3, 2, 3, 1)
+    if act == "alert_restrict":
+        b.adjust(1, 4, 3, 2, 3, 1)
+    else:
+        b.adjust(1, 4, 3, 2, 1)
     return b.as_markup()
 
 
@@ -1137,7 +1145,11 @@ async def cmd_addantispam_group(message: Message):
         if mem.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
             await message.reply("Только администратор группы может добавить пользователя в антиспам базу.")
             return
-    except Exception:
+    except TelegramBadRequest:
+        await message.reply("Не удалось проверить ваши права в группе. Проверьте, что бот — администратор.")
+        return
+    except Exception as e:
+        await message.reply(f"Не удалось выполнить команду: {e}")
         return
     from app.api.service import user_can_access_chat
     from app.services.global_antispam import add_to_global_antispam
@@ -1150,6 +1162,21 @@ async def cmd_addantispam_group(message: Message):
         await message.reply(f"✅ Пользователь {target.id} добавлен в антиспам базу. При включённой проверке он будет исключаться при входе в ваши группы.")
     else:
         await message.reply(f"Пользователь {target.id} уже был в антиспам базе.")
+
+
+@router.message(
+    F.chat.type.in_({"group", "supergroup"}),
+    Command("addantispam"),
+    ~F.reply_to_message,
+)
+async def cmd_addantispam_group_no_reply(message: Message):
+    """Подсказка, если /addantispam без ответа на сообщение."""
+    await message.reply(
+        "Чтобы добавить пользователя в *антиспам базу*, ответьте *на его сообщение* в группе "
+        "и отправьте команду /addantispam.\n\n"
+        "Команду может использовать только *администратор* группы, подключённой к боту.",
+        parse_mode="Markdown",
+    )
 
 
 @router.message(Command("support"))
@@ -1330,13 +1357,14 @@ async def cb_antinakrutka(cb: CallbackQuery):
     win = int(getattr(rule, "antinakrutka_window_minutes", 5) or 5)
     act = getattr(rule, "antinakrutka_action", "alert") or "alert"
     rmin = int(getattr(rule, "antinakrutka_restrict_minutes", 30) or 30)
+    mute_line = f"Мут при рейде: *{rmin}* мин\n" if act == "alert_restrict" else ""
     txt = (
         "📈 *Антинакрутка*\n\n"
         "Оповещение и реакция на массовый вход в группу или чат комментариев канала.\n\n"
         f"Состояние: *{on_off}*\n"
         f"Порог: *{th}* участников за *{win}* мин\n"
         f"Действие: *{'оповещение + мут' if act == 'alert_restrict' else 'только оповещение'}*\n"
-        f"Мут: *{rmin}* мин\n\n"
+        f"{mute_line}\n"
         "_Выберите параметры ниже._"
     )
     await _edit_or_send(cb, txt, _kb_antinakrutka(rule))
@@ -2247,6 +2275,7 @@ async def cb_toggle_links(cb: CallbackQuery):
     async with await get_session() as session:
         rule = await _get_or_create_rule(session, chat_id)
         rule.filter_links = not bool(rule.filter_links)
+        rule.filter_links_mode = "forbid" if rule.filter_links else "allow"
         await session.commit()
 
     await cb_filters(cb)

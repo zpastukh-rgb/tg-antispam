@@ -16,10 +16,10 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import Message, ChatPermissions, ChatMemberUpdated
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.db.session import get_session
-from app.db.models import Chat, Rule, StopWord, WhitelistDomain, WhitelistUser, ModerationLog, ProfanityWord
+from app.db.models import Chat, Rule, StopWord, WhitelistDomain, WhitelistUser, ModerationLog, ProfanityWord, NewMember
 from app.services.public_alerts import maybe_send_public_alert
 from app.services.chat_cleanup import record_seen_member as record_seen_member_cleanup
 from app.services.global_antispam import is_in_global_antispam
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # Важное:
 # - Anti-edit: edited_message прогоняем через тот же evaluate()
 # - Whitelist: users + domains
-# - Newbie: LRU+TTL вместо бесконечного dict (фикс RAM на сотнях чатов)
+# - Новичок: поля newbie_* в Rule; эскалация «delete→mute» для фильтров снята — срабатывает выбранный action_mode
 # - Кэш: TTL-кэш для stopwords/whitelist (разгружает БД)
 # =========================================================
 
@@ -55,42 +55,6 @@ URL_RE = re.compile(
     """
 )
 MENTION_RE = re.compile(r"(?<!\w)@[\w\d_]{4,}")
-
-
-# =========================================================
-# ✅ FIX RAM + SPEED: Newbie memory (LRU + TTL)
-# =========================================================
-NEWBIE_LRU: "OrderedDict[Tuple[int, int], datetime]" = OrderedDict()
-NEWBIE_LRU_MAX = 200_000
-NEWBIE_TTL = timedelta(days=2)
-
-def _newbie_cleanup(now: datetime) -> None:
-    while NEWBIE_LRU:
-        _k, ts = next(iter(NEWBIE_LRU.items()))
-        if now - ts <= NEWBIE_TTL:
-            break
-        NEWBIE_LRU.popitem(last=False)
-
-def _newbie_seen(chat_id: int, user_id: int) -> datetime:
-    now = datetime.now(timezone.utc)
-    _newbie_cleanup(now)
-
-    key = (chat_id, user_id)
-    if key not in NEWBIE_LRU:
-        NEWBIE_LRU[key] = now
-
-    NEWBIE_LRU.move_to_end(key)
-
-    while len(NEWBIE_LRU) > NEWBIE_LRU_MAX:
-        NEWBIE_LRU.popitem(last=False)
-
-    return NEWBIE_LRU[key]
-
-def _is_newbie(chat_id: int, user_id: int, window_min: int) -> bool:
-    if window_min <= 0:
-        return False
-    first_seen = _newbie_seen(chat_id, user_id)
-    return (datetime.now(timezone.utc) - first_seen) <= timedelta(minutes=window_min)
 
 
 # =========================================================
@@ -120,15 +84,66 @@ def _silence_join_record(chat_id: int, user_id: int) -> None:
         SILENCE_JOIN_LRU.popitem(last=False)
 
 
-def _is_in_silence_window(chat_id: int, user_id: int, silence_minutes: int) -> bool:
-    """Пользователь вступил в чат менее silence_minutes назад."""
+def _naive_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+async def _silence_join_at_db(session, chat_id: int, user_id: int) -> Optional[datetime]:
+    res = await session.execute(
+        select(NewMember.joined_at).where(
+            NewMember.chat_id == chat_id,
+            NewMember.user_id == user_id,
+        ).limit(1)
+    )
+    row = res.first()
+    if not row or row[0] is None:
+        return None
+    return _naive_utc(row[0])
+
+
+async def _silence_remaining_restrict_minutes(
+    session, chat_id: int, user_id: int, silence_minutes: int
+) -> Optional[int]:
+    """
+    Остаток окна тишины в минутах для restrict (или None — не в окне / нет записи о входе).
+    Учитывает БД (устойчиво к перезапуску бота) и LRU как запасной путь.
+    """
     if silence_minutes <= 0:
-        return False
-    key = (chat_id, user_id)
-    if key not in SILENCE_JOIN_LRU:
-        return False
-    join_at = SILENCE_JOIN_LRU[key]
-    return (datetime.now(timezone.utc) - join_at) <= timedelta(minutes=silence_minutes)
+        return None
+    join_at = await _silence_join_at_db(session, chat_id, user_id)
+    if join_at is None:
+        key = (chat_id, user_id)
+        if key not in SILENCE_JOIN_LRU:
+            return None
+        join_at = _naive_utc(SILENCE_JOIN_LRU[key])
+    now = datetime.now(timezone.utc)
+    window = timedelta(minutes=silence_minutes)
+    if now - join_at > window:
+        return None
+    remaining = window - (now - join_at)
+    rm = max(1, int((remaining.total_seconds() + 59) // 60))
+    return min(rm, silence_minutes)
+
+
+async def upsert_member_join_for_silence(session, chat_id: int, user_id: int) -> None:
+    """Зафиксировать время входа в чат (режим тишины), одна строка на пару chat+user."""
+    now = datetime.now(timezone.utc)
+    res = await session.execute(
+        select(NewMember).where(NewMember.chat_id == chat_id, NewMember.user_id == user_id).limit(1)
+    )
+    row = res.scalar_one_or_none()
+    if row:
+        row.joined_at = now
+    else:
+        session.add(NewMember(chat_id=chat_id, user_id=user_id, joined_at=now))
+
+
+async def delete_member_join_marker(session, chat_id: int, user_id: int) -> None:
+    await session.execute(
+        delete(NewMember).where(NewMember.chat_id == chat_id, NewMember.user_id == user_id)
+    )
 
 
 # =========================================================
@@ -582,28 +597,25 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     _buttons_mode = getattr(rule, "filter_buttons_mode", "allow")
     filter_buttons = _buttons_mode in ("forbid", "captcha")
     anti_edit = bool(getattr(rule, "anti_edit", True))
-    newbie_enabled = bool(getattr(rule, "newbie_enabled", True))
-    newbie_window = int(getattr(rule, "newbie_minutes", 10) or 10)
-    newbie_window = max(0, min(1440, newbie_window))
     log_enabled = bool(getattr(rule, "log_enabled", True))
     silence_minutes = int(getattr(rule, "silence_minutes", 0) or 0)
     silence_minutes = max(0, min(10080, silence_minutes))  # до 7 суток
 
-    newbie = newbie_enabled and _is_newbie(chat_id, user_id, newbie_window)
-
     # -------------------------------------------------
-    # 0) Режим тишины: новички в чате не могут писать N минут после входа
+    # 0) Режим тишины: после входа N минут — ограничение (время входа в БД + LRU)
     # -------------------------------------------------
-    if silence_minutes > 0 and user and _is_in_silence_window(chat_id, user_id, silence_minutes):
-        return Verdict(
-            True,
-            "silence",
-            f"режим тишины ({silence_minutes} мин)",
-            "mute",
-            mute_minutes=mute_min,
-            log_it=log_enabled,
-            log_extra=f"тишина {silence_minutes} мин",
-        )
+    if silence_minutes > 0 and user:
+        silence_rem = await _silence_remaining_restrict_minutes(session, chat_id, user_id, silence_minutes)
+        if silence_rem is not None:
+            return Verdict(
+                True,
+                "silence",
+                f"режим тишины ({silence_minutes} мин)",
+                "mute",
+                mute_minutes=silence_rem,
+                log_it=log_enabled,
+                log_extra=f"тишина, осталось ~{silence_rem} мин из {silence_minutes}",
+            )
 
     # -------------------------------------------------
     # 1) stopwords (без учёта токенов внутри URL)
@@ -611,13 +623,6 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     stopwords = await load_stopwords(session, chat_id)
     hit = stopword_hit(text_norm, stopwords, text_without_urls_norm=text_for_stopwords_norm)
     if hit:
-        if newbie and action == "delete":
-            return Verdict(
-                True, "stopword_newbie", hit, "mute",
-                mute_minutes=mute_min,
-                log_it=log_enabled,
-                log_extra=f"newbie окно {newbie_window} мин" + (" | anti-edit" if edited else ""),
-            )
         return Verdict(
             True, "stopword", hit, action,
             mute_minutes=mute_min,
@@ -632,13 +637,6 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
         profanity_set = await load_profanity_words(session)
         hit_prof = profanity_hit(text_norm, profanity_set, text_without_urls_norm=text_for_stopwords_norm)
         if hit_prof:
-            if newbie and action == "delete":
-                return Verdict(
-                    True, "profanity_newbie", hit_prof, "mute",
-                    mute_minutes=mute_min,
-                    log_it=log_enabled,
-                    log_extra=f"мат (новичок)" + (" | anti-edit" if edited else ""),
-                )
             return Verdict(
                 True, "profanity", hit_prof, action,
                 mute_minutes=mute_min,
@@ -674,13 +672,6 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
                     # if _links_mode == "captcha" and user and captcha_passed_check(chat_id, user_id):
                     #     pass
                     link_action = action  # капча на паузе — не "captcha", всегда action
-                    if newbie and link_action == "delete":
-                        return Verdict(
-                            True, "link_newbie", links[0], "mute",
-                            mute_minutes=mute_min,
-                            log_it=log_enabled,
-                            log_extra=f"newbie окно {newbie_window} мин" + (" | anti-edit" if edited else ""),
-                        )
                     return Verdict(
                         True, "link", links[0], link_action,
                         mute_minutes=mute_min,
@@ -694,14 +685,6 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     if filter_mentions:
         mentions = find_mentions_any(message)
         if mentions:
-            if newbie and action == "delete":
-                return Verdict(
-                    True, "mention_newbie", mentions[0], "mute",
-                    mute_minutes=mute_min,
-                    log_it=log_enabled,
-                    log_extra=f"newbie окно {newbie_window} мин" + (" | anti-edit" if edited else ""),
-                )
-
             return Verdict(
                 True, "mention", mentions[0], action,
                 mute_minutes=mute_min,
@@ -717,14 +700,6 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
         # if _media_mode == "captcha" and user and captcha_passed_check(chat_id, user_id):
         #     pass
         media_action = action  # капча на паузе: "captcha" -> action (delete/mute/ban)
-        if newbie and media_action == "delete":
-            return Verdict(
-                True, "media_newbie", "медиа/стикер",
-                "mute",
-                mute_minutes=mute_min,
-                log_it=log_enabled,
-                log_extra=f"newbie окно {newbie_window} мин" + (" | anti-edit" if edited else ""),
-            )
         return Verdict(
             True, "media", "медиа/стикер", media_action,
             mute_minutes=mute_min,
@@ -740,14 +715,6 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
         # if _buttons_mode == "captcha" and user and captcha_passed_check(chat_id, user_id):
         #     pass
         buttons_action = action  # капча на паузе: "captcha" -> action (delete/mute/ban)
-        if newbie and buttons_action == "delete":
-            return Verdict(
-                True, "buttons_newbie", "сообщение с кнопками",
-                "mute",
-                mute_minutes=mute_min,
-                log_it=log_enabled,
-                log_extra=f"newbie окно {newbie_window} мин" + (" | anti-edit" if edited else ""),
-            )
         return Verdict(
             True, "buttons", "сообщение с кнопками", buttons_action,
             mute_minutes=mute_min,
@@ -1003,19 +970,38 @@ async def pipeline(message: Message, *, edited: bool = False) -> None:
 
 @router.chat_member(F.chat.type.in_({"group", "supergroup"}))
 async def on_chat_member(event: ChatMemberUpdated):
-    """Записать время входа (режим тишины) и проверить антинакрутку."""
+    """Вход: запись времени в БД (тишина) + LRU; выход — сброс. Антинакрутка."""
     old = event.old_chat_member.status
     new = event.new_chat_member.status
+    chat_id = event.chat.id
+    bot = event.bot
+
+    leave_user = getattr(event.old_chat_member, "user", None)
+    join_user = getattr(event.new_chat_member, "user", None)
+
+    if old in (
+        ChatMemberStatus.MEMBER,
+        ChatMemberStatus.ADMINISTRATOR,
+        ChatMemberStatus.CREATOR,
+    ) and new in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
+        if leave_user:
+            try:
+                async with await get_session() as session:
+                    await delete_member_join_marker(session, chat_id, leave_user.id)
+                    await session.commit()
+                SILENCE_JOIN_LRU.pop((chat_id, leave_user.id), None)
+            except Exception as e:
+                logger.exception("on_chat_member leave: %s", e)
+        return
+
     if old not in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
         return
     if new not in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
         return
-    user = getattr(event.new_chat_member, "user", None)
+    user = join_user
     if not user:
         return
-    chat_id = event.chat.id
     user_id = user.id
-    bot = event.bot
     try:
         async with await get_session() as session:
             chat_row = await session.get(Chat, chat_id)
@@ -1031,7 +1017,9 @@ async def on_chat_member(event: ChatMemberUpdated):
                     except Exception as e:
                         logger.debug("global_antispam kick %s: %s", user_id, e)
                     return
+            await upsert_member_join_for_silence(session, chat_id, user_id)
             _silence_join_record(chat_id, user_id)
+            await session.commit()
 
             enabled = bool(getattr(rule, "antinakrutka_enabled", False))
             if not enabled:

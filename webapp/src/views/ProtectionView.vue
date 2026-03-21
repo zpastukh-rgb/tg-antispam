@@ -59,6 +59,9 @@ async function updateRule(patch) {
     const data = await fetch(() => api.updateRule(chat.value.id, patch))
     chat.value.rule = data.rule
     showToast('Настройки успешно сохранены')
+  } catch {
+    if (error.value) showToast(error.value)
+    else showToast('Не удалось сохранить настройки')
   } finally {
     saving.value = false
   }
@@ -156,16 +159,14 @@ async function removeProfanityWord(word) {
   }
 }
 
-/** Открыть бота по deep link для запуска очистки от удалённых (на мобильном — в Telegram, можно закрыть мини-приложение). */
+/** Открыть бота по deep link: очистка выполняется в личке с ботом; мини-приложение не закрываем. */
 function openCleanDeleted(event) {
   if (!chat.value?.id || !botUsername.value) return
   const url = `https://t.me/${botUsername.value}?start=cleandeleted_${chat.value.id}`
   if (window.Telegram?.WebApp?.openTelegramLink) {
     event?.preventDefault()
     window.Telegram.WebApp.openTelegramLink(url)
-    setTimeout(() => {
-      if (window.Telegram?.WebApp?.close) window.Telegram.WebApp.close()
-    }, 400)
+    showToast('Откроется чат с ботом — результат очистки придёт в личку')
   }
 }
 

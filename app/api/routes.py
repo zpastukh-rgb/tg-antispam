@@ -253,6 +253,11 @@ async def api_chat_rule(
     if "filter_links_mode" in body and hasattr(rule, "filter_links"):
         mode = (body.get("filter_links_mode") or "").strip().lower()
         rule.filter_links = mode != "allow"
+    if "filter_links" in body and "filter_links_mode" not in body and hasattr(rule, "filter_links_mode"):
+        rule.filter_links_mode = "forbid" if rule.filter_links else "allow"
+    aa = (getattr(rule, "antinakrutka_action", None) or "alert").strip().lower()
+    if aa not in ("alert", "alert_restrict"):
+        rule.antinakrutka_action = "alert"
     await session.commit()
     await session.refresh(rule)
     stopwords_count = await count_stopwords(session, int(chat_id))
