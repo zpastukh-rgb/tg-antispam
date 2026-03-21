@@ -92,6 +92,11 @@ async def _run_ensure_rules_migration() -> None:
 
 
 async def on_startup() -> None:
+    if engine is None:
+        raise RuntimeError(
+            "DATABASE_URL not set. Railway: Add Reference → Postgres → DATABASE_URL, "
+            "или задай PGHOST, PGUSER, PGPASSWORD, PGDATABASE (и при необходимости PGPORT)."
+        )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _run_ensure_rules_migration()

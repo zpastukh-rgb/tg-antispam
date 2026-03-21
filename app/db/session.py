@@ -28,25 +28,31 @@ if not DATABASE_URL:
     if pg_host and pg_user:
         safe_pass = quote_plus(pg_pass) if pg_pass else ""
         DATABASE_URL = f"postgresql+asyncpg://{pg_user}:{safe_pass}@{pg_host}:{pg_port}/{pg_db}"
-if not DATABASE_URL:
-    raise RuntimeError(
-        "DATABASE_URL not set. Railway: Add Reference → Postgres → DATABASE_URL, "
-        "или задай PGHOST, PGUSER, PGPASSWORD, PGDATABASE (и при необходимости PGPORT)."
-    )
-
-# Схема postgresql → postgresql+asyncpg; порт не должен быть буквально "PORT"
-if DATABASE_URL.startswith("postgresql://") and "postgresql+asyncpg" not in DATABASE_URL:
-    DATABASE_URL = "postgresql+asyncpg://" + DATABASE_URL.split("://", 1)[1]
-if re.search(r":PORT(\D|$)", DATABASE_URL):
-    DATABASE_URL = re.sub(r":PORT(\D|$)", r":5432\1", DATABASE_URL)
-
-engine = create_async_engine(DATABASE_URL, echo=False)
-
-AsyncSessionLocal = sessionmaker(
-    bind=engine,
-    class_=AsyncSession,
-    expire_on_commit=False,
+_MISSING_DB = (
+    "DATABASE_URL not set. Railway: Add Reference → Postgres → DATABASE_URL, "
+    "или задай PGHOST, PGUSER, PGPASSWORD, PGDATABASE (и при необходимости PGPORT)."
 )
 
+# Схема postgresql → postgresql+asyncpg; порт не должен быть буквально "PORT"
+if DATABASE_URL:
+    if DATABASE_URL.startswith("postgresql://") and "postgresql+asyncpg" not in DATABASE_URL:
+        DATABASE_URL = "postgresql+asyncpg://" + DATABASE_URL.split("://", 1)[1]
+    if re.search(r":PORT(\D|$)", DATABASE_URL):
+        DATABASE_URL = re.sub(r":PORT(\D|$)", r":5432\1", DATABASE_URL)
+
+if DATABASE_URL:
+    engine = create_async_engine(DATABASE_URL, echo=False)
+    AsyncSessionLocal = sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+else:
+    engine = None
+    AsyncSessionLocal = None
+
+
 async def get_session() -> AsyncSession:
+    if AsyncSessionLocal is None:
+        raise RuntimeError(_MISSING_DB)
     return AsyncSessionLocal()

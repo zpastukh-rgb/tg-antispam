@@ -16,13 +16,18 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# Mini App может открываться с другого origin (например статика на Vercel, API на своём домене)
-# В продакшене указать конкретные origins
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*").split(",")
+# Mini App может открываться с другого origin. Нельзя одновременно allow_origins=["*"] и
+# allow_credentials=True — Starlette падает при старте (uvicorn сразу выходит → 502 у прокси).
+# Авторизация через заголовок X-Telegram-Init-Data, не через cookie — credentials не нужны.
+_raw_cors = os.getenv("CORS_ORIGINS", "*").split(",")
+_cors_origins = [o.strip() for o in _raw_cors if o.strip()]
+if not _cors_origins:
+    _cors_origins = ["*"]
+_cors_credentials = False if _cors_origins == ["*"] else True
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in CORS_ORIGINS if o.strip()],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=_cors_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -30,7 +35,8 @@ app.add_middleware(
 app.include_router(router)
 
 
+@app.get("/health")
 @app.get("/api/health")
 async def health():
-    """Проверка доступности API."""
+    """Проверка доступности API (и /health для прокси/Railway)."""
     return {"status": "ok"}
