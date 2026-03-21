@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -27,6 +28,8 @@ from sqlalchemy import select, or_, func
 from app.db.session import get_session
 from app.db.models import Chat, Rule, UserContext, ChatManager, StopWord
 from app.services.user_service import get_or_create_user, can_add_chat, TARIFF_CHAT_LIMITS
+
+logger = logging.getLogger(__name__)
 from app.texts.guardian_billing import (
     PREMIUM_DESCRIPTION,
     PREMIUM_PLANS,
@@ -1134,6 +1137,28 @@ async def _try_delete_quiet(bot, chat_id: int, message_id: int) -> None:
         pass
 
 
+async def _ban_from_chat_after_global_antispam(bot, chat_id: int, user_id: int) -> bool:
+    """
+    Исключить пользователя из текущей группы (как при входе с включённой проверкой базы).
+    Не трогаем админов/создателя; уже вышедших считаем ок.
+    """
+    try:
+        tm = await bot.get_chat_member(chat_id, user_id)
+    except TelegramBadRequest as e:
+        logger.warning("addantispam get_chat_member target %s: %s", user_id, e)
+        return False
+    if tm.status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
+        return True
+    if tm.status in (ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR):
+        return False
+    try:
+        await bot.ban_chat_member(chat_id, user_id)
+        return True
+    except (TelegramBadRequest, TelegramForbiddenError) as e:
+        logger.warning("addantispam ban_chat_member %s: %s", user_id, e)
+        return False
+
+
 @router.message(
     F.chat.type.in_({"group", "supergroup"}),
     Command(commands=["addantispam"], ignore_mention=True),
@@ -1176,14 +1201,33 @@ async def cmd_addantispam_group(message: Message):
             await message.reply("Эта группа не подключена к вашему аккаунту. Управление — в боте в личке.")
             return
         added = await add_to_global_antispam(session, target.id, reason=f"из группы {message.chat.id}")
+
+    kicked = await _ban_from_chat_after_global_antispam(message.bot, message.chat.id, target.id)
+
     if added:
+        if kicked:
+            extra = " Исключён из этой группы."
+            tail = ""
+        else:
+            extra = ""
+            tail = " Не удалось исключить из чата — дайте боту право *блокировать пользователей*."
         bot_reply = await message.reply(
-            f"✅ Пользователь {target.id} добавлен в антиспам базу. При включённой проверке он будет исключаться при входе в ваши группы."
+            f"✅ Пользователь {target.id} добавлен в антиспам базу.{extra}"
+            " При включённой проверке он будет исключаться при входе в ваши группы."
+            f"{tail}",
+            parse_mode="Markdown" if tail else None,
         )
         await _try_delete_quiet(message.bot, message.chat.id, message.message_id)
         await _try_delete_quiet(message.bot, bot_reply.chat.id, bot_reply.message_id)
     else:
-        await message.reply(f"Пользователь {target.id} уже был в антиспам базе.")
+        if kicked:
+            bot_reply = await message.reply(
+                f"Пользователь {target.id} уже был в антиспам базе. Исключён из этой группы."
+            )
+            await _try_delete_quiet(message.bot, message.chat.id, message.message_id)
+            await _try_delete_quiet(message.bot, bot_reply.chat.id, bot_reply.message_id)
+        else:
+            await message.reply(f"Пользователь {target.id} уже был в антиспам базе.")
 
 
 @router.message(
