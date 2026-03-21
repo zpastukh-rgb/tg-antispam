@@ -196,9 +196,14 @@ railway run python -m scripts.run_migration 008
 1. В том же проекте нажми **Add Service** → **GitHub Repo** → выбери тот же репозиторий.
 2. **Settings:**
    - **Root Directory:** пусто (корень).
-   - **Build Command:** `pip install -r requirements.txt` (или оставь авто).
-   - **Start Command:** `uvicorn app.api.main:app --host 0.0.0.0 --port $PORT`
-3. **Variables:** те же, что у бота: `BOT_TOKEN` (обязателен — для проверки init data и для ссылки «Добавить бота в группу» во фронте), Reference из Postgres — `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` (или один Reference `DATABASE_URL`).
+   - **Builder:** Dockerfile (не Railpack).
+   - **Start Command:** оставь **пустым**, если используешь `Dockerfile.api` (команда уже внутри образа).  
+     Если без отдельного Dockerfile — тогда полная строка:  
+     `uvicorn app.api.main:app --host 0.0.0.0 --port $PORT`  
+     (недостаточно одного слова `uvicorn` — иначе будет `Usage: uvicorn [OPTIONS] APP`).
+3. **Variables:**
+   - **`RAILWAY_DOCKERFILE_PATH`** = `Dockerfile.api` — иначе подтянется корневой `Dockerfile` с ботом, а не uvicorn.
+   - Как у бота: `BOT_TOKEN` (обязателен для init data и ссылок во фронте), Postgres: `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` (или Reference `DATABASE_URL`).
 4. **Settings** → **Networking** → **Generate Domain.** Запомни URL API, например: `https://tg-antispam-api-production-xxxx.up.railway.app`
 
 ---

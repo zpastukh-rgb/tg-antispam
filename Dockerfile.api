@@ -1,0 +1,15 @@
+# Бэкенд Mini App (FastAPI). Для сервиса API на Railway:
+# Variables → RAILWAY_DOCKERFILE_PATH = Dockerfile.api
+# Start Command оставь пустым (используется CMD ниже).
+FROM python:3.11-slim
+
+WORKDIR /app
+ENV PYTHONPATH=/app
+
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . /app
+
+# Railway подставляет PORT в рантайме; в exec-форме JSON переменные не раскрываются — shell:
+CMD ["sh", "-c", "exec uvicorn app.api.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
