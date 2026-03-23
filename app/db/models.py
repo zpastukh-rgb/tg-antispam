@@ -450,6 +450,22 @@ class PromoCode(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class PromoCodeRedemption(Base):
+    """Один пользователь (telegram_id) — не более одной активации данного промокода."""
+
+    __tablename__ = "promo_code_redemptions"
+    __table_args__ = (
+        UniqueConstraint("promo_code_id", "telegram_user_id", name="uq_promo_code_user"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    promo_code_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("promo_codes.id", ondelete="CASCADE"), index=True
+    )
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    redeemed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 # =========================================================
 # PAYMENT (история оплат, задел под интеграцию)
 # =========================================================

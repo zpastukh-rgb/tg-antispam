@@ -8,7 +8,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from datetime import datetime, timezone, timedelta
 
-from app.db.models import Chat, Rule, UserContext, ChatManager, StopWord, ProfanityWord, PromoCode, User
+from app.db.models import (
+    Chat,
+    Rule,
+    UserContext,
+    ChatManager,
+    StopWord,
+    ProfanityWord,
+    PromoCode,
+    PromoCodeRedemption,
+    User,
+)
 from app.services.user_service import get_or_create_user, can_add_chat, TARIFF_CHAT_LIMITS
 
 
@@ -164,9 +174,13 @@ async def remove_profanity(session: AsyncSession, word: str) -> bool:
 async def apply_promo_code(session: AsyncSession, user_id: int, code: str) -> tuple[bool, str]:
     """
     Активировать промокод для пользователя.
+    Каждый пользователь (telegram_id) может активировать один и тот же код только один раз;
+    другие пользователи тот же код активируют независимо.
     Returns: (success, message).
     """
     from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError
+
     code_clean = (code or "").strip().upper()
     if not code_clean:
         return False, "Введите промокод"
@@ -174,21 +188,36 @@ async def apply_promo_code(session: AsyncSession, user_id: int, code: str) -> tu
     promo = res.scalar_one_or_none()
     if not promo:
         return False, "Промокод не найден"
-    if promo.used_at is not None:
-        return False, "Промокод уже использован"
     res_user = await session.execute(select(User).where(User.telegram_id == user_id).limit(1))
     user = res_user.scalar_one_or_none()
     if not user:
         return False, "Пользователь не найден"
+
+    res_red = await session.execute(
+        select(PromoCodeRedemption)
+        .where(
+            PromoCodeRedemption.promo_code_id == promo.id,
+            PromoCodeRedemption.telegram_user_id == user_id,
+        )
+        .limit(1)
+    )
+    if res_red.scalar_one_or_none():
+        return False, "Вы уже активировали этот промокод"
+
     user.tariff = promo.tariff or "premium"
+    now = datetime.now(timezone.utc)
     if promo.days and promo.days > 0:
-        user.subscription_until = datetime.now(timezone.utc) + timedelta(days=promo.days)
+        base = user.subscription_until if user.subscription_until and user.subscription_until > now else now
+        user.subscription_until = base + timedelta(days=promo.days)
     else:
         user.subscription_until = None  # бессрочно
     user.chat_limit = TARIFF_CHAT_LIMITS.get(user.tariff, 20)
-    promo.used_at = datetime.now(timezone.utc)
-    promo.used_by_user_id = user_id
-    await session.commit()
+    session.add(PromoCodeRedemption(promo_code_id=promo.id, telegram_user_id=user_id))
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        return False, "Вы уже активировали этот промокод"
     days_msg = f" на {promo.days} дн." if promo.days else ""
     return True, f"Premium активирован{days_msg}"
 

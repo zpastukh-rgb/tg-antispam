@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
-from app.db.models import User, Chat, Rule, ProfanityWord, PromoCode
+from app.db.models import User, Chat, Rule, ProfanityWord, PromoCode, PromoCodeRedemption
 from app.services.user_service import get_or_create_user, can_add_chat, count_protected_chats, TARIFF_CHAT_LIMITS
 from app.api.service import (
     list_profanity,
@@ -77,6 +77,34 @@ async def test_apply_promo_code_success(db_session):
     assert user.tariff == "premium"
     assert user.subscription_until is not None
     assert user.chat_limit == 20
+
+
+@pytest.mark.asyncio
+async def test_apply_promo_code_same_user_twice_fails(db_session):
+    await get_or_create_user(db_session, 777)
+    promo = PromoCode(code="TRIAL3", tariff="premium", days=3)
+    db_session.add(promo)
+    await db_session.commit()
+    ok1, _ = await apply_promo_code(db_session, 777, "TRIAL3")
+    assert ok1 is True
+    ok2, msg2 = await apply_promo_code(db_session, 777, "TRIAL3")
+    assert ok2 is False
+    assert "уже" in msg2.lower()
+
+
+@pytest.mark.asyncio
+async def test_apply_promo_code_two_different_users_same_code(db_session):
+    await get_or_create_user(db_session, 601)
+    await get_or_create_user(db_session, 602)
+    promo = PromoCode(code="TRIAL3", tariff="premium", days=3)
+    db_session.add(promo)
+    await db_session.commit()
+    ok_a, _ = await apply_promo_code(db_session, 601, "TRIAL3")
+    ok_b, _ = await apply_promo_code(db_session, 602, "TRIAL3")
+    assert ok_a is True
+    assert ok_b is True
+    res = await db_session.execute(select(PromoCodeRedemption))
+    assert len(list(res.scalars().all())) == 2
 
 
 @pytest.mark.asyncio
