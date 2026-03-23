@@ -78,4 +78,5 @@ export const api = {
   profanityAdd: (word) => api.post('/api/profanity', { word }),
   profanityRemove: (word) => api.delete(`/api/profanity/${encodeURIComponent(word)}`),
   promoApply: (code) => api.post('/api/promo/apply', { code }),
+  yookassaCreatePayment: (months) => api.post('/api/payments/yookassa/create', { months }),
 }

@@ -8,6 +8,7 @@ const { showToast } = useToast()
 const billing = ref(null)
 const promoCode = ref('')
 const promoLoading = ref(false)
+const payLoadingMonths = ref(null)
 
 // Тарифы Guardian Premium (кнопки оплаты пока без перехода) + тест 3 дня по промокоду
 const PREMIUM_PLANS = [
@@ -22,6 +23,30 @@ const tariffLabel = computed(() => {
   const t = (billing.value?.tariff || 'free').toLowerCase()
   return ['premium', 'pro', 'business'].includes(t) ? 'PREMIUM' : 'FREE'
 })
+
+async function startPayment(months) {
+  payLoadingMonths.value = months
+  try {
+    const r = await fetch(() => api.yookassaCreatePayment(months))
+    const url = r?.confirmation_url
+    if (!url) {
+      showToast('Нет ссылки на оплату')
+      return
+    }
+    const tg = window.Telegram?.WebApp
+    if (typeof tg?.openLink === 'function') {
+      tg.openLink(url, { try_instant_view: false })
+    } else {
+      window.open(url, '_blank', 'noopener,noreferrer')
+    }
+    showToast('Откроется страница оплаты')
+  } catch (e) {
+    const msg = e?.body?.detail || e?.message || 'Ошибка создания платежа'
+    showToast(typeof msg === 'string' ? msg : 'Ошибка создания платежа')
+  } finally {
+    payLoadingMonths.value = null
+  }
+}
 
 async function applyPromo() {
   const code = (promoCode.value || '').trim()
@@ -105,14 +130,17 @@ onMounted(async () => {
             v-for="plan in PREMIUM_PLANS"
             :key="plan.months"
             type="button"
-            disabled
-            class="flex items-center justify-between rounded-xl border border-primary-300 bg-white px-4 py-3 text-left text-sm font-medium text-gray-800 dark:border-primary-700 dark:bg-gray-800 dark:text-gray-200 disabled:cursor-default disabled:opacity-90"
+            :disabled="payLoadingMonths !== null"
+            class="flex items-center justify-between rounded-xl border border-primary-300 bg-white px-4 py-3 text-left text-sm font-medium text-gray-800 transition hover:bg-primary-50 dark:border-primary-700 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-primary-900/20 disabled:cursor-wait disabled:opacity-70"
+            @click="startPayment(plan.months)"
           >
             <span><span class="mr-1.5">{{ plan.icon }}</span>{{ plan.label }} — {{ plan.price }}</span>
             <span v-if="plan.savings" class="text-xs text-primary-600 dark:text-primary-400">Экономия {{ plan.savings }}</span>
           </button>
         </div>
-        <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">Оплата будет подключена в следующей версии.</p>
+        <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">
+          Оплата через ЮKassa. После оплаты подписка продлится автоматически; при необходимости обновите экран.
+        </p>
 
         <div class="mt-6 rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
           <h3 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">🎁 Промокод / Premium на 3 дня</h3>

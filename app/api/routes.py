@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import secrets
 from datetime import datetime, timezone
 
 import aiohttp
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,6 +36,7 @@ from app.db.models import Chat, Rule
 from app.services.user_service import get_or_create_user, can_add_chat
 
 router = APIRouter(prefix="/api", tags=["webapp"])
+_log = logging.getLogger(__name__)
 
 # Кэш username бота для ссылки «Добавить в группу»
 _bot_username: str | None = None
@@ -402,6 +405,64 @@ async def api_promo_apply(
     if not success:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=message)
     return {"ok": True, "message": message}
+
+
+# ---------- POST /api/payments/yookassa/create ----------
+@router.post("/payments/yookassa/create")
+async def api_yookassa_create_payment(
+    body: dict,
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Создать платёж ЮKassa. Body: { \"months\": 1|3|6|12|24 }. Ответ: { \"confirmation_url\": \"...\" }."""
+    from app.services.payments_yookassa import create_yookassa_subscription_payment, yookassa_configured
+
+    if not yookassa_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Платежи не настроены",
+        )
+    raw = body.get("months")
+    try:
+        months = int(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="months required")
+    try:
+        url = await create_yookassa_subscription_payment(session, user_id, months)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Недопустимый период")
+    except RuntimeError as e:
+        _log.exception("YooKassa create failed")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(e) or "Ошибка платёжной системы",
+        ) from e
+    return {"confirmation_url": url}
+
+
+# ---------- POST /api/webhooks/yookassa/:secret (без initData) ----------
+@router.post("/webhooks/yookassa/{secret_token}")
+async def api_yookassa_webhook(
+    secret_token: str,
+    request: Request,
+    session: AsyncSession = Depends(get_db),
+):
+    """Входящие уведомления ЮKassa. URL с секретом задаётся в личном кабинете."""
+    expected = os.getenv("YOOKASSA_WEBHOOK_SECRET")
+    if not expected or not secrets.compare_digest(secret_token, expected):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid json")
+    from app.services.payments_yookassa import process_yookassa_webhook
+
+    try:
+        await process_yookassa_webhook(session, body)
+    except Exception:
+        _log.exception("YooKassa webhook handler failed")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="retry")
+    return {"ok": True}
 
 
 # ---------- GET /api/profanity ----------

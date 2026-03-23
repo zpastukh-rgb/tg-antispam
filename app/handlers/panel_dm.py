@@ -1612,7 +1612,7 @@ async def cb_promo_enter(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith(CB_PLAN))
 async def cb_plan_select(cb: CallbackQuery):
-    """Выбор периода подписки (1, 3, 6, 12, 24 мес). Пока заглушка оплаты."""
+    """Выбор периода подписки (1, 3, 6, 12, 24 мес): ЮKassa или заглушка."""
     await cb.answer()
     if cb.data == CB_PLAN_COMPARE:
         await _send_premium_screen(cb.bot, cb.from_user.id)
@@ -1622,9 +1622,43 @@ async def cb_plan_select(cb: CallbackQuery):
     except ValueError:
         return
     plan_label = next((p[1].split("\n")[0] for p in PREMIUM_PLANS if p[0] == months), f"{months} мес")
+
+    from app.services.payments_yookassa import create_yookassa_subscription_payment, yookassa_configured
+
+    if yookassa_configured():
+        try:
+            async with await get_session() as session:
+                pay_url = await create_yookassa_subscription_payment(
+                    session,
+                    cb.from_user.id,
+                    months,
+                    username=cb.from_user.username,
+                    first_name=cb.from_user.first_name,
+                )
+        except ValueError:
+            await cb.message.answer("Недопустимый тариф.")
+            return
+        except Exception:
+            logger.exception("YooKassa create from bot panel")
+            await cb.message.answer(
+                "Не удалось создать платёж. Попробуйте позже или откройте мини-приложение → Тариф и оплата."
+            )
+            return
+        txt = (
+            f"💳 *{plan_label}*\n\n"
+            "Нажми кнопку ниже — откроется страница оплаты ЮKassa.\n"
+            "После успешной оплаты Premium включится автоматически в течение нескольких секунд."
+        )
+        kb = InlineKeyboardBuilder()
+        kb.button(text="Перейти к оплате", url=pay_url)
+        kb.button(text="⬅️ К тарифам", callback_data=CB_BILLING)
+        kb.adjust(1)
+        await _edit_or_send(cb, txt, kb.as_markup())
+        return
+
     txt = (
         f"💳 *{plan_label}*\n\n"
-        "Оплата будет подключена в следующей версии.\n"
+        "Оплата в боте не настроена (нет ключей ЮKassa в окружении).\n"
         "Сейчас можно оформить подписку через @pastukh_viscera."
     )
     kb = InlineKeyboardBuilder()
