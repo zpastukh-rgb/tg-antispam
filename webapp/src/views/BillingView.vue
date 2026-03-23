@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
+import { formatDateTimeRu } from '../utils/formatDateTime'
 
 const { api, loading, error, fetch, hasInitData } = useApi()
 const { showToast } = useToast()
@@ -23,6 +24,8 @@ const tariffLabel = computed(() => {
   const t = (billing.value?.tariff || 'free').toLowerCase()
   return ['premium', 'pro', 'business'].includes(t) ? 'PREMIUM' : 'FREE'
 })
+
+const subscriptionUntilLabel = computed(() => formatDateTimeRu(billing.value?.subscription_until))
 
 async function startPayment(months) {
   payLoadingMonths.value = months
@@ -104,7 +107,7 @@ onMounted(async () => {
           </div>
           <div>
             <dt class="text-gray-500 dark:text-gray-400">Подписка до</dt>
-            <dd class="font-medium text-gray-900 dark:text-white">{{ billing.subscription_until || '—' }}</dd>
+            <dd class="font-medium text-gray-900 dark:text-white">{{ subscriptionUntilLabel }}</dd>
           </div>
         </dl>
       </div>

@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
+import { formatDateTimeRu } from '../utils/formatDateTime'
 
 const router = useRouter()
 const { api, loading, error, fetch, hasInitData } = useApi()
@@ -11,6 +12,8 @@ const tariffLabel = computed(() => {
   const t = (me.value?.tariff || 'free').toLowerCase()
   return ['premium', 'pro', 'business'].includes(t) ? 'PREMIUM' : 'FREE'
 })
+
+const subscriptionUntilLabel = computed(() => formatDateTimeRu(me.value?.subscription_until))
 
 onMounted(async () => {
   if (!hasInitData.value) return
@@ -49,7 +52,7 @@ function goToConnect() {
           <dt class="text-gray-500 dark:text-gray-400">Подключено чатов</dt>
           <dd class="font-medium text-gray-900 dark:text-white">{{ me.chats_count }} / {{ me.chat_limit }}</dd>
           <dt class="text-gray-500 dark:text-gray-400">Подписка до</dt>
-          <dd class="font-medium text-gray-900 dark:text-white">{{ me.subscription_until || '—' }}</dd>
+          <dd class="font-medium text-gray-900 dark:text-white">{{ subscriptionUntilLabel }}</dd>
         </dl>
         <p class="mt-4 border-t border-gray-200 pt-4 dark:border-gray-600">
           <button
