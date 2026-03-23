@@ -191,6 +191,19 @@ async def _fulfill_payment(session: AsyncSession, yookassa_id: str, payment_obj:
     row.status = "succeeded"
     await session.commit()
 
+    try:
+        from app.texts.guardian_billing import build_premium_payment_success_text
+        from app.services.telegram_notify import send_user_dm
+
+        text = build_premium_payment_success_text(
+            months=row.months,
+            amount_rub=float(row.amount),
+            subscription_until=user.subscription_until,
+        )
+        await send_user_dm(user.telegram_id, text)
+    except Exception:
+        log.exception("YooKassa: failed to notify user telegram_id=%s after payment", user.telegram_id)
+
 
 async def _mark_payment_canceled(session: AsyncSession, yookassa_id: str) -> None:
     res = await session.execute(select(Payment).where(Payment.payment_id == yookassa_id).limit(1))

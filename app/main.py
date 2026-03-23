@@ -114,6 +114,14 @@ async def on_startup() -> None:
         await bot.set_my_commands(GROUP_ADMIN_COMMANDS, scope=BotCommandScopeAllChatAdministrators())
     except Exception:
         pass
+    # Описание в профиле бота (как в BotFather /setdescription и краткое для поиска)
+    try:
+        from app.texts.bot_intro import BOT_TELEGRAM_DESCRIPTION, BOT_TELEGRAM_SHORT_DESCRIPTION
+
+        await bot.set_my_description(BOT_TELEGRAM_DESCRIPTION)
+        await bot.set_my_short_description(BOT_TELEGRAM_SHORT_DESCRIPTION)
+    except Exception:
+        pass
 
 
 async def main() -> None:

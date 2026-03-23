@@ -7,6 +7,6 @@
     @apply antialiased;
   }
   body {
-    @apply bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100 min-h-screen;
+    @apply min-h-screen bg-[#f2f4ef] text-guardian-ink dark:bg-guardian-surface dark:text-gray-100;
   }
 }

@@ -1,6 +1,10 @@
 # app/texts/guardian_billing.py
 """Полный пакет текстов Guardian Premium: подписка, кнопки оплаты, напоминания, блокировки."""
 
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 🛡 ОПИСАНИЕ ПОДПИСКИ (экран выбора периода)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -48,6 +52,69 @@ PREMIUM_ACTIVATED = (
     "📡 До 20 чатов\n\n"
     "Guardian усилил защиту группы."
 )
+
+_MONTHS_GENITIVE = (
+    "января",
+    "февраля",
+    "марта",
+    "апреля",
+    "мая",
+    "июня",
+    "июля",
+    "августа",
+    "сентября",
+    "октября",
+    "ноября",
+    "декабря",
+)
+
+
+def format_subscription_until_ru(dt: datetime | None) -> str:
+    """Дата окончания подписки для текста пользователю (UTC)."""
+    if dt is None:
+        return "—"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return (
+        f"{dt.day} {_MONTHS_GENITIVE[dt.month - 1]} {dt.year}, "
+        f"{dt.strftime('%H:%M')} UTC"
+    )
+
+
+def months_period_label_ru(n: int) -> str:
+    """«1 месяц» / «3 месяца» / «12 месяцев»."""
+    n = int(n)
+    if n == 1:
+        return "1 месяц"
+    if 2 <= n <= 4:
+        return f"{n} месяца"
+    return f"{n} месяцев"
+
+
+def build_premium_payment_success_text(
+    *,
+    months: int,
+    amount_rub: float,
+    subscription_until: datetime | None,
+) -> str:
+    """Сообщение в ЛС после успешной оплаты ЮKassa (Markdown как в остальном боте)."""
+    period = months_period_label_ru(months)
+    until = format_subscription_until_ru(subscription_until)
+    ar = float(amount_rub)
+    amt = str(int(ar)) if ar == int(ar) else f"{ar:.2f}"
+    return (
+        "✅ *Оплата прошла успешно*\n\n"
+        f"Включён тариф *Guardian Premium* на *{period}*\n"
+        f"Сумма: *{amt}* ₽\n"
+        f"Подписка действует до: *{until}*\n\n"
+        "Теперь доступны:\n"
+        "⚔ анти-рейд · 👶 режим новичков · 🔕 тишина\n"
+        "📊 расширенные фильтры · 📡 до *20 чатов*\n\n"
+        "Панель: `/panel` или мини-приложение Telegram."
+    )
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 🚫 ПЛАТНАЯ ФУНКЦИЯ (анти-рейд, новички и т.д.) — заглушка

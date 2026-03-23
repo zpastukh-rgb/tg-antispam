@@ -42,7 +42,7 @@ function goToConnect() {
     </div>
 
     <div v-else-if="me" class="space-y-4">
-      <div class="rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-700 dark:bg-gray-800">
+      <div class="rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-guardian-elevated-hi dark:bg-guardian-elevated">
         <p class="mb-4 text-gray-600 dark:text-gray-400">
           Добро пожаловать в панель AntiSpam Guardian. Выберите раздел в меню слева.
         </p>
@@ -54,10 +54,10 @@ function goToConnect() {
           <dt class="text-gray-500 dark:text-gray-400">Подписка до</dt>
           <dd class="font-medium text-gray-900 dark:text-white">{{ subscriptionUntilLabel }}</dd>
         </dl>
-        <p class="mt-4 border-t border-gray-200 pt-4 dark:border-gray-600">
+        <p class="mt-4 border-t border-gray-200 pt-4 dark:border-guardian-elevated-hi">
           <button
             type="button"
-            class="inline-flex items-center gap-2 rounded-xl bg-primary-500 px-5 py-3 font-medium text-white shadow-sm transition hover:bg-primary-600"
+            class="inline-flex items-center gap-2 rounded-xl bg-primary-500 px-5 py-3 font-semibold text-guardian-ink shadow-sm shadow-primary-500/25 transition hover:bg-primary-400"
             @click="goToConnect"
           >
             Добавить бота в новую группу
@@ -66,7 +66,7 @@ function goToConnect() {
       </div>
     </div>
 
-    <div v-else-if="loading" class="rounded-xl border border-gray-200 bg-white p-8 text-center dark:border-gray-700 dark:bg-gray-800">
+    <div v-else-if="loading" class="rounded-xl border border-gray-200 bg-white p-8 text-center dark:border-guardian-elevated-hi dark:bg-guardian-elevated">
       <span class="text-gray-500 dark:text-gray-400">Загрузка…</span>
     </div>
   </div>

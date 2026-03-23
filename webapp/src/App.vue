@@ -16,7 +16,7 @@ function closeSidebar() {
 </script>
 
 <template>
-  <div class="min-h-screen bg-gray-50 dark:bg-gray-900">
+  <div class="min-h-screen bg-[#f2f4ef] dark:bg-guardian-surface">
     <AppToast />
     <AppHeader :sidebar-open="sidebarOpen" @menu-click="openMenu" />
     <AppSidebar :open="sidebarOpen" @close="closeSidebar" />

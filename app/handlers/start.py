@@ -10,6 +10,8 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from app.texts.bot_intro import START_INTRO_TEXT
+
 router = Router()
 
 # =========================================================
@@ -79,17 +81,7 @@ def _cache_get(user_id: int) -> Optional[int]:
 # TEXTS
 # =========================================================
 
-START_TEXT = (
-    "😈 *AntiSpam Guardian*\n\n"
-    "Я не разговариваю.\n"
-    "Я *удаляю спам.*\n\n"
-    "⚡ *Подключение занимает 30 секунд:*\n\n"
-    "1️⃣ Добавь меня в группу\n"
-    "2️⃣ Дай админку: ✅ *Удалять сообщения*\n"
-    "3️⃣ Напиши в группе:\n"
-    "`/check`\n\n"
-    "🧨 После этого чат появится в панели."
-)
+START_TEXT = START_INTRO_TEXT
 
 CONNECT_TEXT = (
     "➕ *Подключение защиты*\n\n"

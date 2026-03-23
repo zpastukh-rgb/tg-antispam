@@ -227,7 +227,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
       <p class="text-gray-600 dark:text-gray-400">Сначала выберите чат в разделе «Подключённые чаты».</p>
       <button
         type="button"
-        class="mt-4 rounded-lg bg-primary-500 px-4 py-2 text-sm font-medium text-white hover:bg-primary-600"
+        class="mt-4 rounded-lg bg-primary-500 px-4 py-2 text-sm font-semibold text-guardian-ink hover:bg-primary-400"
         @click="router.push('/chats')"
       >
         К списку чатов
@@ -247,7 +247,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
         <div class="flex flex-wrap gap-2">
           <button
             type="button"
-            :class="chat.rule.master_anti_spam ? 'bg-primary-500 text-white' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+            :class="chat.rule.master_anti_spam ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
             class="rounded-lg px-3 py-1.5 text-sm"
             @click="updateRule({ master_anti_spam: !chat.rule.master_anti_spam })"
           >
@@ -267,7 +267,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
                 v-for="opt in policyOptions"
                 :key="opt.value"
                 type="button"
-                :class="chat.rule.filter_links_mode === opt.value ? 'bg-primary-500 text-white' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+                :class="chat.rule.filter_links_mode === opt.value ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
                 class="rounded-lg px-3 py-1.5 text-sm"
                 @click="updateRule({ filter_links_mode: opt.value })"
               >
@@ -282,7 +282,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
                 v-for="opt in policyOptions"
                 :key="opt.value"
                 type="button"
-                :class="chat.rule.filter_media_mode === opt.value ? 'bg-primary-500 text-white' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+                :class="chat.rule.filter_media_mode === opt.value ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
                 class="rounded-lg px-3 py-1.5 text-sm"
                 @click="updateRule({ filter_media_mode: opt.value })"
               >
@@ -297,7 +297,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
                 v-for="opt in policyOptions"
                 :key="opt.value"
                 type="button"
-                :class="chat.rule.filter_buttons_mode === opt.value ? 'bg-primary-500 text-white' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+                :class="chat.rule.filter_buttons_mode === opt.value ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
                 class="rounded-lg px-3 py-1.5 text-sm"
                 @click="updateRule({ filter_buttons_mode: opt.value })"
               >
@@ -309,7 +309,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
             <span class="text-sm text-gray-600 dark:text-gray-400">Удалять сообщения «вступил в группу»</span>
             <button
               type="button"
-              :class="chat.rule.delete_join_messages ? 'bg-primary-500 text-white' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+              :class="chat.rule.delete_join_messages ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
               class="rounded-lg px-3 py-1.5 text-sm"
               @click="updateRule({ delete_join_messages: !chat.rule.delete_join_messages })"
             >
@@ -323,7 +323,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
                 v-for="p in silencePresets"
                 :key="p.value"
                 type="button"
-                :class="(chat.rule.silence_minutes || 0) === p.value ? 'bg-primary-500 text-white' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+                :class="(chat.rule.silence_minutes || 0) === p.value ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
                 class="rounded-lg px-3 py-1.5 text-sm"
                 :disabled="!isPremium"
                 @click="isPremium && updateRule({ silence_minutes: p.value })"
@@ -347,7 +347,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
             />
             <button
               type="button"
-              class="rounded-lg bg-primary-500 px-4 py-2 text-sm font-medium text-white hover:bg-primary-600 disabled:opacity-50"
+              class="rounded-lg bg-primary-500 px-4 py-2 text-sm font-semibold text-guardian-ink hover:bg-primary-400 disabled:opacity-50"
               :disabled="stopwordLoading || !(newStopword || '').trim()"
               @click="addStopword()"
             >
@@ -384,7 +384,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
             <span class="text-sm text-gray-600 dark:text-gray-400">Включить фильтр мата</span>
             <button
               type="button"
-              :class="chat.rule.filter_profanity_enabled ? 'bg-primary-500 text-white' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+              :class="chat.rule.filter_profanity_enabled ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
               class="rounded-lg px-3 py-1.5 text-sm"
               @click="updateRule({ filter_profanity_enabled: !chat.rule.filter_profanity_enabled })"
             >
@@ -402,7 +402,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
             />
             <button
               type="button"
-              class="rounded-lg bg-primary-500 px-4 py-2 text-sm font-medium text-white hover:bg-primary-600 disabled:opacity-50"
+              class="rounded-lg bg-primary-500 px-4 py-2 text-sm font-semibold text-guardian-ink hover:bg-primary-400 disabled:opacity-50"
               :disabled="profanityLoading || !(newProfanityWord || '').trim()"
               @click="addProfanityWord()"
             >
@@ -444,7 +444,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
                 v-for="opt in actionOptions"
                 :key="opt.value"
                 type="button"
-                :class="chat.rule.action_mode === opt.value ? 'bg-primary-500 text-white' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+                :class="chat.rule.action_mode === opt.value ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
                 class="rounded-lg px-3 py-1.5 text-sm"
                 @click="updateRule({ action_mode: opt.value })"
               >
@@ -459,7 +459,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
                 v-for="m in mutePresets"
                 :key="m"
                 type="button"
-                :class="chat.rule.mute_minutes === m ? 'bg-primary-500 text-white' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+                :class="chat.rule.mute_minutes === m ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
                 class="rounded-lg px-3 py-1.5 text-sm"
                 @click="updateRule({ mute_minutes: m })"
               >
@@ -481,7 +481,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
             <span class="text-sm text-gray-600 dark:text-gray-400">Включить</span>
             <button
               type="button"
-              :class="chat.rule.antinakrutka_enabled ? 'bg-primary-500 text-white' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+              :class="chat.rule.antinakrutka_enabled ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
               class="rounded-lg px-3 py-1.5 text-sm"
               :disabled="!isPremium"
               @click="isPremium && updateRule({ antinakrutka_enabled: !chat.rule.antinakrutka_enabled })"
@@ -496,7 +496,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
                 v-for="n in antinakrutkaThresholdPresets"
                 :key="n"
                 type="button"
-                :class="(chat.rule.antinakrutka_joins_threshold || 10) === n ? 'bg-primary-500 text-white' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+                :class="(chat.rule.antinakrutka_joins_threshold || 10) === n ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
                 class="rounded-lg px-3 py-1.5 text-sm"
                 @click="updateRule({ antinakrutka_joins_threshold: n })"
               >
@@ -509,7 +509,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
                 v-for="w in antinakrutkaWindowPresets"
                 :key="w"
                 type="button"
-                :class="(chat.rule.antinakrutka_window_minutes || 5) === w ? 'bg-primary-500 text-white' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+                :class="(chat.rule.antinakrutka_window_minutes || 5) === w ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
                 class="rounded-lg px-3 py-1.5 text-sm"
                 @click="updateRule({ antinakrutka_window_minutes: w })"
               >
@@ -522,7 +522,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
                 v-for="opt in antinakrutkaActionOptions"
                 :key="opt.value"
                 type="button"
-                :class="(chat.rule.antinakrutka_action || 'alert') === opt.value ? 'bg-primary-500 text-white' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+                :class="(chat.rule.antinakrutka_action || 'alert') === opt.value ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
                 class="rounded-lg px-3 py-1.5 text-sm"
                 @click="updateRule({ antinakrutka_action: opt.value })"
               >
@@ -536,7 +536,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
                   v-for="r in antinakrutkaRestrictPresets"
                   :key="r"
                   type="button"
-                  :class="(chat.rule.antinakrutka_restrict_minutes || 30) === r ? 'bg-primary-500 text-white' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+                  :class="(chat.rule.antinakrutka_restrict_minutes || 30) === r ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
                   class="rounded-lg px-3 py-1.5 text-sm"
                   @click="updateRule({ antinakrutka_restrict_minutes: r })"
                 >
@@ -562,7 +562,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
             <span class="text-sm text-gray-600 dark:text-gray-400">Проверять при входе в этот чат</span>
             <button
               type="button"
-              :class="chat.rule.use_global_antispam_db ? 'bg-primary-500 text-white' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+              :class="chat.rule.use_global_antispam_db ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
               class="rounded-lg px-3 py-1.5 text-sm"
               :disabled="!isPremium"
               @click="isPremium && updateRule({ use_global_antispam_db: !chat.rule.use_global_antispam_db })"
@@ -582,7 +582,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
             />
             <button
               type="button"
-              class="rounded-lg bg-primary-500 px-4 py-2 text-sm font-medium text-white hover:bg-primary-600 disabled:opacity-50"
+              class="rounded-lg bg-primary-500 px-4 py-2 text-sm font-semibold text-guardian-ink hover:bg-primary-400 disabled:opacity-50"
               :disabled="antispamLoading || !(newAntispamUserId || '').trim()"
               @click="addAntispamUser()"
             >
@@ -623,7 +623,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
           :href="`https://t.me/${botUsername}?start=cleandeleted_${chat.id}`"
           target="_blank"
           rel="noopener noreferrer"
-          class="inline-flex items-center gap-2 rounded-xl bg-primary-500 px-4 py-3 font-medium text-white shadow-sm transition hover:bg-primary-600"
+          class="inline-flex items-center gap-2 rounded-xl bg-primary-500 px-4 py-3 font-semibold text-guardian-ink shadow-sm shadow-primary-500/20 transition hover:bg-primary-400"
           @click="openCleanDeleted"
         >
           Запустить очистку
@@ -655,7 +655,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
           </select>
           <button
             type="button"
-            class="rounded-lg bg-primary-500 px-4 py-2 text-sm font-medium text-white hover:bg-primary-600 disabled:opacity-50"
+            class="rounded-lg bg-primary-500 px-4 py-2 text-sm font-semibold text-guardian-ink hover:bg-primary-400 disabled:opacity-50"
             :disabled="copyLoading || !copyTargetId || String(copyTargetId) === String(chat?.id) || (!isPremium && (chatsList || []).length > 1)"
             @click="(isPremium || (chatsList || []).length <= 1) && doCopySettings()"
           >
@@ -672,7 +672,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
             <span class="text-sm text-gray-600 dark:text-gray-400">Режим новичков</span>
             <button
               type="button"
-              :class="chat.rule.newbie_enabled ? 'bg-primary-500 text-white' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+              :class="chat.rule.newbie_enabled ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
               class="rounded-lg px-3 py-1.5 text-sm"
               :disabled="!isPremium"
               @click="isPremium && updateRule({ newbie_enabled: !chat.rule.newbie_enabled })"
@@ -687,7 +687,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
                 v-for="m in newbiePresets"
                 :key="m"
                 type="button"
-                :class="chat.rule.newbie_minutes === m ? 'bg-primary-500 text-white' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+                :class="chat.rule.newbie_minutes === m ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
                 class="rounded-lg px-3 py-1.5 text-sm"
                 @click="updateRule({ newbie_minutes: m })"
               >

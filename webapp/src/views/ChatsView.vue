@@ -72,7 +72,7 @@ function goToReports(chatId) {
         <div class="flex flex-wrap gap-2">
           <button
             type="button"
-            class="rounded-lg bg-primary-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-600"
+            class="rounded-lg bg-primary-500 px-3 py-1.5 text-sm font-semibold text-guardian-ink hover:bg-primary-400"
             @click="goToProtection(chat.id)"
           >
             Защита

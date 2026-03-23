@@ -15,8 +15,7 @@ const { message, visible } = useToast()
       <div
         class="w-full max-w-md rounded-lg px-4 py-3 shadow-lg md:rounded-xl md:py-3.5"
         :class="[
-          'bg-gray-800 text-white dark:bg-gray-700',
-          'border border-gray-700 dark:border-gray-600',
+          'border border-guardian-elevated-hi bg-guardian-elevated text-white shadow-glow-cyan dark:bg-guardian-elevated-hi',
         ]"
       >
         <p class="text-center text-sm font-medium text-white md:text-base">

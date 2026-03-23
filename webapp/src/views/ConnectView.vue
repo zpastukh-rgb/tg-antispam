@@ -67,7 +67,7 @@ function openAddToGroup() {
         <div v-if="addToGroupUrl" class="flex flex-wrap gap-3">
           <button
             type="button"
-            class="inline-flex items-center gap-2 rounded-xl bg-primary-500 px-5 py-3 font-medium text-white shadow-sm transition hover:bg-primary-600"
+            class="inline-flex items-center gap-2 rounded-xl bg-primary-500 px-5 py-3 font-semibold text-guardian-ink shadow-sm shadow-primary-500/25 transition hover:bg-primary-400"
             @click="openAddToGroup"
           >
             Открыть чат с ботом

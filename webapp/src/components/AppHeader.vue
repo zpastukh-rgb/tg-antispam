@@ -14,6 +14,9 @@ defineProps({
 
 const emit = defineEmits(['menu-click'])
 
+/** С base: './' в Vite публичные файлы через BASE_URL */
+const logoSrc = `${import.meta.env.BASE_URL}avatar.png`
+
 const showBack = computed(() => route.path !== '/' && route.path !== '')
 
 function goBack() {
@@ -26,7 +29,9 @@ function goBack() {
 </script>
 
 <template>
-  <header class="sticky top-0 z-30 flex h-14 items-center justify-between border-b border-gray-200 bg-white px-4 dark:border-gray-700 dark:bg-gray-800 md:px-6">
+  <header
+    class="sticky top-0 z-30 flex h-14 items-center justify-between border-b border-gray-200/80 bg-white/95 px-4 shadow-sm shadow-primary-500/5 backdrop-blur-sm dark:border-guardian-elevated-hi dark:bg-guardian-elevated/95 md:px-6"
+  >
     <div class="flex items-center gap-3">
       <button
         v-if="showBack"
@@ -46,11 +51,15 @@ function goBack() {
       >
         <NavIcon name="menu" class="w-5 h-5" />
       </button>
-      <a href="#" class="flex items-center gap-2" @click.prevent="router.push('/')">
-        <span class="flex h-9 w-9 items-center justify-center rounded-lg bg-primary-500 text-white shadow-sm">
-          <NavIcon name="shield" class="w-5 h-5" />
-        </span>
-        <span class="text-lg font-semibold tracking-tight text-gray-900 dark:text-white">Guardian</span>
+      <a href="#" class="flex min-w-0 items-center gap-2.5" @click.prevent="router.push('/')">
+        <img
+          :src="logoSrc"
+          alt="AntiSpam Guardian"
+          width="36"
+          height="36"
+          class="h-9 w-9 shrink-0 rounded-lg object-cover shadow-glow-lime ring-2 ring-primary-400/50 dark:ring-primary-500/40"
+        />
+        <span class="truncate text-lg font-bold tracking-tight text-guardian-ink dark:text-white">AntiSpam Guardian</span>
       </a>
     </div>
     <button

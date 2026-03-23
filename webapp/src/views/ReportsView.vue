@@ -65,7 +65,7 @@ function openReportsChat() {
       <p class="text-gray-600 dark:text-gray-400">Выберите чат в разделе «Подключённые чаты», чтобы настроить чат отчётов.</p>
       <button
         type="button"
-        class="mt-4 rounded-lg bg-primary-500 px-4 py-2 text-sm font-medium text-white hover:bg-primary-600"
+        class="mt-4 rounded-lg bg-primary-500 px-4 py-2 text-sm font-semibold text-guardian-ink hover:bg-primary-400"
         @click="router.push('/chats')"
       >
         К списку чатов
@@ -91,7 +91,7 @@ function openReportsChat() {
         <button
           v-if="reportsChatUrl"
           type="button"
-          class="mt-3 rounded-lg bg-primary-500 px-4 py-2 text-sm font-medium text-white hover:bg-primary-600"
+          class="mt-3 rounded-lg bg-primary-500 px-4 py-2 text-sm font-semibold text-guardian-ink hover:bg-primary-400"
           @click="openReportsChat"
         >
           {{ chat.log_chat_id ? 'Сменить чат отчётов' : 'Подключить чат отчётов' }}
@@ -106,7 +106,7 @@ function openReportsChat() {
             <span class="text-sm text-gray-600 dark:text-gray-400">Отчёты в чат включены</span>
             <button
               type="button"
-              :class="chat.rule.log_enabled ? 'bg-primary-500 text-white' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+              :class="chat.rule.log_enabled ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
               class="rounded-lg px-3 py-1.5 text-sm"
               @click="updateRule({ log_enabled: !chat.rule.log_enabled })"
             >
@@ -117,7 +117,7 @@ function openReportsChat() {
             <span class="text-sm text-gray-600 dark:text-gray-400">Guardian сообщения в группе</span>
             <button
               type="button"
-              :class="chat.rule.guardian_messages_enabled ? 'bg-primary-500 text-white' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+              :class="chat.rule.guardian_messages_enabled ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
               class="rounded-lg px-3 py-1.5 text-sm"
               @click="updateRule({ guardian_messages_enabled: !chat.rule.guardian_messages_enabled })"
             >
@@ -128,7 +128,7 @@ function openReportsChat() {
             <span class="text-sm text-gray-600 dark:text-gray-400">Автоотчёты (дайджест)</span>
             <button
               type="button"
-              :class="chat.rule.auto_reports_enabled ? 'bg-primary-500 text-white' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+              :class="chat.rule.auto_reports_enabled ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
               class="rounded-lg px-3 py-1.5 text-sm"
               @click="updateRule({ auto_reports_enabled: !chat.rule.auto_reports_enabled })"
             >
