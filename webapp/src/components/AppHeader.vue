@@ -15,7 +15,7 @@ defineProps({
 const emit = defineEmits(['menu-click'])
 
 /** С base: './' в Vite публичные файлы через BASE_URL */
-const logoSrc = `${import.meta.env.BASE_URL}avatar.png`
+const logoSrc = `${import.meta.env.BASE_URL}logo.png`
 
 const showBack = computed(() => route.path !== '/' && route.path !== '')
 
@@ -55,9 +55,9 @@ function goBack() {
         <img
           :src="logoSrc"
           alt="AntiSpam Guardian"
-          width="36"
-          height="36"
-          class="h-9 w-9 shrink-0 rounded-lg object-cover shadow-glow-lime ring-2 ring-primary-400/50 dark:ring-primary-500/40"
+          width="40"
+          height="40"
+          class="h-9 w-9 shrink-0 object-contain object-center drop-shadow-[0_0_10px_rgba(143,212,26,0.35)] dark:drop-shadow-[0_0_12px_rgba(143,212,26,0.25)]"
         />
         <span class="truncate text-lg font-bold tracking-tight text-guardian-ink dark:text-white">AntiSpam Guardian</span>
       </a>

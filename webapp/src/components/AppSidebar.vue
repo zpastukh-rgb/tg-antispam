@@ -11,7 +11,7 @@ const emit = defineEmits(['close'])
 
 const route = useRoute()
 
-const logoSrc = `${import.meta.env.BASE_URL}avatar.png`
+const logoSrc = `${import.meta.env.BASE_URL}logo.png`
 
 const isActive = (path) => {
   if (path === '/') return route.path === '/'
@@ -35,17 +35,19 @@ const isActive = (path) => {
       ]"
     >
       <nav class="flex flex-col gap-0.5 p-3">
-        <div class="mb-3 flex items-center gap-2.5 rounded-xl border border-primary-200/60 bg-primary-50/80 px-2.5 py-2 dark:border-primary-500/20 dark:bg-primary-500/10">
+        <div
+          class="mb-3 flex flex-col gap-2 rounded-xl border border-primary-200/60 bg-primary-50/80 px-2 py-3 dark:border-primary-500/20 dark:bg-primary-500/10"
+        >
           <img
             :src="logoSrc"
-            alt=""
-            width="40"
-            height="40"
-            class="h-10 w-10 shrink-0 rounded-lg object-cover ring-1 ring-primary-400/40"
+            alt="AntiSpam Guardian"
+            width="160"
+            height="120"
+            class="mx-auto h-16 w-auto max-w-full object-contain drop-shadow-[0_0_8px_rgba(143,212,26,0.3)] dark:drop-shadow-[0_0_10px_rgba(143,212,26,0.2)]"
           />
-          <div class="min-w-0 leading-tight">
-            <p class="truncate text-xs font-semibold uppercase tracking-wide text-primary-800 dark:text-primary-300">Панель</p>
-            <p class="truncate text-sm font-bold text-guardian-ink dark:text-white">Guardian</p>
+          <div class="min-w-0 border-t border-primary-200/50 pt-2 text-center leading-tight dark:border-primary-500/15">
+            <p class="text-xs font-semibold uppercase tracking-wide text-primary-800 dark:text-primary-300">Панель</p>
+            <p class="text-sm font-bold text-guardian-ink dark:text-white">AntiSpam Guardian</p>
           </div>
         </div>
         <router-link
