@@ -81,10 +81,26 @@ async def main() -> None:
         url = "postgresql+asyncpg://" + url.split("://", 1)[1]
 
     engine = create_async_engine(url, echo=False)
+    def _sql_chunk_without_leading_line_comments(chunk: str) -> str:
+        """Убрать строки-комментарии -- только в начале блока (до первого оператора)."""
+        lines_out: list[str] = []
+        started = False
+        for line in chunk.replace("\r\n", "\n").split("\n"):
+            s = line.strip()
+            if not s:
+                if started:
+                    lines_out.append(line)
+                continue
+            if s.startswith("--") and not started:
+                continue
+            started = True
+            lines_out.append(line)
+        return "\n".join(lines_out).strip()
+
     async with engine.begin() as conn:
         # Несколько операторов в файле — разбиваем по ; и выполняем по одному
         for raw in sql_stripped.replace("\r\n", "\n").split(";"):
-            part = raw.strip()
+            part = _sql_chunk_without_leading_line_comments(raw.strip())
             if not part or part.startswith("--"):
                 continue
             if not part.endswith(";"):
