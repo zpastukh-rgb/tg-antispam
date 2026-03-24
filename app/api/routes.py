@@ -27,9 +27,6 @@ from app.api.service import (
     add_stopword,
     delete_stopword,
     copy_rule_to_chat,
-    list_profanity,
-    add_profanity,
-    remove_profanity,
     apply_promo_code,
 )
 from app.db.models import Chat, Rule
@@ -152,7 +149,14 @@ async def api_chats(
     session: AsyncSession = Depends(get_db),
 ):
     """Список подключённых чатов."""
+    from app.services.telegram_bot_api import refresh_chat_title_in_db
+
     chats = await get_managed_chats(session, user_id)
+    for c in chats:
+        try:
+            await refresh_chat_title_in_db(session, int(c.id))
+        except Exception:
+            pass
     selected_id = await get_selected_chat_id(session, user_id)
     return {
         "chats": [
@@ -203,12 +207,24 @@ async def api_chat(
     chat = await session.get(Chat, int(chat_id))
     if not chat:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+    from app.services.telegram_bot_api import refresh_chat_title_in_db
+
+    try:
+        await refresh_chat_title_in_db(session, int(chat_id))
+        await session.refresh(chat)
+    except Exception:
+        pass
+    if getattr(chat, "log_chat_id", None):
+        try:
+            await refresh_chat_title_in_db(session, int(chat.log_chat_id))
+        except Exception:
+            pass
     rule = await get_or_create_rule(session, int(chat_id))
     stopwords_list = await list_stopwords(session, int(chat_id))
     stopwords_count = len(stopwords_list)
     log_chat_title = None
     if getattr(chat, "log_chat_id", None):
-        log_chat_row = await session.get(Chat, chat.log_chat_id)
+        log_chat_row = await session.get(Chat, int(chat.log_chat_id))
         if log_chat_row and getattr(log_chat_row, "title", None):
             log_chat_title = (log_chat_row.title or "").strip() or str(chat.log_chat_id)
         else:
@@ -358,8 +374,8 @@ async def api_global_antispam_list(
     session: AsyncSession = Depends(get_db),
 ):
     """Список пользователей в глобальной антиспам базе (общая для бота)."""
-    from app.services.global_antispam import list_global_antispam
-    items = await list_global_antispam(session, limit=500)
+    from app.services.global_antispam import list_global_antispam_for_api
+    items = await list_global_antispam_for_api(session, limit=500)
     return {"items": items}
 
 
@@ -371,12 +387,20 @@ async def api_global_antispam_add(
     session: AsyncSession = Depends(get_db),
 ):
     """Добавить user_id в глобальную антиспам базу. Body: { "user_id": number, "reason": "optional" }."""
-    from app.services.global_antispam import add_to_global_antispam
+    from app.services.global_antispam import add_to_global_antispam, update_antispam_user_profile
+    from app.services.telegram_bot_api import private_chat_profile, tg_get_chat
+
     uid = body.get("user_id")
     if uid is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="user_id required")
-    added = await add_to_global_antispam(session, int(uid), body.get("reason"))
-    return {"added": added, "user_id": int(uid)}
+    uid = int(uid)
+    added = await add_to_global_antispam(session, uid, body.get("reason"))
+    if added:
+        info = await tg_get_chat(uid)
+        disp, un = private_chat_profile(info)
+        if disp or un:
+            await update_antispam_user_profile(session, uid, disp, un)
+    return {"added": added, "user_id": uid}
 
 
 # ---------- DELETE /api/global-antispam/:target_uid ----------
@@ -465,42 +489,29 @@ async def api_yookassa_webhook(
     return {"ok": True}
 
 
-# ---------- GET /api/profanity ----------
+# ---------- /api/profanity (зарезервировано; список скрыт, управление — не через Mini App) ----------
 @router.get("/profanity")
-async def api_profanity_list(
-    user_id: int = Depends(require_init_data),
-    session: AsyncSession = Depends(get_db),
-):
-    """Список матерных слов (глобальная таблица для фильтра)."""
-    items = await list_profanity(session)
-    return {"items": items}
+async def api_profanity_list(_user_id: int = Depends(require_init_data)):
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="profanity_list_not_available",
+    )
 
 
-# ---------- POST /api/profanity ----------
 @router.post("/profanity")
-async def api_profanity_add(
-    body: dict,
-    user_id: int = Depends(require_init_data),
-    session: AsyncSession = Depends(get_db),
-):
-    """Добавить слово в фильтр мата. Body: { "word": "..." }."""
-    word = (body.get("word") or "").strip()
-    if not word:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="word required")
-    added = await add_profanity(session, word)
-    return {"added": added, "word": word}
+async def api_profanity_add(_user_id: int = Depends(require_init_data)):
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="profanity_list_not_available",
+    )
 
 
-# ---------- DELETE /api/profanity/:word ----------
 @router.delete("/profanity/{word:path}")
-async def api_profanity_remove(
-    word: str,
-    user_id: int = Depends(require_init_data),
-    session: AsyncSession = Depends(get_db),
-):
-    """Удалить слово из фильтра мата."""
-    removed = await remove_profanity(session, word)
-    return {"removed": removed}
+async def api_profanity_remove(_word: str, _user_id: int = Depends(require_init_data)):
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="profanity_list_not_available",
+    )
 
 
 # ---------- POST /api/chat/:id/copy-settings ----------

@@ -40,6 +40,28 @@ async def _is_admin(bot, chat_id: int, user_id: int) -> bool:
         return False
 
 
+async def _skip_protection_prompt(chat_id: int, user_id: int) -> bool:
+    """
+    Чат журнала отчётов или куда уже ведутся отчёты — не показываем «назначьте админа» / «подключить защиту».
+    Пока пользователь выбирает чат отчётов в панели — тоже не мешаем.
+    """
+    try:
+        async with await get_session() as session:
+            row = await session.get(Chat, chat_id)
+            if row and row.is_log_chat:
+                return True
+            res = await session.execute(select(Chat.id).where(Chat.log_chat_id == chat_id).limit(1))
+            if res.scalar_one_or_none():
+                return True
+        from app.handlers import panel_dm as _panel_dm
+
+        if user_id in _panel_dm._pending_reports_for:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _kb_make_logs():
 
     b = InlineKeyboardBuilder()
@@ -166,6 +188,8 @@ async def on_my_chat_member(update: ChatMemberUpdated):
         )
         if connected:
             return
+        if await _skip_protection_prompt(chat.id, update.from_user.id):
+            return
         from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
         try:
             await update.bot.send_message(
@@ -183,8 +207,10 @@ async def on_my_chat_member(update: ChatMemberUpdated):
     if not added:
         return
 
-    # ТЗ ЧЕККК: бот в группе, но не админ — просим назначить
+    # ТЗ ЧЕККК: бот в группе, но не админ — просим назначить (но не в чате отчётов)
     if not await _is_admin(update.bot, chat.id, update.from_user.id):
+        return
+    if await _skip_protection_prompt(chat.id, update.from_user.id):
         return
     try:
         msg = await update.bot.send_message(

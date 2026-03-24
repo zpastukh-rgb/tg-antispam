@@ -19,9 +19,6 @@ const copyTargetId = ref(null)
 const copyLoading = ref(false)
 const botUsername = ref(null)
 const isPremium = ref(false)
-const profanityItems = ref([])
-const newProfanityWord = ref('')
-const profanityLoading = ref(false)
 
 onMounted(async () => {
   if (!hasInitData.value) return
@@ -41,12 +38,8 @@ onMounted(async () => {
     }
     const data = await fetch(() => api.chat(selected_chat_id))
     chat.value = data
-    const [antispam, profanity] = await Promise.all([
-      fetch(() => api.globalAntispamList()).catch(() => ({ items: [] })),
-      fetch(() => api.profanityList()).catch(() => ({ items: [] })),
-    ])
+    const antispam = await fetch(() => api.globalAntispamList()).catch(() => ({ items: [] }))
     antispamItems.value = antispam?.items || []
-    profanityItems.value = profanity?.items || []
   } catch {
     chat.value = { noSelection: false, loadError: true }
   }
@@ -133,32 +126,6 @@ async function removeAntispamUser(userId) {
   }
 }
 
-async function addProfanityWord() {
-  const word = (newProfanityWord.value || '').trim()
-  if (!word) return
-  profanityLoading.value = true
-  try {
-    await fetch(() => api.profanityAdd(word))
-    newProfanityWord.value = ''
-    const data = await fetch(() => api.profanityList())
-    profanityItems.value = data?.items || []
-    showToast('Слово добавлено в фильтр мата')
-  } finally {
-    profanityLoading.value = false
-  }
-}
-
-async function removeProfanityWord(word) {
-  profanityLoading.value = true
-  try {
-    await fetch(() => api.profanityRemove(word))
-    profanityItems.value = profanityItems.value.filter((i) => i.word !== word)
-    showToast('Слово удалено из фильтра')
-  } finally {
-    profanityLoading.value = false
-  }
-}
-
 /** Открыть бота по deep link: очистка выполняется в личке с ботом; мини-приложение не закрываем. */
 function openCleanDeleted(event) {
   if (!chat.value?.id || !botUsername.value) return
@@ -197,14 +164,20 @@ const actionOptions = [
   { value: 'ban', label: 'Бан' },
 ]
 
-const mutePresets = [5, 10, 30, 60, 1440]
+const mutePresets = [
+  { value: 5, label: '5' },
+  { value: 10, label: '10' },
+  { value: 30, label: '30' },
+  { value: 60, label: '60' },
+  { value: 1440, label: '1 день' },
+]
 const newbiePresets = [5, 10, 15, 30, 60]
 const silencePresets = [
   { value: 0, label: 'Выкл' },
   { value: 5, label: '5 мин' },
   { value: 15, label: '15 мин' },
   { value: 60, label: '1 ч' },
-  { value: 1440, label: '24 ч' },
+  { value: 1440, label: '1 день' },
 ]
 const antinakrutkaThresholdPresets = [5, 10, 15, 20]
 const antinakrutkaWindowPresets = [3, 5, 10]
@@ -318,6 +291,9 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
           </div>
           <div>
             <p class="mb-1 text-xs text-gray-500 dark:text-gray-400">Режим тишины (мин) <span v-if="!isPremium" class="text-amber-600 dark:text-amber-400">🔒 Premium</span></p>
+            <p class="mb-2 text-xs text-gray-500 dark:text-gray-400">
+              После входа в чат выбранное время: любое сообщение участника может привести к муту на оставшиеся минуты окна (тишина для новых участников).
+            </p>
             <div class="flex flex-wrap gap-2">
               <button
                 v-for="p in silencePresets"
@@ -378,10 +354,10 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
 
           <h3 class="mb-2 mt-4 text-sm font-medium text-gray-700 dark:text-gray-300">Фильтр мата</h3>
           <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
-            Сообщения, содержащие слова из списка мата, будут удаляться или наказываться по правилам. Общий список по всем чатам; можно добавлять свои слова.
+            Нецензурная лексика обрабатывается по выбранным выше правилам наказаний. Содержимое списка в интерфейсе не показывается.
           </p>
-          <div class="flex items-center justify-between gap-2 mb-3">
-            <span class="text-sm text-gray-600 dark:text-gray-400">Включить фильтр мата</span>
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-sm text-gray-600 dark:text-gray-400">Фильтр мата</span>
             <button
               type="button"
               :class="chat.rule.filter_profanity_enabled ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
@@ -391,45 +367,6 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
               {{ chat.rule.filter_profanity_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
             </button>
           </div>
-          <div class="mb-3 flex flex-wrap gap-2">
-            <input
-              v-model="newProfanityWord"
-              type="text"
-              placeholder="Добавить слово"
-              class="min-w-0 flex-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-white"
-              :disabled="profanityLoading"
-              @keydown.enter.prevent="addProfanityWord()"
-            />
-            <button
-              type="button"
-              class="rounded-lg bg-primary-500 px-4 py-2 text-sm font-semibold text-guardian-ink hover:bg-primary-400 disabled:opacity-50"
-              :disabled="profanityLoading || !(newProfanityWord || '').trim()"
-              @click="addProfanityWord()"
-            >
-              Добавить
-            </button>
-          </div>
-          <ul v-if="(profanityItems || []).length" class="max-h-32 space-y-1 overflow-y-auto">
-            <li
-              v-for="item in (profanityItems || []).slice(0, 30)"
-              :key="item.word"
-              class="flex items-center justify-between rounded-lg bg-gray-100 px-3 py-1.5 text-sm dark:bg-gray-700"
-            >
-              <span class="text-gray-800 dark:text-gray-200">{{ item.word }}</span>
-              <button
-                type="button"
-                class="rounded p-1 text-red-600 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-900/30"
-                :disabled="profanityLoading"
-                aria-label="Удалить"
-                @click="removeProfanityWord(item.word)"
-              >
-                ✕
-              </button>
-            </li>
-          </ul>
-          <p v-if="(profanityItems || []).length > 30" class="text-xs text-gray-500 dark:text-gray-400">
-            Показано 30 из {{ profanityItems.length }}. Остальные в боте.
-          </p>
         </div>
       </section>
 
@@ -453,17 +390,17 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
             </div>
           </div>
           <div v-if="chat.rule.action_mode === 'mute'">
-            <p class="mb-1 text-xs text-gray-500 dark:text-gray-400">Длительность мута (мин)</p>
+            <p class="mb-1 text-xs text-gray-500 dark:text-gray-400">Длительность мута</p>
             <div class="flex flex-wrap gap-2">
               <button
-                v-for="m in mutePresets"
-                :key="m"
+                v-for="p in mutePresets"
+                :key="p.value"
                 type="button"
-                :class="chat.rule.mute_minutes === m ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+                :class="chat.rule.mute_minutes === p.value ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
                 class="rounded-lg px-3 py-1.5 text-sm"
-                @click="updateRule({ mute_minutes: m })"
+                @click="updateRule({ mute_minutes: p.value })"
               >
-                {{ m }}
+                {{ p.label }}
               </button>
             </div>
           </div>
@@ -598,7 +535,7 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
               :key="item.user_id"
               class="flex items-center justify-between gap-2 rounded-lg bg-gray-100 px-3 py-2 text-sm dark:bg-gray-700"
             >
-              <span class="min-w-0 flex-1 text-gray-800 dark:text-gray-200">{{ item.user_id }}{{ item.reason ? ` — ${item.reason}` : '' }}</span>
+              <span class="min-w-0 flex-1 text-gray-800 dark:text-gray-200">{{ item.display_label || item.user_id }}{{ item.reason ? ` — ${item.reason}` : '' }}</span>
               <button
                 type="button"
                 class="shrink-0 rounded-lg border border-red-300 bg-red-50 px-2.5 py-1 text-xs font-medium text-red-700 hover:bg-red-100 dark:border-red-800 dark:bg-red-900/30 dark:text-red-300 dark:hover:bg-red-900/50"
@@ -667,6 +604,9 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
       <!-- Новички (Premium) -->
       <section class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
         <h2 class="mb-3 text-sm font-medium text-gray-700 dark:text-gray-300">Новички <span v-if="!isPremium" class="text-amber-600 dark:text-amber-400">🔒 Premium</span></h2>
+        <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
+          Первые N минут после входа участник считается новичком: те же фильтры (стоп-слова, ссылки, медиа и т.д.), но в отчётах причина помечается как «новичок» — удобнее отслеживать риск после вступления.
+        </p>
         <div class="space-y-3">
           <div class="flex items-center justify-between gap-2">
             <span class="text-sm text-gray-600 dark:text-gray-400">Режим новичков</span>

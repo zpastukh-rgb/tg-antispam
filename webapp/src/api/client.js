@@ -74,9 +74,6 @@ export const api = {
   globalAntispamAdd: (userId, reason) => api.post('/api/global-antispam', { user_id: userId, reason: reason || '' }),
   globalAntispamRemove: (userId) => api.delete(`/api/global-antispam/${userId}`),
   copySettings: (chatId, targetChatId) => api.post(`/api/chat/${chatId}/copy-settings`, { target_chat_id: targetChatId }),
-  profanityList: () => api.get('/api/profanity'),
-  profanityAdd: (word) => api.post('/api/profanity', { word }),
-  profanityRemove: (word) => api.delete(`/api/profanity/${encodeURIComponent(word)}`),
   promoApply: (code) => api.post('/api/promo/apply', { code }),
   yookassaCreatePayment: (months) => api.post('/api/payments/yookassa/create', { months }),
 }

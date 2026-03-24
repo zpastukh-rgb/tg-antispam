@@ -43,10 +43,16 @@ GENERIC_MESSAGES = [
 REASON_TO_CATEGORY = {
     "stopword": "spam",
     "stopword_newbie": "spam",
+    "profanity": "bad_words",
+    "profanity_newbie": "bad_words",
     "link": "link",
     "link_newbie": "link",
     "mention": "generic",
     "mention_newbie": "generic",
+    "media": "generic",
+    "media_newbie": "generic",
+    "buttons": "generic",
+    "buttons_newbie": "generic",
     "spam": "spam",
     "edited_clean": "generic",
 }

@@ -133,6 +133,29 @@ async def _silence_remaining_restrict_minutes(
     return min(rm, silence_minutes)
 
 
+async def _in_newbie_period(session, chat_id: int, user_id: int, newbie_minutes: int) -> bool:
+    """Первые N минут после входа (та же отметка входа, что и для режима тишины)."""
+    if newbie_minutes <= 0:
+        return False
+    join_at = await _silence_join_at_db(session, chat_id, user_id)
+    if join_at is None:
+        key = (chat_id, user_id)
+        if key not in SILENCE_JOIN_LRU:
+            return False
+        join_at = _naive_utc(SILENCE_JOIN_LRU[key])
+    now = datetime.now(timezone.utc)
+    return now - join_at <= timedelta(minutes=newbie_minutes)
+
+
+_NB_FILTER_REASONS = frozenset({"stopword", "profanity", "link", "mention", "media", "buttons"})
+
+
+def _with_newbie_reason(reason: str, in_newbie_window: bool) -> str:
+    if in_newbie_window and reason in _NB_FILTER_REASONS:
+        return f"{reason}_newbie"
+    return reason
+
+
 async def upsert_member_join_for_silence(session, chat_id: int, user_id: int) -> None:
     """Зафиксировать время входа в чат (режим тишины), одна строка на пару chat+user."""
     now = datetime.now(timezone.utc)
@@ -606,6 +629,13 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     log_enabled = bool(getattr(rule, "log_enabled", True))
     silence_minutes = int(getattr(rule, "silence_minutes", 0) or 0)
     silence_minutes = max(0, min(10080, silence_minutes))  # до 7 суток
+    newbie_min = int(getattr(rule, "newbie_minutes", 10) or 10)
+    newbie_min = max(1, min(10080, newbie_min))
+    newbie_win = (
+        bool(getattr(rule, "newbie_enabled", False))
+        and bool(user)
+        and await _in_newbie_period(session, chat_id, user_id, newbie_min)
+    )
 
     # -------------------------------------------------
     # 0) Режим тишины: после входа N минут — ограничение (время входа в БД + LRU)
@@ -630,7 +660,7 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     hit = stopword_hit(text_norm, stopwords, text_without_urls_norm=text_for_stopwords_norm)
     if hit:
         return Verdict(
-            True, "stopword", hit, action,
+            True, _with_newbie_reason("stopword", newbie_win), hit, action,
             mute_minutes=mute_min,
             log_it=log_enabled,
             log_extra=("anti-edit" if edited else ""),
@@ -644,7 +674,7 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
         hit_prof = profanity_hit(text_norm, profanity_set, text_without_urls_norm=text_for_stopwords_norm)
         if hit_prof:
             return Verdict(
-                True, "profanity", hit_prof, action,
+                True, _with_newbie_reason("profanity", newbie_win), hit_prof, action,
                 mute_minutes=mute_min,
                 log_it=log_enabled,
                 log_extra=("anti-edit" if edited else ""),
@@ -679,7 +709,7 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
                     #     pass
                     link_action = action  # капча на паузе — не "captcha", всегда action
                     return Verdict(
-                        True, "link", links[0], link_action,
+                        True, _with_newbie_reason("link", newbie_win), links[0], link_action,
                         mute_minutes=mute_min,
                         log_it=log_enabled,
                         log_extra=("anti-edit" if edited else ""),
@@ -692,7 +722,7 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
         mentions = find_mentions_any(message)
         if mentions:
             return Verdict(
-                True, "mention", mentions[0], action,
+                True, _with_newbie_reason("mention", newbie_win), mentions[0], action,
                 mute_minutes=mute_min,
                 log_it=log_enabled,
                 log_extra=("anti-edit" if edited else ""),
@@ -707,7 +737,7 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
         #     pass
         media_action = action  # капча на паузе: "captcha" -> action (delete/mute/ban)
         return Verdict(
-            True, "media", "медиа/стикер", media_action,
+            True, _with_newbie_reason("media", newbie_win), "медиа/стикер", media_action,
             mute_minutes=mute_min,
             log_it=log_enabled,
             log_extra=("anti-edit" if edited else ""),
@@ -722,7 +752,7 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
         #     pass
         buttons_action = action  # капча на паузе: "captcha" -> action (delete/mute/ban)
         return Verdict(
-            True, "buttons", "сообщение с кнопками", buttons_action,
+            True, _with_newbie_reason("buttons", newbie_win), "сообщение с кнопками", buttons_action,
             mute_minutes=mute_min,
             log_it=log_enabled,
             log_extra=("anti-edit" if edited else ""),
@@ -797,7 +827,9 @@ async def apply_action(message: Message, v: Verdict) -> Tuple[bool, str, bool]:
 
     if v.action == "mute":
         ok = await _try_mute(message, v.mute_minutes)
-        return ok, f"mute {v.mute_minutes}m", deleted_ok
+        mm = int(v.mute_minutes)
+        mute_lbl = "mute 1 д." if mm == 1440 else f"mute {mm}m"
+        return ok, mute_lbl, deleted_ok
 
     if v.action == "ban":
         ok = await _try_ban(message)
@@ -974,6 +1006,34 @@ async def pipeline(message: Message, *, edited: bool = False) -> None:
 # Handlers
 # =========================================================
 
+def _has_new_chat_members(message: Message) -> bool:
+    return bool(message.new_chat_members)
+
+
+@router.message(
+    F.chat.type.in_({"group", "supergroup"}),
+    F.func(_has_new_chat_members),
+)
+async def on_join_service_message(message: Message):
+    """
+    Сервисное «вступил в группу» (new_chat_members). Удаление по rule.delete_join_messages.
+    Не проходит через pipeline: там нет текста/медиа, обработчик раньше завершался без действий.
+    """
+    try:
+        async with await get_session() as session:
+            chat_row = await session.get(Chat, message.chat.id)
+            if not chat_row or not getattr(chat_row, "is_active", True):
+                return
+            rule = await get_rule(session, message.chat.id)
+            if not bool(getattr(rule, "delete_join_messages", True)):
+                return
+        await message.delete()
+    except (TelegramBadRequest, TelegramForbiddenError):
+        pass
+    except Exception as e:
+        logger.debug("on_join_service_message chat=%s: %s", message.chat.id, e)
+
+
 @router.chat_member(F.chat.type.in_({"group", "supergroup"}))
 async def on_chat_member(event: ChatMemberUpdated):
     """Вход: запись времени в БД (тишина) + LRU; выход — сброс. Антинакрутка."""
@@ -1078,8 +1138,29 @@ async def on_chat_member(event: ChatMemberUpdated):
 
 
 @router.message(
+    F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}),
+    F.func(lambda m: bool(getattr(m, "new_chat_title", None))),
+)
+async def on_new_chat_title(message: Message):
+    """Синхронизировать название группы в БД при смене названия в Telegram."""
+    title = (message.new_chat_title or "").strip()
+    if not title:
+        return
+    title = title[:255]
+    try:
+        async with await get_session() as session:
+            chat_row = await session.get(Chat, message.chat.id)
+            if chat_row:
+                chat_row.title = title
+                await session.commit()
+    except Exception as e:
+        logger.warning("on_new_chat_title chat=%s: %s", message.chat.id, e)
+
+
+@router.message(
     F.chat.type.in_({"group", "supergroup"}),
     F.func(_should_run_moderation_pipeline),
+    ~F.func(_has_new_chat_members),
 )
 async def on_message(message: Message):
     await pipeline(message, edited=False)
@@ -1087,6 +1168,7 @@ async def on_message(message: Message):
 @router.edited_message(
     F.chat.type.in_({"group", "supergroup"}),
     F.func(_should_run_moderation_pipeline),
+    ~F.func(_has_new_chat_members),
 )
 async def on_edit(message: Message):
     await pipeline(message, edited=True)
