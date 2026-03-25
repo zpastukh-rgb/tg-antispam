@@ -14,3 +14,4 @@ venv/
 
 # mac
 .DS_Store
+.env
