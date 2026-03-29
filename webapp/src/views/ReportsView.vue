@@ -49,18 +49,12 @@ async function updateRule(patch) {
   }
 }
 
-/** Как «Подключить группу»: openTelegramLink — клиент Telegram открывает нативный выбор чата (часто поверх Mini App, см. Bot API 7+). */
+/** Без WebApp.close() — панель «Отчёты» остаётся доступной после выбора чата. */
 function openReportsChat() {
   const url = reportsChatUrl.value
   if (!url) return
   if (window.Telegram?.WebApp?.openTelegramLink) {
     window.Telegram.WebApp.openTelegramLink(url)
-    // На части клиентов удобнее сразу видеть чат с ботом и reply-кнопку; на новых Telegram Mini App часто остаётся открытой.
-    setTimeout(() => {
-      if (window.Telegram?.WebApp?.close) {
-        window.Telegram.WebApp.close()
-      }
-    }, 400)
   } else {
     window.open(url, '_blank')
   }
@@ -96,8 +90,7 @@ function openReportsChat() {
       <div class="rounded-xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-900/20">
         <p class="mb-2 font-medium text-amber-900 dark:text-amber-100">📱 Как подключить</p>
         <p class="text-sm text-amber-800 dark:text-amber-200">
-          Нажмите кнопку ниже — Telegram откроет сценарий выбора группы (как при «Подключить группу»): на актуальных клиентах это часто
-          <strong>нативное окно поверх мини-приложения</strong>. Дальше укажите чат, куда слать отчёты; боту не нужны права админа в этом чате.
+          Нажмите кнопку ниже — откроется сценарий выбора группы. Мини-приложение <strong>не закрывается</strong> — после настройки вернитесь «Назад» в панель. В личке с ботом должно прийти сообщение с кнопкой «Выбрать чат отчётов», а не только короткое /start.
         </p>
       </div>
 
