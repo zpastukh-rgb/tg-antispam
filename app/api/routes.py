@@ -111,7 +111,7 @@ async def api_bot_info(
     return {
         "username": username,
         "add_to_group_url": f"https://t.me/{username}?startgroup=connect&admin=delete_messages+restrict_members+invite_users+pin_messages",
-        "reports_chat_url": f"https://t.me/{username}?start=reportschat",
+        "reports_chat_url_template": f"https://t.me/{username}?startgroup=reportschat_{{chat_id}}",
     }
 
 

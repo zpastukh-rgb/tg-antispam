@@ -225,7 +225,70 @@ async def _send_addgroup_screenshots(bot, chat_id: int) -> None:
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     """ТЗ Меню: /start открывает главную панель. Deep link addgroup — кнопка «добавить в группу + выдать права»."""
+
+    # ?startgroup= payloads приходят В ГРУППУ, не в личку
     if message.chat.type != "private":
+        if not message.from_user:
+            return
+        args = (message.text or "").strip().split()
+        if len(args) >= 2:
+            payload = args[1].lower()
+            # ?startgroup=reportschat_CHATID → эта группа становится чатом отчётов для CHATID
+            if payload.startswith("reportschat_"):
+                try:
+                    protected_chat_id = int(payload.split("_", 1)[1])
+                except (ValueError, IndexError):
+                    return
+                from app.db.session import get_session
+                from app.api.service import user_can_access_chat
+                from app.db.models import Chat
+                uid = message.from_user.id
+                reports_chat_id = message.chat.id
+                reports_title = (message.chat.title or "").strip() or str(reports_chat_id)
+                try:
+                    async with await get_session() as session:
+                        if not await user_can_access_chat(session, uid, protected_chat_id):
+                            return
+                        chat_row = await session.get(Chat, protected_chat_id)
+                        if chat_row:
+                            chat_row.log_chat_id = reports_chat_id
+                        log_chat_row = await session.get(Chat, reports_chat_id)
+                        if not log_chat_row:
+                            log_chat_row = Chat(
+                                id=reports_chat_id,
+                                title=reports_title,
+                                owner_user_id=uid,
+                                is_log_chat=True,
+                                is_active=False,
+                            )
+                            session.add(log_chat_row)
+                        else:
+                            log_chat_row.title = reports_title
+                            log_chat_row.is_log_chat = True
+                        await session.commit()
+                    protected_title = ""
+                    try:
+                        async with await get_session() as session:
+                            cr = await session.get(Chat, protected_chat_id)
+                            protected_title = (cr.title or "").strip() if cr else ""
+                    except Exception:
+                        pass
+                    await message.answer(
+                        f"✅ Чат отчётов подключён.\n"
+                        f"Сюда будут приходить отчёты для «{protected_title or protected_chat_id}».",
+                    )
+                except Exception:
+                    pass
+                return
+            # ?startgroup=connect → подтверждение подключения группы
+            if payload == "connect":
+                try:
+                    await message.answer(
+                        "✅ Бот добавлен! Напишите /check чтобы активировать защиту.",
+                    )
+                except Exception:
+                    pass
+                return
         return
     if not message.from_user:
         return

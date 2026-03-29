@@ -2,7 +2,7 @@
 import { ref, onMounted } from 'vue'
 import { useApi } from '../composables/useApi'
 
-const { api, loading, error, fetch, hasInitData } = useApi()
+const { api, loading, fetch, hasInitData } = useApi()
 const addToGroupUrl = ref(null)
 
 onMounted(async () => {
@@ -10,16 +10,14 @@ onMounted(async () => {
   try {
     const botData = await fetch(() => api.botInfo()).catch(() => null)
     addToGroupUrl.value = botData?.add_to_group_url ?? null
-  } catch {
-    //
-  }
+  } catch { /* */ }
 })
 
 function openAddToGroup() {
   const url = addToGroupUrl.value
   if (!url) return
-  if (window.Telegram?.WebApp?.openLink) {
-    window.Telegram.WebApp.openLink(url)
+  if (window.Telegram?.WebApp?.openTelegramLink) {
+    window.Telegram.WebApp.openTelegramLink(url)
   } else {
     window.open(url, '_blank')
   }
@@ -34,10 +32,6 @@ function openAddToGroup() {
       Откройте панель из Telegram.
     </div>
 
-    <div v-else-if="error" class="rounded-xl border border-red-200 bg-red-50 p-4 text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300">
-      {{ error }}
-    </div>
-
     <div v-else class="rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-800">
       <button
         v-if="addToGroupUrl"
@@ -47,11 +41,7 @@ function openAddToGroup() {
       >
         ➕ Подключить группу
       </button>
-      <p v-else class="text-center text-gray-500 dark:text-gray-400">Загрузка…</p>
-    </div>
-
-    <div v-if="loading && !addToGroupUrl" class="rounded-xl border border-gray-200 bg-white p-8 text-center dark:border-gray-700 dark:bg-gray-800">
-      <span class="text-gray-500 dark:text-gray-400">Загрузка…</span>
+      <p v-else class="text-center text-sm text-gray-500 dark:text-gray-400">Загрузка…</p>
     </div>
   </div>
 </template>
