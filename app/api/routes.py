@@ -283,6 +283,44 @@ async def api_chat_rule(
     return {"rule": _rule_to_dict(rule, stopwords_count)}
 
 
+# ---------- POST /api/chat/:id/reports-chat ----------
+@router.post("/chat/{chat_id}/reports-chat")
+async def api_set_reports_chat(
+    chat_id: int,
+    body: dict,
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Выбрать чат отчётов для защищаемой группы прямо из Mini App (без deep link).
+    Body: { "log_chat_id": number | null }  — null снимает привязку.
+    """
+    ok = await user_can_access_chat(session, user_id, int(chat_id))
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+    log_chat_id = body.get("log_chat_id")
+    chat = await session.get(Chat, int(chat_id))
+    if not chat:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+    if log_chat_id is not None:
+        log_chat_id = int(log_chat_id)
+        ok2 = await user_can_access_chat(session, user_id, log_chat_id)
+        if not ok2:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to target chat")
+        log_chat_row = await session.get(Chat, log_chat_id)
+        if log_chat_row:
+            log_chat_row.is_log_chat = True
+        chat.log_chat_id = log_chat_id
+    else:
+        chat.log_chat_id = None
+    await session.commit()
+    await session.refresh(chat)
+    log_title = None
+    if chat.log_chat_id:
+        lr = await session.get(Chat, int(chat.log_chat_id))
+        log_title = (lr.title or "").strip() if lr else str(chat.log_chat_id)
+    return {"log_chat_id": chat.log_chat_id, "log_chat_title": log_title}
+
+
 # ---------- GET /api/chat/:id/stopwords (список уже в GET /api/chat/:id)
 # ---------- POST /api/chat/:id/stopwords ----------
 @router.post("/chat/{chat_id}/stopwords")

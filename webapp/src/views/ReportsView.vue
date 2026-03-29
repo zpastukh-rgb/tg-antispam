@@ -8,34 +8,60 @@ const router = useRouter()
 const { api, loading, error, fetch, hasInitData } = useApi()
 const { showToast } = useToast()
 const chat = ref(null)
-const reportsChatUrl = ref(null)
+const allChats = ref([])
 const saving = ref(false)
+const selectedLogChatId = ref(null)
+const settingReports = ref(false)
 
 onMounted(async () => {
   if (!hasInitData.value) return
   try {
-    const [chatsData, botData] = await Promise.all([
-      fetch(() => api.chats()).catch(() => ({ selected_chat_id: null })),
-      fetch(() => api.botInfo()).catch(() => null),
-    ])
+    const chatsData = await fetch(() => api.chats()).catch(() => ({ selected_chat_id: null, chats: [] }))
+    allChats.value = chatsData?.chats ?? []
     const selected_chat_id = chatsData?.selected_chat_id
     if (!selected_chat_id) {
       chat.value = { noSelection: true }
     } else {
       const data = await fetch(() => api.chat(selected_chat_id))
       chat.value = data
-    }
-    const u = botData?.username
-    if (u && selected_chat_id) {
-      reportsChatUrl.value = `https://t.me/${u}?start=reportschat_${selected_chat_id}`
-    } else {
-      reportsChatUrl.value =
-        botData?.reports_chat_url ?? (u ? `https://t.me/${u}?start=reportschat` : null)
+      selectedLogChatId.value = data.log_chat_id || null
     }
   } catch {
     chat.value = { noSelection: false, loadError: true }
   }
 })
+
+async function setReportsChat() {
+  if (!chat.value?.id || chat.value.noSelection) return
+  settingReports.value = true
+  try {
+    const targetId = selectedLogChatId.value ? Number(selectedLogChatId.value) : null
+    const result = await fetch(() => api.setReportsChat(chat.value.id, targetId))
+    chat.value.log_chat_id = result.log_chat_id
+    chat.value.log_chat_title = result.log_chat_title
+    showToast(targetId ? 'Чат отчётов подключён' : 'Чат отчётов отключён')
+  } catch {
+    showToast('Не удалось сохранить чат отчётов')
+  } finally {
+    settingReports.value = false
+  }
+}
+
+async function clearReportsChat() {
+  selectedLogChatId.value = null
+  if (!chat.value?.id || chat.value.noSelection) return
+  settingReports.value = true
+  try {
+    await fetch(() => api.setReportsChat(chat.value.id, null))
+    chat.value.log_chat_id = null
+    chat.value.log_chat_title = null
+    showToast('Чат отчётов отключён')
+  } catch {
+    showToast('Не удалось отключить чат отчётов')
+  } finally {
+    settingReports.value = false
+  }
+}
 
 async function updateRule(patch) {
   if (!chat.value?.id || chat.value.noSelection) return
@@ -46,17 +72,6 @@ async function updateRule(patch) {
     showToast('Настройки успешно сохранены')
   } finally {
     saving.value = false
-  }
-}
-
-/** Deep link ведёт в личку бота — там reply-кнопка «Выбрать чат отчётов». */
-function openReportsChat() {
-  const url = reportsChatUrl.value
-  if (!url) return
-  if (window.Telegram?.WebApp?.openTelegramLink) {
-    window.Telegram.WebApp.openTelegramLink(url)
-  } else {
-    window.open(url, '_blank')
   }
 }
 </script>
@@ -87,30 +102,57 @@ function openReportsChat() {
     <div v-else-if="chat?.rule" class="space-y-5">
       <p class="text-gray-600 dark:text-gray-400">Чат: <strong class="text-gray-900 dark:text-white">{{ chat.title }}</strong></p>
 
-      <div class="rounded-xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-900/20">
-        <p class="mb-2 font-medium text-amber-900 dark:text-amber-100">📱 Как подключить</p>
-        <p class="text-sm text-amber-800 dark:text-amber-200">
-          Нажмите кнопку ниже — <strong>откроется чат с ботом</strong> (это нормально, не /start). Там под полем ввода появится синяя кнопка <strong>«Выбрать чат отчётов»</strong> — нажмите и укажите группу. Потом вернитесь в панель через меню бота.
-        </p>
-      </div>
-
-      <!-- Подключённый чат отчётов -->
+      <!-- Выбор чата отчётов из списка подключённых групп -->
       <section class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
         <h2 class="mb-3 text-sm font-medium text-gray-700 dark:text-gray-300">Чат отчётов</h2>
-        <p v-if="chat.log_chat_id" class="text-sm text-gray-600 dark:text-gray-400">
+        <p v-if="chat.log_chat_id" class="mb-2 text-sm text-gray-600 dark:text-gray-400">
           Подключён: <strong class="text-gray-900 dark:text-white">{{ chat.log_chat_title || chat.log_chat_id }}</strong>
         </p>
-        <p v-else class="text-sm text-gray-500 dark:text-gray-400">
-          Не подключён. Нажмите кнопку ниже — откроется тот же нативный выбор группы, что и при подключении защищаемого чата.
+        <p v-else class="mb-2 text-sm text-gray-500 dark:text-gray-400">
+          Не подключён. Выберите группу из списка ниже.
         </p>
-        <button
-          v-if="reportsChatUrl"
-          type="button"
-          class="mt-3 rounded-lg bg-primary-500 px-4 py-2 text-sm font-semibold text-guardian-ink hover:bg-primary-400"
-          @click="openReportsChat"
-        >
-          {{ chat.log_chat_id ? 'Сменить чат отчётов' : 'Подключить чат отчётов' }}
-        </button>
+
+        <div v-if="allChats.length > 1" class="space-y-3">
+          <select
+            v-model="selectedLogChatId"
+            class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+            :disabled="settingReports"
+          >
+            <option :value="null">— Не выбран —</option>
+            <option
+              v-for="c in allChats.filter(c => c.id !== chat.id)"
+              :key="c.id"
+              :value="c.id"
+            >
+              {{ c.title }}
+            </option>
+          </select>
+          <div class="flex flex-wrap gap-2">
+            <button
+              type="button"
+              class="rounded-lg bg-primary-500 px-4 py-2 text-sm font-semibold text-guardian-ink hover:bg-primary-400 disabled:opacity-50"
+              :disabled="settingReports || selectedLogChatId == chat.log_chat_id"
+              @click="setReportsChat"
+            >
+              {{ settingReports ? 'Сохранение…' : 'Сохранить' }}
+            </button>
+            <button
+              v-if="chat.log_chat_id"
+              type="button"
+              class="rounded-lg bg-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-300 dark:bg-gray-600 dark:text-gray-200 dark:hover:bg-gray-500 disabled:opacity-50"
+              :disabled="settingReports"
+              @click="clearReportsChat"
+            >
+              Отключить
+            </button>
+          </div>
+        </div>
+
+        <div v-else class="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800 dark:bg-amber-900/20">
+          <p class="text-sm text-amber-800 dark:text-amber-200">
+            Для выбора чата отчётов подключите хотя бы ещё одну группу в разделе «Подключить группу».
+          </p>
+        </div>
       </section>
 
       <!-- Переключатели -->

@@ -73,6 +73,7 @@ export const api = {
   globalAntispamList: () => api.get('/api/global-antispam'),
   globalAntispamAdd: (userId, reason) => api.post('/api/global-antispam', { user_id: userId, reason: reason || '' }),
   globalAntispamRemove: (userId) => api.delete(`/api/global-antispam/${userId}`),
+  setReportsChat: (chatId, logChatId) => api.post(`/api/chat/${chatId}/reports-chat`, { log_chat_id: logChatId }),
   copySettings: (chatId, targetChatId) => api.post(`/api/chat/${chatId}/copy-settings`, { target_chat_id: targetChatId }),
   promoApply: (code) => api.post('/api/promo/apply', { code }),
   yookassaCreatePayment: (months) => api.post('/api/payments/yookassa/create', { months }),
