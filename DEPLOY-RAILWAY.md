@@ -212,17 +212,24 @@ railway run python -m scripts.run_migration 008
 ### Сервис 3: Фронт (Mini App)
 
 1. **Add Service** → **GitHub Repo** → тот же репо.
-2. **Settings:**
-   - **Root Directory:** `webapp` (важно — сборка из папки webapp).
-   - **Config-as-code:** путь к `webapp/railway.json` (там указан `Dockerfile` внутри `webapp`), чтобы не подмешивался глобальный Docker-образ бота.
-   - Либо без Docker: **Build Command:** `npm ci && npm run build`, **Start Command:** `npx serve -s dist -l $PORT`  
-     (флаг `-s` — SPA: все маршруты отдают `index.html`; `$PORT` задаёт Railway.)
-3. **Variables:**
-   - `VITE_API_BASE_URL` = **URL твоего API** из шага «Сервис 2» (например `https://tg-antispam-api-production-xxxx.up.railway.app`).  
-     Эта переменная подставляется при **сборке**, поэтому после первого деплоя API нужно прописать сюда реальный URL и заново задеплоить фронт.
-   - **`RAILWAY_DOCKERFILE_PATH`:** для фронта **удали** эту переменную (достаточно `webapp/railway.json`) **или** укажи ровно **`Dockerfile`** — путь относительно Root Directory `webapp`.  
-     Значения вроде **`webapp/Dockerfile.bot`** или **`Dockerfile.bot`** дадут ошибку «Dockerfile does not exist»: это пути **бота** в корне репо, в папке `webapp` их нет.
-4. **Networking** → **Generate Domain.** Это и есть URL Mini App для BotFather и для кнопки в боте.
+2. **Variables (обязательно):** `VITE_API_BASE_URL` = URL API из «Сервис 2». После смены URL пересобери фронт.
+3. **Важно:** у фронта **не должно быть** `RAILWAY_DOCKERFILE_PATH` = `Dockerfile.bot` (или любого пути к образу бота). Иначе при **Root Directory = `webapp`** контекст — только папка `webapp`, а в Dockerfile бота ищется **`requirements.txt` из корня репо** → в логах `python:3.11-slim` и ошибка **`"/requirements.txt": not found`**.
+
+**Вариант A (рекомендуется, сложнее ошибиться):** контекст — **весь репозиторий**, Dockerfile копирует `webapp/` сам.
+
+- **Root Directory:** **пусто** (очисти поле, не `webapp`).
+- **Settings → Config-as-code:** путь к файлу **`railway.frontend.json`** в корне репо.
+- **`RAILWAY_DOCKERFILE_PATH`:** **удали** переменную (путь к Docker задаёт `railway.frontend.json` → `Dockerfile.webapp`).
+
+**Вариант B:** сборка только из папки `webapp`.
+
+- **Root Directory:** `webapp`.
+- **Config-as-code:** `webapp/railway.json`.
+- **`RAILWAY_DOCKERFILE_PATH`:** **удали** или ровно **`Dockerfile`** (относительно `webapp`). Не используй **`Dockerfile.bot`**.
+
+**Без Docker (Railpack / Nixpacks):** **Build Command:** `npm ci && npm run build`, **Start Command:** `npx serve -s dist -l $PORT` (флаг `-s` — SPA).
+
+4. **Networking** → **Generate Domain** — URL Mini App для BotFather и кнопки в боте.
 
 ---
 

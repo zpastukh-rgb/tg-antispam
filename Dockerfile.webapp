@@ -1,5 +1,6 @@
-# Mini App (Vite). Контекст сборки — корень репозитория.
-# Сервис фронта на Railway: RAILWAY_DOCKERFILE_PATH=Dockerfile.webapp
+# Mini App (Vite). Контекст сборки — корень репозитория (Railway: Root Directory пустой).
+# Настройка: Config-as-code → railway.frontend.json (или RAILWAY_DOCKERFILE_PATH=Dockerfile.webapp при пустом root).
+# Не смешивать с Root Directory=webapp — иначе COPY webapp/ не найдёт файлы.
 # Variables: VITE_API_BASE_URL=https://<твой-api>.up.railway.app
 FROM node:20-alpine AS build
 WORKDIR /app
