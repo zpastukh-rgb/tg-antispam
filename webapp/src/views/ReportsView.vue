@@ -112,7 +112,7 @@ async function updateRule(patch) {
           Не подключён. Выберите группу из списка ниже.
         </p>
 
-        <div v-if="allChats.length > 1" class="space-y-3">
+        <div v-if="allChats.length" class="space-y-3">
           <select
             v-model="selectedLogChatId"
             class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-white"
@@ -120,7 +120,7 @@ async function updateRule(patch) {
           >
             <option :value="null">— Не выбран —</option>
             <option
-              v-for="c in allChats.filter(c => c.id !== chat.id)"
+              v-for="c in allChats"
               :key="c.id"
               :value="c.id"
             >
@@ -150,7 +150,7 @@ async function updateRule(patch) {
 
         <div v-else class="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800 dark:bg-amber-900/20">
           <p class="text-sm text-amber-800 dark:text-amber-200">
-            Для выбора чата отчётов подключите хотя бы ещё одну группу в разделе «Подключить группу».
+            Нет подключённых групп. Подключите группу в разделе «Подключить группу».
           </p>
         </div>
       </section>
