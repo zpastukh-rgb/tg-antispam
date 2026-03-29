@@ -69,7 +69,7 @@ async function updateRule(patch) {
   try {
     const data = await fetch(() => api.updateRule(chat.value.id, patch))
     chat.value.rule = data.rule
-    showToast('Настройки успешно сохранены')
+    showToast('Сохранено')
   } finally {
     saving.value = false
   }
@@ -85,12 +85,8 @@ async function updateRule(patch) {
     </div>
 
     <div v-else-if="chat?.noSelection" class="rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-800">
-      <p class="text-gray-600 dark:text-gray-400">Выберите чат в разделе «Подключённые чаты», чтобы настроить чат отчётов.</p>
-      <button
-        type="button"
-        class="mt-4 rounded-lg bg-primary-500 px-4 py-2 text-sm font-semibold text-guardian-ink hover:bg-primary-400"
-        @click="router.push('/chats')"
-      >
+      <p class="text-gray-600 dark:text-gray-400">Сначала выберите чат в разделе «Подключённые чаты».</p>
+      <button type="button" class="mt-3 rounded-lg bg-primary-500 px-4 py-2 text-sm font-semibold text-guardian-ink hover:bg-primary-400" @click="router.push('/chats')">
         К списку чатов
       </button>
     </div>
@@ -102,107 +98,70 @@ async function updateRule(patch) {
     <div v-else-if="chat?.rule" class="space-y-5">
       <p class="text-gray-600 dark:text-gray-400">Чат: <strong class="text-gray-900 dark:text-white">{{ chat.title }}</strong></p>
 
-      <!-- Выбор чата отчётов из списка подключённых групп -->
+      <!-- Чат отчётов: выпадающий список + одна кнопка -->
       <section class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
         <h2 class="mb-3 text-sm font-medium text-gray-700 dark:text-gray-300">Чат отчётов</h2>
-        <p v-if="chat.log_chat_id" class="mb-2 text-sm text-gray-600 dark:text-gray-400">
-          Подключён: <strong class="text-gray-900 dark:text-white">{{ chat.log_chat_title || chat.log_chat_id }}</strong>
-        </p>
-        <p v-else class="mb-2 text-sm text-gray-500 dark:text-gray-400">
-          Не подключён. Выберите группу из списка ниже.
+        <p v-if="chat.log_chat_id" class="mb-2 text-sm text-green-600 dark:text-green-400">
+          ✓ {{ chat.log_chat_title || chat.log_chat_id }}
         </p>
 
-        <div v-if="allChats.length" class="space-y-3">
-          <select
-            v-model="selectedLogChatId"
-            class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-white"
-            :disabled="settingReports"
+        <select
+          v-model="selectedLogChatId"
+          class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+          :disabled="settingReports"
+        >
+          <option :value="null">— Выберите группу —</option>
+          <option v-for="c in allChats" :key="c.id" :value="c.id">{{ c.title }}</option>
+        </select>
+
+        <div class="mt-3 flex flex-wrap gap-2">
+          <button
+            type="button"
+            class="w-full rounded-xl bg-primary-500 px-5 py-3 font-semibold text-guardian-ink shadow-sm shadow-primary-500/25 transition hover:bg-primary-400 disabled:opacity-50"
+            :disabled="settingReports || !selectedLogChatId"
+            @click="setReportsChat"
           >
-            <option :value="null">— Не выбран —</option>
-            <option
-              v-for="c in allChats"
-              :key="c.id"
-              :value="c.id"
-            >
-              {{ c.title }}
-            </option>
-          </select>
-          <div class="flex flex-wrap gap-2">
-            <button
-              type="button"
-              class="rounded-lg bg-primary-500 px-4 py-2 text-sm font-semibold text-guardian-ink hover:bg-primary-400 disabled:opacity-50"
-              :disabled="settingReports || selectedLogChatId == chat.log_chat_id"
-              @click="setReportsChat"
-            >
-              {{ settingReports ? 'Сохранение…' : 'Сохранить' }}
-            </button>
-            <button
-              v-if="chat.log_chat_id"
-              type="button"
-              class="rounded-lg bg-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-300 dark:bg-gray-600 dark:text-gray-200 dark:hover:bg-gray-500 disabled:opacity-50"
-              :disabled="settingReports"
-              @click="clearReportsChat"
-            >
-              Отключить
-            </button>
-          </div>
-        </div>
-
-        <div v-else class="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800 dark:bg-amber-900/20">
-          <p class="text-sm text-amber-800 dark:text-amber-200">
-            Нет подключённых групп. Подключите группу в разделе «Подключить группу».
-          </p>
+            {{ settingReports ? 'Сохранение…' : '📋 Подключить чат отчётов' }}
+          </button>
+          <button
+            v-if="chat.log_chat_id"
+            type="button"
+            class="w-full rounded-lg bg-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-300 dark:bg-gray-600 dark:text-gray-200 dark:hover:bg-gray-500 disabled:opacity-50"
+            :disabled="settingReports"
+            @click="clearReportsChat"
+          >
+            Отключить
+          </button>
         </div>
       </section>
 
-      <!-- Переключатели -->
+      <!-- Настройки -->
       <section class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
         <h2 class="mb-3 text-sm font-medium text-gray-700 dark:text-gray-300">Настройки</h2>
         <div class="space-y-3">
           <div class="flex items-center justify-between gap-2">
-            <span class="text-sm text-gray-600 dark:text-gray-400">Отчёты в чат включены</span>
-            <button
-              type="button"
-              :class="chat.rule.log_enabled ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
-              class="rounded-lg px-3 py-1.5 text-sm"
-              @click="updateRule({ log_enabled: !chat.rule.log_enabled })"
-            >
+            <span class="text-sm text-gray-600 dark:text-gray-400">Отчёты в чат</span>
+            <button type="button" :class="chat.rule.log_enabled ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'" class="rounded-lg px-3 py-1.5 text-sm" @click="updateRule({ log_enabled: !chat.rule.log_enabled })">
               {{ chat.rule.log_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
             </button>
           </div>
           <div class="flex items-center justify-between gap-2">
-            <span class="text-sm text-gray-600 dark:text-gray-400">Guardian сообщения в группе</span>
-            <button
-              type="button"
-              :class="chat.rule.guardian_messages_enabled ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
-              class="rounded-lg px-3 py-1.5 text-sm"
-              @click="updateRule({ guardian_messages_enabled: !chat.rule.guardian_messages_enabled })"
-            >
+            <span class="text-sm text-gray-600 dark:text-gray-400">Сообщения Guardian в группе</span>
+            <button type="button" :class="chat.rule.guardian_messages_enabled ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'" class="rounded-lg px-3 py-1.5 text-sm" @click="updateRule({ guardian_messages_enabled: !chat.rule.guardian_messages_enabled })">
               {{ chat.rule.guardian_messages_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
             </button>
           </div>
           <div class="flex items-center justify-between gap-2">
-            <span class="text-sm text-gray-600 dark:text-gray-400">Автоотчёты (дайджест)</span>
-            <button
-              type="button"
-              :class="chat.rule.auto_reports_enabled ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
-              class="rounded-lg px-3 py-1.5 text-sm"
-              @click="updateRule({ auto_reports_enabled: !chat.rule.auto_reports_enabled })"
-            >
+            <span class="text-sm text-gray-600 dark:text-gray-400">Автоотчёты</span>
+            <button type="button" :class="chat.rule.auto_reports_enabled ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'" class="rounded-lg px-3 py-1.5 text-sm" @click="updateRule({ auto_reports_enabled: !chat.rule.auto_reports_enabled })">
               {{ chat.rule.auto_reports_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
             </button>
           </div>
         </div>
       </section>
-
-      <p v-if="saving" class="text-sm text-gray-500 dark:text-gray-400">Сохранение…</p>
     </div>
 
-    <div v-else-if="loading" class="rounded-xl border border-gray-200 bg-white p-8 text-center dark:border-gray-700 dark:bg-gray-800">
-      <span class="text-gray-500 dark:text-gray-400">Загрузка…</span>
-    </div>
-
-    <div v-else-if="hasInitData" class="rounded-xl border border-gray-200 bg-white p-8 text-center dark:border-gray-700 dark:bg-gray-800">
+    <div v-else-if="loading || hasInitData" class="rounded-xl border border-gray-200 bg-white p-8 text-center dark:border-gray-700 dark:bg-gray-800">
       <span class="text-gray-500 dark:text-gray-400">Загрузка…</span>
     </div>
   </div>
