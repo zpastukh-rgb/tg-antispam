@@ -220,6 +220,8 @@ railway run python -m scripts.run_migration 008
 3. **Variables:**
    - `VITE_API_BASE_URL` = **URL твоего API** из шага «Сервис 2» (например `https://tg-antispam-api-production-xxxx.up.railway.app`).  
      Эта переменная подставляется при **сборке**, поэтому после первого деплоя API нужно прописать сюда реальный URL и заново задеплоить фронт.
+   - **`RAILWAY_DOCKERFILE_PATH`:** для фронта **удали** эту переменную (достаточно `webapp/railway.json`) **или** укажи ровно **`Dockerfile`** — путь относительно Root Directory `webapp`.  
+     Значения вроде **`webapp/Dockerfile.bot`** или **`Dockerfile.bot`** дадут ошибку «Dockerfile does not exist»: это пути **бота** в корне репо, в папке `webapp` их нет.
 4. **Networking** → **Generate Domain.** Это и есть URL Mini App для BotFather и для кнопки в боте.
 
 ---

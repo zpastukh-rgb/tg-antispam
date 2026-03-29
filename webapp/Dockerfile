@@ -1,5 +1,6 @@
 # Контекст сборки — папка webapp (в Railway: Root Directory = webapp).
-# Не используй RAILWAY_DOCKERFILE_PATH=Dockerfile.webapp из корня репо при таком root.
+# RAILWAY_DOCKERFILE_PATH для ЭТОГО сервиса: только "Dockerfile" или удали переменную (см. webapp/railway.json).
+# Неверно: webapp/Dockerfile.bot, Dockerfile.bot — это образ бота из корня репо, здесь их нет.
 FROM node:20-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
