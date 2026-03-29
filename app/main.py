@@ -13,6 +13,7 @@ from aiogram.types import (
     BotCommandScopeAllChatAdministrators,
 )
 from dotenv import load_dotenv
+from aiohttp import web
 from sqlalchemy import text
 
 from app.db.ensure_defaults import ensure_default_trial_promo
@@ -92,6 +93,28 @@ async def _run_ensure_rules_migration() -> None:
         log.info("ensure_rules migration: %s/%s columns ensured", ok, len(_RULES_COLUMNS_008))
 
 
+async def _railway_health_server() -> None:
+    """Railway проверяет $PORT; чистый polling без HTTP — деплой/restart долго висят на «healthy»."""
+    raw = os.getenv("PORT", "").strip()
+    if not raw:
+        return
+    try:
+        port = int(raw)
+    except ValueError:
+        return
+    app = web.Application()
+
+    async def ping(_: web.Request) -> web.Response:
+        return web.Response(text="ok")
+
+    app.router.add_get("/", ping)
+    app.router.add_get("/health", ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+
 async def on_startup() -> None:
     if engine is None:
         raise RuntimeError(
@@ -142,6 +165,7 @@ async def main() -> None:
 
     await bot.delete_webhook(drop_pending_updates=True)
     await on_startup()
+    await _railway_health_server()
 
     # ТЗ Напоминания + Автоотчёты: фоновый цикл (напоминания 12ч/24ч/3д, Guardian раз в 3 дня, дайджест раз в сутки)
     from app.services.reminders import reminder_loop
