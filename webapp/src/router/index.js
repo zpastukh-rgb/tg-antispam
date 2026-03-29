@@ -1,4 +1,4 @@
-import { createRouter, createWebHashHistory } from 'vue-router'
+import { createRouter, createWebHistory } from 'vue-router'
 import DashboardView from '../views/DashboardView.vue'
 import ChatsView from '../views/ChatsView.vue'
 import ProtectionView from '../views/ProtectionView.vue'
@@ -13,9 +13,11 @@ const routes = [
   { path: '/reports', name: 'Reports', component: ReportsView, meta: { title: 'Отчёты' } },
   { path: '/billing', name: 'Billing', component: BillingView, meta: { title: 'Тариф и оплата' } },
   { path: '/connect', name: 'Connect', component: ConnectView, meta: { title: 'Подключить группу' } },
+  { path: '/:pathMatch(.*)*', name: 'CatchAll', redirect: '/' },
 ]
 
 export default createRouter({
-  history: createWebHashHistory(),
+  // Hash-роутер ломается в Telegram: открывают https://host/?tgWebAppStartParam=... без #/ — маршрут не совпадает, экран пустой.
+  history: createWebHistory(import.meta.env.BASE_URL),
   routes,
 })

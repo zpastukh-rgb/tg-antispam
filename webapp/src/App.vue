@@ -24,7 +24,7 @@ function closeSidebar() {
       <div class="p-4 md:p-6">
         <router-view v-slot="{ Component }">
           <transition name="fade" mode="out-in">
-            <component :is="Component" />
+            <component :is="Component" v-if="Component" :key="$route.fullPath" />
           </transition>
         </router-view>
       </div>

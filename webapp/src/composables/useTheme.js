@@ -37,6 +37,11 @@ export function useTheme() {
   }
 
   onMounted(() => {
+    const tg = typeof window !== 'undefined' ? window.Telegram?.WebApp : null
+    if (tg?.colorScheme === 'dark' || tg?.colorScheme === 'light') {
+      apply(tg.colorScheme === 'dark')
+      return
+    }
     const stored = getStored()
     if (stored === 'dark') apply(true)
     else if (stored === 'light') apply(false)

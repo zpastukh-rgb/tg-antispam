@@ -17,7 +17,7 @@ const emit = defineEmits(['menu-click'])
 /** Публичные файлы (logo) через BASE_URL (в проде обычно '/') */
 const logoSrc = `${import.meta.env.BASE_URL}logo.png`
 
-const showBack = computed(() => route.path !== '/' && route.path !== '')
+const showBack = computed(() => route.path !== '/' && route.name !== 'Dashboard')
 
 function goBack() {
   if (window.history.length > 1) {
