@@ -39,10 +39,8 @@ git push -u origin main
      - **Надёжный вариант:** добавь по Reference из Postgres переменные **PGHOST**, **PGPORT**, **PGUSER**, **PGPASSWORD**, **PGDATABASE** (те же имена). Код сам соберёт строку подключения из них. Так хост и порт точно подставятся из БД.
    - Не используй в URL переменную **PORT** приложения — только порт БД (5432).
 
-4. В **Settings** сервиса приложения укажи:
-   - **Build Command:** `pip install -r requirements.txt` (или оставь авто)
-   - **Start Command:** `python -m app.main`  
-   Либо используй **Procfile**: Railway подхватит `worker: python -m app.main` и запустит его как worker.
+4. Рекомендуется собирать бота **через Docker** (`Dockerfile.bot`, переменная `RAILWAY_DOCKERFILE_PATH` — см. раздел «Всё на Railway» ниже): тогда команда старта задаётся в образе (`CMD`).  
+   Если собираешь **без Docker** (Nixpacks): в **Settings → Deploy** укажи **Start Command:** `python -m app.main`.
 
 5. Деплой запустится по push в выбранную ветку. Если после `git push` бот не обновился: в Railway открой сервис бота → **Deployments** → убедись, что последний деплой после твоего push; при необходимости нажми **Redeploy** (или включи **Auto Deploy** в Settings).
 
@@ -188,7 +186,7 @@ railway run python -m scripts.run_migration 008
 - **Root Directory:** пусто (корень репо).
 - **Variables:** `BOT_TOKEN`, ссылки на Postgres: `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`.
 - **`RAILWAY_DOCKERFILE_PATH`** = `Dockerfile.bot` — если сервис собирается через Docker (иначе Railway может не найти образ бота: в корне нет файла с именем `Dockerfile`).
-- **Start Command:** `python -m app.main` (или через Procfile: `worker: python -m app.main`).
+- **Start Command:** при сборке через Docker обычно не нужен (берётся `CMD` из `Dockerfile.bot`). Для Nixpacks без Docker: `python -m app.main`.
 
 ---
 
@@ -227,7 +225,10 @@ railway run python -m scripts.run_migration 008
 - **Config-as-code:** `webapp/railway.json`.
 - **`RAILWAY_DOCKERFILE_PATH`:** **удали** или ровно **`Dockerfile`** (относительно `webapp`). Не используй **`Dockerfile.bot`**.
 
-**Без Docker (Railpack / Nixpacks):** **Build Command:** `npm ci && npm run build`, **Start Command:** `npx serve -s dist -l $PORT` (флаг `-s` — SPA).
+**Без Docker (Railpack / Nixpacks):** **Root Directory** = `webapp`, **Build Command:** `npm ci && npm run build`, **Start Command:** `npx serve -s dist -l $PORT` (флаг `-s` — SPA).  
+Не оставляй для фронта **пустой Root Directory** без **Docker** и без `railway.frontend.json`: Nixpacks увидит в корне репо **Python** и попытается запустить бота.
+
+**Если в логах фронта `BOT_TOKEN not set` и путь `/app/app/main.py`:** это **не** Mini App, а старт **бота**. Проверь: **Settings → Deploy → Custom Start Command** — **очисти** (не должно быть `python -m app.main`). Включи **Config-as-code** → `railway.frontend.json` **или** **Root Directory** = `webapp` + сборка Node по инструкции выше.
 
 4. **Networking** → **Generate Domain** — URL Mini App для BotFather и кнопки в боте.
 
