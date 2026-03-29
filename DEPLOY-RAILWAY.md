@@ -187,6 +187,7 @@ railway run python -m scripts.run_migration 008
 
 - **Root Directory:** пусто (корень репо).
 - **Variables:** `BOT_TOKEN`, ссылки на Postgres: `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`.
+- **`RAILWAY_DOCKERFILE_PATH`** = `Dockerfile.bot` — если сервис собирается через Docker (иначе Railway может не найти образ бота: в корне нет файла с именем `Dockerfile`).
 - **Start Command:** `python -m app.main` (или через Procfile: `worker: python -m app.main`).
 
 ---
@@ -197,12 +198,12 @@ railway run python -m scripts.run_migration 008
 2. **Settings:**
    - **Root Directory:** пусто (корень).
    - **Builder:** Dockerfile (не Railpack).
-   - **Start Command:** явная команда (перебивает `CMD` бота из корневого `Dockerfile`).  
+   - **Start Command:** явная команда (перебивает `CMD` из образа API).  
      **Важно:** Railway часто запускает команду **без shell**, поэтому `$PORT` не раскрывается и даёт ошибку `Invalid value for '--port': '$PORT'`. Нужна обёртка в `sh -c`:  
      `sh -c "uvicorn app.api.main:app --host 0.0.0.0 --port ${PORT:-8000}"`  
      Если в логах API видно **«😈 AntiSpam Guardian запущен / BUILD 777»** — всё ещё стартует бот, а не uvicorn; проверь, что сохранена именно строка выше.
 3. **Variables:**
-   - **`RAILWAY_DOCKERFILE_PATH`** = `Dockerfile.api` — иначе подтянется корневой `Dockerfile` с ботом, а не uvicorn.
+   - **`RAILWAY_DOCKERFILE_PATH`** = `Dockerfile.api` — иначе Railway может собрать образ бота (`Dockerfile.bot`) вместо uvicorn.
    - Как у бота: `BOT_TOKEN` (обязателен для init data и ссылок во фронте), Postgres: `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` (или Reference `DATABASE_URL`).
 4. **Settings** → **Networking** → **Generate Domain.** Запомни URL API, например: `https://tg-antispam-api-production-xxxx.up.railway.app`
 
@@ -213,8 +214,8 @@ railway run python -m scripts.run_migration 008
 1. **Add Service** → **GitHub Repo** → тот же репо.
 2. **Settings:**
    - **Root Directory:** `webapp` (важно — сборка из папки webapp).
-   - **Build Command:** `npm ci && npm run build`
-   - **Start Command:** `npx serve -s dist -l $PORT`  
+   - **Config-as-code:** путь к `webapp/railway.json` (там указан `Dockerfile` внутри `webapp`), чтобы не подмешивался глобальный Docker-образ бота.
+   - Либо без Docker: **Build Command:** `npm ci && npm run build`, **Start Command:** `npx serve -s dist -l $PORT`  
      (флаг `-s` — SPA: все маршруты отдают `index.html`; `$PORT` задаёт Railway.)
 3. **Variables:**
    - `VITE_API_BASE_URL` = **URL твоего API** из шага «Сервис 2» (например `https://tg-antispam-api-production-xxxx.up.railway.app`).  

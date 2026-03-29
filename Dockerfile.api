@@ -1,5 +1,5 @@
 # Бэкенд Mini App (FastAPI). Для сервиса API на Railway:
-# Variables → RAILWAY_DOCKERFILE_PATH = Dockerfile.api
+# Variables → RAILWAY_DOCKERFILE_PATH = Dockerfile.api (не Dockerfile.bot)
 # Start Command оставь пустым (используется CMD ниже).
 FROM python:3.11-slim
 

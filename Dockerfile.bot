@@ -1,4 +1,5 @@
-# Railway подхватывает Dockerfile только из корня репозитория (или Root Directory сервиса).
+# Образ бота: в Railway у сервиса бота задай RAILWAY_DOCKERFILE_PATH=Dockerfile.bot
+# (в корне репо больше нет файла с именем Dockerfile — чтобы фронт с Root Directory=webapp не подтягивал Python-образ).
 # Копия логики из docker/Dockerfile — при изменениях синхронизируйте оба файла или оставьте один источник.
 FROM python:3.11-slim
 
