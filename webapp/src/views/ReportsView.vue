@@ -25,7 +25,13 @@ onMounted(async () => {
       const data = await fetch(() => api.chat(selected_chat_id))
       chat.value = data
     }
-    reportsChatUrl.value = botData?.reports_chat_url ?? (botData?.username ? `https://t.me/${botData.username}?start=reportschat` : null)
+    const u = botData?.username
+    if (u && selected_chat_id) {
+      reportsChatUrl.value = `https://t.me/${u}?start=reportschat_${selected_chat_id}`
+    } else {
+      reportsChatUrl.value =
+        botData?.reports_chat_url ?? (u ? `https://t.me/${u}?start=reportschat` : null)
+    }
   } catch {
     chat.value = { noSelection: false, loadError: true }
   }
@@ -43,12 +49,20 @@ async function updateRule(patch) {
   }
 }
 
+/** Как «Подключить группу»: openTelegramLink — клиент Telegram открывает нативный выбор чата (часто поверх Mini App, см. Bot API 7+). */
 function openReportsChat() {
-  if (!reportsChatUrl.value) return
+  const url = reportsChatUrl.value
+  if (!url) return
   if (window.Telegram?.WebApp?.openTelegramLink) {
-    window.Telegram.WebApp.openTelegramLink(reportsChatUrl.value)
+    window.Telegram.WebApp.openTelegramLink(url)
+    // На части клиентов удобнее сразу видеть чат с ботом и reply-кнопку; на новых Telegram Mini App часто остаётся открытой.
+    setTimeout(() => {
+      if (window.Telegram?.WebApp?.close) {
+        window.Telegram.WebApp.close()
+      }
+    }, 400)
   } else {
-    window.open(reportsChatUrl.value, '_blank')
+    window.open(url, '_blank')
   }
 }
 </script>
@@ -79,6 +93,14 @@ function openReportsChat() {
     <div v-else-if="chat?.rule" class="space-y-5">
       <p class="text-gray-600 dark:text-gray-400">Чат: <strong class="text-gray-900 dark:text-white">{{ chat.title }}</strong></p>
 
+      <div class="rounded-xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-900/20">
+        <p class="mb-2 font-medium text-amber-900 dark:text-amber-100">📱 Как подключить</p>
+        <p class="text-sm text-amber-800 dark:text-amber-200">
+          Нажмите кнопку ниже — Telegram откроет сценарий выбора группы (как при «Подключить группу»): на актуальных клиентах это часто
+          <strong>нативное окно поверх мини-приложения</strong>. Дальше укажите чат, куда слать отчёты; боту не нужны права админа в этом чате.
+        </p>
+      </div>
+
       <!-- Подключённый чат отчётов -->
       <section class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
         <h2 class="mb-3 text-sm font-medium text-gray-700 dark:text-gray-300">Чат отчётов</h2>
@@ -86,7 +108,7 @@ function openReportsChat() {
           Подключён: <strong class="text-gray-900 dark:text-white">{{ chat.log_chat_title || chat.log_chat_id }}</strong>
         </p>
         <p v-else class="text-sm text-gray-500 dark:text-gray-400">
-          Не подключён. Нажмите кнопку ниже — откроется бот, выберите группу, куда слать отчёты.
+          Не подключён. Нажмите кнопку ниже — откроется тот же нативный выбор группы, что и при подключении защищаемого чата.
         </p>
         <button
           v-if="reportsChatUrl"

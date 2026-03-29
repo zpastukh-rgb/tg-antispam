@@ -20,13 +20,12 @@ onMounted(async () => {
   }
 })
 
-/** Открыть чат с ботом. На мобильном закрываем мини-приложение, чтобы пользователь увидел чат и кнопку под полем ввода. */
+/** openTelegramLink: на клиентах Telegram (Bot API 7+) мини-апп часто остаётся открытой, нативный выбор группы — поверх. Закрытие через 400 мс — запасной вариант, чтобы попасть в чат с ботом, если модалка не всплыла. */
 function openAddToGroup() {
   const url = addToGroupUrl.value
   if (!url) return
   if (window.Telegram?.WebApp?.openTelegramLink) {
     window.Telegram.WebApp.openTelegramLink(url)
-    // Закрываем мини-приложение, чтобы на телефоне пользователь оказался в чате с ботом и увидел кнопку выбора группы
     setTimeout(() => {
       if (window.Telegram?.WebApp?.close) {
         window.Telegram.WebApp.close()
@@ -55,8 +54,8 @@ function openAddToGroup() {
       <div class="rounded-xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-900/20">
         <p class="mb-2 font-medium text-amber-900 dark:text-amber-100">📱 На телефоне</p>
         <ol class="list-decimal list-inside space-y-1 text-sm text-amber-800 dark:text-amber-200">
-          <li>Нажмите кнопку ниже — откроется <strong>чат с ботом</strong> (мини-приложение закроется).</li>
-          <li>В чате с ботом нажмите <strong>кнопку под полем ввода</strong> «Выбрать группу» и выберите группу.</li>
+          <li>Нажмите кнопку ниже — Telegram откроет <strong>нативный выбор группы</strong> (часто поверх мини-приложения, без «обязательной» инлайн-панели).</li>
+          <li>Если вместо модалки открылся только чат с ботом — нажмите <strong>«Выбрать группу»</strong> под полем ввода.</li>
         </ol>
       </div>
 

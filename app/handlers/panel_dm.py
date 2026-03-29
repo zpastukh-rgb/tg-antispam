@@ -868,36 +868,6 @@ async def render_pick_chat(
     return b.as_markup()
 
 
-async def render_pick_reports_chat(bot, user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
-    """Куда слать отчёты — только лог-чаты (где был /setlog)."""
-    async with await get_session() as session:
-        selected = await _get_selected_chat(session, user_id)
-        if not selected:
-            return "😈 Сначала выбери защищаемый чат.", _kb_back_to_main()
-
-        log_chats = await _user_log_chats(session, user_id)
-        if not log_chats:
-            return (
-                "😈 *Нет чатов отчётов.*\n\n"
-                "Нажми *➕ Подключить чат отчётов* — выбери группу, куда слать отчёты.",
-                _kb_back_to_main(),
-            )
-
-        chat_items = [(ch.id, (ch.title or "").strip() or str(ch.id)) for ch in log_chats]
-
-    b = InlineKeyboardBuilder()
-    b.button(text="🚫 Не слать отчёты (снять)", callback_data=CB_CLEAR_REPORTS_CHAT)
-
-    for chat_id, title in chat_items:
-        if title == str(chat_id):
-            title = await _get_chat_title(bot, chat_id)
-        b.button(text=f"📍 {title}", callback_data=f"{CB_SET_REPORTS_CHAT}{chat_id}")
-
-    b.button(text="⬅️ Назад", callback_data=CB_BACK_TO_CHAT)
-    b.adjust(1)
-    return "🧾 *Сменить чат отчётов*\nВыбери, куда слать отчёты:", b.as_markup()
-
-
 # Кэш chat_id, для которых уже отправили приветствие (защита от двойного my_chat_member)
 _WELCOME_SENT_AT: Dict[int, float] = {}
 _WELCOME_SENT_TTL = 60  # секунд
@@ -2525,7 +2495,9 @@ async def cb_connect_reports(cb: CallbackQuery):
     _pending_reports_for[cb.from_user.id] = protected_chat_id
     try:
         await cb.message.answer(
-            "Нажми кнопку ниже — выбери группу, куда слать отчёты. Если бота там ещё нет — добавь его в ту группу и выбери снова.",
+            "Нажми *«Выбрать чат отчётов»* ниже и укажи группу. "
+            "Права администратора в чате отчётов не нужны — только возможность писать сообщения.",
+            parse_mode="Markdown",
             reply_markup=_kb_connect_reports_chat(),
         )
     except Exception as e:
@@ -2542,9 +2514,21 @@ async def cb_connect_reports(cb: CallbackQuery):
 
 @router.callback_query(F.data == CB_PICK_REPORTS_CHAT)
 async def cb_pick_reports_chat(cb: CallbackQuery):
+    """Как «Подключить»: одна reply-кнопка и выбор чата, без инлайн-списка."""
     await cb.answer()
-    txt, kb = await render_pick_reports_chat(cb.bot, cb.from_user.id)
-    await _edit_or_send(cb, txt, kb)
+    protected_chat_id = await _get_selected_or_alert(cb)
+    if not protected_chat_id:
+        return
+    _pending_reports_for[cb.from_user.id] = protected_chat_id
+    try:
+        await cb.message.answer(
+            "Нажми *«Выбрать чат отчётов»* ниже и укажи новую группу для отчётов.",
+            parse_mode="Markdown",
+            reply_markup=_kb_connect_reports_chat(),
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("cb_pick_reports_chat: %s", e)
 
 
 @router.callback_query(F.data == CB_CLEAR_REPORTS_CHAT)
@@ -2648,7 +2632,7 @@ USER_ADMIN_RIGHTS_FOR_REQUEST = ChatAdministratorRights(
 
 
 def _kb_connect_reports_chat() -> ReplyKeyboardMarkup:
-    """ТЗ Отчёты: выбор чата для отчётов — только группы, где бот уже есть (чтобы туда слать отчёты)."""
+    """Чат отчётов: любая группа; если бота там нет — клиент предложит добавить (без выдачи админки)."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [
@@ -2657,7 +2641,7 @@ def _kb_connect_reports_chat() -> ReplyKeyboardMarkup:
                     request_chat=KeyboardButtonRequestChat(
                         request_id=REPORTS_REQUEST_ID,
                         chat_is_channel=False,
-                        bot_is_member=True,
+                        bot_is_member=False,
                         request_title=True,
                     ),
                 )
@@ -2997,23 +2981,15 @@ async def on_chat_shared(message: Message):
             title_esc = protected_title.replace("*", "\\*")
 
             msg_text = (
-                "😈 *AntiSpam Guardian* подключил чат отчётов.\n\n"
-                "Теперь сюда будут прилетать отчёты из группы:\n"
-                f"*«{title_esc}»*\n\n"
-                "Я буду присылать:\n"
-                "• удаления сообщений\n• муты\n• баны\n• разбаны\n• размуты\n• подозрительную активность\n\n"
-                "_Это рабочий журнал администраторов. Участников здесь не трогаю — только отчёты._"
+                "😈 *AntiSpam Guardian* — чат отчётов для группы "
+                f"*«{title_esc}»*.\n\n"
+                "Сюда приходят служебные отчёты о модерации (удаления, муты, баны и т.д.). "
+                "Обычных участников здесь не трогаю."
             )
-            me = await message.bot.get_me()
-            panel_url = f"https://t.me/{me.username}?start=panel"
-            from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
             await message.bot.send_message(
                 reports_chat_id,
                 msg_text,
                 parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="⚙ Открыть панель управления", url=panel_url)]
-                ]),
             )
         except Exception:
             pass

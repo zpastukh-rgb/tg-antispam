@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, Tuple
@@ -254,29 +255,47 @@ async def cmd_start(message: Message):
                     await message.answer("Нет доступа к этой группе.")
         return
 
-    # Deep link из Mini App: t.me/bot?start=reportschat — выбор чата отчётов (для выбранной в панели группы)
-    if len(args) >= 2 and args[1].lower() == "reportschat":
-        try:
-            from app.db.session import get_session
-            from app.api.service import get_selected_chat_id
-            from app.handlers import panel_dm
-            async with await get_session() as session:
-                selected = await get_selected_chat_id(session, message.from_user.id)
-            if not selected:
+    # Deep link из Mini App: t.me/bot?start=reportschat или reportschat_<chat_id>
+    if len(args) >= 2:
+        m = re.match(r"^reportschat(?:_(-?\d+))?$", (args[1] or "").strip(), re.I)
+        if m:
+            try:
+                from app.db.session import get_session
+                from app.api.service import get_selected_chat_id, user_can_access_chat
+                from app.handlers import panel_dm
+                uid = message.from_user.id
+                selected: int | None = None
+                async with await get_session() as session:
+                    if m.group(1) is not None:
+                        selected = int(m.group(1))
+                        if not await user_can_access_chat(session, uid, selected):
+                            await message.answer(
+                                "Нет доступа к этой группе. Открой *Отчёты* в панели для нужного чата.",
+                                parse_mode="Markdown",
+                            )
+                            return
+                    else:
+                        selected = await get_selected_chat_id(session, uid)
+                if not selected:
+                    await message.answer(
+                        "Сначала выберите группу в приложении: *Подключённые чаты* → *Отчёты*, "
+                        "либо *Выбрать* у нужной группы, затем снова «Подключить чат отчётов».",
+                        parse_mode="Markdown",
+                    )
+                else:
+                    panel_dm._pending_reports_for[uid] = selected
+                    await message.answer(
+                        "Нажми *«Выбрать чат отчётов»* ниже и укажи группу для отчётов. "
+                        "Боту не нужны права администратора в этом чате — только чтобы он мог писать сообщения.",
+                        parse_mode="Markdown",
+                        reply_markup=panel_dm._kb_connect_reports_chat(),
+                    )
+            except Exception:
                 await message.answer(
-                    "Сначала выберите чат в панели: *Подключённые чаты* → нажмите «Выбрать» у нужной группы, "
-                    "затем снова нажмите «Подключить чат отчётов» в разделе Отчёты.",
+                    "Не удалось открыть выбор чата отчётов. Открой раздел *Отчёты* в приложении и попробуйте снова.",
                     parse_mode="Markdown",
                 )
-            else:
-                panel_dm._pending_reports_for[message.from_user.id] = selected
-                await message.answer(
-                    "Нажми кнопку ниже — выбери группу, куда слать отчёты. Если бота там ещё нет — добавь его в ту группу и выбери снова.",
-                    reply_markup=panel_dm._kb_connect_reports_chat(),
-                )
-        except Exception:
-            await message.answer("Не удалось открыть выбор чата отчётов. Выберите чат в панели и попробуйте снова.")
-        return
+            return
 
     # Deep link из Mini App: t.me/bot?start=addgroup — Reply-кнопка (выбор группы + права) + инлайн на случай превью
     if len(args) >= 2 and args[1].lower() == "addgroup":
