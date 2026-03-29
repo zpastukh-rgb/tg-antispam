@@ -66,7 +66,10 @@ function goToConnect() {
       </div>
     </div>
 
-    <div v-else-if="loading" class="rounded-xl border border-gray-200 bg-white p-8 text-center dark:border-guardian-elevated-hi dark:bg-guardian-elevated">
+    <div
+      v-else-if="loading || (hasInitData && me === null && !error)"
+      class="rounded-xl border border-gray-200 bg-white p-8 text-center dark:border-guardian-elevated-hi dark:bg-guardian-elevated"
+    >
       <span class="text-gray-500 dark:text-gray-400">Загрузка…</span>
     </div>
   </div>

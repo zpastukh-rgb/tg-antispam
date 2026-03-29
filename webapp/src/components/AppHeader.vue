@@ -14,7 +14,7 @@ defineProps({
 
 const emit = defineEmits(['menu-click'])
 
-/** С base: './' в Vite публичные файлы через BASE_URL */
+/** Публичные файлы (logo) через BASE_URL (в проде обычно '/') */
 const logoSrc = `${import.meta.env.BASE_URL}logo.png`
 
 const showBack = computed(() => route.path !== '/' && route.path !== '')

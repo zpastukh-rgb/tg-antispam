@@ -170,7 +170,10 @@ onMounted(async () => {
       </div>
     </div>
 
-    <div v-else-if="loading" class="rounded-xl border border-gray-200 bg-white p-8 text-center dark:border-gray-700 dark:bg-gray-800">
+    <div
+      v-else-if="loading || (hasInitData && billing === null && !error)"
+      class="rounded-xl border border-gray-200 bg-white p-8 text-center dark:border-gray-700 dark:bg-gray-800"
+    >
       <span class="text-gray-500 dark:text-gray-400">Загрузка…</span>
     </div>
   </div>
