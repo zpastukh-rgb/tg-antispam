@@ -280,14 +280,45 @@ async def cmd_start(message: Message):
                 except Exception:
                     pass
                 return
-            # ?startgroup=connect → подтверждение подключения группы
+            # ?startgroup=connect → автоматически подключаем группу к защите
             if payload == "connect":
                 try:
+                    from app.db.session import get_session
+                    from app.db.models import Chat, Rule
+                    from app.services.user_service import get_or_create_user, can_add_chat
+                    uid = message.from_user.id
+                    chat_id = message.chat.id
+                    chat_title = (message.chat.title or "").strip() or str(chat_id)
+                    bot = message.bot
+                    async with await get_session() as session:
+                        await get_or_create_user(session, uid, username=getattr(message.from_user, "username", None), first_name=getattr(message.from_user, "first_name", None))
+                        can_add, current_count, limit = await can_add_chat(session, uid)
+                        if not can_add:
+                            await message.answer(f"❌ Лимит чатов: {current_count} из {limit}. Повысьте тариф.")
+                            return
+                        chat_row = await session.get(Chat, chat_id)
+                        if not chat_row:
+                            chat_row = Chat(id=chat_id, title=chat_title, owner_user_id=uid, is_active=True, is_log_chat=False)
+                            session.add(chat_row)
+                        else:
+                            chat_row.title = chat_title
+                            chat_row.owner_user_id = uid
+                            chat_row.is_active = True
+                        rule = await session.get(Rule, chat_id)
+                        if not rule:
+                            rule = Rule(chat_id=chat_id, filter_links=True, filter_mentions=True, action_mode="delete", mute_minutes=30, anti_edit=True, newbie_enabled=True, newbie_minutes=10, log_enabled=True)
+                            session.add(rule)
+                        await session.commit()
+                    title_esc = chat_title.replace("*", "\\*")
                     await message.answer(
-                        "✅ Бот добавлен! Напишите /check чтобы активировать защиту.",
+                        f"✅ Группа *«{title_esc}»* подключена к защите.\n\n"
+                        "Настройки — в панели управления.",
+                        parse_mode="Markdown",
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).warning("startgroup=connect error: %s", e)
+                    await message.answer("✅ Бот добавлен. Откройте панель для настроек.")
                 return
         return
     if not message.from_user:
