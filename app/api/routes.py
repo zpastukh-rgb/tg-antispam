@@ -40,11 +40,8 @@ _bot_username: str | None = None
 
 
 async def _get_bot_username() -> str | None:
+    """Имя для t.me/… Сначала getMe по BOT_TOKEN API (совпадает с ботом Mini App). ENV только если getMe не вернул username."""
     global _bot_username
-    # Имя бота без @: надёжные ссылки Mini App, если getMe даёт «не тот» бот при расхождении конфигов.
-    forced = (os.getenv("BOT_USERNAME") or os.getenv("TELEGRAM_BOT_USERNAME") or "").strip().lstrip("@")
-    if forced:
-        return forced
     if _bot_username:
         return _bot_username
     token = os.getenv("BOT_TOKEN")
@@ -55,11 +52,14 @@ async def _get_bot_username() -> str | None:
             async with session.get(f"https://api.telegram.org/bot{token}/getMe") as resp:
                 data = await resp.json()
                 if data.get("ok") and data.get("result"):
-                    _bot_username = data["result"].get("username")
-                    return _bot_username
+                    u = (data["result"].get("username") or "").strip()
+                    if u:
+                        _bot_username = u
+                        return u
     except Exception:
         pass
-    return None
+    forced = (os.getenv("BOT_USERNAME") or os.getenv("TELEGRAM_BOT_USERNAME") or "").strip().lstrip("@")
+    return forced or None
 
 
 def _format_dt(dt):

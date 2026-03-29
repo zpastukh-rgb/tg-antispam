@@ -205,6 +205,17 @@ ADDGROUP_SCREENSHOTS = (
 )
 
 
+def _group_start_payload(message: Message) -> str | None:
+    """Аргумент deep links в группе: /start connect, /start@Bot connect (startgroup=…)."""
+    t = (message.text or "").strip()
+    if not t:
+        return None
+    m = re.match(r"^/start(?:@[A-Za-z0-9_]+)?\s+(\S+)", t)
+    if not m:
+        return None
+    return m.group(1).strip().lower()
+
+
 async def _send_addgroup_screenshots(bot, chat_id: int) -> None:
     """Отправить 2 скриншота-подсказки, если файлы есть."""
     from aiogram.types import FSInputFile
@@ -230,9 +241,8 @@ async def cmd_start(message: Message):
     if message.chat.type != "private":
         if not message.from_user:
             return
-        args = (message.text or "").strip().split()
-        if len(args) >= 2:
-            payload = args[1].lower()
+        payload = _group_start_payload(message)
+        if payload:
             # ?startgroup=reportschat_CHATID → эта группа становится чатом отчётов для CHATID
             if payload.startswith("reportschat_"):
                 try:
