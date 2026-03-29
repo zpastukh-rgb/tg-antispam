@@ -1,4 +1,4 @@
-import { ref, watch, onMounted } from 'vue'
+import { ref, onMounted } from 'vue'
 
 const STORAGE_KEY = 'antispam-theme'
 
@@ -15,40 +15,57 @@ function getStored() {
   }
 }
 
+function applyVisual(dark) {
+  if (typeof document === 'undefined') return
+  const html = document.documentElement
+  if (dark) html.classList.add('dark')
+  else html.classList.remove('dark')
+}
+
+function persistChoice(dark) {
+  try {
+    localStorage.setItem(STORAGE_KEY, dark ? 'dark' : 'light')
+  } catch {
+    //
+  }
+}
+
 export function useTheme() {
   const isDark = ref(false)
 
-  function apply(dark) {
-    isDark.value = !!dark
-    if (typeof document === 'undefined') return
-    const html = document.documentElement
-    if (dark) {
-      html.classList.add('dark')
-    } else {
-      html.classList.remove('dark')
-    }
-    try {
-      localStorage.setItem(STORAGE_KEY, dark ? 'dark' : 'light')
-    } catch {}
+  function toggle() {
+    const next = !isDark.value
+    isDark.value = next
+    applyVisual(next)
+    persistChoice(next)
   }
 
-  function toggle() {
-    apply(!isDark.value)
+  function apply(dark) {
+    isDark.value = !!dark
+    applyVisual(!!dark)
   }
 
   onMounted(() => {
-    const tg = typeof window !== 'undefined' ? window.Telegram?.WebApp : null
-    if (tg?.colorScheme === 'dark' || tg?.colorScheme === 'light') {
-      apply(tg.colorScheme === 'dark')
+    const stored = getStored()
+    if (stored === 'dark') {
+      isDark.value = true
+      applyVisual(true)
       return
     }
-    const stored = getStored()
-    if (stored === 'dark') apply(true)
-    else if (stored === 'light') apply(false)
-    else apply(getSystemDark())
+    if (stored === 'light') {
+      isDark.value = false
+      applyVisual(false)
+      return
+    }
+    const tg = typeof window !== 'undefined' ? window.Telegram?.WebApp : null
+    if (tg?.colorScheme === 'dark' || tg?.colorScheme === 'light') {
+      isDark.value = tg.colorScheme === 'dark'
+      applyVisual(isDark.value)
+      return
+    }
+    isDark.value = getSystemDark()
+    applyVisual(isDark.value)
   })
-
-  watch(isDark, (v) => apply(v), { immediate: false })
 
   return { isDark, toggle, apply }
 }

@@ -41,6 +41,10 @@ _bot_username: str | None = None
 
 async def _get_bot_username() -> str | None:
     global _bot_username
+    # Имя бота без @: надёжные ссылки Mini App, если getMe даёт «не тот» бот при расхождении конфигов.
+    forced = (os.getenv("BOT_USERNAME") or os.getenv("TELEGRAM_BOT_USERNAME") or "").strip().lstrip("@")
+    if forced:
+        return forced
     if _bot_username:
         return _bot_username
     token = os.getenv("BOT_TOKEN")
