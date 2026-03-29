@@ -15,6 +15,7 @@ from aiogram.types import (
 from dotenv import load_dotenv
 from sqlalchemy import text
 
+from app.db.ensure_defaults import ensure_default_trial_promo
 from app.db.session import engine
 from app.db.models import Base
 
@@ -100,6 +101,7 @@ async def on_startup() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _run_ensure_rules_migration()
+    await ensure_default_trial_promo(engine)
     # Меню команд:
     # - ЛС: основной список (default).
     # - Обычные участники групп: пустое меню (не видят /addantispam и прочее).

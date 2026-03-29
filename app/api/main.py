@@ -4,16 +4,28 @@
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router
+from app.db.ensure_defaults import ensure_default_trial_promo
+from app.db.session import engine
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if engine is not None:
+        await ensure_default_trial_promo(engine)
+    yield
+
 
 app = FastAPI(
     title="AntiSpam Guardian API",
     description="REST API для Mini App панели управления",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 # Mini App может открываться с другого origin. Нельзя одновременно allow_origins=["*"] и
