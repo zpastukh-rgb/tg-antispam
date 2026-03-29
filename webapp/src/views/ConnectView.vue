@@ -20,12 +20,12 @@ onMounted(async () => {
   }
 })
 
-/** Не вызывать WebApp.close() — иначе панель закрывается и кажется, что «пропали настройки»; выбор группы открывается поверх или в чате, мини-апп остаётся в стеке. */
+/** Ссылка ?startgroup&admin= открывает нативный выбор группы прямо в Telegram, без перехода в чат с ботом. */
 function openAddToGroup() {
   const url = addToGroupUrl.value
   if (!url) return
-  if (window.Telegram?.WebApp?.openTelegramLink) {
-    window.Telegram.WebApp.openTelegramLink(url)
+  if (window.Telegram?.WebApp?.openLink) {
+    window.Telegram.WebApp.openLink(url)
   } else {
     window.open(url, '_blank')
   }
@@ -49,8 +49,8 @@ function openAddToGroup() {
       <div class="rounded-xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-900/20">
         <p class="mb-2 font-medium text-amber-900 dark:text-amber-100">📱 На телефоне</p>
         <ol class="list-decimal list-inside space-y-1 text-sm text-amber-800 dark:text-amber-200">
-          <li>Нажмите кнопку ниже — Telegram откроет <strong>нативный выбор группы</strong> (часто поверх мини-приложения). Панель <strong>не закрывается</strong> — вернитесь к ней кнопкой «Назад» или через меню бота.</li>
-          <li>Если открылся чат с ботом — нажмите <strong>«Выбрать группу»</strong> под полем ввода; должно прийти сообщение с инструкцией, а не только приветствие /start.</li>
+          <li>Нажмите кнопку — Telegram откроет <strong>выбор группы</strong> и предложит дать боту права администратора.</li>
+          <li>После выбора группы в ней напишите <code>/check</code> — чат появится в разделе «Подключённые чаты».</li>
         </ol>
       </div>
 

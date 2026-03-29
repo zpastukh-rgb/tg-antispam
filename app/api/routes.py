@@ -110,7 +110,7 @@ async def api_bot_info(
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Bot username not available")
     return {
         "username": username,
-        "add_to_group_url": f"https://t.me/{username}?start=addgroup",
+        "add_to_group_url": f"https://t.me/{username}?startgroup=connect&admin=delete_messages+restrict_members+invite_users+pin_messages",
         "reports_chat_url": f"https://t.me/{username}?start=reportschat",
     }
 

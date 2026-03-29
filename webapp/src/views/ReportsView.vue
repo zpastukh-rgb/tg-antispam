@@ -49,7 +49,7 @@ async function updateRule(patch) {
   }
 }
 
-/** Без WebApp.close() — панель «Отчёты» остаётся доступной после выбора чата. */
+/** Deep link ведёт в личку бота — там reply-кнопка «Выбрать чат отчётов». */
 function openReportsChat() {
   const url = reportsChatUrl.value
   if (!url) return
@@ -90,7 +90,7 @@ function openReportsChat() {
       <div class="rounded-xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-900/20">
         <p class="mb-2 font-medium text-amber-900 dark:text-amber-100">📱 Как подключить</p>
         <p class="text-sm text-amber-800 dark:text-amber-200">
-          Нажмите кнопку ниже — откроется сценарий выбора группы. Мини-приложение <strong>не закрывается</strong> — после настройки вернитесь «Назад» в панель. В личке с ботом должно прийти сообщение с кнопкой «Выбрать чат отчётов», а не только короткое /start.
+          Нажмите кнопку ниже — <strong>откроется чат с ботом</strong> (это нормально, не /start). Там под полем ввода появится синяя кнопка <strong>«Выбрать чат отчётов»</strong> — нажмите и укажите группу. Потом вернитесь в панель через меню бота.
         </p>
       </div>
 
