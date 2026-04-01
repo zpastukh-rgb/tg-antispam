@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
     BotCommand,
     BotCommandScopeDefault,
@@ -149,6 +150,25 @@ async def on_startup() -> None:
         pass
 
 
+async def _safe_delete_webhook() -> None:
+    """После ручного logOut Bot API может вернуть Logged out на deleteWebhook — не валим запуск."""
+    import logging
+
+    log = logging.getLogger(__name__)
+    for attempt in range(3):
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            return
+        except TelegramBadRequest as e:
+            msg = str(e).lower()
+            if "logged out" in msg:
+                log.warning("delete_webhook skipped: bot is logged out (attempt %s/3)", attempt + 1)
+                await asyncio.sleep(2)
+                continue
+            raise
+    log.warning("delete_webhook: still logged out, continue startup and let polling recover")
+
+
 async def main() -> None:
     # log_setup ДО moderation: иначе chat_member в moderation перехватывает добавление бота в группу,
     # и my_chat_member в log_setup не срабатывает — группа не подключается, приветствие не уходит
@@ -163,7 +183,7 @@ async def main() -> None:
     dp.include_router(whitelist_router)
     dp.include_router(stopwords_router)
 
-    await bot.delete_webhook(drop_pending_updates=True)
+    await _safe_delete_webhook()
     await on_startup()
     await _railway_health_server()
 
