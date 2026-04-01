@@ -216,6 +216,11 @@ def _group_start_payload(message: Message) -> str | None:
     return m.group(1).strip().lower()
 
 
+def _is_plain_group_start(message: Message) -> bool:
+    t = (message.text or "").strip()
+    return bool(re.match(r"^/start(?:@[A-Za-z0-9_]+)?\s*$", t, re.I))
+
+
 async def _send_addgroup_screenshots(bot, chat_id: int) -> None:
     """Отправить 2 скриншота-подсказки, если файлы есть."""
     from aiogram.types import FSInputFile
@@ -242,6 +247,10 @@ async def cmd_start(message: Message):
         if not message.from_user:
             return
         payload = _group_start_payload(message)
+        # В некоторых клиентах в группе прилетает просто /start@bot без payload.
+        # Для UX «одна кнопка» трактуем это как connect.
+        if payload is None and _is_plain_group_start(message):
+            payload = "connect"
         if payload:
             # ?startgroup=reportschat_CHATID → эта группа становится чатом отчётов для CHATID
             if payload.startswith("reportschat_"):
@@ -293,38 +302,28 @@ async def cmd_start(message: Message):
             # ?startgroup=connect → автоматически подключаем группу к защите
             if payload == "connect":
                 try:
-                    from app.db.session import get_session
-                    from app.db.models import Chat, Rule
-                    from app.services.user_service import get_or_create_user, can_add_chat
+                    from aiogram.enums import ChatMemberStatus
+                    from app.handlers.panel_dm import connect_chat_after_bot_added
                     uid = message.from_user.id
                     chat_id = message.chat.id
                     chat_title = (message.chat.title or "").strip() or str(chat_id)
-                    bot = message.bot
-                    async with await get_session() as session:
-                        await get_or_create_user(session, uid, username=getattr(message.from_user, "username", None), first_name=getattr(message.from_user, "first_name", None))
-                        can_add, current_count, limit = await can_add_chat(session, uid)
-                        if not can_add:
-                            await message.answer(f"❌ Лимит чатов: {current_count} из {limit}. Повысьте тариф.")
-                            return
-                        chat_row = await session.get(Chat, chat_id)
-                        if not chat_row:
-                            chat_row = Chat(id=chat_id, title=chat_title, owner_user_id=uid, is_active=True, is_log_chat=False)
-                            session.add(chat_row)
-                        else:
-                            chat_row.title = chat_title
-                            chat_row.owner_user_id = uid
-                            chat_row.is_active = True
-                        rule = await session.get(Rule, chat_id)
-                        if not rule:
-                            rule = Rule(chat_id=chat_id, filter_links=True, filter_mentions=True, action_mode="delete", mute_minutes=30, anti_edit=True, newbie_enabled=True, newbie_minutes=10, log_enabled=True)
-                            session.add(rule)
-                        await session.commit()
-                    title_esc = chat_title.replace("*", "\\*")
-                    await message.answer(
-                        f"✅ Группа *«{title_esc}»* подключена к защите.\n\n"
-                        "Настройки — в панели управления.",
-                        parse_mode="Markdown",
+                    me = await message.bot.get_me()
+                    m = await message.bot.get_chat_member(chat_id, me.id)
+                    if m.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
+                        await message.answer(
+                            "Чтобы включить защиту, назначьте меня администратором в этой группе."
+                        )
+                        return
+                    connected = await connect_chat_after_bot_added(
+                        message.bot,
+                        chat_id,
+                        chat_title,
+                        uid,
+                        username=getattr(message.from_user, "username", None),
+                        first_name=getattr(message.from_user, "first_name", None),
                     )
+                    if not connected:
+                        await message.answer("✅ Бот добавлен. Откройте панель для настроек.")
                 except Exception as e:
                     import logging
                     logging.getLogger(__name__).warning("startgroup=connect error: %s", e)
