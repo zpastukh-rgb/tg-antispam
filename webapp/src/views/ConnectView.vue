@@ -1,10 +1,13 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { useApi } from '../composables/useApi'
+import { useToast } from '../composables/useToast'
 import { openTelegramDeepLink } from '../utils/openTelegramDeepLink'
 
 const { api, fetch, hasInitData } = useApi()
+const { showToast } = useToast()
 const addToGroupUrl = ref(null)
+const pendingChats = ref([])
 
 const ADMIN_RIGHTS = 'delete_messages+restrict_members+invite_users+pin_messages'
 
@@ -17,15 +20,23 @@ function buildAddUrl(username) {
 onMounted(async () => {
   if (!hasInitData.value) return
   try {
-    const botData = await fetch(() => api.botInfo()).catch(() => null)
+    const [botData, pendingData] = await Promise.all([
+      fetch(() => api.botInfo()).catch(() => null),
+      fetch(() => api.connectPending()).catch(() => ({ chats: [] })),
+    ])
     addToGroupUrl.value = botData?.add_to_group_url || buildAddUrl(botData?.username)
+    pendingChats.value = pendingData?.chats || []
   } catch {
     //
   }
 })
 
 function openAddToGroup() {
-  if (addToGroupUrl.value) openTelegramDeepLink(addToGroupUrl.value)
+  if (!addToGroupUrl.value) return
+  const ok = openTelegramDeepLink(addToGroupUrl.value)
+  if (!ok) {
+    showToast('Откройте эту кнопку из Telegram-приложения, не из браузера.')
+  }
 }
 </script>
 
@@ -41,18 +52,17 @@ function openAddToGroup() {
     </div>
 
     <template v-else>
-      <p class="text-sm leading-relaxed text-gray-600 dark:text-gray-400">
-        Одна кнопка — Telegram предложит <strong class="text-gray-800 dark:text-gray-200">выбрать группу</strong> и выдать боту права. Это стандартный сценарий Mini App (
-        <code class="rounded bg-gray-100 px-1 text-xs dark:bg-gray-700">startgroup</code>
-        ).
-      </p>
+      <div class="rounded-xl border-2 border-red-500/60 bg-red-50 p-4 text-sm text-red-950 dark:border-red-700 dark:bg-red-950/30 dark:text-red-100">
+        <p class="font-medium">📱 На телефоне</p>
+        <p class="mt-2 leading-relaxed">
+          1. Нажмите зелёную кнопку ниже — Telegram сразу откроет выбор группы.<br>
+          2. Выберите группу и выдайте боту права администратора.
+        </p>
+      </div>
 
-      <div
-        class="rounded-xl border-2 border-sky-500/40 bg-sky-50/90 p-4 text-sm text-sky-950 dark:border-sky-600 dark:bg-sky-950/25 dark:text-sky-100"
-      >
-        <p class="font-medium">Что будет дальше</p>
-        <p class="mt-1.5 text-sky-900/90 dark:text-sky-100/90">
-          После выбора группы она появится в «Подключённых чатах». Настраивать фильтры можно там же.
+      <div class="rounded-xl border-2 border-emerald-500/50 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-100">
+        <p class="leading-relaxed">
+          После выбора группа автоматически добавится в подключённые. Команду <code class="rounded bg-emerald-100 px-1 text-xs dark:bg-emerald-900/40">/check</code> писать не нужно.
         </p>
       </div>
 
@@ -63,9 +73,17 @@ function openAddToGroup() {
           class="w-full max-w-sm rounded-xl bg-primary-500 px-6 py-3.5 text-base font-semibold text-guardian-ink shadow-sm shadow-primary-500/25 transition hover:bg-primary-400 active:scale-[0.99]"
           @click="openAddToGroup"
         >
-          ➕ Выбрать группу и подключить
+          ➕ Выбрать группу
         </button>
         <p v-else class="py-4 text-center text-sm text-gray-500 dark:text-gray-400">Загрузка ссылки…</p>
+      </div>
+
+      <div class="rounded-xl border-2 border-sky-500/40 bg-sky-50/90 p-4 text-sm text-sky-950 dark:border-sky-600 dark:bg-sky-950/25 dark:text-sky-100">
+        <p class="font-medium">Чаты, ожидающие подключения</p>
+        <ul v-if="pendingChats.length" class="mt-2 list-disc space-y-1 pl-5">
+          <li v-for="c in pendingChats" :key="c.id">{{ c.title }}</li>
+        </ul>
+        <p v-else class="mt-2 text-sky-900/85 dark:text-sky-100/85">Пока пусто.</p>
       </div>
     </template>
   </div>
