@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,11 +17,6 @@ from app.db.session import get_session
 from app.db.models import User, Chat, Rule
 from app.services.user_service import count_protected_chats, TARIFF_CHAT_LIMITS
 from app.db.models import Tariff
-from app.texts.guardian_billing import (
-    REMINDER_PREMIUM_WEEKLY,
-    REMINDER_PREMIUM_SOFT,
-    SUBSCRIPTION_EXPIRED,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +27,22 @@ REMINDER_3D = timedelta(days=3)
 GUARDIAN_MSG_INTERVAL = timedelta(hours=72)  # не чаще 1 раз в 72 часа
 GUARDIAN_ACTIVITY_WINDOW = timedelta(hours=24)  # «≥10 сообщений за сутки» — считаем активным если была модерация
 AUTO_REPORT_INTERVAL = timedelta(hours=24)  # дайджест раз в сутки
+EXPIRED_REMINDER_PATTERN_DAYS = (7, 3)  # после первого уведомления: раз в неделю, затем через 3 дня, по кругу
+
+_STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
+EXPIRED_WARNING_PHOTO_PATH = _STATIC_DIR / "trial_warning.jpg"
+EXPIRED_WARNING_FALLBACK_PATH = Path(__file__).resolve().parent.parent.parent / "webapp" / "public" / "logo.png"
+EXPIRED_WARNING_PHOTO_FILE_ID = (os.getenv("TRIAL_WARNING_PHOTO_FILE_ID") or "").strip()
+EXPIRED_WARNING_TEXT = (
+    "⚠ *Guard сообщает: триальный период завершён*\n\n"
+    "Бот продолжает работать, но расширенные Premium-функции отключены.\n\n"
+    "Без усиленной защиты в чате чаще появляются:\n"
+    "⛔ реклама казино и мошеннических схем\n"
+    "⛔ предложения по запрещённым веществам\n"
+    "⛔ ссылки на нелегальный контент\n\n"
+    "По [судебной практике](https://dzen.ru/a/Z4-D4Y6bG07j33Kc) такие ситуации уже приводили к рискам для администраторов.\n\n"
+    "Guard не допустит такого исхода. Продлите защиту сейчас и держите чат под контролем."
+)
 
 # Тексты напоминаний (ТЗ)
 REMINDER_12H_TEXT = (
@@ -71,6 +84,90 @@ GUARDIAN_PERIODIC_TEXTS = [
     "🛡 Guardian проверяет чат.\nЕсли заметите странные ссылки — можете не переживать.\nЯ их тоже вижу.",
     "😈 AntiSpam Guardian на дежурстве.\nПорядок в чате поддерживается автоматически.",
 ]
+
+
+def _billing_url() -> str | None:
+    base = (os.getenv("MINI_APP_URL") or os.getenv("WEBAPP_URL") or "").strip().rstrip("/")
+    if not base:
+        return None
+    return f"{base}/billing"
+
+
+def _expired_reminder_threshold_days(n: int) -> int:
+    """Порог в днях для n-го follow-up после первого уведомления об истечении."""
+    total = 0
+    for i in range(n):
+        total += EXPIRED_REMINDER_PATTERN_DAYS[i % len(EXPIRED_REMINDER_PATTERN_DAYS)]
+    return total
+
+
+async def send_expired_warning(bot, user_id: int) -> None:
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+    from aiogram.types import FSInputFile
+    from aiogram.exceptions import TelegramBadRequest
+    url = _billing_url()
+    if url:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Продлить защиту", web_app=WebAppInfo(url=url)),
+        ]])
+    else:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Продлить защиту", callback_data="p:billing"),
+        ]])
+    if EXPIRED_WARNING_PHOTO_FILE_ID:
+        photo = EXPIRED_WARNING_PHOTO_FILE_ID
+    elif EXPIRED_WARNING_PHOTO_PATH.exists():
+        photo = FSInputFile(str(EXPIRED_WARNING_PHOTO_PATH))
+    elif EXPIRED_WARNING_FALLBACK_PATH.exists():
+        photo = FSInputFile(str(EXPIRED_WARNING_FALLBACK_PATH))
+    else:
+        photo = None
+    try:
+        if photo is not None:
+            await bot.send_photo(
+                chat_id=user_id,
+                photo=photo,
+                caption=EXPIRED_WARNING_TEXT,
+                parse_mode="Markdown",
+                reply_markup=kb,
+            )
+        else:
+            await bot.send_message(
+                chat_id=user_id,
+                text=EXPIRED_WARNING_TEXT,
+                parse_mode="Markdown",
+                reply_markup=kb,
+                disable_web_page_preview=True,
+            )
+    except TelegramBadRequest:
+        # Частая причина: невалидный file_id в TRIAL_WARNING_PHOTO_FILE_ID.
+        # Пробуем безопасный fallback, чтобы предпросмотр и рассылка не ломались.
+        if EXPIRED_WARNING_PHOTO_PATH.exists():
+            fallback_photo = FSInputFile(str(EXPIRED_WARNING_PHOTO_PATH))
+            await bot.send_photo(
+                chat_id=user_id,
+                photo=fallback_photo,
+                caption=EXPIRED_WARNING_TEXT,
+                parse_mode="Markdown",
+                reply_markup=kb,
+            )
+        elif EXPIRED_WARNING_FALLBACK_PATH.exists():
+            fallback_photo = FSInputFile(str(EXPIRED_WARNING_FALLBACK_PATH))
+            await bot.send_photo(
+                chat_id=user_id,
+                photo=fallback_photo,
+                caption=EXPIRED_WARNING_TEXT,
+                parse_mode="Markdown",
+                reply_markup=kb,
+            )
+        else:
+            await bot.send_message(
+                chat_id=user_id,
+                text=EXPIRED_WARNING_TEXT,
+                parse_mode="Markdown",
+                reply_markup=kb,
+                disable_web_page_preview=True,
+            )
 
 
 async def _run_reminders_no_group(bot, session: AsyncSession, now: datetime) -> None:
@@ -267,10 +364,6 @@ async def _run_auto_reports(bot, session: AsyncSession, now: datetime) -> None:
 
 async def _run_subscription_expired(bot, session: AsyncSession, now: datetime) -> None:
     """Проверка истечения подписки: перевод на FREE, уведомление."""
-    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-
-    CB_BILLING = "p:billing"
-
     res = await session.execute(
         select(User).where(
             User.subscription_until.isnot(None),
@@ -284,19 +377,44 @@ async def _run_subscription_expired(bot, session: AsyncSession, now: datetime) -
                 continue
             user.tariff = Tariff.FREE.value
             user.chat_limit = TARIFF_CHAT_LIMITS[Tariff.FREE.value]
-            user.subscription_until = None
+            # Сохраняем expired subscription_until как якорь для follow-up кампании.
+            user.reminder_stage = max(int(getattr(user, "reminder_stage", 0) or 0), 100)
             await session.commit()
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💳 Продлить Premium", callback_data=CB_BILLING)],
-            ])
-            await bot.send_message(
-                user.telegram_id,
-                SUBSCRIPTION_EXPIRED,
-                parse_mode="Markdown",
-                reply_markup=kb,
-            )
+            await send_expired_warning(bot, user.telegram_id)
         except Exception as e:
             logger.warning("subscription_expired user=%s: %s", getattr(user, "telegram_id"), e)
+            await session.rollback()
+
+
+async def _run_subscription_expired_followups(bot, session: AsyncSession, now: datetime) -> None:
+    """Follow-up после истечения: 7 дней, 3 дня, 7 дней, 3 дня..."""
+    res = await session.execute(
+        select(User).where(
+            User.subscription_until.isnot(None),
+            User.subscription_until < now,
+            User.telegram_id.isnot(None),
+            User.tariff == Tariff.FREE.value,
+            User.reminder_stage >= 100,
+        )
+    )
+    for user in res.scalars().all():
+        try:
+            expired_at = user.subscription_until
+            if not expired_at:
+                continue
+            if expired_at.tzinfo is None:
+                expired_at = expired_at.replace(tzinfo=timezone.utc)
+            elapsed_days = (now - expired_at).total_seconds() / 86400.0
+            stage = int(getattr(user, "reminder_stage", 100) or 100)
+            followups_sent = max(0, stage - 100)
+            next_threshold = _expired_reminder_threshold_days(followups_sent + 1)
+            if elapsed_days < next_threshold:
+                continue
+            await send_expired_warning(bot, user.telegram_id)
+            user.reminder_stage = stage + 1
+            await session.commit()
+        except Exception as e:
+            logger.warning("subscription_expired_followup user=%s: %s", getattr(user, "telegram_id"), e)
             await session.rollback()
 
 
@@ -309,6 +427,8 @@ async def run_reminders_and_guardian(bot) -> None:
         await _run_reminders_reports_chat(bot, session, now)
     async with await get_session() as session:
         await _run_subscription_expired(bot, session, now)
+    async with await get_session() as session:
+        await _run_subscription_expired_followups(bot, session, now)
     try:
         async with await get_session() as session:
             await _run_guardian_periodic_messages(bot, session, now)
