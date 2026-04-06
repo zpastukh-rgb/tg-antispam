@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router
-from app.db.ensure_defaults import ensure_default_trial_promo
+from app.db.ensure_defaults import ensure_default_trial_promo, ensure_owner_forever_promo
 from app.db.session import engine
 
 
@@ -18,6 +18,7 @@ from app.db.session import engine
 async def lifespan(app: FastAPI):
     if engine is not None:
         await ensure_default_trial_promo(engine)
+        await ensure_owner_forever_promo(engine)
     yield
 
 

@@ -172,11 +172,17 @@ const mutePresets = [
   { value: 1440, label: '1 день' },
 ]
 const newbiePresets = [5, 10, 15, 30, 60]
+// Синхронно с app/handlers/panel_dm.py — _kb_filter_silence (SILENCE_OPTIONS), сетка 2×N + «Отключить»
 const silencePresets = [
-  { value: 0, label: 'Выкл' },
-  { value: 5, label: '5 мин' },
-  { value: 15, label: '15 мин' },
-  { value: 60, label: '1 ч' },
+  { value: 10, label: '10 минут' },
+  { value: 60, label: '1 час' },
+  { value: 120, label: '2 часа' },
+  { value: 180, label: '3 часа' },
+  { value: 240, label: '4 часа' },
+  { value: 360, label: '6 часов' },
+  { value: 480, label: '8 часов' },
+  { value: 600, label: '10 часов' },
+  { value: 720, label: '12 часов' },
   { value: 1440, label: '1 день' },
 ]
 const antinakrutkaThresholdPresets = [5, 10, 15, 20]
@@ -290,21 +296,30 @@ const antinakrutkaRestrictPresets = [15, 30, 60]
             </button>
           </div>
           <div>
-            <p class="mb-1 text-xs text-gray-500 dark:text-gray-400">Режим тишины (мин) <span v-if="!isPremium" class="text-amber-600 dark:text-amber-400">🔒 Premium</span></p>
+            <p class="mb-1 text-xs text-gray-500 dark:text-gray-400">Режим тишины <span v-if="!isPremium" class="text-amber-600 dark:text-amber-400">🔒 Premium</span></p>
             <p class="mb-2 text-xs text-gray-500 dark:text-gray-400">
               После входа в чат выбранное время: любое сообщение участника может привести к муту на оставшиеся минуты окна (тишина для новых участников).
             </p>
-            <div class="flex flex-wrap gap-2">
+            <div class="grid grid-cols-2 gap-2">
               <button
                 v-for="p in silencePresets"
                 :key="p.value"
                 type="button"
                 :class="(chat.rule.silence_minutes || 0) === p.value ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
-                class="rounded-lg px-3 py-1.5 text-sm"
+                class="rounded-lg px-3 py-2.5 text-center text-sm font-medium"
                 :disabled="!isPremium"
                 @click="isPremium && updateRule({ silence_minutes: p.value })"
               >
                 {{ p.label }}
+              </button>
+              <button
+                type="button"
+                :class="(chat.rule.silence_minutes || 0) === 0 ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-100 text-gray-700 dark:bg-gray-600 dark:text-gray-300'"
+                class="col-span-2 rounded-lg px-3 py-2.5 text-center text-sm font-medium"
+                :disabled="!isPremium"
+                @click="isPremium && updateRule({ silence_minutes: 0 })"
+              >
+                ❌ Отключить
               </button>
             </div>
           </div>
