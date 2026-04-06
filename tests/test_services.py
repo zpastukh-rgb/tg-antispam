@@ -93,6 +93,42 @@ async def test_apply_promo_code_same_user_twice_fails(db_session):
 
 
 @pytest.mark.asyncio
+async def test_apply_owner_forever_promo_lazy_row(db_session, monkeypatch):
+    """Без строки в promo_codes: создаётся при активации (как на проде после деплоя без рестарта ensure)."""
+    monkeypatch.delenv("OWNER_FOREVER_PROMO_CODE", raising=False)
+    monkeypatch.delenv("OWNER_FOREVER_CHAT_LIMIT", raising=False)
+    await get_or_create_user(db_session, 501)
+    ok, msg = await apply_promo_code(db_session, 501, "GUARDIAN_OWNER")
+    assert ok is True
+    assert "без срока" in msg.lower()
+    res = await db_session.execute(select(User).where(User.telegram_id == 501))
+    user = res.scalar_one_or_none()
+    assert user is not None
+    assert user.subscription_until is None
+    assert user.chat_limit == 500
+
+
+@pytest.mark.asyncio
+async def test_apply_owner_forever_promo(db_session, monkeypatch):
+    """Бессрочный тестовый промокод владельца: premium, без subscription_until, расширенный лимит чатов."""
+    monkeypatch.delenv("OWNER_FOREVER_PROMO_CODE", raising=False)
+    monkeypatch.delenv("OWNER_FOREVER_CHAT_LIMIT", raising=False)
+    await get_or_create_user(db_session, 333)
+    promo = PromoCode(code="GUARDIAN_OWNER", tariff="premium", days=0)
+    db_session.add(promo)
+    await db_session.commit()
+    ok, msg = await apply_promo_code(db_session, 333, "guardian_owner")
+    assert ok is True
+    assert "без срока" in msg.lower()
+    res = await db_session.execute(select(User).where(User.telegram_id == 333))
+    user = res.scalar_one_or_none()
+    assert user is not None
+    assert user.tariff == "premium"
+    assert user.subscription_until is None
+    assert user.chat_limit == 500
+
+
+@pytest.mark.asyncio
 async def test_apply_promo_code_two_different_users_same_code(db_session):
     await get_or_create_user(db_session, 601)
     await get_or_create_user(db_session, 602)

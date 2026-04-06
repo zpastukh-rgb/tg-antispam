@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from datetime import datetime, timezone, timedelta
+
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
     Chat,
@@ -19,6 +19,8 @@ from app.db.models import (
     PromoCodeRedemption,
     User,
 )
+
+from app.db.ensure_defaults import get_owner_forever_chat_limit, get_owner_forever_promo_code
 from app.services.user_service import get_or_create_user, can_add_chat, TARIFF_CHAT_LIMITS
 
 
@@ -171,6 +173,22 @@ async def remove_profanity(session: AsyncSession, word: str) -> bool:
     return True
 
 
+async def _lazy_ensure_owner_promo_row(session: AsyncSession, code_clean: str) -> None:
+    """Строка владельца в promo_codes: если при старте не создалась — создаём при первом вводе кода."""
+    if code_clean != get_owner_forever_promo_code():
+        return
+    await session.execute(
+        text(
+            """
+            INSERT INTO promo_codes (code, tariff, days)
+            VALUES (:code, 'premium', 0)
+            ON CONFLICT (code) DO NOTHING
+            """
+        ),
+        {"code": code_clean},
+    )
+
+
 async def apply_promo_code(session: AsyncSession, user_id: int, code: str) -> tuple[bool, str]:
     """
     Активировать промокод для пользователя.
@@ -178,12 +196,12 @@ async def apply_promo_code(session: AsyncSession, user_id: int, code: str) -> tu
     другие пользователи тот же код активируют независимо.
     Returns: (success, message).
     """
-    from sqlalchemy import select
     from sqlalchemy.exc import IntegrityError
 
     code_clean = (code or "").strip().upper()
     if not code_clean:
         return False, "Введите промокод"
+    await _lazy_ensure_owner_promo_row(session, code_clean)
     res = await session.execute(select(PromoCode).where(PromoCode.code == code_clean).limit(1))
     promo = res.scalar_one_or_none()
     if not promo:
@@ -212,6 +230,8 @@ async def apply_promo_code(session: AsyncSession, user_id: int, code: str) -> tu
     else:
         user.subscription_until = None  # бессрочно
     user.chat_limit = TARIFF_CHAT_LIMITS.get(user.tariff, 20)
+    if code_clean == get_owner_forever_promo_code():
+        user.chat_limit = get_owner_forever_chat_limit()
     session.add(PromoCodeRedemption(promo_code_id=promo.id, telegram_user_id=user_id))
     try:
         await session.commit()
@@ -219,6 +239,8 @@ async def apply_promo_code(session: AsyncSession, user_id: int, code: str) -> tu
         await session.rollback()
         return False, "Вы уже активировали этот промокод"
     days_msg = f" на {promo.days} дн." if promo.days else ""
+    if code_clean == get_owner_forever_promo_code():
+        return True, f"Тестовый Premium без срока (лимит чатов: {user.chat_limit})"
     return True, f"Premium активирован{days_msg}"
 
 
