@@ -6,10 +6,15 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import asyncio
+import smtplib
 from datetime import datetime, timezone
+from email.message import EmailMessage
 
 import aiohttp
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from aiogram import Bot
+from sqlalchemy import select, func
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,8 +34,11 @@ from app.api.service import (
     copy_rule_to_chat,
     apply_promo_code,
 )
-from app.db.models import Chat, Rule
+from app.db.models import Chat, Rule, User, Payment, CreditLedger
 from app.services.user_service import get_or_create_user, can_add_chat
+from app.services.telegram_notify import send_user_dm
+from app.db.ensure_defaults import get_comeback_promo_code
+from app.services.chat_cleanup import clean_deleted_accounts
 
 router = APIRouter(prefix="/api", tags=["webapp"])
 _log = logging.getLogger(__name__)
@@ -70,6 +78,15 @@ def _format_dt(dt):
     return str(dt)
 
 
+def _is_user_premium_now(user, now: datetime) -> bool:
+    """Premium активен, если есть неистекшая дата или бессрочный premium без даты."""
+    tariff = (getattr(user, "tariff", None) or "free").lower()
+    sub_until = getattr(user, "subscription_until", None)
+    if sub_until:
+        return sub_until > now
+    return tariff in ("premium", "pro", "business")
+
+
 def _rule_to_dict(rule: Rule, stopwords_count: int = 0) -> dict:
     return {
         "chat_id": rule.chat_id,
@@ -85,6 +102,7 @@ def _rule_to_dict(rule: Rule, stopwords_count: int = 0) -> dict:
         "first_message_captcha_enabled": bool(getattr(rule, "first_message_captcha_enabled", False)),
         "all_captcha_minutes": int(getattr(rule, "all_captcha_minutes", 0) or 0),
         "delete_join_messages": bool(getattr(rule, "delete_join_messages", True)),
+        "delete_left_messages": bool(getattr(rule, "delete_left_messages", True)),
         "silence_minutes": int(getattr(rule, "silence_minutes", 0) or 0),
         "master_anti_spam": bool(getattr(rule, "master_anti_spam", True)),
         "antinakrutka_enabled": bool(getattr(rule, "antinakrutka_enabled", False)),
@@ -94,6 +112,8 @@ def _rule_to_dict(rule: Rule, stopwords_count: int = 0) -> dict:
         "antinakrutka_restrict_minutes": int(getattr(rule, "antinakrutka_restrict_minutes", 30) or 30),
         "use_global_antispam_db": bool(getattr(rule, "use_global_antispam_db", False)),
         "filter_profanity_enabled": bool(getattr(rule, "filter_profanity_enabled", False)),
+        "filter_jobs_enabled": bool(getattr(rule, "filter_jobs_enabled", False)),
+        "filter_casino_enabled": bool(getattr(rule, "filter_casino_enabled", False)),
         "log_enabled": bool(rule.log_enabled),
         "guardian_messages_enabled": bool(getattr(rule, "guardian_messages_enabled", True)),
         "public_alerts_every_n": int(getattr(rule, "public_alerts_every_n", 5)),
@@ -129,10 +149,8 @@ async def api_me(
     user = await get_or_create_user(session, user_id)
     chats = await get_managed_chats(session, user_id)
     can_add, current_count, limit = await can_add_chat(session, user_id)
-    tariff = (user.tariff or "free").lower()
-    sub_until = user.subscription_until
     now = datetime.now(timezone.utc)
-    is_premium = tariff in ("premium", "pro", "business") or (sub_until and sub_until > now)
+    is_premium = _is_user_premium_now(user, now)
     return {
         "telegram_id": user_id,
         "username": user.username,
@@ -143,6 +161,8 @@ async def api_me(
         "chats_count": len(chats),
         "can_add_more": can_add,
         "subscription_until": _format_dt(user.subscription_until),
+        "subscription_tokens": float(getattr(user, "credits_balance", 0.0) or 0.0),
+        "partner_tokens": float(getattr(user, "bonus_credits", 0.0) or 0.0),
     }
 
 
@@ -197,6 +217,47 @@ async def api_chats_select(
     return {"selected_chat_id": chat_id if chat_id != 0 else None}
 
 
+# ---------- DELETE /api/chat/:id ----------
+@router.delete("/chat/{chat_id}")
+async def api_chat_remove(
+    chat_id: int,
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Отключить защищаемую группу и убрать из списка подключённых чатов."""
+    ok = await user_can_access_chat(session, user_id, int(chat_id))
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+    chat = await session.get(Chat, int(chat_id))
+    if not chat:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+
+    title = (chat.title or "").strip() or str(chat.id)
+    chat.is_active = False
+    chat.log_chat_id = None
+
+    selected_id = await get_selected_chat_id(session, user_id)
+    if selected_id == int(chat_id):
+        await set_selected_chat(session, user_id, None)
+
+    await session.commit()
+
+    dm_text = (
+        "😈 *Гуард на связи*\n\n"
+        f"Группа *{title}* отключена от защиты.\n\n"
+        f"🎁 Не уходи: держи бонус на *3 дня Premium* — промокод `{get_comeback_promo_code()}`.\n\n"
+        "Мы правда хотим стать лучше для тебя.\n"
+        "Напиши в *Службу Заботы* — [@Help_guard](https://t.me/Help_guard), "
+        "что не понравилось (можно одним сообщением и со скринами)."
+    )
+    try:
+        await send_user_dm(user_id, dm_text)
+    except Exception:
+        pass
+
+    return {"ok": True, "selected_chat_id": None if selected_id == int(chat_id) else selected_id}
+
+
 # ---------- GET /api/chat/:id ----------
 @router.get("/chat/{chat_id}")
 async def api_chat(
@@ -243,6 +304,30 @@ async def api_chat(
     }
 
 
+# ---------- POST /api/chat/:id/clean-deleted ----------
+@router.post("/chat/{chat_id}/clean-deleted")
+async def api_chat_clean_deleted(
+    chat_id: int,
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Запустить очистку удалённых аккаунтов для выбранного чата (без выхода из Mini App)."""
+    ok = await user_can_access_chat(session, user_id, int(chat_id))
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+
+    token = (os.getenv("BOT_TOKEN") or "").strip()
+    if not token:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="BOT_TOKEN not set")
+
+    bot = Bot(token=token)
+    try:
+        kicked, checked = await clean_deleted_accounts(bot, session, int(chat_id))
+        return {"ok": True, "kicked": int(kicked), "checked": int(checked)}
+    finally:
+        await bot.session.close()
+
+
 # ---------- PATCH /api/chat/:id/rule ----------
 @router.patch("/chat/{chat_id}/rule")
 async def api_chat_rule(
@@ -259,12 +344,12 @@ async def api_chat_rule(
     allowed = {
         "filter_links", "filter_links_mode", "filter_media_mode", "filter_buttons_mode", "filter_mentions",
         "action_mode", "mute_minutes", "newbie_enabled", "newbie_minutes",
-        "first_message_captcha_enabled", "all_captcha_minutes", "delete_join_messages",
+        "first_message_captcha_enabled", "all_captcha_minutes", "delete_join_messages", "delete_left_messages",
         "silence_minutes", "master_anti_spam",
         "antinakrutka_enabled", "antinakrutka_joins_threshold", "antinakrutka_window_minutes",
         "antinakrutka_action", "antinakrutka_restrict_minutes",
         "use_global_antispam_db",
-        "filter_profanity_enabled",
+        "filter_profanity_enabled", "filter_jobs_enabled", "filter_casino_enabled",
         "log_enabled",
         "guardian_messages_enabled", "public_alerts_every_n", "public_alerts_min_interval_sec",
         "auto_reports_enabled",
@@ -395,10 +480,8 @@ async def api_billing(
     user = await get_or_create_user(session, user_id)
     chats = await get_managed_chats(session, user_id)
     can_add, current_count, limit = await can_add_chat(session, user_id)
-    tariff = (user.tariff or "free").lower()
-    sub_until = user.subscription_until
     now = datetime.now(timezone.utc)
-    is_premium = tariff in ("premium", "pro", "business") or (sub_until and sub_until > now)
+    is_premium = _is_user_premium_now(user, now)
     return {
         "tariff": user.tariff or "free",
         "is_premium": is_premium,
@@ -407,6 +490,274 @@ async def api_billing(
         "can_add_more": can_add,
         "subscription_until": _format_dt(user.subscription_until),
     }
+
+
+@router.get("/referral")
+async def api_referral(
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    user = await get_or_create_user(session, user_id)
+    username = await _get_bot_username()
+    if not username:
+        username = "GuardAntiSpam_Bot"
+    ref_link = f"https://t.me/{username}?start=ref_{user_id}"
+    invited = int(getattr(user, "ref_invited_count", 0) or 0)
+    paid = int(getattr(user, "ref_paid_count", 0) or 0)
+    sub_balance = float(getattr(user, "credits_balance", 0.0) or 0.0)
+    bonus_balance = float(getattr(user, "bonus_credits", 0.0) or 0.0)
+    sub_until = getattr(user, "subscription_until", None)
+    now = datetime.now(timezone.utc)
+    days_left = 0
+    if sub_until:
+        if sub_until.tzinfo is None:
+            sub_until = sub_until.replace(tzinfo=timezone.utc)
+        days_left = max(0, (sub_until.date() - now.date()).days)
+    last_months = None
+    if user.id:
+        pr = await session.execute(
+            select(Payment.months).where(
+                Payment.user_id == user.id,
+                Payment.status == "succeeded",
+            ).order_by(Payment.created_at.desc()).limit(1)
+        )
+        last_months = pr.scalar_one_or_none()
+    return {
+        "access_label": f"{int(last_months)} мес." if last_months else "без активного периода",
+        "days_left": int(days_left),
+        "active_until": _format_dt(sub_until),
+        "subscription_credits": sub_balance,
+        "bonus_credits": bonus_balance,
+        "ref_link": ref_link,
+        "invited_count": invited,
+        "paid_count": paid,
+    }
+
+
+@router.post("/referral/bonus-to-sub")
+async def api_referral_bonus_to_sub(
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    user = await get_or_create_user(session, user_id)
+    bonus = float(getattr(user, "bonus_credits", 0.0) or 0.0)
+    if bonus <= 0:
+        return {"ok": True, "moved": 0.0}
+    moved = round(bonus, 2)
+    user.bonus_credits = round(max(0.0, bonus - moved), 2)
+    user.credits_balance = round(float(getattr(user, "credits_balance", 0.0) or 0.0) + moved, 2)
+    session.add(CreditLedger(user_id=int(user.id), delta=-moved, reason="bonus_to_sub"))
+    session.add(CreditLedger(user_id=int(user.id), delta=+moved, reason="bonus_to_sub_target"))
+    await session.commit()
+    return {"ok": True, "moved": moved}
+
+
+@router.get("/referral/people")
+async def api_referral_people(
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Списки рефералов: полный и самые активные."""
+    await get_or_create_user(session, user_id)
+    invited_q = await session.execute(
+        select(
+            User.id,
+            User.telegram_id,
+            User.first_name,
+            User.username,
+            User.created_at,
+        ).where(User.referred_by_tg_id == int(user_id)).limit(1000)
+    )
+    invited_rows = invited_q.all()
+    if not invited_rows:
+        return {"full_list": [], "top_active": []}
+
+    invited_user_ids = [int(row.id) for row in invited_rows if row.id]
+    payments_map: dict[int, dict] = {}
+    tokens_map: dict[int, float] = {}
+
+    if invited_user_ids:
+        pay_q = await session.execute(
+            select(
+                Payment.user_id,
+                func.count(Payment.id).label("pay_count"),
+                func.max(Payment.created_at).label("last_paid_at"),
+            ).where(
+                Payment.user_id.in_(invited_user_ids),
+                Payment.status == "succeeded",
+            ).group_by(Payment.user_id)
+        )
+        for row in pay_q.all():
+            uid = int(row.user_id)
+            payments_map[uid] = {
+                "payments_count": int(row.pay_count or 0),
+                "last_paid_at": _format_dt(row.last_paid_at),
+            }
+
+        token_q = await session.execute(
+            select(
+                CreditLedger.user_id,
+                func.sum(CreditLedger.delta).label("tokens_sum"),
+            ).where(
+                CreditLedger.user_id.in_(invited_user_ids),
+                CreditLedger.reason == "tokens_purchase",
+                CreditLedger.delta > 0,
+            ).group_by(CreditLedger.user_id)
+        )
+        for row in token_q.all():
+            uid = int(row.user_id)
+            tokens_map[uid] = float(row.tokens_sum or 0.0)
+
+    full_list = []
+    for row in invited_rows:
+        uid = int(row.id)
+        p = payments_map.get(uid, {})
+        tokens_sum = float(tokens_map.get(uid, 0.0))
+        full_list.append({
+            "user_id": uid,
+            "telegram_id": int(row.telegram_id or 0),
+            "first_name": str(row.first_name or "").strip(),
+            "username": str(row.username or "").strip(),
+            "joined_at": _format_dt(row.created_at),
+            "payments_count": int(p.get("payments_count", 0)),
+            "last_paid_at": p.get("last_paid_at"),
+            "tokens_purchased": round(tokens_sum, 2),
+            "is_paid": int(p.get("payments_count", 0)) > 0,
+        })
+
+    full_list.sort(
+        key=lambda x: (
+            0 if x.get("is_paid") else 1,
+            -(x.get("tokens_purchased") or 0.0),
+            -(x.get("payments_count") or 0),
+            x.get("first_name") or x.get("username") or "",
+        )
+    )
+    top_active = sorted(
+        [x for x in full_list if (x.get("tokens_purchased", 0.0) > 0 or x.get("payments_count", 0) > 0)],
+        key=lambda x: (-(x.get("tokens_purchased") or 0.0), -(x.get("payments_count") or 0)),
+    )[:20]
+    return {"full_list": full_list, "top_active": top_active}
+
+
+@router.get("/history/payments")
+async def api_history_payments(
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    user = await get_or_create_user(session, user_id)
+    q = await session.execute(
+        select(Payment).where(
+            Payment.user_id == user.id
+        ).order_by(Payment.created_at.desc()).limit(100)
+    )
+    items = []
+    for p in q.scalars().all():
+        items.append({
+            "id": int(getattr(p, "id", 0) or 0),
+            "created_at": _format_dt(getattr(p, "created_at", None)),
+            "amount_rub": float(getattr(p, "amount", 0.0) or 0.0),
+            "months": int(getattr(p, "months", 0) or 0),
+            "status": str(getattr(p, "status", "") or ""),
+            "provider": str(getattr(p, "provider", "") or ""),
+            "payment_id": str(getattr(p, "payment_id", "") or ""),
+        })
+    return {"items": items}
+
+
+@router.get("/history/tokens")
+async def api_history_tokens(
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    user = await get_or_create_user(session, user_id)
+    q = await session.execute(
+        select(CreditLedger).where(
+            CreditLedger.user_id == user.id
+        ).order_by(CreditLedger.created_at.desc()).limit(200)
+    )
+    items = []
+    for row in q.scalars().all():
+        items.append({
+            "created_at": _format_dt(getattr(row, "created_at", None)),
+            "delta": float(getattr(row, "delta", 0.0) or 0.0),
+            "reason": str(getattr(row, "reason", "") or ""),
+        })
+    return {"items": items}
+
+
+@router.post("/history/payments/receipt")
+async def api_history_payment_receipt(
+    body: dict,
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Отправить чек на email по записи оплаты пользователя.
+    Body: { payment_id: number, email: string, full_name?: string }
+    """
+    payment_id = int(body.get("payment_id") or 0)
+    email_to = (body.get("email") or "").strip()
+    full_name = (body.get("full_name") or "").strip()
+    if payment_id <= 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="payment_id required")
+    if not email_to or "@" not in email_to:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Введите корректный email")
+    user = await get_or_create_user(session, user_id)
+    q = await session.execute(
+        select(Payment).where(Payment.id == payment_id, Payment.user_id == user.id).limit(1)
+    )
+    p = q.scalar_one_or_none()
+    if not p:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Платеж не найден")
+
+    smtp_host = (os.getenv("SMTP_HOST") or "").strip()
+    smtp_port = int((os.getenv("SMTP_PORT") or "587").strip())
+    smtp_user = (os.getenv("SMTP_USER") or "").strip()
+    smtp_pass = (os.getenv("SMTP_PASS") or "").strip()
+    smtp_from = (os.getenv("SMTP_FROM") or smtp_user or "").strip()
+    if not smtp_host or not smtp_from:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Сервис отправки чеков на email временно недоступен",
+        )
+
+    created = _format_dt(getattr(p, "created_at", None)) or "—"
+    amount = float(getattr(p, "amount", 0.0) or 0.0)
+    months = int(getattr(p, "months", 0) or 0)
+    provider = str(getattr(p, "provider", "") or "yookassa")
+    pay_ext = str(getattr(p, "payment_id", "") or "—")
+    fio = full_name or "Пользователь"
+    text = (
+        "Чек оплаты Guard\n\n"
+        f"Покупатель: {fio}\n"
+        f"Дата: {created}\n"
+        f"Сумма: {amount:.2f} RUB\n"
+        f"Период: {months} мес.\n"
+        f"Способ оплаты: {provider}\n"
+        f"ID платежа: {pay_ext}\n"
+    )
+    msg = EmailMessage()
+    msg["Subject"] = "Чек оплаты Guard"
+    msg["From"] = smtp_from
+    msg["To"] = email_to
+    msg.set_content(text)
+
+    def _send_mail():
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as s:
+            try:
+                s.starttls()
+            except Exception:
+                pass
+            if smtp_user and smtp_pass:
+                s.login(smtp_user, smtp_pass)
+            s.send_message(msg)
+
+    try:
+        await asyncio.to_thread(_send_mail)
+    except Exception:
+        _log.exception("send receipt email failed")
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Не удалось отправить чек")
+    return {"ok": True}
 
 
 # ---------- GET /api/global-antispam ----------
@@ -480,7 +831,7 @@ async def api_yookassa_create_payment(
     user_id: int = Depends(require_init_data),
     session: AsyncSession = Depends(get_db),
 ):
-    """Создать платёж ЮKassa. Body: { \"months\": 1|3|6|12|24 }. Ответ: { \"confirmation_url\": \"...\" }."""
+    """Создать платёж ЮKassa. Body: { \"months\": 1|3|12|24|72 }. Ответ: { \"confirmation_url\": \"...\" }."""
     from app.services.payments_yookassa import create_yookassa_subscription_payment, yookassa_configured
 
     if not yookassa_configured():
@@ -499,6 +850,41 @@ async def api_yookassa_create_payment(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Недопустимый период")
     except RuntimeError as e:
         _log.exception("YooKassa create failed")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(e) or "Ошибка платёжной системы",
+        ) from e
+    return {"confirmation_url": url}
+
+
+@router.post("/payments/yookassa/create-tokens")
+async def api_yookassa_create_tokens_payment(
+    body: dict,
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Создать платёж ЮKassa для токенов. Body: { "tokens": 50|150|300 }."""
+    from app.services.payments_yookassa import create_yookassa_tokens_payment, yookassa_configured
+
+    if not yookassa_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Платежи не настроены",
+        )
+    user = await get_or_create_user(session, user_id)
+    if not _is_user_premium_now(user, datetime.now(timezone.utc)):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Токены доступны только при активной подписке")
+    raw = body.get("tokens")
+    try:
+        tokens = int(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="tokens required")
+    try:
+        url = await create_yookassa_tokens_payment(session, user_id, tokens)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Недопустимый пакет токенов")
+    except RuntimeError as e:
+        _log.exception("YooKassa tokens create failed")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(e) or "Ошибка платёжной системы",
