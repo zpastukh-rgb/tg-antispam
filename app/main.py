@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
-from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramBadRequest
@@ -12,12 +12,24 @@ from aiogram.types import (
     BotCommandScopeDefault,
     BotCommandScopeAllGroupChats,
     BotCommandScopeAllChatAdministrators,
+    MenuButtonWebApp,
+    WebAppInfo,
 )
 from dotenv import load_dotenv
 from aiohttp import web
 from sqlalchemy import text
 
-from app.db.ensure_defaults import ensure_default_trial_promo, ensure_owner_forever_promo
+from app.db.ensure_defaults import (
+    ensure_chats_chat_kind_column,
+    ensure_default_trial_promo,
+    ensure_default_comeback_promo,
+    ensure_owner_forever_promo,
+    ensure_default_profanity_roots,
+    ensure_referral_credits_schema,
+    ensure_credit_ledger_schema,
+    ensure_rules_public_alerts_columns,
+    ensure_rules_hard_dictionary_independent_v1,
+)
 from app.db.session import engine
 from app.db.models import Base
 
@@ -45,11 +57,11 @@ dp = Dispatcher()
 # ТЗ: Меню команд Telegram (синяя кнопка) — только основные команды
 BOT_COMMANDS = [
     BotCommand(command="start", description="Начать работу с ботом"),
-    BotCommand(command="group", description="Управление одной группой"),
-    BotCommand(command="groups", description="Управление всеми группами"),
-    BotCommand(command="buy", description="Тариф и подписка"),
-    BotCommand(command="premium", description="Guardian Premium"),
-    BotCommand(command="support", description="Техподдержка"),
+    BotCommand(command="panel", description="Открыть панель Guard"),
+    BotCommand(command="guard_help", description="Инструкция Guard"),
+    BotCommand(command="guard_ref", description="Реферальная программа"),
+    BotCommand(command="guard_lang", description="Смена языка"),
+    BotCommand(command="guard_tip", description="Поддержать проект"),
 ]
 
 
@@ -62,6 +74,9 @@ _RULES_COLUMNS_008 = (
     ("antinakrutka_restrict_minutes", "INTEGER", "30"),
     ("use_global_antispam_db", "BOOLEAN", "FALSE"),
     ("filter_profanity_enabled", "BOOLEAN", "FALSE"),
+    ("filter_jobs_enabled", "BOOLEAN", "FALSE"),
+    ("filter_casino_enabled", "BOOLEAN", "FALSE"),
+    ("delete_left_messages", "BOOLEAN", "TRUE"),
 )
 
 
@@ -116,6 +131,42 @@ async def _railway_health_server() -> None:
     await site.start()
 
 
+# Пустая строка = слой "для всех языков без отдельного описания" (см. Telegram setMyDescription).
+# ru/uk/en/be: иначе русскоязычный Telegram часто продолжает показывать старый текст из BotFather.
+_BOT_PROFILE_LANGUAGE_CODES = ("", "ru", "uk", "en", "be")
+
+
+async def _sync_bot_profile(b: Bot) -> None:
+    """Синхронизация имени и описаний (экран «пустой чат» до /start)."""
+    log = logging.getLogger(__name__)
+    from app.texts.bot_intro import (
+        BOT_TELEGRAM_DESCRIPTION,
+        BOT_TELEGRAM_SHORT_DESCRIPTION,
+    )
+
+    # setMyName имеет жёсткий rate-limit у Telegram (может блокироваться на сутки).
+    # Имя бота меняется редко, поэтому не дёргаем этот метод на каждом старте.
+    # При необходимости имя можно изменить вручную в BotFather (Edit Name).
+
+    for lang in _BOT_PROFILE_LANGUAGE_CODES:
+        lc = lang if lang else ""
+        try:
+            await b.set_my_description(BOT_TELEGRAM_DESCRIPTION, language_code=lc)
+        except Exception as e:
+            log.warning("set_my_description language_code=%r: %s", lc, e)
+        try:
+            await b.set_my_short_description(BOT_TELEGRAM_SHORT_DESCRIPTION, language_code=lc)
+        except Exception as e:
+            log.warning("set_my_short_description language_code=%r: %s", lc, e)
+
+    try:
+        check = await b.get_my_description(language_code="ru")
+        preview = (check.description or "")[:160].replace("\n", " ")
+        log.info("bot profile ok: getMyDescription(ru) starts with: %s…", preview)
+    except Exception as e:
+        log.warning("get_my_description(ru): %s", e)
+
+
 async def on_startup() -> None:
     if engine is None:
         raise RuntimeError(
@@ -125,8 +176,15 @@ async def on_startup() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _run_ensure_rules_migration()
+    await ensure_rules_public_alerts_columns(engine)
+    await ensure_chats_chat_kind_column(engine)
     await ensure_default_trial_promo(engine)
+    await ensure_default_comeback_promo(engine)
     await ensure_owner_forever_promo(engine)
+    await ensure_default_profanity_roots(engine)
+    await ensure_referral_credits_schema(engine)
+    await ensure_credit_ledger_schema(engine)
+    await ensure_rules_hard_dictionary_independent_v1(engine)
     # Меню команд:
     # - ЛС: основной список (default).
     # - Обычные участники групп: пустое меню (не видят /addantispam и прочее).
@@ -141,14 +199,19 @@ async def on_startup() -> None:
         await bot.set_my_commands(GROUP_ADMIN_COMMANDS, scope=BotCommandScopeAllChatAdministrators())
     except Exception:
         pass
-    # Описание в профиле бота (как в BotFather /setdescription и краткое для поиска)
-    try:
-        from app.texts.bot_intro import BOT_TELEGRAM_DESCRIPTION, BOT_TELEGRAM_SHORT_DESCRIPTION
-
-        await bot.set_my_description(BOT_TELEGRAM_DESCRIPTION)
-        await bot.set_my_short_description(BOT_TELEGRAM_SHORT_DESCRIPTION)
-    except Exception:
-        pass
+    # Кнопка слева от поля ввода (вместо "Open"): задаём текст "Меню", если есть URL мини-приложения.
+    miniapp_url = (os.getenv("MINI_APP_URL") or os.getenv("WEBAPP_URL") or "").strip()
+    if miniapp_url:
+        try:
+            await bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(
+                    text="Меню",
+                    web_app=WebAppInfo(url=miniapp_url),
+                )
+            )
+        except Exception:
+            pass
+    await _sync_bot_profile(bot)
 
 
 async def _safe_delete_webhook() -> None:
@@ -184,15 +247,21 @@ async def main() -> None:
     dp.include_router(whitelist_router)
     dp.include_router(stopwords_router)
 
-    await _safe_delete_webhook()
-    await on_startup()
+    # Порт открываем до любых вызовов Telegram API и БД — иначе Railway/Docker healthcheck и delete_webhook висят в гонке.
     await _railway_health_server()
+    logging.getLogger(__name__).info("Health HTTP on PORT (Railway) — слушаем / и /health")
 
-    # ТЗ Напоминания + Автоотчёты: фоновый цикл (напоминания 12ч/24ч/3д, Guardian раз в 3 дня, дайджест раз в сутки)
+    await on_startup()
+    await _safe_delete_webhook()
+
+    # ТЗ Напоминания + Автоотчёты: фоновый цикл (напоминания 12ч/24ч/3д, Guard раз в 3 дня, дайджест раз в сутки)
     from app.services.reminders import reminder_loop
-    asyncio.create_task(reminder_loop(bot, interval_sec=900))
+    from app.services.autopost_loop import autopost_loop
 
-    print("😈 AntiSpam Guardian запущен / BUILD 777")
+    asyncio.create_task(reminder_loop(bot, interval_sec=900))
+    asyncio.create_task(autopost_loop(interval_sec=30.0))
+
+    print("😈 AntiSpam Guard запущен / BUILD 777")
 
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
