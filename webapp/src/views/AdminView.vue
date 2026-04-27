@@ -2364,9 +2364,22 @@ function bcSendCancelWatching() {
   resetBcSendUiExtras()
 }
 
-function startBroadcastProgressPolling(id, target) {
+/** Закрыть шаги «куда / подтверждение / пикеры» перед полноэкранной отправкой — иначе они перекрывают оверлей (у них z-index выше). */
+function bcDismissBroadcastSendPrefaceOverlays() {
+  bcConfirmModalOpen.value = false
+  bcConfirmSending.value = false
+  bcConfirmLoading.value = false
+  bcSendTargetModalOpen.value = false
+  bcShowGroupsPicker.value = false
+  bcShowChannelsPicker.value = false
+  bcShowBotsPicker.value = false
+}
+
+async function startBroadcastProgressPolling(id, target) {
   stopBroadcastProgressPolling()
   resetBcSendUiExtras()
+  bcDismissBroadcastSendPrefaceOverlays()
+  await nextTick()
   bcSendModalOpen.value = true
   bcSendModalState.value = 'sending'
   bcSendModalBroadcastId.value = Number(id || 0)
@@ -8601,7 +8614,7 @@ watch(
 
     <div
       v-if="bcSendModalOpen"
-      class="fixed inset-0 z-[70] flex items-center justify-center bg-black/80 p-2 pt-[max(0.5rem,calc(env(safe-area-inset-top,0px)+40px))] pb-[max(0.75rem,calc(4.25rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-md"
+      class="fixed inset-0 z-[400] flex items-center justify-center bg-black/80 p-2 pt-[max(0.5rem,calc(env(safe-area-inset-top,0px)+40px))] pb-[max(0.75rem,calc(4.25rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-md"
       @click.self="bcSendModalState === 'sending' ? null : closeBcSendModal()"
     >
       <div
