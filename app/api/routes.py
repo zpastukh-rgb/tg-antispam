@@ -8512,7 +8512,7 @@ async def api_admin_broadcasts_quote(
             )
 
     n_users, n_groups = await estimate_recipient_counts(session, target=target, target_chat_ids=target_chat_ids)
-    cost_tokens = broadcast_charge_tokens(full_admin=full, n_users=n_users, n_groups=n_groups)
+    cost_tokens = broadcast_charge_tokens(n_users=n_users, n_groups=n_groups)
     plan = await resolve_broadcast_billing_plan(
         session,
         viewer=viewer,
@@ -8644,7 +8644,7 @@ async def api_admin_broadcasts_send(
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="BOT_TOKEN не задан")
 
     n_users, n_groups = await estimate_recipient_counts(session, target=target, target_chat_ids=target_chat_ids)
-    cost_tokens = broadcast_charge_tokens(full_admin=full, n_users=n_users, n_groups=n_groups)
+    cost_tokens = broadcast_charge_tokens(n_users=n_users, n_groups=n_groups)
     spent_aurum = 0.0
     spent_sub = 0.0
     if not full and int(cost_tokens) > 0:

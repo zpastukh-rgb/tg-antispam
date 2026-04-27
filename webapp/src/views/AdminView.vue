@@ -199,6 +199,17 @@ function ruPlural(n, one, few, many) {
   return many
 }
 
+function bcConfirmSymbolsLabel(n) {
+  const v = Math.max(0, Number(n || 0))
+  return `~${v} ${ruPlural(v, 'символ', 'символа', 'символов')}`
+}
+
+function bcConfirmButtonsLabel(n) {
+  const v = Math.max(0, Number(n || 0))
+  if (!v) return 'Нет'
+  return `${v} ${ruPlural(v, 'кнопка', 'кнопки', 'кнопок')}`
+}
+
 const bcFilteredGroups = computed(() => {
   const q = String(bcGroupsSearch.value || '').trim().toLowerCase()
   if (!q) return bcBroadcastGroups.value || []
@@ -299,8 +310,8 @@ async function openBcConfirmModal() {
   bcConfirmQuoteTokens.value = 0
   try {
     const q = await fetch(() => api.adminBroadcastQuote(bid, payload.mode, payload.ids))
-    const need = Number(q?.cost_tokens || 0)
-    if (q?.broadcast_charge_applies && need > 0 && q?.can_afford === false) {
+    const need = Number(q?.cost_tokens ?? 0)
+    if (need > 0 && q?.can_afford === false) {
       alert(`Недостаточно AURUM: нужно ${need} ✨, доступно ${Number(q?.spendable_credits || 0)} ✨.`)
       return
     }
@@ -6171,17 +6182,21 @@ watch(
 
       <div
         v-if="bcConfirmModalOpen"
-        class="fixed inset-0 z-[338] flex items-start justify-center overflow-y-auto bg-[#070b12] px-3 pb-[max(5.75rem,calc(5.25rem+env(safe-area-inset-bottom,0px)))] pt-[max(0.25rem,calc(env(safe-area-inset-top,0px)+46px))]"
+        class="fixed inset-0 z-[338] flex flex-col overflow-y-auto bg-[#070b12] px-1.5 pb-[max(5.75rem,calc(5.25rem+env(safe-area-inset-bottom,0px)))] pt-[max(0.25rem,calc(env(safe-area-inset-top,0px)+46px))]"
         @click.self="bcConfirmModalOpen = false"
       >
-        <div class="flex w-full max-w-[22rem] min-h-[calc(100dvh-8.4rem)] flex-col rounded-2xl border border-white/12 bg-[#0a101a]/96 px-3 py-2.5 text-zinc-100 shadow-[0_28px_80px_-24px_rgba(0,0,0,0.92)] ring-1 ring-white/[0.06]">
+        <div
+          class="mx-auto flex w-full max-w-[min(28rem,calc(100vw-0.75rem))] min-h-[calc(100dvh-7.9rem)] flex-col rounded-2xl border border-white/[0.08] bg-[#0a101a]/92 px-2.5 py-2.5 text-zinc-100 shadow-[0_22px_70px_-30px_rgba(0,0,0,0.88)]"
+        >
           <div class="flex items-center gap-2">
             <button type="button" class="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/18 bg-white/[0.04] text-[13px] text-white/90" @click="bcConfirmModalOpen = false">←</button>
             <p class="text-[19px] font-bold text-white leading-none">Подтверждение</p>
           </div>
 
           <div class="mt-3 text-center">
-            <div class="mx-auto mb-2 flex h-[5.15rem] w-[5.15rem] items-center justify-center rounded-full border border-violet-400/45 bg-[#1a1330]/75 shadow-[0_0_26px_-4px_rgba(139,92,246,0.95)]">
+            <div
+              class="mx-auto mb-2 flex h-[5.15rem] w-[5.15rem] items-center justify-center rounded-full border border-violet-300/22 bg-[#1a1330]/45 shadow-[0_0_22px_-8px_rgba(139,92,246,0.55)]"
+            >
               <svg viewBox="0 0 24 24" class="h-9 w-9 text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.3)]" fill="currentColor" aria-hidden="true">
                 <path d="M21.5 4.8 18.4 19c-.2.9-.8 1.1-1.6.7l-4.4-3.2-2.1 2c-.2.2-.4.4-.9.4l.3-4.5 8.3-7.5c.4-.3-.1-.5-.5-.2l-10.2 6.4-4.4-1.4c-.9-.3-.9-.9.2-1.3L19.9 4c.8-.3 1.5.2 1.3.8z" />
               </svg>
@@ -6190,28 +6205,28 @@ watch(
             <p class="mx-auto mt-1 max-w-[17rem] text-[13px] leading-[1.35] text-zinc-300/95">Проверьте настройки и подтвердите отправку рассылки</p>
           </div>
 
-          <div class="mt-4 rounded-xl border border-white/10 bg-white/[0.03]">
-            <div class="flex items-center justify-between border-b border-white/8 px-3 py-2 text-[13px]">
+          <div class="mt-4 rounded-xl border border-white/[0.07] bg-white/[0.02] px-3 py-2">
+            <div class="flex items-center justify-between gap-3 py-1.5 text-[13px] leading-snug">
               <span class="text-zinc-300">Получатели</span>
-              <span class="font-semibold text-zinc-100">{{ bcConfirmRecipientLabel }}</span>
+              <span class="text-right font-semibold text-zinc-100">{{ bcConfirmRecipientLabel }}</span>
             </div>
-            <div class="flex items-center justify-between border-b border-white/8 px-3 py-2 text-[13px]">
+            <div class="flex items-center justify-between gap-3 py-1.5 text-[13px] leading-snug">
               <span class="text-zinc-300">Текст сообщения</span>
-              <span class="font-semibold text-zinc-100">~{{ bcConfirmMessageLen }} символов</span>
+              <span class="text-right font-semibold text-zinc-100">{{ bcConfirmSymbolsLabel(bcConfirmMessageLen) }}</span>
             </div>
-            <div class="flex items-center justify-between border-b border-white/8 px-3 py-2 text-[13px]">
+            <div class="flex items-center justify-between gap-3 py-1.5 text-[13px] leading-snug">
               <span class="text-zinc-300">Кнопки</span>
-              <span class="font-semibold text-zinc-100">{{ bcConfirmButtonsCount > 0 ? `${bcConfirmButtonsCount} кнопка` : 'Нет' }}</span>
+              <span class="text-right font-semibold text-zinc-100">{{ bcConfirmButtonsLabel(bcConfirmButtonsCount) }}</span>
             </div>
-            <div class="flex items-center justify-between px-3 py-2 text-[13px]">
+            <div class="flex items-center justify-between gap-3 py-1.5 text-[13px] leading-snug">
               <span class="text-zinc-300">Вложения</span>
-              <span class="font-semibold text-zinc-100">{{ bcConfirmHasMedia ? 'Есть' : 'Нет' }}</span>
+              <span class="text-right font-semibold text-zinc-100">{{ bcConfirmHasMedia ? 'Есть' : 'Нет' }}</span>
             </div>
           </div>
 
-          <div class="mt-2.5 flex items-center justify-between rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2">
+          <div class="mt-2.5 flex items-center justify-between gap-3 rounded-xl border border-white/[0.07] bg-white/[0.02] px-3 py-2">
             <span class="text-[14px] font-semibold text-zinc-100">Стоимость</span>
-            <span class="text-[15px] font-black text-amber-300">{{ bcConfirmLoading ? '...' : `🪙 ${bcConfirmQuoteTokens} AURUM` }}</span>
+            <span class="text-[15px] font-black text-amber-300">{{ bcConfirmLoading ? '...' : `${bcConfirmQuoteTokens} AURUM` }}</span>
           </div>
 
           <div class="mt-auto pt-4">

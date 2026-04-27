@@ -303,7 +303,7 @@ async def _autopost_process_one_loaded_ap(
         return
 
     _n_users, n_groups = await estimate_recipient_counts(session, target="groups", target_chat_ids=resolved)
-    cost = broadcast_charge_tokens(full_admin=full_owner, n_users=_n_users, n_groups=n_groups)
+    cost = broadcast_charge_tokens(n_users=_n_users, n_groups=n_groups)
     slot_firing = int(next_slot)
     idem_base = f"{idem_prefix}:{int(entity_pk)}:{int(bid)}:{day_key}:n{slot_firing}"
 

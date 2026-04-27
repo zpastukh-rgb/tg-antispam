@@ -49,7 +49,7 @@ def _chat_is_group_or_channel_destination():
 BROADCAST_MAX_TOKENS = 2500
 
 
-def broadcast_charge_tokens(*, full_admin: bool, n_users: int, n_groups: int) -> int:
+def broadcast_charge_tokens(*, n_users: int, n_groups: int) -> int:
     """
     Стоимость в AURUM за один запуск рассылки или один слот автопоста.
 
@@ -57,8 +57,6 @@ def broadcast_charge_tokens(*, full_admin: bool, n_users: int, n_groups: int) ->
     недоступна). Считаем только n_groups — выбранные группы/каналы.
     """
     _ = n_users  # не тарифицируем
-    if full_admin:
-        return 0
     n_groups = max(0, int(n_groups))
     return min(BROADCAST_MAX_TOKENS, int(n_groups))
 
