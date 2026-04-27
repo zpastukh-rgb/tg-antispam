@@ -104,6 +104,8 @@ const bcUploading = ref(false)
 const bcSending = ref(false)
 const bcShowAllRecentModal = ref(false)
 const bcQuickDraftModalOpen = ref(false)
+/** Сохранённое на сервере название при открытии быстрого черновика — для кнопки ✓ */
+const bcQuickTitleBaseline = ref('')
 const bcSendTargetModalOpen = ref(false)
 const bcSendTargetChannels = ref(true)
 const bcSendTargetGroups = ref(false)
@@ -128,6 +130,9 @@ const bcConfirmMode = ref('groups') // groups | users | mixed
 const bcConfirmChatIds = ref([])
 const bcSelectedId = ref(null)
 const bcTitle = ref('')
+const bcQuickTitleDirty = computed(
+  () => String(bcTitle.value ?? '').trim() !== String(bcQuickTitleBaseline.value ?? '').trim(),
+)
 const bcBodyHtml = ref('')
 const bcButtonRows = ref([[{ text: '', url: '', web_app_url: '', callback_data: '' }]])
 /** Тип для следующей загрузки файла */
@@ -406,6 +411,7 @@ async function openQuickBroadcastDraft() {
   }
   bcEditorOpen.value = false
   bcQuickDraftModalOpen.value = true
+  bcQuickTitleBaseline.value = String(bcTitle.value || '')
   await nextTick()
   if (bcBodyRef.value) bcBodyRef.value.innerHTML = bcBodyHtml.value || ''
   bcUpdateFormatState()
@@ -3893,10 +3899,32 @@ async function saveBcDraft() {
   bcSaving.value = true
   try {
     await persistCurrentBroadcast()
+    if (bcQuickDraftModalOpen.value) {
+      bcQuickTitleBaseline.value = String(bcTitle.value || '')
+    }
   } catch (e) {
     alert(String(e?.body?.detail || e?.message || 'Не удалось сохранить'))
   } finally {
     bcSaving.value = false
+  }
+}
+
+async function applyBcQuickDraftTitle() {
+  const id = Number(bcSelectedId.value || 0)
+  if (!id || !bcQuickTitleDirty.value) return
+  const title = String(bcTitle.value ?? '').trim().slice(0, 255) || 'Черновик'
+  bcSavingTitleId.value = id
+  try {
+    const r = await fetch(() => api.adminBroadcastPatch(id, { title }))
+    upsertBroadcastInList(r)
+    bcTitle.value = String(r?.title ?? title)
+    bcQuickTitleBaseline.value = String(bcTitle.value)
+    bcSaveLocalSnapshot()
+    bcSavedTick.value = true
+  } catch (e) {
+    alert(String(e?.body?.detail || e?.message || 'Не удалось сохранить название'))
+  } finally {
+    bcSavingTitleId.value = null
   }
 }
 
@@ -6270,16 +6298,38 @@ watch(
         </div>
       </div>
 
-      <div
-        v-if="bcQuickDraftModalOpen"
-        class="fixed inset-0 z-[330] flex items-start justify-center overflow-y-auto bg-black/80 px-3 pb-[max(6.25rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))] pt-[max(0px,calc(env(safe-area-inset-top,0px)+54px))]"
-        @click.self="bcQuickDraftModalOpen = false"
-      >
-        <div class="w-full max-w-lg rounded-2xl border border-white/12 bg-[#0b111b]/95 p-3 text-zinc-100 shadow-[0_28px_80px_-24px_rgba(0,0,0,0.92)] ring-1 ring-white/[0.06]">
+      <Teleport to="body">
+        <div
+          v-if="bcQuickDraftModalOpen"
+          class="fixed inset-0 z-[10000] flex min-h-[100dvh] min-w-0 flex-col bg-[#09090b] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
+          @click.self="bcQuickDraftModalOpen = false"
+        >
+          <div class="mx-auto flex w-full max-w-lg flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-3">
+            <div class="w-full rounded-2xl border border-white/12 bg-[#0b111b]/95 p-3 text-zinc-100 shadow-[0_28px_80px_-24px_rgba(0,0,0,0.92)] ring-1 ring-white/[0.06]">
           <div class="mb-2 flex items-start justify-between gap-2 border-b border-white/10 pb-2">
-            <div class="min-w-0">
+            <div class="min-w-0 flex-1">
               <p class="truncate text-[19px] font-black text-white">Новая рассылка</p>
-              <p class="text-[12px] text-zinc-400">{{ bcTitle || 'Черновик' }}</p>
+              <div class="mt-1.5 flex min-w-0 items-center gap-1.5">
+                <input
+                  v-model="bcTitle"
+                  type="text"
+                  class="min-w-0 flex-1 rounded-lg border border-white/10 bg-zinc-950/80 px-2.5 py-1.5 text-[13px] text-zinc-200 placeholder:text-zinc-500 focus:border-cyan-500/45 focus:outline-none focus:ring-1 focus:ring-cyan-500/25"
+                  placeholder="Название черновика"
+                  maxlength="255"
+                  :disabled="Number(bcSavingTitleId || 0) === Number(bcSelectedId || 0) && Number(bcSelectedId || 0) > 0"
+                  @keydown.enter.prevent="applyBcQuickDraftTitle"
+                />
+                <button
+                  v-show="bcQuickTitleDirty"
+                  type="button"
+                  class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-emerald-500/40 bg-emerald-500/20 text-[16px] font-bold text-emerald-200 shadow-[0_0_20px_-4px_rgba(16,185,129,0.5)] transition active:scale-95 hover:border-emerald-400/55 hover:bg-emerald-500/30 disabled:opacity-50"
+                  :disabled="Number(bcSavingTitleId || 0) === Number(bcSelectedId || 0) && Number(bcSelectedId || 0) > 0"
+                  title="Применить название"
+                  @click="applyBcQuickDraftTitle"
+                >
+                  ✓
+                </button>
+              </div>
             </div>
             <button type="button" class="rounded-lg px-2 py-1 text-[13px] font-bold text-[#70a8ff] hover:bg-white/10" :disabled="bcSaving" @click="saveBcDraft">
               Сохранить
@@ -6369,8 +6419,10 @@ watch(
           >
             Далее
           </button>
+            </div>
+          </div>
         </div>
-      </div>
+      </Teleport>
 
       <div
         v-if="bcSendTargetModalOpen"
