@@ -320,12 +320,11 @@ watch(
   bottom: 0px;
   transition-duration: 360ms;
   transition-timing-function: cubic-bezier(0.2, 0.78, 0.2, 1);
-  background: rgba(130, 145, 175, 0.08);
-  box-shadow:
-    inset 0 0 0 1px rgba(130, 146, 176, 0.12),
-    0 8px 18px -14px rgba(40, 60, 95, 0.42);
-  backdrop-filter: blur(7px) saturate(1.08);
-  -webkit-backdrop-filter: blur(7px) saturate(1.08);
+  /* Keep the pill visually empty: no fill / no backdrop blur on the whole hit-area */
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
   overflow: hidden;
   cursor: grab;
   touch-action: none;
@@ -334,10 +333,10 @@ watch(
 .nav-active-indicator-dragging {
   cursor: grabbing;
   transform: scaleY(1.16);
-  background: rgba(130, 145, 175, 0.04);
-  box-shadow:
-    inset 0 0 0 1px rgba(130, 146, 176, 0.08),
-    0 8px 18px -14px rgba(40, 60, 95, 0.3);
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 .nav-active-indicator-settle {
@@ -349,18 +348,19 @@ watch(
   inset: 0;
   border-radius: 999px;
   pointer-events: none;
-  opacity: 0;
+  /* Idle: only a faint ring; motion classes raise opacity */
+  opacity: 0.42;
+  /* Edge-only: thin ring + very light refraction; center stays fully clear */
   background:
-    linear-gradient(95deg, transparent 0%, rgba(130, 190, 255, 0.12) 8%, rgba(255, 140, 210, 0.2) 14%, rgba(120, 250, 255, 0.2) 18%, rgba(130, 190, 255, 0.12) 22%, transparent 32%) 0 0 / 250% 100% no-repeat,
-    conic-gradient(from 215deg at 50% 50%, rgba(255, 120, 195, 0.18), rgba(133, 214, 255, 0.16), rgba(168, 137, 255, 0.18), rgba(255, 120, 195, 0.18));
+    linear-gradient(95deg, transparent 0%, rgba(130, 190, 255, 0.08) 10%, rgba(255, 140, 210, 0.12) 16%, rgba(120, 250, 255, 0.12) 20%, rgba(130, 190, 255, 0.08) 26%, transparent 36%) 0 0 / 260% 100% no-repeat;
   box-shadow:
-    inset 0 1px 0 rgba(164, 218, 255, 0.26),
-    inset 0 -1px 0 rgba(188, 140, 255, 0.26);
-  backdrop-filter: blur(14px) saturate(1.46) contrast(1.1);
-  -webkit-backdrop-filter: blur(14px) saturate(1.46) contrast(1.1);
-  mask: radial-gradient(closest-side, transparent calc(100% - 2.8px), #000 calc(100% - 1.7px));
-  -webkit-mask: radial-gradient(closest-side, transparent calc(100% - 2.8px), #000 calc(100% - 1.7px));
-  mix-blend-mode: screen;
+    inset 0 0 0 1px rgba(170, 210, 255, 0.22),
+    0 0 0 1px rgba(120, 170, 255, 0.12);
+  backdrop-filter: blur(10px) saturate(1.25) contrast(1.04);
+  -webkit-backdrop-filter: blur(10px) saturate(1.25) contrast(1.04);
+  mask: radial-gradient(closest-side, transparent calc(100% - 2.4px), #000 calc(100% - 1.45px));
+  -webkit-mask: radial-gradient(closest-side, transparent calc(100% - 2.4px), #000 calc(100% - 1.45px));
+  mix-blend-mode: plus-lighter;
   transition: opacity 180ms ease;
 }
 
