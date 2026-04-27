@@ -17,12 +17,16 @@ const itemButtonRefs = ref([])
 const navActiveIndicatorStyle = ref({
   left: '0px',
   width: '0px',
+  height: 'auto',
+  borderRadius: '999px',
   opacity: 0,
   transitionDuration: '320ms',
 })
 const navActiveIndicatorAnimating = ref(false)
 const navActiveIndicatorDragging = ref(false)
 const navActiveIndicatorSettling = ref(false)
+const navIndicatorPhase = ref('idle')
+const navPrevActiveIndex = ref(0)
 let navIndicatorAnimTimer = null
 let navIndicatorSettleTimer = null
 let navResizeHandler = null
@@ -56,34 +60,120 @@ function activeItemIndex() {
   return idx >= 0 ? idx : 0
 }
 
+function waitMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 function setItemButtonRef(el, index) {
   if (!el) return
   itemButtonRefs.value[index] = el
 }
 
-function updateActiveIndicator(withSqueeze = false) {
-  nextTick(() => {
+function indicatorMetricsForButton(btn, grid) {
+  const g = grid.getBoundingClientRect()
+  const b = btn.getBoundingClientRect()
+  const left = Math.max(0, b.left - g.left)
+  const width = Math.max(0, b.width)
+  const height = Math.max(0, b.height)
+  const circleSize = Math.max(18, Math.min(width, height))
+  return { left, width, height, circleSize }
+}
+
+async function animateIndicatorTravel(fromIdx, toIdx) {
+  const grid = navGridRef.value
+  const fromBtn = itemButtonRefs.value[fromIdx]
+  const toBtn = itemButtonRefs.value[toIdx]
+  if (!grid || !fromBtn || !toBtn || fromIdx === toIdx) return
+
+  const from = indicatorMetricsForButton(fromBtn, grid)
+  const to = indicatorMetricsForButton(toBtn, grid)
+
+  navIndicatorPhase.value = 'travel'
+  navActiveIndicatorAnimating.value = false
+
+  const curLeft = Number.parseFloat(String(navActiveIndicatorStyle.value.left || '0').replace('px', '')) || from.left
+  const curWidth = Number.parseFloat(String(navActiveIndicatorStyle.value.width || '0').replace('px', '')) || from.width
+
+  const startCenter = curLeft + curWidth / 2
+  const endCenter = to.left + to.width / 2
+  const travelLeft = Math.max(0, startCenter - from.circleSize / 2)
+
+  navActiveIndicatorStyle.value = {
+    ...navActiveIndicatorStyle.value,
+    left: `${travelLeft}px`,
+    width: `${from.circleSize}px`,
+    height: `${from.circleSize}px`,
+    borderRadius: '999px',
+    opacity: 1,
+    transitionDuration: '240ms',
+    transitionTimingFunction: 'cubic-bezier(0.2, 0.85, 0.15, 1)',
+  }
+
+  await waitMs(240)
+
+  const moveLeft = Math.max(0, endCenter - from.circleSize / 2)
+  navActiveIndicatorStyle.value = {
+    ...navActiveIndicatorStyle.value,
+    left: `${moveLeft}px`,
+    transitionDuration: '520ms',
+    transitionTimingFunction: 'cubic-bezier(0.18, 0.72, 0.18, 1)',
+  }
+
+  await waitMs(520)
+
+  navIndicatorPhase.value = 'land'
+  navActiveIndicatorAnimating.value = false
+  requestAnimationFrame(() => {
+    navActiveIndicatorAnimating.value = true
+    if (navIndicatorAnimTimer) clearTimeout(navIndicatorAnimTimer)
+    navIndicatorAnimTimer = setTimeout(() => {
+      navActiveIndicatorAnimating.value = false
+    }, 620)
+  })
+
+  navActiveIndicatorStyle.value = {
+    ...navActiveIndicatorStyle.value,
+    left: `${to.left}px`,
+    width: `${to.width}px`,
+    height: `${to.height}px`,
+    borderRadius: '999px',
+    opacity: 1,
+    transitionDuration: '380ms',
+    transitionTimingFunction: 'cubic-bezier(0.18, 0.78, 0.14, 1)',
+  }
+
+  await waitMs(380)
+  navIndicatorPhase.value = 'idle'
+}
+
+function updateActiveIndicator(withTravel = false) {
+  nextTick(async () => {
     const grid = navGridRef.value
     const idx = activeItemIndex()
     const btn = itemButtonRefs.value[idx]
     if (!grid || !btn) return
-    const g = grid.getBoundingClientRect()
-    const b = btn.getBoundingClientRect()
-    navActiveIndicatorStyle.value = {
-      left: `${Math.max(0, b.left - g.left)}px`,
-      width: `${Math.max(0, b.width)}px`,
-      opacity: 1,
-      transitionDuration: navActiveIndicatorDragging.value ? '0ms' : '460ms',
+
+    const prevIdx = navPrevActiveIndex.value
+
+    const m = indicatorMetricsForButton(btn, grid)
+
+    if (!withTravel || prevIdx === idx || navActiveIndicatorDragging.value) {
+      navActiveIndicatorStyle.value = {
+        ...navActiveIndicatorStyle.value,
+        left: `${m.left}px`,
+        width: `${m.width}px`,
+        height: `${m.height}px`,
+        borderRadius: '999px',
+        opacity: 1,
+        transitionDuration: navActiveIndicatorDragging.value ? '0ms' : '460ms',
+        transitionTimingFunction: 'cubic-bezier(0.2, 0.78, 0.2, 1)',
+      }
+      navPrevActiveIndex.value = idx
+      return
     }
-    if (!withSqueeze) return
-    navActiveIndicatorAnimating.value = false
-    requestAnimationFrame(() => {
-      navActiveIndicatorAnimating.value = true
-      if (navIndicatorAnimTimer) clearTimeout(navIndicatorAnimTimer)
-      navIndicatorAnimTimer = setTimeout(() => {
-        navActiveIndicatorAnimating.value = false
-      }, 520)
-    })
+
+    await animateIndicatorTravel(prevIdx, idx)
+    navPrevActiveIndex.value = idx
   })
 }
 
@@ -92,6 +182,7 @@ function startIndicatorDrag(ev) {
   const grid = navGridRef.value
   if (!grid) return
   const curLeft = Number.parseFloat(String(navActiveIndicatorStyle.value.left || '0').replace('px', '')) || 0
+  navIndicatorPhase.value = 'travel'
   navDragState.value = {
     active: true,
     pointerId: ev.pointerId ?? null,
@@ -125,6 +216,8 @@ function onIndicatorDragMove(ev) {
   navActiveIndicatorStyle.value = {
     ...navActiveIndicatorStyle.value,
     left: `${clamped}px`,
+    height: `${width}px`,
+    borderRadius: '999px',
     opacity: 1,
     transitionDuration: '0ms',
   }
@@ -135,6 +228,7 @@ function endIndicatorDrag() {
   navDragState.value.active = false
   navActiveIndicatorDragging.value = false
   navActiveIndicatorSettling.value = true
+  navIndicatorPhase.value = 'land'
   const grid = navGridRef.value
   const left = Number.parseFloat(String(navActiveIndicatorStyle.value.left || '0').replace('px', '')) || 0
   const width = Number.parseFloat(String(navActiveIndicatorStyle.value.width || '0').replace('px', '')) || 0
@@ -158,11 +252,12 @@ function endIndicatorDrag() {
   })
   const target = items[bestIdx]
   if (target) onTap(target)
-  updateActiveIndicator(true)
+  updateActiveIndicator(false)
   if (navIndicatorSettleTimer) clearTimeout(navIndicatorSettleTimer)
   navIndicatorSettleTimer = setTimeout(() => {
     navActiveIndicatorSettling.value = false
-  }, 260)
+    navIndicatorPhase.value = 'idle'
+  }, 320)
 }
 
 function onTap(item) {
@@ -208,6 +303,7 @@ async function loadSpikeAlerts() {
 onMounted(async () => {
   await loadSpikeAlerts()
   spikeTimer = setInterval(loadSpikeAlerts, 30000)
+  navPrevActiveIndex.value = activeItemIndex()
   updateActiveIndicator(false)
   navResizeHandler = () => updateActiveIndicator(false)
   if (typeof window !== 'undefined') {
@@ -244,16 +340,18 @@ watch(
 
 <template>
   <nav
-    class="fixed bottom-3 left-4 right-4 z-40 mx-auto w-auto max-w-[20.3rem] rounded-[1.8rem] border border-white/15 bg-[linear-gradient(180deg,rgba(40,44,54,0.55),rgba(19,23,32,0.62))] pb-[calc(0.2rem+env(safe-area-inset-bottom,0px))] pt-0 shadow-[0_16px_34px_-12px_rgba(0,0,0,0.78),inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-10px_18px_rgba(0,0,0,0.24)] backdrop-blur-[18px] [contain:layout_paint] [transform:translateZ(0)]"
+    class="fixed bottom-3 left-6 right-6 z-40 mx-auto w-auto max-w-[17.8rem] rounded-[1.65rem] border-0 bg-[linear-gradient(180deg,rgba(18,21,28,0.42),rgba(12,14,18,0.42))] pb-[calc(0.18rem+env(safe-area-inset-bottom,0px))] pt-0 shadow-[0_14px_28px_-14px_rgba(0,0,0,0.62)] backdrop-blur-[14px] [contain:layout_paint] [transform:translateZ(0)]"
     style="font-family: 'Exo 2', 'Montserrat', sans-serif;"
   >
-    <div ref="navGridRef" class="relative mx-auto grid w-full max-w-[19rem] grid-cols-4 gap-0 px-0.5 pt-0.5 pb-0">
+    <div ref="navGridRef" class="relative mx-auto grid w-full max-w-[16.6rem] grid-cols-4 gap-0 px-0 pt-[0.18rem] pb-[0.06rem]">
       <span
-        class="nav-active-indicator absolute bottom-0 top-0 z-[3] rounded-full transition-[left,width,opacity,background-color,box-shadow,backdrop-filter,transform] duration-200 ease-out"
+        class="nav-active-indicator absolute bottom-[0.06rem] z-[3] rounded-full transition-[left,width,height,border-radius,opacity,background-color,box-shadow,backdrop-filter,transform] duration-200 ease-out"
         :class="[
           navActiveIndicatorAnimating ? 'nav-active-indicator-squeeze' : '',
           navActiveIndicatorDragging ? 'nav-active-indicator-dragging' : '',
           navActiveIndicatorSettling ? 'nav-active-indicator-settle' : '',
+          navIndicatorPhase === 'travel' ? 'nav-active-indicator-travel' : '',
+          navIndicatorPhase === 'land' ? 'nav-active-indicator-land' : '',
         ]"
         :style="navActiveIndicatorStyle"
         @pointerdown.prevent.stop="startIndicatorDrag"
@@ -265,6 +363,8 @@ watch(
             navActiveIndicatorAnimating ? 'nav-active-indicator-edge-run' : '',
             navActiveIndicatorDragging ? 'nav-active-indicator-edge-drag' : '',
             navActiveIndicatorSettling ? 'nav-active-indicator-edge-settle' : '',
+            navIndicatorPhase === 'travel' ? 'nav-active-indicator-edge-travel' : '',
+            navIndicatorPhase === 'land' ? 'nav-active-indicator-edge-land' : '',
           ]"
           aria-hidden="true"
         />
@@ -274,7 +374,7 @@ watch(
         :key="item.key"
         :ref="(el) => setItemButtonRef(el, items.findIndex((x) => x.key === item.key))"
         type="button"
-        class="group relative z-[2] flex flex-col items-center justify-center gap-0 rounded-full px-1 py-[0.2rem] text-[10.5px] font-semibold tracking-[0.01em] transition-colors duration-200"
+        class="group relative z-[2] flex flex-col items-center justify-center gap-0 rounded-full px-0.5 py-[0.18rem] text-[10.5px] font-semibold tracking-[0.01em] transition-colors duration-200"
         :class="
           isActive(item)
             ? 'text-[#58a9ff]'
@@ -305,68 +405,81 @@ watch(
 
 <style scoped>
 .nav-active-indicator-squeeze {
-  animation: navIndicatorSqueeze 520ms cubic-bezier(0.2, 0.74, 0.2, 1);
+  animation: navIndicatorSqueeze 620ms cubic-bezier(0.18, 0.78, 0.14, 1);
 }
 
 @keyframes navIndicatorSqueeze {
   0% { transform: scaleY(1); }
-  35% { transform: scaleY(1.12); }
-  72% { transform: scaleY(0.86); }
+  40% { transform: scaleY(1.06); }
+  70% { transform: scaleY(0.94); }
   100% { transform: scaleY(1); }
 }
 
 .nav-active-indicator {
-  top: 4px;
-  bottom: 0px;
   transition-duration: 460ms;
   transition-timing-function: cubic-bezier(0.2, 0.78, 0.2, 1);
-  background: rgba(130, 145, 175, 0.08);
-  box-shadow:
-    inset 0 0 0 1px rgba(130, 146, 176, 0.12),
-    0 8px 18px -14px rgba(40, 60, 95, 0.42);
-  backdrop-filter: blur(7px) saturate(1.08);
-  -webkit-backdrop-filter: blur(7px) saturate(1.08);
+  background:
+    radial-gradient(closest-side, transparent 62%, rgba(115, 175, 255, 0.075) 100%);
+  box-shadow: none;
+  backdrop-filter: blur(8px) saturate(1.05);
+  -webkit-backdrop-filter: blur(8px) saturate(1.05);
   overflow: hidden;
   cursor: grab;
   touch-action: none;
 }
 
+.nav-active-indicator-travel {
+  backdrop-filter: blur(0px) saturate(1);
+  -webkit-backdrop-filter: blur(0px) saturate(1);
+  background: transparent;
+  box-shadow: none;
+}
+
+.nav-active-indicator-land {
+  backdrop-filter: blur(11px) saturate(1.18) contrast(1.03);
+  -webkit-backdrop-filter: blur(11px) saturate(1.18) contrast(1.03);
+}
+
 .nav-active-indicator-dragging {
   cursor: grabbing;
-  transform: scaleY(1.16);
-  background: rgba(130, 145, 175, 0.04);
-  box-shadow:
-    inset 0 0 0 1px rgba(130, 146, 176, 0.08),
-    0 8px 18px -14px rgba(40, 60, 95, 0.3);
+  transform: scaleY(1.06);
+  backdrop-filter: blur(0px) saturate(1);
+  -webkit-backdrop-filter: blur(0px) saturate(1);
+  background: transparent;
 }
 
 .nav-active-indicator-settle {
-  animation: navIndicatorSettle 260ms cubic-bezier(0.2, 0.75, 0.22, 1);
+  animation: navIndicatorSettle 320ms cubic-bezier(0.2, 0.75, 0.22, 1);
 }
 
 .nav-active-indicator-edge {
   position: absolute;
   inset: 0;
-  border-radius: 999px;
+  border-radius: inherit;
   pointer-events: none;
   opacity: 0;
   background:
-    linear-gradient(95deg, transparent 0%, rgba(130, 190, 255, 0.12) 8%, rgba(255, 140, 210, 0.2) 14%, rgba(120, 250, 255, 0.2) 18%, rgba(130, 190, 255, 0.12) 22%, transparent 32%) 0 0 / 250% 100% no-repeat,
-    conic-gradient(from 215deg at 50% 50%, rgba(255, 120, 195, 0.18), rgba(133, 214, 255, 0.16), rgba(168, 137, 255, 0.18), rgba(255, 120, 195, 0.18));
-  box-shadow:
-    inset 0 1px 0 rgba(164, 218, 255, 0.26),
-    inset 0 -1px 0 rgba(188, 140, 255, 0.26);
-  backdrop-filter: blur(14px) saturate(1.46) contrast(1.1);
-  -webkit-backdrop-filter: blur(14px) saturate(1.46) contrast(1.1);
-  mask: radial-gradient(closest-side, transparent calc(100% - 2.8px), #000 calc(100% - 1.7px));
-  -webkit-mask: radial-gradient(closest-side, transparent calc(100% - 2.8px), #000 calc(100% - 1.7px));
-  mix-blend-mode: screen;
+    linear-gradient(
+      95deg,
+      transparent 0%,
+      rgba(120, 200, 255, 0.08) 9%,
+      rgba(255, 150, 230, 0.1) 14%,
+      rgba(130, 255, 245, 0.1) 18%,
+      rgba(120, 200, 255, 0.08) 23%,
+      transparent 34%
+    ) 0 0 / 280% 100% no-repeat;
+  /* edge-only: keep the center fully clear */
+  mask: radial-gradient(closest-side, transparent calc(100% - 3px), #000 calc(100% - 2.1px));
+  -webkit-mask: radial-gradient(closest-side, transparent calc(100% - 3px), #000 calc(100% - 2.1px));
+  backdrop-filter: blur(10px) saturate(1.35) hue-rotate(12deg);
+  -webkit-backdrop-filter: blur(10px) saturate(1.35) hue-rotate(12deg);
+  mix-blend-mode: soft-light;
   transition: opacity 180ms ease;
 }
 
 .nav-active-indicator-edge-run {
-  animation: navEdgeFlow 520ms cubic-bezier(0.2, 0.7, 0.2, 1);
-  opacity: 0.92;
+  animation: navEdgeFlow 620ms cubic-bezier(0.18, 0.72, 0.14, 1);
+  opacity: 0.95;
 }
 
 .nav-active-indicator-edge-drag {
@@ -375,27 +488,55 @@ watch(
 }
 
 .nav-active-indicator-edge-settle {
-  animation: navEdgeSettle 260ms ease-out;
-  opacity: 0.7;
+  animation: navEdgeSettle 280ms ease-out;
+  opacity: 0.65;
+}
+
+.nav-active-indicator-edge-travel {
+  animation: navEdgeFlow 520ms linear infinite;
+  opacity: 1;
+}
+
+.nav-active-indicator-edge-land {
+  animation: navEdgeRainbow 620ms cubic-bezier(0.18, 0.78, 0.14, 1);
+  opacity: 1;
 }
 
 @keyframes navEdgeFlow {
   0% {
-    background-position: 0% 0, 0 0, 0 0;
+    background-position: 0% 0;
     opacity: 0.52;
   }
   45% {
-    background-position: 58% 0, 0 0, 0 0;
-    opacity: 0.9;
+    background-position: 58% 0;
+    opacity: 0.92;
   }
   100% {
-    background-position: 100% 0, 0 0, 0 0;
-    opacity: 0.68;
+    background-position: 100% 0;
+    opacity: 0.72;
+  }
+}
+
+@keyframes navEdgeRainbow {
+  0% {
+    background-position: 18% 0;
+    opacity: 0.45;
+    filter: blur(0.2px) saturate(1.05);
+  }
+  55% {
+    background-position: 72% 0;
+    opacity: 0.95;
+    filter: blur(0px) saturate(1.22);
+  }
+  100% {
+    background-position: 100% 0;
+    opacity: 0.35;
+    filter: blur(0px) saturate(1.08);
   }
 }
 
 @keyframes navIndicatorSettle {
-  0% { transform: scaleY(1.16); }
+  0% { transform: scaleY(1.1); }
   100% { transform: scaleY(1); }
 }
 
