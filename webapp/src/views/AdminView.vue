@@ -289,12 +289,13 @@ const bcSendProgressPercent = computed(() => {
   return clampPct((bcSendProgressDone.value / total) * 100)
 })
 
-const bcSendCircleOffset = computed(() => {
+/** Длина видимой дуги пропорциональна проценту (не перевёрнуто). */
+const bcSendCircleDash = computed(() => {
   const p = bcSendProgressPercent.value
   const R = 52
   const C = 2 * Math.PI * R
-  const dash = C * (1 - p / 100)
-  return `${dash.toFixed(1)} ${C.toFixed(1)}`
+  const filled = C * (p / 100)
+  return `${filled.toFixed(2)} ${C.toFixed(2)}`
 })
 
 const bcSendStatsOverall = computed(() => bcSendResultSnapshot.value?.overall || null)
@@ -1411,6 +1412,12 @@ const bcSendTargetKind = ref('groups')
 const bcSendResultLoading = ref(false)
 /** Снимок метрик после завершения (из /stats) */
 const bcSendResultSnapshot = ref(null)
+/** Минимум времени на экране «Отправка…» перед переходом к результату (мс). */
+const BC_SEND_MIN_VISIBLE_MS = 3000
+/** Время открытия экрана отправки — для BC_SEND_MIN_VISIBLE_MS */
+const bcSendSendingStartedAt = ref(0)
+/** Белый знак Telegram внутри круга (локальный svg в public/) */
+const bcTelegramPlaneIconUrl = `${import.meta.env.BASE_URL}broadcast/telegram-plane-white.svg`
 
 const adminBcBg = `${import.meta.env.BASE_URL}admin-bg-dark-final.png`
 /** Верхняя отсечка AURUM за один запуск/слот на бэкенде (broadcast_send_plan.BROADCAST_MAX_TOKENS). */
@@ -2381,6 +2388,7 @@ async function startBroadcastProgressPolling(id, target) {
   bcDismissBroadcastSendPrefaceOverlays()
   await nextTick()
   bcSendModalOpen.value = true
+  bcSendSendingStartedAt.value = Date.now()
   bcSendModalState.value = 'sending'
   bcSendModalBroadcastId.value = Number(id || 0)
   bcSendModalText.value = ''
@@ -2418,9 +2426,18 @@ async function startBroadcastProgressPolling(id, target) {
       const countsLookComplete = totc > 0 && okc + flc >= totc
       const finishedAsDraftWithStats = st === 'draft' && !!sentAt && countsLookComplete
       if (st === 'sent' || finishedAsDraftWithStats) {
-        bcSendModalState.value = 'done'
         stopBroadcastProgressPolling()
-        await loadBcSendResultStats(bid)
+        const bidSnap = bid
+        const t0 = bcSendSendingStartedAt.value || Date.now()
+        const wait = Math.max(0, BC_SEND_MIN_VISIBLE_MS - (Date.now() - t0))
+        if (wait > 0) {
+          await new Promise((resolve) => {
+            setTimeout(resolve, wait)
+          })
+        }
+        if (!bcSendModalOpen.value || Number(bcSendModalBroadcastId.value || 0) !== bidSnap) return
+        bcSendModalState.value = 'done'
+        await loadBcSendResultStats(bidSnap)
         return
       }
       if (st === 'failed') {
@@ -8612,62 +8629,87 @@ watch(
       </div>
     </div>
 
-    <div
-      v-if="bcSendModalOpen"
-      class="fixed inset-0 z-[400] flex items-center justify-center bg-black/80 p-2 pt-[max(0.5rem,calc(env(safe-area-inset-top,0px)+40px))] pb-[max(0.75rem,calc(4.25rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-md"
-      @click.self="bcSendModalState === 'sending' ? null : closeBcSendModal()"
-    >
+    <Teleport to="body">
       <div
-        class="relative w-full max-w-[min(100vw-1rem,22rem)] rounded-2xl border border-white/[0.08] bg-[#0c0c0e] p-4 shadow-[0_28px_80px_-24px_rgba(0,0,0,0.92)] ring-1 ring-white/[0.04]"
+        v-if="bcSendModalOpen"
+        class="fixed inset-0 z-[10000] flex min-h-[100dvh] min-w-0 flex-col bg-[#09090b] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
+        @click.self="bcSendModalState === 'sending' ? null : closeBcSendModal()"
       >
-        <template v-if="bcSendModalState === 'sending'">
-          <p class="text-[15px] font-semibold text-white">Отправка...</p>
-          <div class="relative mt-6 flex items-center justify-center">
-            <div class="relative grid h-[132px] w-[132px] place-items-center">
-              <svg class="col-start-1 row-start-1 h-[132px] w-[132px] -rotate-90" viewBox="0 0 120 120" aria-hidden="true">
-                <circle cx="60" cy="60" r="52" fill="none" stroke="rgba(148,163,184,0.14)" stroke-width="9" />
-                <circle
-                  cx="60"
-                  cy="60"
-                  r="52"
-                  fill="none"
-                  stroke="#38bdf8"
-                  stroke-width="9"
-                  stroke-linecap="round"
-                  :stroke-dasharray="bcSendCircleOffset"
-                />
-              </svg>
-              <div
-                class="col-start-1 row-start-1 flex h-[92px] w-[92px] items-center justify-center rounded-full bg-gradient-to-br from-indigo-600/35 via-violet-600/25 to-slate-900/40 shadow-[0_0_42px_-8px_rgba(99,102,241,0.55)] ring-1 ring-white/[0.06]"
-              >
-                <span class="text-[26px] leading-none text-white drop-shadow">✈️</span>
+        <div
+          v-if="bcSendModalState === 'sending'"
+          class="flex min-h-[100dvh] w-full max-w-full flex-col px-4"
+        >
+          <p class="shrink-0 pt-2 text-[15px] font-semibold text-white">Отправка...</p>
+          <div class="flex min-h-0 flex-1 flex-col items-center justify-center">
+            <div class="relative mx-auto w-full max-w-[17.5rem]">
+              <div class="relative mx-auto h-[150px] w-[150px]">
+                <svg
+                  class="pointer-events-none absolute left-0 top-0 h-[150px] w-[150px] -rotate-90 drop-shadow-[0_0_18px_rgba(192,132,252,0.5)]"
+                  viewBox="0 0 120 120"
+                  aria-hidden="true"
+                >
+                  <defs>
+                    <linearGradient id="bcSendNeonRing" x1="0%" y1="30%" x2="100%" y2="100%">
+                      <stop offset="0%" stop-color="#f0abfc" />
+                      <stop offset="50%" stop-color="#c084fc" />
+                      <stop offset="100%" stop-color="#7c3aed" />
+                    </linearGradient>
+                  </defs>
+                  <circle cx="60" cy="60" r="52" fill="none" stroke="rgba(148,163,184,0.12)" stroke-width="9" />
+                  <circle
+                    cx="60"
+                    cy="60"
+                    r="52"
+                    fill="none"
+                    stroke="url(#bcSendNeonRing)"
+                    stroke-width="9"
+                    stroke-linecap="round"
+                    :stroke-dasharray="bcSendCircleDash"
+                    class="transition-[stroke-dasharray] duration-300 ease-out"
+                  />
+                </svg>
+                <div
+                  class="absolute left-1/2 top-1/2 flex h-[100px] w-[100px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-gradient-to-br from-violet-600/45 via-fuchsia-500/25 to-slate-900/35 shadow-[0_0_48px_-6px_rgba(168,85,247,0.55)] ring-1 ring-white/10"
+                >
+                  <img
+                    :src="bcTelegramPlaneIconUrl"
+                    class="h-9 w-9 select-none object-contain"
+                    width="36"
+                    height="36"
+                    alt=""
+                  />
+                </div>
+                <span
+                  class="absolute bottom-1 -right-1 text-2xl font-semibold tabular-nums tracking-tight text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.65)]"
+                >
+                  {{ bcSendProgressPercent }}%
+                </span>
               </div>
             </div>
-            <span class="absolute right-1 top-1/2 -translate-y-1/2 text-2xl font-semibold tabular-nums text-white">
-              {{ bcSendProgressPercent }}%
-            </span>
+            <div class="mt-5 w-full max-w-[17.5rem] text-center">
+              <p class="text-[9px] font-semibold uppercase tracking-[0.12em] text-slate-500">Отправлено</p>
+              <p class="mt-0.5 text-sm font-semibold tabular-nums leading-tight text-white">
+                {{ fmtIntSpace(bcSendProgressDone) }}
+                <span class="text-slate-500">из</span>
+                {{ fmtIntSpace(bcSendProgressTotal) }}
+              </p>
+            </div>
           </div>
-          <div class="mt-5 text-center">
-            <p class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Отправлено</p>
-            <p class="mt-1 text-lg font-semibold tabular-nums text-white">
-              {{ fmtIntSpace(bcSendProgressDone) }}
-              <span class="text-slate-500">из</span>
-              {{ fmtIntSpace(bcSendProgressTotal) }}
-            </p>
+          <div class="shrink-0 px-0 pb-3 pt-2">
+            <button
+              type="button"
+              class="w-full rounded-2xl border border-white/[0.1] bg-white/[0.07] py-3.5 text-[15px] font-semibold text-white active:scale-[0.99] hover:bg-white/[0.1]"
+              @click="bcSendCancelWatching"
+            >
+              Отменить отправку
+            </button>
           </div>
-          <button
-            type="button"
-            class="mt-6 w-full rounded-xl border border-white/[0.08] bg-white/[0.06] py-3 text-sm font-semibold text-white hover:bg-white/[0.09]"
-            @click="bcSendCancelWatching"
-          >
-            Отменить просмотр
-          </button>
-          <p class="mt-2 text-center text-[10px] leading-snug text-slate-500">
-            Сервер продолжит отправку: эта кнопка только закрывает экран прогресса.
-          </p>
-        </template>
+        </div>
 
-        <template v-else-if="bcSendModalState === 'done'">
+        <div
+          v-else-if="bcSendModalState === 'done'"
+          class="relative mx-auto flex w-full max-w-[22rem] flex-1 flex-col overflow-y-auto overscroll-contain px-4 pb-6 pt-2"
+        >
           <button
             type="button"
             class="bc-tool-btn absolute right-2 top-2 z-[2]"
@@ -8733,9 +8775,12 @@ watch(
               Статистика
             </button>
           </div>
-        </template>
+        </div>
 
-        <template v-else>
+        <div
+          v-else
+          class="mx-auto flex w-full max-w-[22rem] flex-1 flex-col px-4 pb-8 pt-10"
+        >
           <div class="flex items-start justify-between gap-2">
             <p class="text-base font-semibold text-white">Ошибка отправки</p>
             <button type="button" class="bc-tool-btn" @click="closeBcSendModal">✕</button>
@@ -8748,9 +8793,9 @@ watch(
           >
             Закрыть
           </button>
-        </template>
+        </div>
       </div>
-    </div>
+    </Teleport>
 
     <div
       v-if="bcMediaViewerOpen && bcMediaViewerItem"
