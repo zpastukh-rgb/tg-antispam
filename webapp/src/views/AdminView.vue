@@ -210,6 +210,151 @@ function bcConfirmButtonsLabel(n) {
   return `${v} ${ruPlural(v, 'кнопка', 'кнопки', 'кнопок')}`
 }
 
+function clampPct(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return 0
+  return Math.min(100, Math.max(0, Math.round(n)))
+}
+
+function fmtPctPartFromRatio(num, den) {
+  const n = Number(num || 0)
+  const d = Number(den || 0)
+  if (!d || d <= 0) return null
+  return clampPct((n / d) * 100)
+}
+
+function fmtBroadcastShortTime(iso) {
+  if (!iso) return ''
+  const d = new Date(String(iso))
+  if (Number.isNaN(d.getTime())) return ''
+  const now = new Date()
+  const pad = (x) => String(x).padStart(2, '0')
+  const sameDay =
+    d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()
+  const timeStr = `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  if (sameDay) return `Сегодня, ${timeStr}`
+  return timeStr
+}
+
+function fmtIntSpace(n) {
+  const v = Number(n || 0)
+  if (!Number.isFinite(v)) return '0'
+  try {
+    return new Intl.NumberFormat('ru-RU').format(Math.trunc(v))
+  } catch {
+    return String(Math.trunc(v))
+  }
+}
+
+function fmtPctTrim(p) {
+  if (p == null) return '—'
+  const n = Number(p)
+  if (!Number.isFinite(n)) return '—'
+  const s = n.toFixed(1).replace('.', ',')
+  return `${s}%`
+}
+
+const bcSendProgressTotal = computed(() => {
+  const row = bcSendLiveRow.value
+  const rt = Number(row?.recipient_total || 0)
+  if (Number.isFinite(rt) && rt > 0) return rt
+  const kind = String(bcSendTargetKind.value || 'groups')
+  let n = 0
+  if (kind === 'users') n = Number(bcSelectedBotRecipientIds.value?.length || 0)
+  else if (kind === 'groups') {
+    n =
+      Number(bcSelectedGroupIds.value?.length || 0) +
+      Number(bcSelectedChannelIds.value?.length || 0)
+  } else {
+    n =
+      Number(bcSelectedGroupIds.value?.length || 0) +
+      Number(bcSelectedChannelIds.value?.length || 0) +
+      Number(bcSelectedBotRecipientIds.value?.length || 0)
+  }
+  return Math.max(0, Math.trunc(n))
+})
+
+const bcSendProgressDone = computed(() => {
+  const row = bcSendLiveRow.value
+  const ok = Number(row?.recipient_ok || 0)
+  const fail = Number(row?.recipient_fail || 0)
+  const sum = ok + fail
+  if (Number.isFinite(sum) && sum >= 0) return Math.max(0, Math.trunc(sum))
+  return 0
+})
+
+const bcSendProgressPercent = computed(() => {
+  const total = bcSendProgressTotal.value
+  if (!total) return 0
+  return clampPct((bcSendProgressDone.value / total) * 100)
+})
+
+const bcSendCircleOffset = computed(() => {
+  const p = bcSendProgressPercent.value
+  const R = 52
+  const C = 2 * Math.PI * R
+  const dash = C * (1 - p / 100)
+  return `${dash.toFixed(1)} ${C.toFixed(1)}`
+})
+
+const bcSendStatsOverall = computed(() => bcSendResultSnapshot.value?.overall || null)
+const bcSendStatsBots = computed(() => bcSendResultSnapshot.value?.bots || null)
+const bcSendStatsGroups = computed(() => bcSendResultSnapshot.value?.groups || null)
+
+const bcSendDeliveredOk = computed(() => {
+  const o = bcSendStatsOverall.value
+  const v = Number(o?.ok ?? o?.delivered ?? 0)
+  return Number.isFinite(v) ? Math.max(0, Math.trunc(v)) : 0
+})
+
+const bcSendDeliveredTotal = computed(() => {
+  const o = bcSendStatsOverall.value
+  const v = Number(o?.total ?? o?.attempts ?? 0)
+  return Number.isFinite(v) && v > 0 ? Math.trunc(v) : bcSendProgressTotal.value
+})
+
+const bcSendDeliveredPct = computed(() =>
+  fmtPctPartFromRatio(bcSendDeliveredOk.value, bcSendDeliveredTotal.value),
+)
+
+/** «Клики»: успешные доставки в личку боту (users). Подпись уточняется в карточке UI. */
+const bcSendClicks = computed(() => {
+  const b = bcSendStatsBots.value
+  const v = Number(b?.ok ?? 0)
+  return Number.isFinite(v) ? Math.max(0, Math.trunc(v)) : 0
+})
+
+/** «Переходы»: успешные доставки в группы/каналы (чаты). */
+const bcSendTransitions = computed(() => {
+  const g = bcSendStatsGroups.value
+  const v = Number(g?.ok ?? 0)
+  return Number.isFinite(v) ? Math.max(0, Math.trunc(v)) : 0
+})
+
+const bcSendClicksPct = computed(() => fmtPctPartFromRatio(bcSendClicks.value, bcSendDeliveredOk.value))
+
+const bcSendTransitionsPct = computed(() => fmtPctPartFromRatio(bcSendTransitions.value, bcSendDeliveredOk.value))
+
+/**
+ * CTR в карточке — «охват базы»: доставлено успешно относительно всех подключённых групп/каналов
+ * и активных пользователей бота (как в /stats: connected_*).
+ */
+const bcSendCtrDen = computed(() => {
+  const s = bcSendResultSnapshot.value
+  const g = Number(s?.connected_groups_total || 0)
+  const b = Number(s?.connected_bots_total || 0)
+  const sum = (Number.isFinite(g) ? g : 0) + (Number.isFinite(b) ? b : 0)
+  return Math.max(1, Math.trunc(sum))
+})
+
+const bcSendCtrPct = computed(() => fmtPctPartFromRatio(bcSendDeliveredOk.value, bcSendCtrDen.value))
+
+const bcSendCompletedAtLabel = computed(() => {
+  const row = bcSendLiveRow.value
+  const iso = row?.finished_at || row?.sent_at || row?.updated_at || row?.created_at
+  return fmtBroadcastShortTime(iso)
+})
+
 const bcFilteredGroups = computed(() => {
   const q = String(bcGroupsSearch.value || '').trim().toLowerCase()
   if (!q) return bcBroadcastGroups.value || []
@@ -332,7 +477,11 @@ async function submitBcConfirmedSend() {
   bcConfirmSending.value = true
   try {
     await persistCurrentBroadcast()
-    await fetch(() => api.adminBroadcastSend(bid, bcConfirmMode.value, bcConfirmMode.value === 'groups' ? bcConfirmChatIds.value : []))
+    await fetch(() =>
+      api.adminBroadcastSend(bid, bcConfirmMode.value, bcConfirmMode.value === 'groups' ? bcConfirmChatIds.value : [], {
+        keepDraftAfter: true,
+      }),
+    )
     bcConfirmModalOpen.value = false
     bcSendTargetModalOpen.value = false
     bcShowGroupsPicker.value = false
@@ -1250,11 +1399,18 @@ const bcStatsPollTimer = ref(null)
 const bcStatsHistoryModalOpen = ref(false)
 const bcStatsReloadTimer = ref(null)
 const bcSendModalOpen = ref(false)
-const bcSendModalState = ref('sending') // sending | sent | failed
+const bcSendModalState = ref('sending') // sending | done | failed
 const bcSendModalText = ref('')
 const bcSendModalBroadcastId = ref(0)
 const bcSendPollTimer = ref(null)
 const bcSendAutoCloseTimer = ref(null)
+/** Последняя строка /admin/broadcasts/:id во время отправки */
+const bcSendLiveRow = ref(null)
+/** groups | users | all — как запускали sendBc / submitBcConfirmedSend */
+const bcSendTargetKind = ref('groups')
+const bcSendResultLoading = ref(false)
+/** Снимок метрик после завершения (из /stats) */
+const bcSendResultSnapshot = ref(null)
 
 const adminBcBg = `${import.meta.env.BASE_URL}admin-bg-dark-final.png`
 /** Верхняя отсечка AURUM за один запуск/слот на бэкенде (broadcast_send_plan.BROADCAST_MAX_TOKENS). */
@@ -2125,12 +2281,97 @@ function stopBroadcastProgressPolling() {
   }
 }
 
+function resetBcSendUiExtras() {
+  bcSendLiveRow.value = null
+  bcSendResultSnapshot.value = null
+  bcSendResultLoading.value = false
+}
+
+async function loadBcSendResultStats(broadcastId) {
+  const bid = Number(broadcastId || 0)
+  if (!bid) return
+  bcSendResultLoading.value = true
+  try {
+    const r = await fetch(() =>
+      api.adminBroadcastStats(
+        bid,
+        '',
+        minusMinutesLocalInputValue(30),
+        nowLocalInputValue(),
+        isBroadcastShellLite.value ? 'groups' : String(bcSendTargetKind.value || '') === 'groups' ? 'groups' : 'bots',
+      ),
+    )
+    bcSendResultSnapshot.value = {
+      bots: r?.bots || { ok: 0, fail: 0, total: 0 },
+      groups: r?.groups || { ok: 0, fail: 0, total: 0 },
+      overall: r?.overall || { ok: 0, fail: 0, total: 0 },
+      per_groups: Array.isArray(r?.per_groups) ? r.per_groups : [],
+      batches: Array.isArray(r?.batches) ? r.batches : [],
+      errors: Array.isArray(r?.errors) ? r.errors : [],
+      connected_groups_total: Number(r?.connected_groups_total || 0),
+      connected_bots_total: Number(r?.connected_bots_total || 0),
+    }
+  } catch {
+    bcSendResultSnapshot.value = {
+      bots: { ok: 0, fail: 0, total: 0 },
+      groups: { ok: 0, fail: 0, total: 0 },
+      overall: { ok: 0, fail: 0, total: 0 },
+      per_groups: [],
+      batches: [],
+      errors: [],
+      connected_groups_total: 0,
+      connected_bots_total: 0,
+    }
+  } finally {
+    bcSendResultLoading.value = false
+  }
+}
+
+function closeBcSendModal() {
+  stopBroadcastProgressPolling()
+  bcSendModalOpen.value = false
+  bcSendModalState.value = 'sending'
+  bcSendModalText.value = ''
+  bcSendModalBroadcastId.value = 0
+  resetBcSendUiExtras()
+}
+
+function bcSendGoToBroadcasts() {
+  tab.value = 'broadcasts'
+  closeBcSendModal()
+}
+
+function bcSendOpenStatsFromModal() {
+  const bid = Number(bcSendModalBroadcastId.value || 0)
+  if (!bid) return
+  bcStatsSelectedId.value = bid
+  const remembered = String(bcLastSendTargetByPost.value?.[bid] || '').toLowerCase()
+  bcStatsTab.value = isBroadcastShellLite.value ? 'groups' : remembered === 'groups' ? 'groups' : 'bots'
+  bcStatsFrom.value = minusMinutesLocalInputValue(30)
+  bcStatsTo.value = nowLocalInputValue()
+  bcStatsModalOpen.value = true
+  loadBroadcastStats()
+  closeBcSendModal()
+}
+
+/** Отмена в UI не останавливает серверную отправку — только закрывает экран прогресса. */
+function bcSendCancelWatching() {
+  stopBroadcastProgressPolling()
+  bcSendModalOpen.value = false
+  bcSendModalState.value = 'sending'
+  bcSendModalText.value = ''
+  bcSendModalBroadcastId.value = 0
+  resetBcSendUiExtras()
+}
+
 function startBroadcastProgressPolling(id, target) {
   stopBroadcastProgressPolling()
+  resetBcSendUiExtras()
   bcSendModalOpen.value = true
   bcSendModalState.value = 'sending'
   bcSendModalBroadcastId.value = Number(id || 0)
-  bcSendModalText.value = `Отправляется в ${bcTargetLabel(target)}...`
+  bcSendModalText.value = ''
+  bcSendTargetKind.value = String(target || 'users')
   bcStatsBatchId.value = ''
   bcLastSendTargetByPost.value = {
     ...(bcLastSendTargetByPost.value || {}),
@@ -2147,20 +2388,18 @@ function startBroadcastProgressPolling(id, target) {
     if (!bid) return
     try {
       const row = await fetch(() => api.adminBroadcast(bid))
+      bcSendLiveRow.value = row || { id: bid }
       upsertBroadcastInList(row || { id: bid })
       if (bcStatsModalOpen.value && Number(bcStatsSelectedId.value || 0) === bid) {
         await loadBroadcastStats()
       }
       const st = String(row?.status || '').toLowerCase()
-      if (st === 'sent') {
-        bcSendModalState.value = 'sent'
-        const ok = Number(row?.recipient_ok || 0)
-        const fail = Number(row?.recipient_fail || 0)
-        bcSendModalText.value = `Доставлено: ${ok}. Ошибок: ${fail}.`
+      const sentAt = row?.sent_at
+      const finishedAsDraftWithStats = st === 'draft' && !!sentAt
+      if (st === 'sent' || finishedAsDraftWithStats) {
+        bcSendModalState.value = 'done'
         stopBroadcastProgressPolling()
-        bcSendAutoCloseTimer.value = setTimeout(() => {
-          bcSendModalOpen.value = false
-        }, 3000)
+        await loadBcSendResultStats(bid)
         return
       }
       if (st === 'failed') {
@@ -3828,11 +4067,11 @@ async function sendBc(target = 'users') {
     quote?.broadcast_charge_applies && Number(quote.cost_tokens || 0) > 0
       ? ` Будет списано ${Number(quote.cost_tokens)} ✨ (чатов в выборе: ${Number(quote.n_groups || 0)}; размер аудитории не умножает цену).`
       : ''
-  if (!window.confirm(`${titleByTarget}${costHint} Отменить отправку нельзя.`)) return
+  if (!window.confirm(`${titleByTarget}${costHint} Запущенная отправка на сервере не останавливается, но прогресс можно скрыть кнопкой «Отменить просмотр».`)) return
   bcSending.value = true
   try {
     await persistCurrentBroadcast()
-    await fetch(() => api.adminBroadcastSend(id, target))
+    await fetch(() => api.adminBroadcastSend(id, target, [], { keepDraftAfter: true }))
     upsertBroadcastInList({ id, status: 'sending' })
     startBroadcastProgressPolling(id, target)
     bcSaveLocalSnapshot()
@@ -8353,49 +8592,141 @@ watch(
 
     <div
       v-if="bcSendModalOpen"
-      class="fixed inset-0 z-[70] flex items-center justify-center bg-black/75 p-3 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+48px))] pb-[max(1rem,calc(4.5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
-      @click.self="bcSendModalState === 'sending' ? null : (bcSendModalOpen = false)"
+      class="fixed inset-0 z-[70] flex items-center justify-center bg-black/80 p-2 pt-[max(0.5rem,calc(env(safe-area-inset-top,0px)+40px))] pb-[max(0.75rem,calc(4.25rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-md"
+      @click.self="bcSendModalState === 'sending' ? null : closeBcSendModal()"
     >
       <div
-        class="w-full max-w-sm rounded-2xl border border-white/[0.1] bg-slate-950/[0.94] p-4 shadow-[0_28px_80px_-24px_rgba(0,0,0,0.85)] ring-1 ring-indigo-400/25 backdrop-blur-2xl"
+        class="relative w-full max-w-[min(100vw-1rem,22rem)] rounded-2xl border border-white/[0.08] bg-[#0c0c0e] p-4 shadow-[0_28px_80px_-24px_rgba(0,0,0,0.92)] ring-1 ring-white/[0.04]"
       >
-        <div class="flex items-center justify-between gap-2">
-          <p class="text-base font-semibold text-white">
-            {{ bcSendModalState === 'sending' ? 'Отправляется...' : (bcSendModalState === 'sent' ? 'Доставлено' : 'Ошибка') }}
-          </p>
+        <template v-if="bcSendModalState === 'sending'">
+          <p class="text-[15px] font-semibold text-white">Отправка...</p>
+          <div class="relative mt-6 flex items-center justify-center">
+            <div class="relative grid h-[132px] w-[132px] place-items-center">
+              <svg class="col-start-1 row-start-1 h-[132px] w-[132px] -rotate-90" viewBox="0 0 120 120" aria-hidden="true">
+                <circle cx="60" cy="60" r="52" fill="none" stroke="rgba(148,163,184,0.14)" stroke-width="9" />
+                <circle
+                  cx="60"
+                  cy="60"
+                  r="52"
+                  fill="none"
+                  stroke="#38bdf8"
+                  stroke-width="9"
+                  stroke-linecap="round"
+                  :stroke-dasharray="bcSendCircleOffset"
+                />
+              </svg>
+              <div
+                class="col-start-1 row-start-1 flex h-[92px] w-[92px] items-center justify-center rounded-full bg-gradient-to-br from-indigo-600/35 via-violet-600/25 to-slate-900/40 shadow-[0_0_42px_-8px_rgba(99,102,241,0.55)] ring-1 ring-white/[0.06]"
+              >
+                <span class="text-[26px] leading-none text-white drop-shadow">✈️</span>
+              </div>
+            </div>
+            <span class="absolute right-1 top-1/2 -translate-y-1/2 text-2xl font-semibold tabular-nums text-white">
+              {{ bcSendProgressPercent }}%
+            </span>
+          </div>
+          <div class="mt-5 text-center">
+            <p class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Отправлено</p>
+            <p class="mt-1 text-lg font-semibold tabular-nums text-white">
+              {{ fmtIntSpace(bcSendProgressDone) }}
+              <span class="text-slate-500">из</span>
+              {{ fmtIntSpace(bcSendProgressTotal) }}
+            </p>
+          </div>
           <button
-            v-if="bcSendModalState !== 'sending'"
             type="button"
-            class="bc-tool-btn"
-            @click="bcSendModalOpen = false"
+            class="mt-6 w-full rounded-xl border border-white/[0.08] bg-white/[0.06] py-3 text-sm font-semibold text-white hover:bg-white/[0.09]"
+            @click="bcSendCancelWatching"
+          >
+            Отменить просмотр
+          </button>
+          <p class="mt-2 text-center text-[10px] leading-snug text-slate-500">
+            Сервер продолжит отправку: эта кнопка только закрывает экран прогресса.
+          </p>
+        </template>
+
+        <template v-else-if="bcSendModalState === 'done'">
+          <button
+            type="button"
+            class="bc-tool-btn absolute right-2 top-2 z-[2]"
+            aria-label="Закрыть"
+            @click="closeBcSendModal"
           >
             ✕
           </button>
-        </div>
-        <div class="mt-3 flex items-center gap-3 rounded-xl border border-slate-700 bg-slate-950/50 p-3">
-          <div
-            v-if="bcSendModalState === 'sending'"
-            class="bc-hourglass"
-            aria-hidden="true"
-          >
-            ⏳
+          <p class="pr-8 text-[17px] font-semibold leading-snug text-white">Рассылка отправлена!</p>
+          <div class="mt-5 flex flex-col items-center">
+            <div
+              class="flex h-[92px] w-[92px] items-center justify-center rounded-full bg-emerald-500/15 shadow-[0_0_48px_-10px_rgba(52,211,153,0.65)] ring-2 ring-emerald-400/35"
+            >
+              <span class="text-3xl text-emerald-300">✓</span>
+            </div>
+            <p class="mt-3 text-[13px] text-slate-400">{{ bcSendCompletedAtLabel }}</p>
           </div>
-          <div
-            v-else-if="bcSendModalState === 'sent'"
-            class="text-xl"
-            aria-hidden="true"
-          >
-            ✅
+
+          <div class="mt-5 grid grid-cols-3 gap-2">
+            <div class="rounded-xl border border-white/[0.06] bg-white/[0.03] px-2 py-2.5 text-center">
+              <p class="text-[10px] text-slate-500">Доставлено</p>
+              <p class="mt-1 text-[15px] font-semibold tabular-nums text-white">{{ fmtIntSpace(bcSendDeliveredOk) }}</p>
+              <p class="mt-0.5 text-[12px] font-semibold tabular-nums text-emerald-400">
+                {{ fmtPctTrim(bcSendDeliveredPct) }}
+              </p>
+            </div>
+            <div class="rounded-xl border border-white/[0.06] bg-white/[0.03] px-2 py-2.5 text-center">
+              <p class="text-[10px] text-slate-500">Клики · в ЛС</p>
+              <p class="mt-1 text-[15px] font-semibold tabular-nums text-white">{{ fmtIntSpace(bcSendClicks) }}</p>
+              <p class="mt-0.5 text-[12px] font-semibold tabular-nums text-emerald-400">
+                {{ fmtPctTrim(bcSendClicksPct) }}
+              </p>
+            </div>
+            <div class="rounded-xl border border-white/[0.06] bg-white/[0.03] px-2 py-2.5 text-center">
+              <p class="text-[10px] text-slate-500">Переходы · в чаты</p>
+              <p class="mt-1 text-[15px] font-semibold tabular-nums text-white">{{ fmtIntSpace(bcSendTransitions) }}</p>
+              <p class="mt-0.5 text-[12px] font-semibold tabular-nums text-emerald-400">
+                {{ fmtPctTrim(bcSendTransitionsPct) }}
+              </p>
+            </div>
           </div>
-          <div
-            v-else
-            class="text-xl"
-            aria-hidden="true"
-          >
-            ❌
+          <div class="mt-2 rounded-xl border border-white/[0.06] bg-white/[0.03] px-3 py-3 text-center">
+            <p class="text-[10px] text-slate-500">CTR · охват базы</p>
+            <p class="mt-1 text-2xl font-semibold tabular-nums text-emerald-400">{{ fmtPctTrim(bcSendCtrPct) }}</p>
           </div>
-          <p class="text-sm text-slate-100">{{ bcSendModalText || 'Обработка...' }}</p>
-        </div>
+          <p class="mt-2 text-center text-[10px] leading-snug text-slate-500">
+            «Клики» и «Переходы» здесь — это успешные доставки в личку и в группы/каналы по логам отправки. CTR — доля доставленных сообщений относительно всех подключённых групп/каналов и активных пользователей бота (не клики по ссылкам в тексте).
+          </p>
+
+          <div class="mt-4 grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              class="rounded-xl border border-white/[0.08] bg-white/[0.05] py-3 text-[13px] font-semibold text-white hover:bg-white/[0.08]"
+              @click="bcSendGoToBroadcasts"
+            >
+              К рассылкам
+            </button>
+            <button
+              type="button"
+              class="rounded-xl bg-gradient-to-r from-violet-600 to-sky-500 py-3 text-[13px] font-semibold text-white shadow-lg shadow-indigo-900/30 hover:brightness-105"
+              @click="bcSendOpenStatsFromModal"
+            >
+              Статистика
+            </button>
+          </div>
+        </template>
+
+        <template v-else>
+          <div class="flex items-start justify-between gap-2">
+            <p class="text-base font-semibold text-white">Ошибка отправки</p>
+            <button type="button" class="bc-tool-btn" @click="closeBcSendModal">✕</button>
+          </div>
+          <p class="mt-3 text-sm leading-relaxed text-slate-200">{{ bcSendModalText || 'Не удалось выполнить рассылку.' }}</p>
+          <button
+            type="button"
+            class="mt-5 w-full rounded-xl border border-white/[0.08] bg-white/[0.06] py-3 text-sm font-semibold text-white hover:bg-white/[0.09]"
+            @click="closeBcSendModal"
+          >
+            Закрыть
+          </button>
+        </template>
       </div>
     </div>
 

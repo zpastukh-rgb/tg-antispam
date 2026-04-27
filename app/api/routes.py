@@ -8561,6 +8561,7 @@ async def api_admin_broadcasts_send(
     )
 
     target = str((body or {}).get("target") or "users").strip().lower()
+    keep_draft_after = bool((body or {}).get("keep_draft_after") or (body or {}).get("keepDraftAfter") or False)
     raw_chat_ids = (body or {}).get("chat_ids") or []
     body_chat_ids: list[int] = []
     if isinstance(raw_chat_ids, list):
@@ -8702,7 +8703,7 @@ async def api_admin_broadcasts_send(
         int(broadcast_id),
         target,
         target_chat_ids,
-        keep_draft_after=False,
+        keep_draft_after=bool(keep_draft_after),
         run_source="manual",
     )
     return {

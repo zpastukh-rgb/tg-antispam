@@ -370,7 +370,12 @@ export const api = {
   adminBroadcastCreate: (body) => api.post('/api/admin/broadcasts', body),
   adminBroadcastPatch: (id, body) => api.patch(`/api/admin/broadcasts/${id}`, body),
   adminBroadcastDelete: (id) => api.delete(`/api/admin/broadcasts/${id}`),
-  adminBroadcastSend: (id, target = 'users', chatIds = []) => api.post(`/api/admin/broadcasts/${id}/send`, { target, chat_ids: chatIds }),
+  adminBroadcastSend: (id, target = 'users', chatIds = [], opts = {}) =>
+    api.post(`/api/admin/broadcasts/${id}/send`, {
+      target,
+      chat_ids: chatIds,
+      keep_draft_after: Boolean(opts?.keepDraftAfter || opts?.keep_draft_after),
+    }),
   adminBroadcastQuote: (id, target = 'users', chatIds = []) => api.post(`/api/admin/broadcasts/${id}/quote`, { target, chat_ids: chatIds }),
   adminAutopostCampaigns: () => api.get('/api/admin/autopost-campaigns'),
   adminAutopostCampaignCreate: (body) => api.post('/api/admin/autopost-campaigns', body),
