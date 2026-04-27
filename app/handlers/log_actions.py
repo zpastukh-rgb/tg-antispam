@@ -57,14 +57,25 @@ async def cb_unmute(cb: CallbackQuery):
         return
 
     try:
+        # Снимаем ограничение максимально совместимым способом:
+        # без can_change_info/can_pin_messages/can_manage_topics (часто ломает на разных типах чатов).
         await cb.bot.restrict_chat_member(
             chat_id,
             user_id,
-            permissions=ChatPermissions(can_send_messages=True, can_send_audios=True, can_send_documents=True,
-                                        can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
-                                        can_send_voice_notes=True, can_send_polls=True, can_send_other_messages=True,
-                                        can_add_web_page_previews=True, can_change_info=False, can_invite_users=True,
-                                        can_pin_messages=False, can_manage_topics=False),
+            permissions=ChatPermissions(
+                can_send_messages=True,
+                can_send_audios=True,
+                can_send_documents=True,
+                can_send_photos=True,
+                can_send_videos=True,
+                can_send_video_notes=True,
+                can_send_voice_notes=True,
+                can_send_polls=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True,
+                can_invite_users=True,
+            ),
+            use_independent_chat_permissions=True,
         )
         await cb.message.edit_text(cb.message.text + "\n\n🔊 Размут выполнен.", reply_markup=None)
     except Exception:

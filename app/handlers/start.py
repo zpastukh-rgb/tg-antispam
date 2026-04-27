@@ -1,19 +1,53 @@
 from __future__ import annotations
 
 import re
+import os
+import logging
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, Tuple
 from collections import OrderedDict
+from sqlalchemy import select, func, delete
 
 from aiogram import Router, F
-from aiogram.filters import CommandStart
-from aiogram.types import Message, CallbackQuery
+from aiogram.filters import Command, CommandStart
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.texts.bot_intro import START_INTRO_TEXT
+from app.db.models import User, ChatManagerInvite, ChatManager
 
 router = Router()
+logger = logging.getLogger(__name__)
+TRIAL_PREVIEW_CMD = (os.getenv("TRIAL_WARNING_PREVIEW_COMMAND") or "guard_trial_preview_48291").strip().lower()
+EXPIRED_PREVIEW_CMD = (os.getenv("EXPIRED_WARNING_PREVIEW_COMMAND") or "guard_expired_preview").strip().lower()
+
+
+def _is_trial_preview_command(text: str | None) -> bool:
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    # Разрешаем: /cmd, /cmd@BotName и cmd (без слеша).
+    lowered = raw.lower()
+    if lowered.startswith("/"):
+        lowered = lowered[1:]
+    lowered = lowered.split()[0]
+    if "@" in lowered:
+        lowered = lowered.split("@", 1)[0]
+    return lowered == TRIAL_PREVIEW_CMD
+
+
+def _is_expired_preview_command(text: str | None) -> bool:
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    lowered = raw.lower()
+    if lowered.startswith("/"):
+        lowered = lowered[1:]
+    lowered = lowered.split()[0]
+    if "@" in lowered:
+        lowered = lowered.split("@", 1)[0]
+    return lowered == EXPIRED_PREVIEW_CMD
 
 # =========================================================
 # CALLBACK KEYS
@@ -34,9 +68,11 @@ CB_ADDGROUP = "st:addgroup"
 # =========================================================
 
 START_MSG_CACHE: "OrderedDict[int, Tuple[int, datetime]]" = OrderedDict()
+LAST_START_HANDLED_AT: "OrderedDict[int, datetime]" = OrderedDict()
 
 CACHE_MAX = 2000
 CACHE_TTL = timedelta(days=3)
+START_DEDUP_WINDOW = timedelta(seconds=5)
 
 
 def _cache_set(user_id: int, msg_id: int):
@@ -78,6 +114,18 @@ def _cache_get(user_id: int) -> Optional[int]:
     return msg_id
 
 
+def _should_skip_duplicate_start(user_id: int) -> bool:
+    now = datetime.now(timezone.utc)
+    last = LAST_START_HANDLED_AT.get(user_id)
+    LAST_START_HANDLED_AT[user_id] = now
+    LAST_START_HANDLED_AT.move_to_end(user_id)
+    while len(LAST_START_HANDLED_AT) > CACHE_MAX:
+        LAST_START_HANDLED_AT.popitem(last=False)
+    if not last:
+        return False
+    return (now - last) < START_DEDUP_WINDOW
+
+
 # =========================================================
 # TEXTS
 # =========================================================
@@ -86,26 +134,17 @@ START_TEXT = START_INTRO_TEXT
 
 CONNECT_TEXT = (
     "➕ *Подключение защиты*\n\n"
-    "Сделай 3 шага:\n\n"
+    "Сделай 2 шага:\n\n"
     "1️⃣ Добавь бота в группу\n\n"
     "2️⃣ Дай права администратора:\n"
     "✅ удалять сообщения\n"
     "➕ желательно банить участников\n\n"
-    "3️⃣ В группе напиши:\n"
-    "`/check`\n\n"
-    "После этого чат появится в панели управления."
+    "После этого группа появится в мини-приложении автоматически."
 )
 
 RULES_TEXT = (
-    "📜 *Что умеет AntiSpam Guardian*\n\n"
-    "🔗 удаляет ссылки\n"
-    "🏷 режет массовые @упоминания\n"
-    "🧨 блокирует стоп-слова\n"
-    "✏️ ловит редактирование сообщений\n"
-    "👶 защищает от новых аккаунтов\n"
-    "🤖 удаляет спам-ботов\n"
-    "🧾 ведёт журнал действий\n\n"
-    "⚙️ Всё настраивается в панели."
+    "📜 *Guard*\n\n"
+    "Инструкция и описание функций находятся в приложении под знаком *i*."
 )
 
 # =========================================================
@@ -140,6 +179,62 @@ def start_kb():
     kb.adjust(1)
 
     return kb.as_markup()
+
+
+def _mini_app_chats_startapp_link(bot_username: str) -> str:
+    uname = (bot_username or "").strip().lstrip("@")
+    short_name = (os.getenv("MINI_APP_SHORT_NAME") or os.getenv("WEBAPP_SHORT_NAME") or "").strip().strip("/")
+    if short_name:
+        return f"https://t.me/{uname}/{short_name}?startapp=chats"
+    return f"https://t.me/{uname}?startapp=chats"
+
+
+async def _activate_pending_manager_invites(message: Message) -> int:
+    if not message.from_user:
+        return 0
+    uid = int(message.from_user.id)
+    uname = (getattr(message.from_user, "username", None) or "").strip().lower()
+    from app.db.session import get_session
+    connected = 0
+    async with await get_session() as session:
+        invites = (
+            await session.execute(
+                select(ChatManagerInvite).where(
+                    (ChatManagerInvite.target_telegram_id == uid)
+                    | (
+                        ChatManagerInvite.target_telegram_id.is_(None)
+                        & (func.lower(ChatManagerInvite.target_username) == uname)
+                    )
+                )
+            )
+        ).scalars().all()
+        for inv in invites:
+            existing = (
+                await session.execute(
+                    select(ChatManager).where(
+                        ChatManager.chat_id == int(inv.chat_id),
+                        ChatManager.user_id == uid,
+                    ).limit(1)
+                )
+            ).scalar_one_or_none()
+            if not existing:
+                session.add(ChatManager(chat_id=int(inv.chat_id), user_id=uid, added_by=int(inv.owner_user_id)))
+            inv.target_telegram_id = uid
+            if uname:
+                inv.target_username = uname
+            inv.connected_user_id = uid
+            inv.status = "connected"
+            connected += 1
+        # чистим дубли sent/connecting для уже подключенного id
+        if connected > 0:
+            await session.execute(
+                delete(ChatManagerInvite).where(
+                    ChatManagerInvite.target_telegram_id == uid,
+                    ChatManagerInvite.status.in_(("sent", "connecting")),
+                )
+            )
+        await session.commit()
+    return connected
 
 
 def back_kb():
@@ -238,6 +333,23 @@ async def _send_addgroup_screenshots(bot, chat_id: int) -> None:
             pass
 
 
+async def _send_welcome_banner_if_any(bot, chat_id: int) -> None:
+    """Дублирующее фото после /start; по умолчанию выкл. Картинка до «Старт» — через BotFather Description Picture."""
+    from aiogram.types import FSInputFile
+    from app.texts.bot_intro import WELCOME_BANNER_PATH, WELCOME_BANNER_CAPTION
+
+    if not WELCOME_BANNER_PATH.is_file():
+        return
+    try:
+        await bot.send_photo(
+            chat_id,
+            FSInputFile(WELCOME_BANNER_PATH),
+            caption=WELCOME_BANNER_CAPTION,
+        )
+    except Exception:
+        pass
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     """ТЗ Меню: /start открывает главную панель. Deep link addgroup — кнопка «добавить в группу + выдать права»."""
@@ -284,6 +396,7 @@ async def cmd_start(message: Message):
                         else:
                             log_chat_row.title = reports_title
                             log_chat_row.is_log_chat = True
+                            log_chat_row.is_active = False
                         await session.commit()
                     protected_title = ""
                     try:
@@ -304,7 +417,11 @@ async def cmd_start(message: Message):
                 try:
                     from aiogram.enums import ChatMemberStatus
                     from app.handlers.panel_dm import connect_chat_after_bot_added
-                    uid = message.from_user.id
+                    from app.services.group_connect_actor import (
+                        actor_may_init_group_connect_from_group,
+                        resolve_guard_connect_actor_for_group,
+                    )
+
                     chat_id = message.chat.id
                     chat_title = (message.chat.title or "").strip() or str(chat_id)
                     me = await message.bot.get_me()
@@ -314,26 +431,106 @@ async def cmd_start(message: Message):
                             "Чтобы включить защиту, назначьте меня администратором в этой группе."
                         )
                         return
-                    connected = await connect_chat_after_bot_added(
+                    if not await actor_may_init_group_connect_from_group(message.bot, chat_id, message):
+                        await message.answer(
+                            "Подключить защиту из группы может только *администратор* "
+                            "или сообщение *от привязанного канала* (если группа — обсуждение канала).\n\n"
+                            "Если включено «анонимное сообщение» не от канала — выключите анонимность для админов "
+                            "или отправьте /start с личного Telegram (создатель группы).",
+                            parse_mode="Markdown",
+                        )
+                        return
+                    # Кабинет Guard — у создателя группы (см. resolve…).
+                    uid, owner_un, owner_fn = await resolve_guard_connect_actor_for_group(
+                        message.bot, chat_id, message.from_user
+                    )
+                    if int(uid or 0) <= 0:
+                        await message.answer(
+                            "Не удалось определить создателя группы для привязки к Guard. "
+                            "Откройте панель из лички с ботом или попробуйте снова после выдачи боту прав администратора."
+                        )
+                        return
+                    ok, fail = await connect_chat_after_bot_added(
                         message.bot,
                         chat_id,
                         chat_title,
                         uid,
-                        username=getattr(message.from_user, "username", None),
-                        first_name=getattr(message.from_user, "first_name", None),
+                        username=owner_un,
+                        first_name=owner_fn,
                     )
-                    if not connected:
-                        await message.answer("✅ Бот добавлен. Откройте панель для настроек.")
+                    if ok:
+                        return
+                    if fail == "limit":
+                        await message.answer(
+                            "❌ Достигнут лимит подключённых чатов по тарифу.\n"
+                            "Откройте панель → «Тариф и оплата» или отключите лишние группы в «Подключённые чаты»."
+                        )
+                    elif fail == "owner":
+                        await message.answer(
+                            "ℹ️ Эта группа в Guard уже подключена к другому кабинету (не к создателю этой группы).\n\n"
+                            "Если нужна передача прав — только владелец текущего кабинета: раздел *Админы и доступы*.",
+                            parse_mode="Markdown",
+                        )
+                    elif fail == "log":
+                        await message.answer(
+                            "ℹ️ Эта группа используется как чат отчётов или недоступна для защиты. См. сообщения в личке."
+                        )
+                    else:
+                        await message.answer(
+                            "Не удалось включить защиту. Откройте панель из личного чата с ботом или повторите позже."
+                        )
                 except Exception as e:
                     import logging
                     logging.getLogger(__name__).warning("startgroup=connect error: %s", e)
-                    await message.answer("✅ Бот добавлен. Откройте панель для настроек.")
+                    await message.answer(
+                        "Не удалось включить защиту. Откройте панель из личного чата с ботом или повторите позже."
+                    )
                 return
         return
     if not message.from_user:
         return
+    if _should_skip_duplicate_start(message.from_user.id):
+        return
 
     args = (message.text or "").strip().split()
+    plain_start_only = len(args) == 1 and bool(
+        re.match(r"^/start(?:@[A-Za-z0-9_]+)?$", (args[0] or "").strip(), re.I)
+    )
+    # Deep link из Mini App: t.me/bot?start=cleandeleted_CHATID — запуск очистки от удалённых в группе
+    # Реферальный deep link: /start ref_<telegram_id>
+    if len(args) >= 2 and (args[1] or "").lower().startswith("ref_"):
+        try:
+            ref_tg_id = int((args[1] or "").split("_", 1)[1])
+        except Exception:
+            ref_tg_id = 0
+        if ref_tg_id and message.from_user and ref_tg_id != message.from_user.id:
+            try:
+                from app.db.session import get_session
+                from app.services.user_service import get_or_create_user
+                async with await get_session() as session:
+                    user = await get_or_create_user(
+                        session,
+                        message.from_user.id,
+                        username=getattr(message.from_user, "username", None),
+                        first_name=getattr(message.from_user, "first_name", None),
+                    )
+                    # Привязываем реферера только один раз.
+                    if not getattr(user, "referred_by_tg_id", None):
+                        ref_row = await session.execute(select(User).where(User.telegram_id == ref_tg_id))
+                        ref_user = ref_row.scalar_one_or_none()
+                        if ref_user:
+                            user.referred_by_tg_id = ref_tg_id
+                            ref_user.ref_invited_count = int(getattr(ref_user, "ref_invited_count", 0) or 0) + 1
+                            await session.commit()
+                    else:
+                        ref_row = await session.execute(select(User).where(User.telegram_id == ref_tg_id))
+                        ref_user = ref_row.scalar_one_or_none()
+                    if ref_user:
+                        ref_user.ref_start_count = int(getattr(ref_user, "ref_start_count", 0) or 0) + 1
+                        await session.commit()
+            except Exception:
+                pass
+
     # Deep link из Mini App: t.me/bot?start=cleandeleted_CHATID — запуск очистки от удалённых в группе
     if len(args) >= 2 and args[1].lower().startswith("cleandeleted_"):
         try:
@@ -387,11 +584,19 @@ async def cmd_start(message: Message):
                     )
                 else:
                     panel_dm._pending_reports_for[uid] = selected
+                    me = await message.bot.get_me()
+                    username = me.username or "bot"
+                    pick_url = f"https://t.me/{username}?startgroup=reportschat_{selected}"
+                    await message.answer("\u2063", reply_markup=ReplyKeyboardRemove())
+                    kb = InlineKeyboardBuilder()
+                    kb.button(text="📋 Выбрать чат отчётов", url=pick_url)
+                    kb.adjust(1)
                     await message.answer(
-                        "Нажми *«Выбрать чат отчётов»* ниже и укажи группу для отчётов. "
-                        "Боту не нужны права администратора в этом чате — только чтобы он мог писать сообщения.",
+                        "⬅️ *Управляй Guard через кнопку «Меню» сверху.*\n\n"
+                        "Кнопка под полем ввода отключена.\n"
+                        "Нажми кнопку ниже и выбери группу для отчётов.",
                         parse_mode="Markdown",
-                        reply_markup=panel_dm._kb_connect_reports_chat(),
+                        reply_markup=kb.as_markup(),
                     )
             except Exception:
                 await message.answer(
@@ -408,7 +613,6 @@ async def cmd_start(message: Message):
             me = await message.bot.get_me()
             username = me.username or "bot"
             add_url = f"https://t.me/{username}?start=addgroup"
-            add_simple_url = f"https://t.me/{username}?startgroup"
             inline_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📋 Выбрать группу и выдать права", url=add_url)],
             ])
@@ -424,9 +628,16 @@ async def cmd_start(message: Message):
         return
 
     # ТЗ Напоминания: при первом /start записываем время для напоминаний (12ч, 24ч, 3д)
+    connected_shared_cabinets = 0
     try:
         from app.db.session import get_session
-        from app.services.user_service import get_or_create_user
+        from app.services.user_service import (
+            get_or_create_user,
+            TARIFF_CHAT_LIMITS,
+            TARIFF_GROUP_LIMITS,
+            TARIFF_CHANNEL_LIMITS,
+        )
+        from app.db.models import Tariff
         from datetime import datetime, timezone
         async with await get_session() as session:
             user = await get_or_create_user(
@@ -436,16 +647,49 @@ async def cmd_start(message: Message):
                 first_name=getattr(message.from_user, "first_name", None),
             )
             if getattr(user, "first_start_at", None) is None:
-                user.first_start_at = datetime.now(timezone.utc)
+                now = datetime.now(timezone.utc)
+                user.first_start_at = now
+                # Первый старт: выдаём 3 дня полного Premium автоматически.
+                user.tariff = Tariff.PREMIUM.value
+                user.chat_limit = TARIFF_CHAT_LIMITS[Tariff.PREMIUM.value]
+                user.group_limit = TARIFF_GROUP_LIMITS[Tariff.PREMIUM.value]
+                user.channel_limit = TARIFF_CHANNEL_LIMITS[Tariff.PREMIUM.value]
+                user.subscription_until = now + timedelta(days=3)
+                user.subscription_source = "trial"
                 await session.commit()
     except Exception:
         pass
     try:
-        from app.handlers.panel_dm import show_panel, _cache_clear
-        _cache_clear(message.from_user.id)
+        connected_shared_cabinets = await _activate_pending_manager_invites(message)
+    except Exception as e:
+        logger.warning("activate pending manager invites failed user=%s: %s", getattr(message.from_user, "id", None), e)
+    if plain_start_only and os.getenv("WELCOME_BANNER_AFTER_START", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        await _send_welcome_banner_if_any(message.bot, message.chat.id)
+    try:
+        from app.handlers.panel_dm import show_panel
         await show_panel(message.bot, message.from_user.id)
     except Exception:
         await _edit_or_send(message, START_TEXT, start_kb())
+    if connected_shared_cabinets > 0:
+        try:
+            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+            me = await message.bot.get_me()
+            await message.answer(
+                f"✅ Вас добавили админом в кабинет(ы): *{connected_shared_cabinets}*.\n"
+                "Откройте общий кабинет и переключитесь на вкладку *Доступы*.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="🚀 Открыть общий кабинет", url=_mini_app_chats_startapp_link(me.username or "bot"))]
+                    ]
+                ),
+            )
+        except Exception:
+            pass
 
 
 # =========================================================
@@ -529,3 +773,31 @@ async def cb_panel(cb: CallbackQuery):
             )
         except Exception:
             pass
+
+
+@router.message(F.chat.type == "private", F.text)
+async def cmd_preview_commands(message: Message):
+    """Служебные предпросмотры уведомлений: trial/expired."""
+    is_trial = _is_trial_preview_command(message.text)
+    is_expired = _is_expired_preview_command(message.text)
+    if not is_trial and not is_expired:
+        return
+    if not message.from_user:
+        return
+    try:
+        if is_trial:
+            from app.services.reminders import send_trial_warning_preview_guard
+            await send_trial_warning_preview_guard(
+                message.bot,
+                message.from_user.id,
+                display_name=getattr(message.from_user, "first_name", None),
+            )
+        else:
+            from app.services.reminders import send_expired_warning_preview
+            await send_expired_warning_preview(
+                message.bot,
+                message.chat.id,
+                display_name=getattr(message.from_user, "first_name", None),
+            )
+    except Exception as e:
+        await message.answer(f"Не удалось отправить предпросмотр: {e}")

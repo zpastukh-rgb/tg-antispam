@@ -1,0 +1,12 @@
+<template>
+  <div class="space-y-4">
+    <h1 class="text-xl font-semibold text-gray-900 dark:text-white md:text-2xl">Подарки</h1>
+    <div class="rounded-2xl border border-cyan-300/60 bg-slate-900 p-5 text-center text-cyan-100 shadow">
+      <p class="text-lg font-semibold">Подарков пока нет 🙁</p>
+      <p class="mt-2 text-sm text-cyan-200/90">
+        Участвуйте в реферальной программе и следите за новостями сообщества.
+      </p>
+    </div>
+  </div>
+</template>
+

@@ -1,20 +1,32 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import { openTelegramDeepLink } from '../utils/openTelegramDeepLink'
+import { useCabinetMode } from '../composables/useCabinetMode'
 
 const router = useRouter()
-const { api, loading, error, fetch, hasInitData } = useApi()
+const route = useRoute()
+const { cabinetMode, setCabinetMode } = useCabinetMode()
+const { api, error, fetchSilent, hasInitData } = useApi()
 const { showToast } = useToast()
 const chat = ref(null)
+const chatsList = ref([])
+const selectedChatId = ref(null)
+const showChatPicker = ref(false)
 const reportsChatUrl = ref(null)
 const saving = ref(false)
 const clearing = ref(false)
-
-let selectedId = null
+const showReportsInfoModal = ref(false)
+const botInfo = ref(null)
 let stopListen = null
+
+const reportsBg = `${import.meta.env.BASE_URL}app-global-bg.png`
+
+function boolToggleClass(on) {
+  return on ? 'guard-green-soft' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'
+}
 
 function buildReportsUrl(botData, protectedChatId) {
   const tpl = botData?.reports_chat_url_template
@@ -27,10 +39,41 @@ function buildReportsUrl(botData, protectedChatId) {
 }
 
 async function reloadChat() {
-  if (!selectedId) return
+  if (!selectedChatId.value) return
   try {
-    const data = await fetch(() => api.chat(selectedId))
+    const data = await fetchSilent(() => api.chat(selectedChatId.value))
     chat.value = data
+  } catch {
+    //
+  }
+}
+
+const selectedChatTitle = computed(() => {
+  const current = (chatsList.value || []).find((c) => Number(c.id) === Number(selectedChatId.value))
+  return current?.title || chat.value?.title || 'Чат не выбран'
+})
+
+const chatsListMine = computed(() => (chatsList.value || []).filter((c) => !c.is_shared))
+const chatsListDelegated = computed(() => (chatsList.value || []).filter((c) => !!c.is_shared))
+
+const selectedRow = computed(() =>
+  (chatsList.value || []).find((c) => Number(c.id) === Number(selectedChatId.value)),
+)
+
+async function switchChat(chatId) {
+  if (!chatId || Number(chatId) === Number(selectedChatId.value)) return
+  try {
+    await fetchSilent(() => api.selectChat(Number(chatId)))
+    selectedChatId.value = Number(chatId)
+    const row = (chatsList.value || []).find((c) => Number(c.id) === Number(chatId))
+    if (row?.is_shared) {
+      setCabinetMode('delegated')
+    } else {
+      setCabinetMode('owner')
+    }
+    await reloadChat()
+    reportsChatUrl.value = buildReportsUrl(botInfo.value, selectedChatId.value)
+    showChatPicker.value = false
   } catch {
     //
   }
@@ -40,15 +83,28 @@ onMounted(async () => {
   if (!hasInitData.value) return
   try {
     const [chatsData, botData] = await Promise.all([
-      fetch(() => api.chats()).catch(() => ({ selected_chat_id: null })),
-      fetch(() => api.botInfo()).catch(() => ({})),
+      fetchSilent(() => api.chats('all')).catch(() => ({ selected_chat_id: null, chats: [] })),
+      fetchSilent(() => api.botInfo()).catch(() => ({})),
     ])
-    const selected_chat_id = chatsData?.selected_chat_id
+    const requestedChatId = Number(route.query?.chat_id || 0) || null
+    let selected_chat_id = chatsData?.selected_chat_id
+    if (requestedChatId && (chatsData?.chats || []).some((c) => Number(c.id) === requestedChatId)) {
+      selected_chat_id = requestedChatId
+      await fetchSilent(() => api.selectChat(requestedChatId)).catch(() => {})
+    }
+    chatsList.value = chatsData?.chats || []
+    botInfo.value = botData || null
     if (!selected_chat_id) {
       chat.value = { noSelection: true }
       return
     }
-    selectedId = selected_chat_id
+    selectedChatId.value = selected_chat_id
+    const picked = (chatsData?.chats || []).find((c) => Number(c.id) === Number(selected_chat_id))
+    if (picked?.is_shared) {
+      setCabinetMode('delegated')
+    } else {
+      setCabinetMode('owner')
+    }
     await reloadChat()
     reportsChatUrl.value = buildReportsUrl(botData, selected_chat_id)
   } catch {
@@ -79,7 +135,7 @@ async function clearReportsChat() {
   if (!chat.value?.id) return
   clearing.value = true
   try {
-    const res = await fetch(() => api.setReportsChat(chat.value.id, null))
+    const res = await fetchSilent(() => api.setReportsChat(chat.value.id, null))
     chat.value.log_chat_id = res.log_chat_id
     chat.value.log_chat_title = res.log_chat_title
     showToast('Чат отчётов отключён')
@@ -90,11 +146,23 @@ async function clearReportsChat() {
   }
 }
 
+async function refreshReportsStatus() {
+  if (!selectedChatId.value) return
+  try {
+    const chatsData = await fetchSilent(() => api.chats('all')).catch(() => null)
+    if (chatsData?.chats) chatsList.value = chatsData.chats
+    await reloadChat()
+    showToast('Обновлено')
+  } catch {
+    showToast('Не удалось обновить')
+  }
+}
+
 async function updateRule(patch) {
   if (!chat.value?.id || chat.value.noSelection) return
   saving.value = true
   try {
-    const data = await fetch(() => api.updateRule(chat.value.id, patch))
+    const data = await fetchSilent(() => api.updateRule(chat.value.id, patch))
     chat.value.rule = data.rule
     showToast('Сохранено')
   } finally {
@@ -105,96 +173,289 @@ async function updateRule(patch) {
 
 <template>
   <div class="space-y-4">
-    <h1 class="text-xl font-semibold text-gray-900 dark:text-white md:text-2xl">Отчёты</h1>
+    <h1 class="text-xl font-semibold text-slate-900 dark:text-white md:text-2xl">Отчёты</h1>
 
     <div
       v-if="!hasInitData"
-      class="rounded-xl border-2 border-amber-400/80 bg-amber-50 p-4 text-sm text-amber-950 dark:border-amber-600 dark:bg-amber-950/30 dark:text-amber-100"
+      class="rounded-2xl border border-amber-400/35 bg-amber-500/10 p-4 text-sm text-amber-100 ring-1 ring-amber-400/20 backdrop-blur-xl"
     >
       Откройте панель из Telegram.
     </div>
 
-    <div v-else-if="chat?.noSelection" class="rounded-xl border border-gray-200 bg-white p-6 dark:border-guardian-elevated-hi dark:bg-guardian-elevated">
-      <p class="text-gray-600 dark:text-gray-400">Сначала в «Подключённые чаты» выберите группу, для которой настраиваете отчёты.</p>
-      <button type="button" class="mt-3 rounded-lg bg-primary-500 px-4 py-2 text-sm font-semibold text-guardian-ink hover:bg-primary-400" @click="router.push('/chats')">
+    <div
+      v-else-if="chat?.noSelection"
+      class="rounded-2xl border border-white/12 bg-zinc-950/50 p-6 text-slate-200 ring-1 ring-white/10 backdrop-blur-2xl"
+    >
+      <p class="text-sm text-slate-300">Сначала в «Подключённые чаты» выберите группу, для которой настраиваете отчёты.</p>
+      <button
+        type="button"
+        class="guard-green-soft mt-3 rounded-lg px-4 py-2 text-sm font-semibold"
+        @click="router.push(cabinetMode === 'delegated' ? { path: '/chats', query: { cabinet: 'delegated' } } : '/chats')"
+      >
         К списку чатов
       </button>
     </div>
 
-    <div v-else-if="chat?.loadError || error" class="rounded-xl border-2 border-red-400/70 bg-red-50 p-4 text-sm text-red-900 dark:border-red-700 dark:bg-red-950/30 dark:text-red-100">
+    <div
+      v-else-if="chat?.loadError || error"
+      class="rounded-2xl border border-red-400/40 bg-red-950/30 p-4 text-sm text-red-100 ring-1 ring-red-500/20 backdrop-blur-xl"
+    >
       {{ error || 'Не удалось загрузить данные' }}
     </div>
 
-    <div v-else-if="chat?.rule" class="space-y-4">
-      <p class="text-sm text-gray-600 dark:text-gray-400">
-        Настройки для: <strong class="text-gray-900 dark:text-white">{{ chat.title }}</strong>
-      </p>
-
+    <div v-else-if="chat?.rule">
       <div
-        class="rounded-xl border-2 border-violet-500/40 bg-violet-50/90 p-4 text-sm text-violet-950 dark:border-violet-600 dark:bg-violet-950/25 dark:text-violet-100"
+        class="relative -mx-4 overflow-hidden rounded-2xl border border-white/10 shadow-[0_24px_80px_-32px_rgba(0,0,0,0.85)] ring-1 ring-white/10 md:-mx-6"
       >
-        <p class="font-medium">Отдельный чат для отчётов</p>
-        <p class="mt-1.5 text-violet-900/90 dark:text-violet-100/90">
-          Это <strong>другая группа</strong> (например «Логи»), куда бот будет слать журнал — не та, что вы защищаете сверху.
-        </p>
+      <div
+        class="pointer-events-none absolute inset-0 bg-cover bg-center"
+        :style="{ backgroundImage: `url(${reportsBg})` }"
+        aria-hidden="true"
+      />
+      <div class="absolute inset-0 bg-slate-950/60 backdrop-blur-[1px] dark:bg-black/55" aria-hidden="true" />
+      <div class="relative z-10 space-y-2.5 px-4 py-3 pb-10 md:px-6 md:pb-12">
+        <div class="flex flex-wrap items-center gap-2 text-[11px] leading-snug text-slate-300">
+          <span>Группа: <strong class="text-white">{{ chat.title }}</strong></span>
+          <span
+            v-if="selectedRow?.is_shared"
+            class="rounded-full border border-violet-400/40 bg-violet-500/15 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide text-violet-100"
+          >Делегированный</span>
+          <span
+            v-else-if="selectedRow && !selectedRow.is_shared"
+            class="rounded-full border border-cyan-400/35 bg-cyan-500/10 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide text-cyan-100"
+          >Мой чат</span>
+        </div>
+        <div
+          class="relative overflow-hidden rounded-[1.15rem] border border-white/14 bg-zinc-950/45 p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] ring-1 ring-white/10 backdrop-blur-2xl"
+        >
+          <div class="flex items-center gap-1.5">
+            <div
+              class="guard-green-chip min-w-0 flex-1 rounded-lg border border-emerald-400/25 px-2 py-1.5 text-xs font-semibold"
+            >
+              <span class="block truncate">{{ selectedChatTitle }}</span>
+            </div>
+            <button
+              type="button"
+              class="shrink-0 rounded-lg border border-white/14 bg-white/8 px-2.5 py-1.5 text-[11px] font-semibold text-slate-100 transition hover:bg-white/14"
+              aria-label="Выбор чата"
+              @click="showChatPicker = true"
+            >
+              Чат
+            </button>
+          </div>
+        </div>
+
+        <div
+          class="overflow-hidden rounded-[1.1rem] border border-violet-400/25 bg-violet-950/20 p-2.5 text-[11px] leading-snug text-violet-50/95 ring-1 ring-violet-500/20 backdrop-blur-2xl"
+        >
+          <div class="flex items-start justify-between gap-1.5">
+            <p class="min-w-0 flex-1 font-medium text-violet-50/95">Лог-чат отчётов</p>
+            <button
+              type="button"
+              class="inline-flex h-6 min-w-6 shrink-0 items-center justify-center rounded-full border border-sky-400/35 bg-sky-950/25 px-1.5 text-[10px] font-extrabold text-sky-200 hover:bg-sky-900/35 dark:border-sky-500/35 dark:bg-sky-950/35"
+              aria-label="Информация о чате отчётов"
+              @click="showReportsInfoModal = true"
+            >
+              i
+            </button>
+          </div>
+          <p class="mt-1 text-[10px] leading-snug text-violet-200/80">
+            Другая группа (напр. «Логи») для журнала — не основная защищаемая.
+          </p>
+        </div>
+
+        <section
+          class="overflow-hidden rounded-[1.1rem] border border-sky-400/30 bg-sky-950/15 p-2.5 ring-1 ring-sky-500/20 backdrop-blur-2xl"
+        >
+          <h2 class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-sky-100/90">
+            Подключение
+          </h2>
+          <p class="mb-2 text-[10px] leading-snug text-slate-300/90">
+            Кнопка → выбор группы в Telegram, бот в лог-чат. Вернитесь сюда — статус обновится.
+          </p>
+          <div
+            v-if="chat.log_chat_id"
+            class="mb-2 flex items-center justify-between gap-1.5 rounded-lg border border-emerald-400/40 bg-emerald-950/25 px-2 py-1.5 text-[11px] text-emerald-100 ring-1 ring-emerald-500/15"
+          >
+            <span class="min-w-0 truncate">✓ {{ chat.log_chat_title || chat.log_chat_id }}</span>
+            <button
+              type="button"
+              class="shrink-0 rounded px-1.5 py-0.5 text-emerald-200 hover:bg-white/10"
+              :disabled="clearing"
+              aria-label="Удалить чат отчётов"
+              @click="clearReportsChat"
+            >
+              ✕
+            </button>
+          </div>
+
+          <div class="flex flex-col items-stretch gap-1.5">
+            <button
+              v-if="reportsChatUrl"
+              type="button"
+              class="guard-green-soft w-full max-w-[240px] self-center rounded-lg px-3 py-2 text-xs font-semibold transition active:scale-[0.99]"
+              @click="openPickReportsGroup"
+            >
+              {{ chat.log_chat_id ? 'Сменить лог-чат' : 'Подключить лог-чат' }}
+            </button>
+            <p v-if="!reportsChatUrl" class="text-center text-[10px] text-slate-400">Нет ссылки — проверьте API.</p>
+            <button
+              type="button"
+              class="w-full max-w-[240px] self-center rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-xs font-semibold text-slate-100 transition hover:bg-white/15 active:scale-[0.99]"
+              @click="refreshReportsStatus"
+            >
+              Обновить
+            </button>
+            <span v-if="clearing" class="text-center text-[10px] text-slate-400">Отключаем…</span>
+          </div>
+        </section>
+
+        <section
+          class="overflow-hidden rounded-[1.1rem] border border-white/12 bg-zinc-950/35 p-2.5 ring-1 ring-white/10 backdrop-blur-2xl"
+        >
+          <h2 class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-200">Настройки</h2>
+          <div class="space-y-1.5">
+            <div class="flex items-center justify-between gap-2 rounded-lg border border-white/10 bg-white/[0.06] px-2 py-1.5 ring-1 ring-white/5">
+              <span class="text-[11px] text-slate-200/90">В чат</span>
+              <button
+                type="button"
+                :class="boolToggleClass(chat.rule.log_enabled)"
+                class="rounded-md px-2 py-0.5 text-[11px] font-semibold"
+                @click="updateRule({ log_enabled: !chat.rule.log_enabled })"
+              >
+                {{ chat.rule.log_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+              </button>
+            </div>
+            <div class="flex items-center justify-between gap-2 rounded-lg border border-white/10 bg-white/[0.06] px-2 py-1.5 ring-1 ring-white/5">
+              <span class="text-[11px] text-slate-200/90">Сообщ. Guard</span>
+              <button
+                type="button"
+                :class="boolToggleClass(chat.rule.guardian_messages_enabled)"
+                class="rounded-md px-2 py-0.5 text-[11px] font-semibold"
+                @click="updateRule({ guardian_messages_enabled: !chat.rule.guardian_messages_enabled })"
+              >
+                {{ chat.rule.guardian_messages_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+              </button>
+            </div>
+            <div class="flex items-center justify-between gap-2 rounded-lg border border-white/10 bg-white/[0.06] px-2 py-1.5 ring-1 ring-white/5">
+              <span class="text-[11px] text-slate-200/90">Автоотчёты</span>
+              <button
+                type="button"
+                :class="boolToggleClass(chat.rule.auto_reports_enabled)"
+                class="rounded-md px-2 py-0.5 text-[11px] font-semibold"
+                @click="updateRule({ auto_reports_enabled: !chat.rule.auto_reports_enabled })"
+              >
+                {{ chat.rule.auto_reports_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+              </button>
+            </div>
+          </div>
+        </section>
+      </div>
       </div>
 
-      <section class="rounded-xl border border-gray-200 bg-white p-4 dark:border-guardian-elevated-hi dark:bg-guardian-elevated">
-        <h2 class="mb-2 text-sm font-medium text-gray-800 dark:text-gray-200">Подключение чата отчётов</h2>
-        <p class="mb-3 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
-          Нажмите кнопку — откроется выбор группы в Telegram; добавьте туда бота. После этого вернитесь в приложение: статус обновится сам.
-        </p>
+      <div
+        v-if="showChatPicker"
+        class="fixed inset-0 z-[300] flex items-end justify-center bg-black/65 p-0 pb-[calc(5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-sm md:pb-6"
+        @click="showChatPicker = false"
+      >
         <div
-          v-if="chat.log_chat_id"
-          class="mb-3 rounded-lg border border-emerald-300/80 bg-emerald-50 px-3 py-2 text-sm text-emerald-900 dark:border-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-100"
+          class="flex max-h-[min(70vh,32rem)] w-full max-w-lg min-h-0 flex-col rounded-t-2xl border border-white/15 border-b-0 bg-zinc-950/90 px-3 pb-4 pt-2 text-slate-100 shadow-[0_-12px_40px_rgba(0,0,0,0.75)] ring-1 ring-white/10 backdrop-blur-2xl md:mx-2 md:rounded-2xl md:border-b md:pb-3"
+          @click.stop
         >
-          ✓ Сейчас: <strong>{{ chat.log_chat_title || chat.log_chat_id }}</strong>
-        </div>
-
-        <div class="flex flex-col items-center gap-3">
-          <button
-            v-if="reportsChatUrl"
-            type="button"
-            class="w-full max-w-sm rounded-xl bg-primary-500 px-6 py-3.5 text-base font-semibold text-guardian-ink shadow-sm shadow-primary-500/25 transition hover:bg-primary-400 active:scale-[0.99]"
-            @click="openPickReportsGroup"
-          >
-            {{ chat.log_chat_id ? '📋 Выбрать другой чат отчётов' : '📋 Выбрать чат отчётов' }}
-          </button>
-          <p v-else class="text-center text-xs text-gray-500 dark:text-gray-400">Нет ссылки — проверьте переменные API и бота.</p>
-
-          <button
-            v-if="chat.log_chat_id"
-            type="button"
-            class="text-sm font-medium text-gray-600 underline decoration-dashed underline-offset-2 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white"
-            :disabled="clearing"
-            @click="clearReportsChat"
-          >
-            {{ clearing ? 'Отключаем…' : 'Отключить чат отчётов' }}
-          </button>
-        </div>
-      </section>
-
-      <section class="rounded-xl border border-gray-200 bg-white p-4 dark:border-guardian-elevated-hi dark:bg-guardian-elevated">
-        <h2 class="mb-3 text-sm font-medium text-gray-700 dark:text-gray-300">Настройки</h2>
-        <div class="space-y-3">
-          <div class="flex items-center justify-between gap-2">
-            <span class="text-sm text-gray-600 dark:text-gray-400">Отчёты в чат</span>
-            <button type="button" :class="chat.rule.log_enabled ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'" class="rounded-lg px-3 py-1.5 text-sm" @click="updateRule({ log_enabled: !chat.rule.log_enabled })">{{ chat.rule.log_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</button>
+          <div class="mx-auto mb-2 h-1 w-10 shrink-0 rounded-full bg-white/20 md:hidden" aria-hidden="true" />
+          <div class="mb-2 flex shrink-0 items-center justify-between gap-2 border-b border-white/10 pb-2">
+            <p class="text-sm font-semibold text-white">Выбор чата</p>
+            <button
+              type="button"
+              class="rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-white/10 hover:text-white"
+              @click="showChatPicker = false"
+            >
+              Закрыть
+            </button>
           </div>
-          <div class="flex items-center justify-between gap-2">
-            <span class="text-sm text-gray-600 dark:text-gray-400">Сообщения Guardian в группе</span>
-            <button type="button" :class="chat.rule.guardian_messages_enabled ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'" class="rounded-lg px-3 py-1.5 text-sm" @click="updateRule({ guardian_messages_enabled: !chat.rule.guardian_messages_enabled })">{{ chat.rule.guardian_messages_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</button>
-          </div>
-          <div class="flex items-center justify-between gap-2">
-            <span class="text-sm text-gray-600 dark:text-gray-400">Автоотчёты</span>
-            <button type="button" :class="chat.rule.auto_reports_enabled ? 'bg-primary-500 text-guardian-ink' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'" class="rounded-lg px-3 py-1.5 text-sm" @click="updateRule({ auto_reports_enabled: !chat.rule.auto_reports_enabled })">{{ chat.rule.auto_reports_enabled ? 'ВКЛ' : 'ВЫКЛ' }}</button>
-          </div>
+          <template v-if="(chatsList || []).length > 1">
+            <div class="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain py-1 [-webkit-overflow-scrolling:touch]">
+              <div v-if="chatsListMine.length">
+                <p class="mb-1.5 px-1 text-[10px] font-semibold uppercase tracking-wide text-cyan-200/80">Мои чаты</p>
+                <div class="space-y-1">
+                  <button
+                    v-for="c in chatsListMine"
+                    :key="`pick-own-${c.id}`"
+                    type="button"
+                    :class="Number(c.id) === Number(selectedChatId) ? 'guard-green-chip' : 'border border-white/10 bg-white/5 text-slate-100 hover:bg-white/10'"
+                    class="w-full rounded-xl px-3 py-2.5 text-left text-xs ring-1 ring-white/5"
+                    @click="switchChat(c.id)"
+                  >
+                    {{ c.title }}
+                  </button>
+                </div>
+              </div>
+              <div v-if="chatsListDelegated.length" class="pt-1">
+                <p class="mb-1.5 px-1 text-[10px] font-semibold uppercase tracking-wide text-violet-200/90">Делегированные</p>
+                <div class="space-y-1">
+                  <button
+                    v-for="c in chatsListDelegated"
+                    :key="`pick-del-${c.id}`"
+                    type="button"
+                    :class="
+                      Number(c.id) === Number(selectedChatId)
+                        ? 'border border-violet-400/50 bg-violet-500/20 text-violet-50 ring-1 ring-violet-400/30'
+                        : 'border border-violet-400/20 bg-violet-950/30 text-violet-100 hover:bg-violet-900/35'
+                    "
+                    class="w-full rounded-xl px-3 py-2.5 text-left text-xs"
+                    @click="switchChat(c.id)"
+                  >
+                    {{ c.title }}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </template>
+          <p v-else class="px-1 py-4 text-center text-xs text-slate-400">
+            Подключена только одна группа. Добавьте ещё в «Подключённые чаты».
+          </p>
         </div>
-      </section>
+      </div>
     </div>
 
-    <div v-else-if="loading || hasInitData" class="rounded-xl border border-gray-200 bg-white p-8 text-center dark:border-guardian-elevated-hi dark:bg-guardian-elevated">
-      <span class="text-gray-500 dark:text-gray-400">Загрузка…</span>
+    <div
+      v-else-if="hasInitData"
+      class="rounded-2xl border border-white/10 bg-zinc-950/40 p-8 text-center text-slate-400 ring-1 ring-white/5 backdrop-blur-xl"
+    >
+      Загрузка…
+    </div>
+    <div
+      v-if="showReportsInfoModal"
+      class="fixed inset-0 z-[300] flex items-end justify-center bg-black/70 p-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] md:items-center md:pb-6"
+      @click.self="showReportsInfoModal = false"
+    >
+      <div
+        class="w-full max-w-xl rounded-2xl border border-sky-400/35 bg-zinc-950/90 p-4 text-slate-100 shadow-2xl ring-1 ring-sky-400/20 backdrop-blur-2xl"
+        @click.stop
+      >
+        <div class="mb-3 flex items-center justify-between gap-2 border-b border-white/10 pb-2">
+          <h3 class="text-sm font-semibold text-white">😈 Чат отчётов</h3>
+          <button
+            type="button"
+            class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-white/10 hover:text-white"
+            @click="showReportsInfoModal = false"
+          >
+            ✕
+          </button>
+        </div>
+        <div class="space-y-2 text-xs leading-relaxed text-slate-300">
+          <p>Отдельный лог-чат: сюда я скидываю срабатывания — кто накосячил, по какой причине и что сделал (удалил, замьютил, забанил).</p>
+          <p>Основной чат остаётся для людей; служебный шум не мешает разговору, а тебе проще копать историю.</p>
+          <p><strong class="text-slate-100">Кому зайдёт:</strong> админам и модераторам, которым нужно быстро ловить рейды и разбирать спорные кейсы.</p>
+          <p>
+            <strong class="text-slate-100">Бонус:</strong> прямо в отчётах есть кнопки вроде
+            <code class="rounded bg-black/50 px-1 py-0.5 text-[11px] text-sky-200 ring-1 ring-white/10">Разбан</code>
+            и
+            <code class="rounded bg-black/50 px-1 py-0.5 text-[11px] text-sky-200 ring-1 ring-white/10">Размут</code>
+            — меньше беготни по боту.
+          </p>
+        </div>
+      </div>
     </div>
   </div>
 </template>

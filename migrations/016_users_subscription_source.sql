@@ -1,0 +1,2 @@
+ALTER TABLE users
+ADD COLUMN IF NOT EXISTS subscription_source VARCHAR(32);

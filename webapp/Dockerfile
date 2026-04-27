@@ -8,11 +8,14 @@ RUN npm ci
 COPY . .
 ARG VITE_API_BASE_URL
 ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
+# URL API может быть только в рантайме: serve-static.mjs отдаёт /guard-api-config.js из process.env.
 RUN npm run build
 
 FROM node:20-alpine AS run
 WORKDIR /app
-RUN npm install -g serve@14
 COPY --from=build /app/dist ./dist
+COPY serve-static.mjs ./serve-static.mjs
 EXPOSE 3000
-CMD ["sh", "-c", "exec serve -s dist -l ${PORT:-3000}"]
+HEALTHCHECK --interval=30s --timeout=15s --start-period=40s --retries=5 \
+  CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.PORT||3000)+'/',(r)=>{r.resume();r.on('end',()=>process.exit(r.statusCode>=200&&r.statusCode<500?0:1))}).on('error',()=>process.exit(1))"
+CMD ["node", "serve-static.mjs"]

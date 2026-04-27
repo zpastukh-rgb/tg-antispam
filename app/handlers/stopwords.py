@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -14,10 +16,34 @@ from app.utils.stealth import reply_stealth
 router = Router()
 
 
+STOP_WORD_MAX_LEN = 64
+
+
 def norm_word(s: str) -> str:
-    s = (s or "").strip().lower()
-    s = s.replace("ё", "е")
-    return s
+    """Одна запись стоп-слова/фразы: как в API (_norm_stopword), длина ограничена полем БД."""
+    s = (s or "").strip().lower().replace("ё", "е")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:STOP_WORD_MAX_LEN]
+
+
+def split_stopword_cli_arg(arg: str) -> list[str]:
+    """
+    Несколько стоп-записей — только через запятую.
+    Без запятой вся строка — одна фраза (в т.ч. с пробелами), а не набор слов по пробелам.
+    """
+    raw = (arg or "").strip()
+    if not raw:
+        return []
+    if "," in raw:
+        parts = raw.split(",")
+    else:
+        parts = [raw]
+    out: list[str] = []
+    for p in parts:
+        w = norm_word(p)
+        if w:
+            out.append(w)
+    return out
 
 
 @router.message(Command("words"))
@@ -47,8 +73,8 @@ async def cmd_words(message: Message):
         await reply_stealth(
             message,
             "📌 Стоп-слова пустые.\n\n"
-            "➕ Добавить: /addword казино\n"
-            "➕ Списком: /addword казино, ставки, реклама\n"
+            "➕ Одно слово или фраза: /addword казино или /addword не звоните мне\n"
+            "➕ Несколько записей через запятую: /addword казино, ставки, не звоните мне\n"
             "➖ Удалить: /delword казино\n"
             "📋 Список: /words"
         )
@@ -58,7 +84,7 @@ async def cmd_words(message: Message):
     if len(words) > 200:
         text += f"\n…и ещё {len(words) - 200}"
 
-    text += "\n\n➕ /addword слово или список через запятую\n➖ /delword слово"
+    text += "\n\n➕ /addword слово, фраза с пробелами или несколько через запятую\n➖ /delword — так же"
     await reply_stealth(message, text)
 
 
@@ -78,14 +104,13 @@ async def cmd_addword(message: Message):
             message,
             "Напиши так:\n"
             "/addword казино\n"
-            "или\n"
-            "/addword казино, ставки, реклама"
+            "/addword не звоните мне\n"
+            "или несколько через запятую:\n"
+            "/addword казино, ставки, не звоните мне"
         )
         return
 
-    # делим по запятой или пробелу
-    words_raw = raw[1].replace(",", " ").split()
-    words = [norm_word(w) for w in words_raw if norm_word(w)]
+    words = split_stopword_cli_arg(raw[1])
 
     if not words:
         await reply_stealth(message, "Нет слов для добавления 🙂")
@@ -112,6 +137,13 @@ async def cmd_addword(message: Message):
 
         await session.commit()
 
+    try:
+        from app.handlers.moderation import invalidate_stopwords_cache
+
+        invalidate_stopwords_cache(int(message.chat.id))
+    except Exception:
+        pass
+
     if added:
         await reply_stealth(message, "✅ Добавил:\n" + "\n".join(f"• {w}" for w in added))
     else:
@@ -133,14 +165,13 @@ async def cmd_delword(message: Message):
             message,
             "Напиши так:\n"
             "/delword казино\n"
-            "или\n"
-            "/delword казино, ставки, реклама"
+            "/delword не звоните мне\n"
+            "или несколько через запятую:\n"
+            "/delword казино, ставки, не звоните мне"
         )
         return
 
-    # делим по запятой или пробелу
-    words_raw = raw[1].replace(",", " ").split()
-    words = [norm_word(w) for w in words_raw if norm_word(w)]
+    words = split_stopword_cli_arg(raw[1])
 
     if not words:
         await reply_stealth(message, "Нет слов для удаления 🙂")
@@ -164,6 +195,13 @@ async def cmd_delword(message: Message):
             deleted_any += 1
 
         await session.commit()
+
+    try:
+        from app.handlers.moderation import invalidate_stopwords_cache
+
+        invalidate_stopwords_cache(int(message.chat.id))
+    except Exception:
+        pass
 
     await reply_stealth(
         message,

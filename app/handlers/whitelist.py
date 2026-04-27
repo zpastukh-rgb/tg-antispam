@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import urlsplit
 
 from aiogram import Router
 from aiogram.filters import Command
@@ -24,6 +25,7 @@ router = Router()
 # =========================================================
 
 DOMAIN_RE = re.compile(r"^[a-z0-9.-]+\.[a-z]{2,}$")
+_TRUSTED_PATH_RE = re.compile(r"^[a-z0-9./+:_-]{3,255}$")
 
 
 def normalize_domain(value: str) -> str:
@@ -40,6 +42,49 @@ def normalize_domain(value: str) -> str:
     v = v.split("/")[0]
 
     return v
+
+
+def normalize_trusted_link_pattern(value: str) -> str:
+    """
+    Доверенная ссылка/фрагмент для whitelist: домен (vk.com) или путь (t.me/my_channel).
+    """
+    v = (value or "").strip().lower()
+    if not v:
+        return ""
+    # Поддержка полного URL: https://site.com/path?x=1 -> site.com/path
+    # и строки без схемы: site.com/path -> site.com/path
+    parse_src = v if "://" in v else f"https://{v}"
+    try:
+        parts = urlsplit(parse_src)
+        host = (parts.netloc or "").strip().lower()
+        path = (parts.path or "").strip().lower()
+    except Exception:
+        host, path = "", ""
+    if host:
+        host = host.lstrip("@")
+        if host.startswith("www."):
+            host = host[4:]
+        v = f"{host}{path or ''}"
+    else:
+        v = v.replace("https://", "").replace("http://", "").replace("www.", "")
+    v = v.rstrip("/").strip()
+    if not v or len(v) > 255:
+        return ""
+    if "/" in v or v.startswith("t.me+"):
+        if not _TRUSTED_PATH_RE.match(v):
+            return ""
+        return v
+    return normalize_domain(v)
+
+
+def is_valid_trusted_pattern(value: str) -> bool:
+    """Допустимая запись в доверенные ссылки (домен или t.me/… / t.me+invite)."""
+    s = normalize_trusted_link_pattern(value)
+    if not s:
+        return False
+    if "/" in s or s.startswith("t.me+"):
+        return True
+    return bool(DOMAIN_RE.match(s))
 
 
 async def is_admin(bot, chat_id: int, user_id: int) -> bool:
@@ -104,10 +149,11 @@ async def wl_add(message: Message):
         await message.reply("Пример: `/wl_add google.com`", parse_mode="Markdown")
         return
 
-    domain = normalize_domain(parts[1])
+    raw_pat = parts[1]
+    domain = normalize_trusted_link_pattern(raw_pat)
 
-    if not DOMAIN_RE.match(domain):
-        await message.reply("❌ Домен выглядит странно. Пример: google.com")
+    if not is_valid_trusted_pattern(raw_pat):
+        await message.reply("❌ Некорректная запись. Примеры: google.com или t.me/my_channel")
         return
 
     async with await get_session() as session:
@@ -155,7 +201,10 @@ async def wl_del(message: Message):
         await message.reply("Пример: `/wl_del google.com`", parse_mode="Markdown")
         return
 
-    domain = normalize_domain(parts[1])
+    domain = normalize_trusted_link_pattern(parts[1])
+    if not domain:
+        await message.reply("❌ Укажи тот же фрагмент, что в списке (домен или t.me/…)")
+        return
 
     async with await get_session() as session:
 

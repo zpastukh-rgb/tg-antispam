@@ -4,21 +4,33 @@ import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import { formatDateTimeRu } from '../utils/formatDateTime'
 
-const { api, loading, error, fetch, hasInitData } = useApi()
+const { api, error, fetchSilent, hasInitData } = useApi()
 const { showToast } = useToast()
 const billing = ref(null)
 const promoCode = ref('')
 const promoLoading = ref(false)
 const payLoadingMonths = ref(null)
+const payLoadingTestMonths = ref(null)
+const showPremiumInfoModal = ref(false)
 
-// Тарифы Guardian Premium (кнопки оплаты пока без перехода) + тест 3 дня по промокоду
+/** Подарок AURUM с Premium: сумма ₽ / 4 ✨ (синхрон с бэкендом). */
+const SUBSCRIPTION_GIFT_RUB_PER_AURUM = 4
+
+// Тарифы Guard Premium + тест по промокоду
 const PREMIUM_PLANS = [
-  { months: 1, icon: '🛡', label: '1 месяц', price: '199 ₽', savings: null },
-  { months: 3, icon: '⚡', label: '3 месяца', price: '499 ₽', savings: '98 ₽' },
-  { months: 6, icon: '🔥', label: '6 месяцев', price: '899 ₽', savings: '295 ₽' },
-  { months: 12, icon: '👑', label: '12 месяцев', price: '1499 ₽', savings: '889 ₽' },
-  { months: 24, icon: '💀', label: '24 месяца', price: '2499 ₽', savings: '2277 ₽' },
+  { months: 1, icon: '🛡', label: '1 месяц', price: '490 ₽', priceRub: 490, savings: null },
+  { months: 3, icon: '⚡', label: '3 месяца', price: '990 ₽', priceRub: 990, savings: '480 ₽' },
+  { months: 6, icon: '📅', label: '6 месяцев', price: '1590 ₽', priceRub: 1590, savings: '1350 ₽' },
+  { months: 12, icon: '👑', label: '12 месяцев', price: '2790 ₽', priceRub: 2790, savings: '3090 ₽' },
+  { months: 24, icon: '💎', label: '24 месяца', price: '4790 ₽', priceRub: 4790, savings: '6970 ₽' },
+  { months: 72, icon: '🚀', label: '72 месяца', price: '10 990 ₽', priceRub: 10990, savings: '24 290 ₽' },
 ]
+
+function subscriptionTokensForPlan(plan) {
+  const rub = Number(plan?.priceRub ?? 0)
+  if (!rub) return 0
+  return Math.round(rub / SUBSCRIPTION_GIFT_RUB_PER_AURUM)
+}
 
 const tariffLabel = computed(() => {
   const t = (billing.value?.tariff || 'free').toLowerCase()
@@ -30,7 +42,7 @@ const subscriptionUntilLabel = computed(() => formatDateTimeRu(billing.value?.su
 async function startPayment(months) {
   payLoadingMonths.value = months
   try {
-    const r = await fetch(() => api.yookassaCreatePayment(months))
+    const r = await fetchSilent(() => api.yookassaCreatePayment(months))
     const url = r?.confirmation_url
     if (!url) {
       showToast('Нет ссылки на оплату')
@@ -59,10 +71,11 @@ async function applyPromo() {
   }
   promoLoading.value = true
   try {
-    await fetch(() => api.promoApply(code))
+    await fetchSilent(() => api.promoApply(code))
     showToast('Промокод активирован')
     promoCode.value = ''
-    billing.value = await fetch(() => api.billing())
+    billing.value = await fetchSilent(() => api.billing())
+    window.dispatchEvent(new CustomEvent('guard:me-refresh'))
   } catch (e) {
     const msg = e?.body?.detail || e?.message || 'Ошибка активации'
     showToast(msg)
@@ -74,7 +87,7 @@ async function applyPromo() {
 onMounted(async () => {
   if (!hasInitData.value) return
   try {
-    billing.value = await fetch(() => api.billing())
+    billing.value = await fetchSilent(() => api.billing())
   } catch {
     //
   }
@@ -95,59 +108,40 @@ onMounted(async () => {
 
     <div v-else-if="billing" class="space-y-6">
       <!-- Текущий тариф -->
-      <div class="rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-700 dark:bg-gray-800">
-        <dl class="grid gap-3 text-sm">
-          <div>
-            <dt class="text-gray-500 dark:text-gray-400">Тариф</dt>
-            <dd class="font-medium text-gray-900 dark:text-white">{{ tariffLabel }}</dd>
+      <div class="rounded-2xl border border-white/10 bg-gradient-to-br from-slate-900/90 to-slate-800/85 p-4 shadow-[0_12px_30px_-20px_rgba(16,185,129,0.45)] backdrop-blur-sm dark:border-white/10">
+        <dl class="grid gap-2 text-sm sm:grid-cols-3">
+          <div class="rounded-xl border border-white/10 bg-white/5 px-3 py-2.5">
+            <dt class="text-[11px] uppercase tracking-wide text-slate-400">Тариф</dt>
+            <dd class="mt-1 font-semibold text-white">{{ tariffLabel }}</dd>
           </div>
-          <div>
-            <dt class="text-gray-500 dark:text-gray-400">Подключено чатов</dt>
-            <dd class="font-medium text-gray-900 dark:text-white">{{ billing.chats_count }} / {{ billing.chat_limit }}</dd>
+          <div class="rounded-xl border border-white/10 bg-white/5 px-3 py-2.5">
+            <dt class="text-[11px] uppercase tracking-wide text-slate-400">Подключено чатов</dt>
+            <dd class="mt-1 font-semibold text-white">{{ billing.chats_count }} / {{ billing.chat_limit }}</dd>
           </div>
-          <div>
-            <dt class="text-gray-500 dark:text-gray-400">Подписка до</dt>
-            <dd class="font-medium text-gray-900 dark:text-white">{{ subscriptionUntilLabel }}</dd>
+          <div class="rounded-xl border border-white/10 bg-white/5 px-3 py-2.5">
+            <dt class="text-[11px] uppercase tracking-wide text-slate-400">Подписка до</dt>
+            <dd class="mt-1 font-semibold text-white">{{ subscriptionUntilLabel }}</dd>
           </div>
         </dl>
       </div>
 
-      <!-- Guardian Premium: описание и тарифы -->
+      <!-- Guard Premium: тарифы и промокод -->
       <div class="rounded-xl border border-primary-200 bg-primary-50 p-6 dark:border-primary-800 dark:bg-primary-900/20">
-        <h2 class="text-lg font-semibold text-gray-900 dark:text-white mb-3">🛡 Guardian Premium</h2>
-        <p class="text-sm text-gray-700 dark:text-gray-300 mb-4">
-          Базовая защита работает бесплатно. Но если у вас несколько чатов или нужна серьёзная защита — включите Guardian Premium.
-        </p>
-        <p class="text-sm text-gray-700 dark:text-gray-300 mb-2">Премиум открывает:</p>
-        <ul class="text-sm text-gray-700 dark:text-gray-300 list-disc list-inside mb-4 space-y-0.5">
-          <li>Анти-рейд защита</li>
-          <li>Режим новичков</li>
-          <li>Режим тишины</li>
-          <li>Расширенные настройки фильтров</li>
-          <li>Больше подключённых чатов (до 20)</li>
-          <li>Гибкие наказания и контроль спама</li>
-        </ul>
-        <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">Выберите период подписки:</p>
-        <div class="flex flex-col gap-2">
+        <div class="mb-4 flex items-center justify-between gap-2">
+          <h2 class="text-lg font-semibold text-gray-900 dark:text-white">🛡 Guard Premium</h2>
           <button
-            v-for="plan in PREMIUM_PLANS"
-            :key="plan.months"
             type="button"
-            :disabled="payLoadingMonths !== null"
-            class="flex items-center justify-between rounded-xl border border-primary-300 bg-white px-4 py-3 text-left text-sm font-medium text-gray-800 transition hover:bg-primary-50 dark:border-primary-700 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-primary-900/20 disabled:cursor-wait disabled:opacity-70"
-            @click="startPayment(plan.months)"
+            class="inline-flex h-8 min-w-8 items-center justify-center rounded-full border border-sky-300 bg-sky-100 px-2 text-sm font-extrabold text-sky-800 shadow-sm hover:bg-sky-200 dark:border-sky-700 dark:bg-sky-900/30 dark:text-sky-200 dark:hover:bg-sky-900/45"
+            aria-label="Информация о Guard Premium"
+            @click="showPremiumInfoModal = true"
           >
-            <span><span class="mr-1.5">{{ plan.icon }}</span>{{ plan.label }} — {{ plan.price }}</span>
-            <span v-if="plan.savings" class="text-xs text-primary-600 dark:text-primary-400">Экономия {{ plan.savings }}</span>
+            i
           </button>
         </div>
-        <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">
-          Оплата через ЮKassa. После оплаты подписка продлится автоматически; при необходимости обновите экран.
-        </p>
 
-        <div class="mt-6 rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
-          <h3 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">🎁 Промокод / Premium на 3 дня</h3>
-          <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">Введите промокод для активации Premium (например тестовый на 3 дня).</p>
+        <div class="mb-4 rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
+          <h3 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">🎁 Промокод</h3>
+          <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">Введите промокод для активации Premium.</p>
           <div class="flex flex-wrap gap-2">
             <input
               v-model="promoCode"
@@ -159,7 +153,7 @@ onMounted(async () => {
             />
             <button
               type="button"
-              class="rounded-lg bg-primary-500 px-4 py-2 text-sm font-semibold text-guardian-ink hover:bg-primary-400 disabled:opacity-50"
+              class="guard-green-soft rounded-lg px-4 py-2 text-sm font-semibold disabled:opacity-50"
               :disabled="promoLoading || !(promoCode || '').trim()"
               @click="applyPromo()"
             >
@@ -167,14 +161,89 @@ onMounted(async () => {
             </button>
           </div>
         </div>
+
+        <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">Выберите период подписки:</p>
+        <div class="flex flex-col gap-2">
+          <button
+            v-for="plan in PREMIUM_PLANS"
+            :key="plan.months"
+            type="button"
+            :disabled="payLoadingMonths !== null || payLoadingTestMonths !== null"
+            class="flex items-center justify-between rounded-xl border border-primary-300 bg-white px-4 py-3 text-left text-sm font-medium text-gray-800 transition hover:bg-primary-50 dark:border-primary-700 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-primary-900/20 disabled:cursor-wait disabled:opacity-70"
+            @click="startPayment(plan.months)"
+          >
+            <span class="min-w-0">
+              <span class="whitespace-nowrap"><span class="mr-1.5">{{ plan.icon }}</span>{{ plan.label }} — {{ plan.price }}</span>
+              <span class="mt-0.5 block text-[11px] text-primary-700 dark:text-primary-300">+{{ subscriptionTokensForPlan(plan) }} ⚡ AURUM в подарок</span>
+            </span>
+            <span v-if="plan.savings" class="shrink-0 self-start whitespace-nowrap text-xs text-primary-600 dark:text-primary-400">Экономия {{ plan.savings }}</span>
+          </button>
+        </div>
+        <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">
+          Оплата через ЮKassa. После оплаты подписка продлится автоматически; при необходимости обновите экран.
+        </p>
+
+        <div v-if="billing?.test_tariff_payment_visible" class="mt-5 rounded-xl border border-amber-300 bg-amber-50 p-4 dark:border-amber-700 dark:bg-amber-950/40">
+          <h3 class="text-sm font-semibold text-amber-900 dark:text-amber-100">Тестовая оплата тарифов</h3>
+          <p class="mt-1 text-xs text-amber-800/90 dark:text-amber-200/90">
+            Только для вашего аккаунта. Сейчас тот же YooKassa, что и выше — позже можно переключить на тестовый магазин отдельно от основных кнопок.
+          </p>
+          <div class="mt-3 flex flex-col gap-2">
+            <button
+              v-for="plan in PREMIUM_PLANS"
+              :key="`test-bill-${plan.months}`"
+              type="button"
+              :disabled="payLoadingTestMonths !== null || payLoadingMonths !== null"
+              class="flex items-center justify-between rounded-xl border border-amber-400 bg-white px-4 py-3 text-left text-sm font-medium text-amber-950 transition hover:bg-amber-100 dark:border-amber-600 dark:bg-amber-950/60 dark:text-amber-50 dark:hover:bg-amber-900/50 disabled:cursor-wait disabled:opacity-70"
+              @click="startTestTariffPayment(plan.months)"
+            >
+              <span class="min-w-0">
+                <span class="whitespace-nowrap">
+                  <span class="mr-1.5">{{ plan.icon }}</span>{{ plan.label }} — {{ plan.price }}
+                  <span class="ml-1 text-[10px] font-bold uppercase text-amber-700 dark:text-amber-300">тест</span>
+                </span>
+                <span class="mt-0.5 block text-[11px] text-amber-900 dark:text-amber-200">+{{ subscriptionTokensForPlan(plan) }} ⚡</span>
+              </span>
+              <span v-if="plan.savings" class="shrink-0 self-start whitespace-nowrap text-xs text-amber-800 dark:text-amber-200">Экономия {{ plan.savings }}</span>
+            </button>
+          </div>
+        </div>
       </div>
     </div>
 
     <div
-      v-else-if="loading || (hasInitData && billing === null && !error)"
+      v-else-if="hasInitData && billing === null && !error"
       class="rounded-xl border border-gray-200 bg-white p-8 text-center dark:border-gray-700 dark:bg-gray-800"
     >
       <span class="text-gray-500 dark:text-gray-400">Загрузка…</span>
+    </div>
+
+    <div
+      v-if="showPremiumInfoModal"
+      class="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-3 md:items-center"
+      @click.self="showPremiumInfoModal = false"
+    >
+      <div class="w-full max-w-md rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
+        <div class="mb-3 flex items-center justify-between gap-2">
+          <h3 class="text-base font-semibold text-gray-900 dark:text-white">😈 Guard Premium — что внутри</h3>
+          <button
+            type="button"
+            class="rounded-lg px-2 py-1 text-sm text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700"
+            @click="showPremiumInfoModal = false"
+          >
+            ✕
+          </button>
+        </div>
+        <p class="mb-3 text-sm text-gray-700 dark:text-gray-300">
+          Берёшь Premium, когда чатов несколько и хочешь, чтобы я держал удар: рейды, накрутки, волны ботов — не твоя ночная смена.
+        </p>
+        <ul class="list-disc space-y-1 pl-4 text-sm text-gray-700 dark:text-gray-300">
+          <li>Антирейд и антинакрутка с нормальными пресетами</li>
+          <li>Режим новичков и тишина после входа</li>
+          <li>Фильтры и наказания гибче, чем в «голом» чате</li>
+          <li>Больше слотов для подключённых чатов под один кабинет</li>
+        </ul>
+      </div>
     </div>
   </div>
 </template>

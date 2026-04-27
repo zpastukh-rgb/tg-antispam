@@ -199,7 +199,7 @@ railway run python -m scripts.run_migration 008
    - **Start Command:** явная команда (перебивает `CMD` из образа API).  
      **Важно:** Railway часто запускает команду **без shell**, поэтому `$PORT` не раскрывается и даёт ошибку `Invalid value for '--port': '$PORT'`. Нужна обёртка в `sh -c`:  
      `sh -c "uvicorn app.api.main:app --host 0.0.0.0 --port ${PORT:-8000}"`  
-     Если в логах API видно **«😈 AntiSpam Guardian запущен / BUILD 777»** — всё ещё стартует бот, а не uvicorn; проверь, что сохранена именно строка выше.
+     Если в логах API видно **«😈 AntiSpam Guard запущен / BUILD 777»** — всё ещё стартует бот, а не uvicorn; проверь, что сохранена именно строка выше.
 3. **Variables:**
    - **`RAILWAY_DOCKERFILE_PATH`** = `Dockerfile.api` — иначе Railway может собрать образ бота (`Dockerfile.bot`) вместо uvicorn.
    - Как у бота: `BOT_TOKEN` (обязателен для init data и ссылок во фронте), Postgres: `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` (или Reference `DATABASE_URL`).
@@ -284,3 +284,78 @@ railway run python -m scripts.run_migration 008
 ---
 
 **Итог:** быстрее всего — в BotFather: **Menu Button** → **Configure** → вставить URL фронта (Railway, сервис 3). Тогда у пользователей в чате с ботом появится кнопка для открытия панели.
+
+---
+
+## Guard Pulse: перезапуск бота / API / WebApp из админки
+
+В Mini App → синяя **ADM** → вкладка **Guard Pulse** есть кнопки «Перезапуск бота / API / WebApp». Они вызывают Railway GraphQL (`serviceInstanceRedeploy`) с сервера **API** — токен и ID хранятся только в переменных окружения сервиса API, не во фронте.
+
+**Важно:** на странице **Account → Tokens** ты **ничего не вставляешь** — там только **создаёшь** токен (имя → Create), Railway **один раз показывает** длинную строку — её **копируешь**. Вставить эту строку нужно в **Variables** сервиса **API** в проекте (шаг 5 ниже), не на экране Tokens.
+
+### 1. Токен Railway
+
+1. Открой [railway.app](https://railway.app) → **Account** (аватар) → **Tokens**.
+2. В поле **Name** введи, например: `guard-redeploy` (или любое имя).
+3. **Workspace** можно оставить как есть или выбрать свой workspace — если Create неактивна, обязательно заполни **Name**.
+4. Нажми **Create** — появится токен. **Сразу скопируй** (потом его уже не покажут).
+
+5. Открой в Railway **сервис API** (тот, где FastAPI / uvicorn, не бот и не фронт) → вкладка **Variables** → **New Variable**:
+   - имя: **`RAILWAY_API_TOKEN`**
+   - значение: **вставь сюда** скопированную строку из шага 4  
+   - сохрани.
+
+Альтернативное имя переменной (тоже работает): **`RAILWAY_TOKEN`**.  
+Токен должен быть создан в том же аккаунте Railway, у которого есть доступ к **проекту**, где лежат бот, API и WebApp.
+
+### 2. Что такое `RAILWAY_ENVIRONMENT_ID` и где его взять
+
+Это **UUID одной «среды»** внутри проекта Railway (например *production*). Все сервисы бота, API и фронта в одной среде делят **один и тот же** `RAILWAY_ENVIRONMENT_ID`.
+
+**Если API крутится на Railway:** платформа **сама** подставляет переменную **`RAILWAY_ENVIRONMENT_ID`** в контейнер (см. [Railway-provided variables](https://docs.railway.com/reference/variables)) — **отдельно копировать и добавлять в Variables чаще всего не нужно**.
+
+**Где посмотреть вручную (в браузере):**
+
+1. Открой проект → сверху переключатель среды (*production* / *preview*).
+2. Посмотри **URL** в адресной строке — там бывает фрагмент вида `environment/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` — это и есть UUID среды.
+3. Либо: **Project** → **Settings** нужной среды — иногда дублируется ID.
+
+**В терминале (локально, с [Railway CLI](https://docs.railway.com/develop/cli)):**
+
+```bash
+railway login
+cd /путь/к/клону/репозитория   # корень репо
+railway link                    # выбери проект и сервис API
+railway run env | grep RAILWAY_ENVIRONMENT_ID
+```
+
+Или одноразово для конкретного сервиса (имя как в дашборде):
+
+```bash
+railway run --service ИМЯ_СЕРВИСА_API env | grep RAILWAY_
+```
+
+В выводе будут и **`RAILWAY_ENVIRONMENT_ID`**, и **`RAILWAY_SERVICE_ID`** (UUID **текущего** сервиса).
+
+### 3. ID сервисов `RAILWAY_SERVICE_ID_BOT` / `_API` / `_WEBAPP`
+
+Это **три разных UUID** — по одному на каждый сервис (бот, API, WebApp). Ими пользуется Railway API, чтобы знать, **какой** сервис перезапустить.
+
+**Упрощение для API:** Railway сам задаёт **`RAILWAY_SERVICE_ID`** для **этого** деплоя. Код Guard Pulse, если **`RAILWAY_SERVICE_ID_API` не задан**, использует **`RAILWAY_SERVICE_ID`** — то есть **ID API вручную дублировать не обязательно**, если переменные смотрит запущенный API-сервис.
+
+**Обязательно вручную** в Variables сервиса **API** обычно задают только:
+
+| Переменная | Откуда значение |
+|------------|-----------------|
+| `RAILWAY_SERVICE_ID_BOT` | Сервис **бота** → **Settings** → **Service ID** (скопировать UUID) |
+| `RAILWAY_SERVICE_ID_WEBAPP` | Сервис **фронта / Mini App** → **Settings** → **Service ID** |
+
+**`RAILWAY_SERVICE_ID_API`** — опционально; если не задан, берётся встроенный **`RAILWAY_SERVICE_ID`** у API-сервиса.
+
+**В терминале:** на каждом сервисе выполни `railway run --service ИМЯ env | grep RAILWAY_SERVICE_ID` (подставь имя бота, API, фронта по очереди) и скопируй три UUID в Variables API.
+
+После сохранения переменных **перезапусти API** один раз. В Guard Pulse → **Обновить мониторинг** — блок **Railway API** покажет галочки.
+
+### 4. Ошибка «Load failed» в диагностике
+
+Если мониторинг не грузится вовсе: чаще всего фронт стучится не в тот URL API (`VITE_API_BASE_URL` / `GUARD_API_BASE_URL` на сервисе **WebApp**) или API недоступен. Это не про Railway-токен — сначала почини доступ к `/api/admin/ops/health`.

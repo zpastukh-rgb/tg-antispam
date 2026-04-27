@@ -1,0 +1,36 @@
+---
+description: Keep moderation text handlers reachable
+alwaysApply: true
+---
+
+# Moderation Router Safety
+
+- Do not add broad text catch-all handlers for groups before moderation handlers.
+- Any generic `@router.message(F.text)` handlers must be restricted to private chats unless they are part of moderation.
+- Keep bot router include order so `moderation_router` can process group text updates.
+
+# Required checks after handler changes
+
+When editing handlers, verify:
+
+1. Group text reaches moderation (`[GUARD TRACE] incoming ... text='...'` appears in bot logs).
+2. `verdict` line appears for link text and plain text in group.
+3. No new early-return handler swallows group text before moderation.
+
+# Known regression to avoid
+
+Bad pattern:
+
+```python
+@router.message(F.text)
+async def some_handler(message: Message):
+    ...
+```
+
+Safe pattern:
+
+```python
+@router.message(F.chat.type == "private", F.text)
+async def some_handler(message: Message):
+    ...
+```

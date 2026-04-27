@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import re
+import uuid
 from datetime import datetime, timezone, timedelta
 
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
@@ -13,26 +15,43 @@ from app.db.models import (
     Rule,
     UserContext,
     ChatManager,
+    ChatManagerInvite,
     StopWord,
     ProfanityWord,
     PromoCode,
     PromoCodeRedemption,
     User,
+    CreditLedger,
 )
 
-from app.db.ensure_defaults import get_owner_forever_chat_limit, get_owner_forever_promo_code
-from app.services.user_service import get_or_create_user, can_add_chat, TARIFF_CHAT_LIMITS
+from app.db.ensure_defaults import (
+    get_owner_forever_chat_limit,
+    get_owner_forever_promo_code,
+    get_repeatable_tokens2000_promo_code,
+)
+from app.services.user_service import (
+    get_or_create_user,
+    can_add_chat,
+    TARIFF_CHAT_LIMITS,
+    TARIFF_GROUP_LIMITS,
+    TARIFF_CHANNEL_LIMITS,
+)
 
 
 async def get_managed_chats(session: AsyncSession, user_id: int) -> list[Chat]:
     """Защищаемые чаты пользователя (владелец или менеджер)."""
-    sub = select(ChatManager.chat_id).where(ChatManager.user_id == user_id).subquery()
+    manager_sub = select(ChatManager.chat_id).where(ChatManager.user_id == user_id)
+    invite_sub = select(ChatManagerInvite.chat_id).where(
+        ChatManagerInvite.status == "connected",
+        (ChatManagerInvite.connected_user_id == user_id) | (ChatManagerInvite.target_telegram_id == user_id),
+    )
+    managed_sub = manager_sub.union(invite_sub).subquery()
     res = await session.execute(
         select(Chat)
         .where(
             Chat.is_log_chat == False,  # noqa: E712
             Chat.is_active == True,  # noqa: E712
-            (Chat.owner_user_id == user_id) | (Chat.id.in_(select(sub.c.chat_id))),
+            (Chat.owner_user_id == user_id) | (Chat.id.in_(select(managed_sub.c.chat_id))),
         )
         .order_by(Chat.id.asc())
     )
@@ -41,12 +60,14 @@ async def get_managed_chats(session: AsyncSession, user_id: int) -> list[Chat]:
 
 async def get_pending_chats(session: AsyncSession, user_id: int) -> list[Chat]:
     """Чаты, куда пользователь добавил бота, но ещё не подключил (is_active=False)."""
+    log_targets = select(Chat.log_chat_id).where(Chat.log_chat_id.is_not(None))
     res = await session.execute(
         select(Chat)
         .where(
             Chat.owner_user_id == user_id,
             Chat.is_log_chat == False,  # noqa: E712
             Chat.is_active == False,  # noqa: E712
+            Chat.id.not_in(log_targets),
         )
         .order_by(Chat.id.desc())
     )
@@ -58,7 +79,12 @@ async def get_or_create_rule(session: AsyncSession, chat_id: int) -> Rule:
     rule = await session.get(Rule, chat_id)
     if rule:
         return rule
-    rule = Rule(chat_id=chat_id)
+    rule = Rule(
+        chat_id=chat_id,
+        filter_profanity_enabled=True,
+        filter_jobs_enabled=True,
+        filter_casino_enabled=True,
+    )
     session.add(rule)
     await session.commit()
     await session.refresh(rule)
@@ -83,13 +109,27 @@ async def set_selected_chat(session: AsyncSession, user_id: int, chat_id: int | 
 
 
 async def user_can_access_chat(session: AsyncSession, user_id: int, chat_id: int) -> bool:
-    """Проверка: пользователь владелец или менеджер чата."""
+    """Проверка: пользователь владелец или менеджер чата.
+
+    Дополнительно: владелец/менеджер **канала** с привязанной группой обсуждения получает доступ к API
+    по id этой группы (правила комментариев хранятся на Rule(chat_id=группа обсуждения)).
+    """
     chats = await get_managed_chats(session, user_id)
-    return any(c.id == chat_id for c in chats)
+    cid = int(chat_id)
+    if any(int(c.id) == cid for c in chats):
+        return True
+    for c in chats:
+        if str(getattr(c, "chat_kind", "") or "").strip().lower() != "channel":
+            continue
+        lid = getattr(c, "linked_discussion_chat_id", None)
+        if lid is not None and int(lid) == cid:
+            return True
+    return False
 
 
 def _norm_stopword(s: str) -> str:
     s = (s or "").strip().lower().replace("ё", "е")
+    s = re.sub(r"\s+", " ", s).strip()
     return s[:64]  # модель: String(64)
 
 
@@ -120,6 +160,12 @@ async def add_stopword(session: AsyncSession, chat_id: int, word: str) -> bool:
         return False
     session.add(StopWord(chat_id=chat_id, word=w))
     await session.commit()
+    try:
+        from app.handlers.moderation import invalidate_stopwords_cache
+
+        invalidate_stopwords_cache(int(chat_id))
+    except Exception:
+        pass
     return True
 
 
@@ -131,6 +177,12 @@ async def delete_stopword(session: AsyncSession, chat_id: int, word: str) -> boo
         return False
     await session.execute(sql_delete(StopWord).where(StopWord.chat_id == chat_id, StopWord.word == w))
     await session.commit()
+    try:
+        from app.handlers.moderation import invalidate_stopwords_cache
+
+        invalidate_stopwords_cache(int(chat_id))
+    except Exception:
+        pass
     return True
 
 
@@ -189,6 +241,26 @@ async def _lazy_ensure_owner_promo_row(session: AsyncSession, code_clean: str) -
     )
 
 
+async def _lazy_ensure_repeatable_tokens2000_row(session: AsyncSession, code_clean: str) -> None:
+    """Строка многоразового промо +2000 ⚡ (без redemptions)."""
+    if code_clean != get_repeatable_tokens2000_promo_code():
+        return
+    await session.execute(
+        text(
+            """
+            INSERT INTO promo_codes (code, tariff, days, grant_tokens, grant_aurum)
+            VALUES (:code, 'free', -1, 2000.0, 0.0)
+            ON CONFLICT (code) DO UPDATE
+            SET tariff = EXCLUDED.tariff,
+                days = EXCLUDED.days,
+                grant_tokens = EXCLUDED.grant_tokens,
+                grant_aurum = EXCLUDED.grant_aurum
+            """
+        ),
+        {"code": code_clean},
+    )
+
+
 async def apply_promo_code(session: AsyncSession, user_id: int, code: str) -> tuple[bool, str]:
     """
     Активировать промокод для пользователя.
@@ -201,7 +273,10 @@ async def apply_promo_code(session: AsyncSession, user_id: int, code: str) -> tu
     code_clean = (code or "").strip().upper()
     if not code_clean:
         return False, "Введите промокод"
+    is_owner_forever = code_clean == get_owner_forever_promo_code()
+    is_repeatable_tokens2000 = code_clean == get_repeatable_tokens2000_promo_code()
     await _lazy_ensure_owner_promo_row(session, code_clean)
+    await _lazy_ensure_repeatable_tokens2000_row(session, code_clean)
     res = await session.execute(select(PromoCode).where(PromoCode.code == code_clean).limit(1))
     promo = res.scalar_one_or_none()
     if not promo:
@@ -211,37 +286,75 @@ async def apply_promo_code(session: AsyncSession, user_id: int, code: str) -> tu
     if not user:
         return False, "Пользователь не найден"
 
-    res_red = await session.execute(
-        select(PromoCodeRedemption)
-        .where(
-            PromoCodeRedemption.promo_code_id == promo.id,
-            PromoCodeRedemption.telegram_user_id == user_id,
+    if not is_owner_forever and not is_repeatable_tokens2000:
+        res_red = await session.execute(
+            select(PromoCodeRedemption)
+            .where(
+                PromoCodeRedemption.promo_code_id == promo.id,
+                PromoCodeRedemption.telegram_user_id == user_id,
+            )
+            .limit(1)
         )
-        .limit(1)
-    )
-    if res_red.scalar_one_or_none():
-        return False, "Вы уже активировали этот промокод"
+        if res_red.scalar_one_or_none():
+            return False, "Вы уже активировали этот промокод"
 
-    user.tariff = promo.tariff or "premium"
     now = datetime.now(timezone.utc)
-    if promo.days and promo.days > 0:
-        base = user.subscription_until if user.subscription_until and user.subscription_until > now else now
-        user.subscription_until = base + timedelta(days=promo.days)
-    else:
-        user.subscription_until = None  # бессрочно
-    user.chat_limit = TARIFF_CHAT_LIMITS.get(user.tariff, 20)
-    if code_clean == get_owner_forever_promo_code():
-        user.chat_limit = get_owner_forever_chat_limit()
-    session.add(PromoCodeRedemption(promo_code_id=promo.id, telegram_user_id=user_id))
+    days = int(getattr(promo, "days", 0) or 0)
+    tariff = str(getattr(promo, "tariff", "") or "").strip().lower()
+    if days >= 0:
+        user.tariff = tariff or "premium"
+        user.subscription_source = "promo"
+        if days > 0:
+            base = user.subscription_until if user.subscription_until and user.subscription_until > now else now
+            user.subscription_until = base + timedelta(days=days)
+        else:
+            user.subscription_until = None  # бессрочно
+        user.chat_limit = TARIFF_CHAT_LIMITS.get(user.tariff, 20)
+        user.group_limit = TARIFF_GROUP_LIMITS.get(user.tariff, 20)
+        user.channel_limit = TARIFF_CHANNEL_LIMITS.get(user.tariff, 20)
+        if is_owner_forever:
+            user.chat_limit = get_owner_forever_chat_limit()
+            user.group_limit = get_owner_forever_chat_limit()
+            user.channel_limit = get_owner_forever_chat_limit()
+    grant_tokens = round(float(getattr(promo, "grant_tokens", 0.0) or 0.0), 2)
+    grant_aurum = round(float(getattr(promo, "grant_aurum", 0.0) or 0.0), 2)
+    promo_aurum_total = round(grant_tokens + grant_aurum, 2)
+    if promo_aurum_total > 0:
+        user.aurum_credits = round(float(getattr(user, "aurum_credits", 0.0) or 0.0) + promo_aurum_total, 2)
+        if is_repeatable_tokens2000:
+            ek = f"promo:{code_clean}:{uuid.uuid4().hex}"[:128]
+        else:
+            ek = f"promo:{code_clean}:aurum"
+        session.add(
+            CreditLedger(
+                user_id=int(user.id),
+                delta=float(promo_aurum_total),
+                reason="promo_aurum",
+                external_key=ek,
+            )
+        )
+    if not is_owner_forever and not is_repeatable_tokens2000:
+        session.add(PromoCodeRedemption(promo_code_id=promo.id, telegram_user_id=user_id))
     try:
         await session.commit()
     except IntegrityError:
         await session.rollback()
-        return False, "Вы уже активировали этот промокод"
-    days_msg = f" на {promo.days} дн." if promo.days else ""
-    if code_clean == get_owner_forever_promo_code():
+        if not is_owner_forever and not is_repeatable_tokens2000:
+            return False, "Вы уже активировали этот промокод"
+        return False, "Не удалось активировать промокод"
+    days_msg = f" на {days} дн." if days > 0 else ""
+    if is_owner_forever:
         return True, f"Тестовый Premium без срока (лимит чатов: {user.chat_limit})"
-    return True, f"Premium активирован{days_msg}"
+    if is_repeatable_tokens2000:
+        return True, f"Начислено по промокоду: +{promo_aurum_total:g} ✨AURUM (можно вводить снова)"
+    if days < 0:
+        if promo_aurum_total > 0:
+            return True, f"Начислено по промокоду: +{promo_aurum_total:g} ✨AURUM"
+        return True, "Начислено по промокоду: бонусов нет"
+    bonus_msg = ""
+    if promo_aurum_total > 0:
+        bonus_msg = f" (+{promo_aurum_total:g} ✨AURUM)"
+    return True, f"Premium активирован{days_msg}{bonus_msg}"
 
 
 async def copy_rule_to_chat(session: AsyncSession, source_chat_id: int, target_chat_id: int) -> Rule:

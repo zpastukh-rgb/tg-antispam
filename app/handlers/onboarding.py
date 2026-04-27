@@ -161,7 +161,7 @@ def kb_back():
 async def render_start(message: Message):
 
     text = (
-        "😈 *AntiSpam Guardian*\n\n"
+        "😈 *AntiSpam Guard*\n\n"
         "Я защищаю Telegram-чаты от:\n\n"
         "• спама\n"
         "• ссылок\n"

@@ -9,6 +9,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Text,
     func,
     String,
     UniqueConstraint,
@@ -17,7 +18,7 @@ from sqlalchemy import (
     Index
 )
 
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 # =========================================================
@@ -28,6 +29,7 @@ class ActionMode(str, enum.Enum):
     delete = "delete"
     mute = "mute"
     ban = "ban"
+    observe = "observe"
 
 
 class Tariff(str, enum.Enum):
@@ -60,7 +62,15 @@ class User(Base):
 
     tariff: Mapped[str] = mapped_column(String(32), default=Tariff.FREE.value)
     chat_limit: Mapped[int] = mapped_column(Integer, default=3)
+    group_limit: Mapped[int] = mapped_column(Integer, default=3)
+    channel_limit: Mapped[int] = mapped_column(Integer, default=1)
     subscription_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Первый успешный платёж по подписке (premium), не сбрасывается при продлении/докупе периода.
+    subscription_activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    subscription_source: Mapped[str | None] = mapped_column(String(32), nullable=True)  # payment | promo | trial | admin | system
+    payment_method_bound: Mapped[bool] = mapped_column(Boolean, default=False)
+    payment_method_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    payment_method_last4: Mapped[str | None] = mapped_column(String(8), nullable=True)
 
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String(32), default="active")
@@ -69,11 +79,130 @@ class User(Base):
     first_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reminder_stage: Mapped[int] = mapped_column(Integer, default=0)
     reports_reminder_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    credits_balance: Mapped[float] = mapped_column(default=0.0)
+    aurum_credits: Mapped[float] = mapped_column(default=0.0)
+    bonus_credits: Mapped[float] = mapped_column(default=0.0)
+    referred_by_tg_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    ref_invited_count: Mapped[int] = mapped_column(Integer, default=0)
+    ref_start_count: Mapped[int] = mapped_column(Integer, default=0)
+    ref_share_count: Mapped[int] = mapped_column(Integer, default=0)
+    ref_paid_count: Mapped[int] = mapped_column(Integer, default=0)
+    ref_sales_total: Mapped[float] = mapped_column(default=0.0)
+    ref_earned_credits: Mapped[float] = mapped_column(default=0.0)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now()
     )
+    last_webapp_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    comeback_offer_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Mini App: черновики «правила в группе» (JSON-массив), синхронизация между устройствами одного tg-аккаунта.
+    post_rules_drafts_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Кто платит AURUM за рассылку, когда постит делегат (менеджер) в чужие чаты: owner | delegate | delegate_first
+    delegate_broadcast_payer: Mapped[str] = mapped_column(String(24), default="delegate_first")
+
+
+# =========================================================
+# REFERRAL SHARE EVENTS (события «поделился рефералкой»)
+# =========================================================
+
+class ReferralShareHit(Base):
+    __tablename__ = "referral_share_hits"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# =========================================================
+# ADMIN MESSAGE TEMPLATES (шаблоны системных сообщений)
+# =========================================================
+
+class AdminMessageTemplate(Base):
+    __tablename__ = "admin_message_templates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    template_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    body_text: Mapped[str] = mapped_column(Text, default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    delay_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    parse_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    is_custom: Mapped[bool] = mapped_column(Boolean, default=False)
+    event_key: Mapped[str] = mapped_column(String(64), default="manual")
+    target_kind: Mapped[str] = mapped_column(String(32), default="owner_admin")
+    trigger_hours: Mapped[int] = mapped_column(Integer, default=24)
+    min_count: Mapped[int] = mapped_column(Integer, default=1)
+    cooldown_minutes: Mapped[int] = mapped_column(Integer, default=1440)
+    schedule_time_hm: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+# =========================================================
+# ADMIN MESSAGE DISPATCH LOGS (антидубли отправок)
+# =========================================================
+
+class AdminMessageDispatchLog(Base):
+    __tablename__ = "admin_message_dispatch_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    template_id: Mapped[int] = mapped_column(Integer, index=True)
+    target_tg_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    event_bucket: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SpamSpikeNotifySent(Base):
+    """Антидубли: одно личное уведомление о всплеске спама на получателя/чат/час (UTC)."""
+
+    __tablename__ = "spam_spike_notify_sent"
+    __table_args__ = (
+        UniqueConstraint("recipient_telegram_id", "chat_id", "bucket_key", name="uq_spam_spike_dm"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    recipient_telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    bucket_key: Mapped[str] = mapped_column(String(16), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SpamSpikeGroupPingSent(Base):
+    """Не чаще одного служебного сообщения в группу за чат/час при всплеске спама."""
+
+    __tablename__ = "spam_spike_group_ping_sent"
+    __table_args__ = (UniqueConstraint("chat_id", "bucket_key", name="uq_spam_spike_group_ping"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    bucket_key: Mapped[str] = mapped_column(String(16), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ChatSpikeAlert(Base):
+    """Активный флаг «чат под угрозой» для UI (TTL ~1 час)."""
+
+    __tablename__ = "chat_spike_alerts"
+    __table_args__ = (
+        UniqueConstraint("chat_id", name="uq_chat_spike_alert_chat"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    spam_count: Mapped[int] = mapped_column(Integer, default=0)
+    joins_count: Mapped[int] = mapped_column(Integer, default=0)
+    window_min: Mapped[int] = mapped_column(Integer, default=35)
+    last_triggered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 # =========================================================
@@ -100,13 +229,21 @@ class Chat(Base):
     # служебные данные
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # group — защищаемая группа/супергруппа; channel — только рассылка (не в лимите «чатов защиты»)
+    chat_kind: Mapped[str] = mapped_column(String(16), default="group")
+
+    # Для chat_kind=channel: id супергруппы обсуждения (getChat.linked_chat), чтобы делегат канала имел доступ к API правил комментариев.
+    linked_discussion_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    # Для группы/супергруппы: id привязанного канала (getChat.linked_chat.type=channel) — обратная связь для Mini App без повторного getChat.
+    linked_channel_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     # статистика
     messages_checked: Mapped[int] = mapped_column(Integer, default=0)
     messages_deleted: Mapped[int] = mapped_column(Integer, default=0)
     users_banned: Mapped[int] = mapped_column(Integer, default=0)
 
-    # ТЗ Напоминания: активность чата для «Guardian сообщения раз в 3 дня» (обновляется при модерации)
+    # ТЗ Напоминания: активность чата для сообщений Guard раз в 3 дня (обновляется при модерации)
     last_activity_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[str] = mapped_column(
@@ -179,16 +316,19 @@ class Rule(Base):
     # логи
     log_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
-    # Публичные сообщения Guardian раз в N удалений (ТЗ ПРАВКИ 2)
+    # Публичные сообщения Guard раз в N удалений (ТЗ ПРАВКИ 2)
     public_alerts_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     public_alerts_every_n: Mapped[int] = mapped_column(Integer, default=5)
     public_alerts_min_interval_sec: Mapped[int] = mapped_column(Integer, default=300)
+    public_alerts_style: Mapped[str] = mapped_column(String(16), default="guard")
     public_alerts_last_sent_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 
-    # ТЗ Напоминания: Guardian сообщения в группе (раз в 3 дня, не чаще 72ч)
+    # ТЗ Напоминания: сообщения Guard в группе (по умолчанию раз в 24ч на Free)
     guardian_messages_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    guardian_periodic_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    guardian_periodic_interval_hours: Mapped[int] = mapped_column(Integer, default=24)
     last_guardian_message_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -201,11 +341,14 @@ class Rule(Base):
 
     # ТЗ доработка Защита: капча на первое сообщение, фильтры (режимы allow/captcha/forbid)
     first_message_captcha_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
-    filter_links_mode: Mapped[str] = mapped_column(String(16), default="forbid")
+    filter_links_mode: Mapped[str] = mapped_column(String(32), default="forbid")
+    # all = весь чат и комментарии; channel_comments_only = только треды постов канала (для форум-обсуждений)
+    filter_links_scope: Mapped[str] = mapped_column(String(32), default="all")
     filter_media_mode: Mapped[str] = mapped_column(String(16), default="allow")
     filter_buttons_mode: Mapped[str] = mapped_column(String(16), default="allow")
     all_captcha_minutes: Mapped[int] = mapped_column(Integer, default=0)
     delete_join_messages: Mapped[bool] = mapped_column(Boolean, default=True)
+    delete_left_messages: Mapped[bool] = mapped_column(Boolean, default=True)
     silence_minutes: Mapped[int] = mapped_column(Integer, default=0)
     master_anti_spam: Mapped[bool] = mapped_column(Boolean, default=True)
 
@@ -215,17 +358,115 @@ class Rule(Base):
     antinakrutka_window_minutes: Mapped[int] = mapped_column(Integer, default=5)
     antinakrutka_action: Mapped[str] = mapped_column(String(32), default="alert")  # alert | alert_restrict
     antinakrutka_restrict_minutes: Mapped[int] = mapped_column(Integer, default=30)
+    # Всплеск спама: подсветка «чат под угрозой» + уведомления владельцу/делегату.
+    spam_spike_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    spam_spike_min_deletes: Mapped[int] = mapped_column(Integer, default=15)
+    spam_spike_window_minutes: Mapped[int] = mapped_column(Integer, default=35)
+    spam_spike_notify_managers: Mapped[bool] = mapped_column(Boolean, default=True)
 
     # Антиспам база: проверять вступивших по общей базе пользователей
     use_global_antispam_db: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Глобальная база плохих URL: дополнительно к режиму ссылок (или режим allow_except_global)
+    use_global_bad_urls: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Сообщения от имени каналов/чатов в группе: отдельный фильтр.
+    # Если включён, Guard режет sender_chat (кроме доверенных @username из whitelist ниже).
+    filter_channel_posts_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    # delete | ban (банит именно sender_chat в группе, не пользователя).
+    filter_channel_posts_action: Mapped[str] = mapped_column(String(16), default="delete")
 
-    # Фильтр мата: удалять/наказывать сообщения с матерными словами (общая таблица profanity_words)
-    filter_profanity_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Guard жёсткий словарь: мат / мутные подработки / казино-ставки
+    filter_profanity_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    filter_jobs_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    filter_casino_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Репутация (карма) за благодарности в группе.
+    reputation_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Капча при входе в группу (до прохождения проверки)
+    join_captcha_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    join_captcha_ttl_minutes: Mapped[int] = mapped_column(Integer, default=3)
+    join_captcha_kind: Mapped[str] = mapped_column(String(32), default="button")
+    join_captcha_prefer_dm: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Приветствие новых участников (по чату).
+    welcome_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    welcome_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # JSON: [[{"text":"...", "url":"..."}], ...]
+    welcome_buttons_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Локальный путь до фото приветствия.
+    welcome_photo_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Лимит приветствий: не чаще N сообщений в минуту (0 = без лимита).
+    welcome_max_per_min: Mapped[int] = mapped_column(Integer, default=0)
+    # Тихий режим при рейде: не отправлять приветствия при массовом входе.
+    welcome_silent_on_raid: Mapped[bool] = mapped_column(Boolean, default=False)
+    welcome_raid_threshold: Mapped[int] = mapped_column(Integer, default=8)
+    welcome_raid_window_minutes: Mapped[int] = mapped_column(Integer, default=2)
+    # Отправлять приветствие каждому N-му вступившему (1 = каждому).
+    welcome_every_n_joins: Mapped[int] = mapped_column(Integer, default=1)
+
+    # Правила: отдельные сценарии для комментариев канала и для группы.
+    rules_channel_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    rules_channel_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rules_channel_buttons_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rules_channel_photo_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    rules_channel_photo_file_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Окно удаления первых комментариев (сек), чтобы первым оставался комментарий с правилами.
+    rules_channel_delete_window_sec: Mapped[int] = mapped_column(Integer, default=0)
+    rules_channel_autopost_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    # JSON список времени ["09:00", "18:30"] для автопостинга правил в комментарии.
+    rules_channel_autopost_times_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    rules_group_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    rules_group_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rules_group_buttons_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rules_group_photo_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    rules_group_photo_file_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    rules_group_autopost_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    # JSON список времени ["10:00", "16:00", "22:00"] для автопостинга правил в группу.
+    rules_group_autopost_times_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rules_group_pin_on_send: Mapped[bool] = mapped_column(Boolean, default=True)
+    # После закрепления правил — удалить сервисное «закрепил(а) сообщение» (ручная и автоотправка).
+    rules_group_delete_pin_notice: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Автоотправка правил в группу после модерации: счётчики «каждые N срабатываний / наказаний».
+    rules_group_event_on_trigger: Mapped[bool] = mapped_column(Boolean, default=False)
+    rules_group_event_on_punish: Mapped[bool] = mapped_column(Boolean, default=False)
+    rules_group_event_trigger_every_n: Mapped[int] = mapped_column(Integer, default=1)
+    rules_group_event_punish_every_n: Mapped[int] = mapped_column(Integer, default=1)
+    rules_group_event_trigger_acc: Mapped[int] = mapped_column(Integer, default=0)
+    rules_group_event_punish_acc: Mapped[int] = mapped_column(Integer, default=0)
+    # Какой черновик Mini App (id в post_rules_drafts) «запущен» в Telegram для группы; сам контент в rules_group_*.
+    rules_group_active_draft_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     created_at: Mapped[str] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now()
     )
+
+
+# =========================================================
+# JOIN CAPTCHA (активная проверка вступившего)
+# =========================================================
+
+
+class JoinCaptchaSession(Base):
+    """Одна незавершённая капча: callback по token + проверка user_id нажимающего."""
+
+    __tablename__ = "join_captcha_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    token: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    correct_idx: Mapped[int] = mapped_column(Integer, default=0)
+    options_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    message_chat_id: Mapped[int] = mapped_column(BigInteger)
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    __table_args__ = (Index("ix_join_captcha_chat_user", "chat_id", "user_id"),)
 
 
 # =========================================================
@@ -239,6 +480,42 @@ class ChatSeenMember(Base):
     chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class ChatReputationWord(Base):
+    """Кастомные слова благодарности для конкретного чата."""
+
+    __tablename__ = "chat_reputation_words"
+
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    word: Mapped[str] = mapped_column(String(64), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ChatReputationScore(Base):
+    """Накопленная карма пользователя в конкретном чате."""
+
+    __tablename__ = "chat_reputation_scores"
+
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    score: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ChatReputationEvent(Base):
+    """События начислений кармы (анти-дубликаты / кулдаун)."""
+
+    __tablename__ = "chat_reputation_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    from_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    to_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    message_id: Mapped[int] = mapped_column(BigInteger, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 # =========================================================
@@ -265,6 +542,36 @@ class GlobalAntispamUser(Base):
     reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
     display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     username: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# =========================================================
+# GLOBAL BAD URL (общие запрещённые фрагменты URL для всех чатов с включённой проверкой)
+# =========================================================
+
+
+class GlobalBadUrlPattern(Base):
+    """Глобальные шаблоны «плохих» ссылок (подстрока в URL, lowercase в БД). Управляет только полный админ."""
+
+    __tablename__ = "global_bad_url_patterns"
+    __table_args__ = (UniqueConstraint("pattern", name="uq_global_bad_url_pattern"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    pattern: Mapped[str] = mapped_column(String(255), index=True)
+    note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class UserGlobalBadUrlPattern(Base):
+    """Персональная «глобальная» база URL владельца (Telegram id): для всех его чатов с включённой проверкой."""
+
+    __tablename__ = "user_global_bad_url_patterns"
+    __table_args__ = (UniqueConstraint("owner_telegram_id", "pattern", name="uq_user_global_bad_url_owner_pattern"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    owner_telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    pattern: Mapped[str] = mapped_column(String(255), index=True)
+    note: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -315,13 +622,47 @@ class WhitelistUser(Base):
 
 
 # =========================================================
+# WHITELIST SENDER CHATS (сообщения от имени каналов/чатов)
+# =========================================================
+class WhitelistSenderChat(Base):
+    __tablename__ = "whitelist_sender_chats"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    channel_username: Mapped[str] = mapped_column(String(255), index=True)  # lowercase, без @
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("chat_id", "channel_username", name="uq_whitelist_sender_chat"),
+    )
+
+
+# =========================================================
+# LINK BLACKLIST (Premium: запрещённые фрагменты URL → бан)
+# =========================================================
+
+
+class LinkBlacklist(Base):
+    """Чёрный список фрагментов ссылок для чата (вхождение в URL, без учёта регистра)."""
+
+    __tablename__ = "link_blacklist"
+    __table_args__ = (UniqueConstraint("chat_id", "pattern", name="uq_link_blacklist_chat_pattern"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    pattern: Mapped[str] = mapped_column(String(255), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# =========================================================
 # STOP WORDS
 # =========================================================
 
 class StopWord(Base):
     __tablename__ = "stop_words"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # Integer: в SQLite с BIGINT autoincrement иногда не заполняется id при INSERT.
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
     chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
 
@@ -356,6 +697,38 @@ class UserContext(Base):
 
 
 # =========================================================
+# OWNER JOIN REPORT SETTINGS (дайджест вступлений в группы владельца)
+# =========================================================
+
+class OwnerJoinReportSetting(Base):
+    __tablename__ = "owner_join_report_settings"
+
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    periods_csv: Mapped[str] = mapped_column(String(64), default="")  # day,3d,week,month (CSV)
+    last_sent_day_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_sent_3d_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_sent_week_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_sent_month_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+# =========================================================
 # CHAT MANAGERS
 # =========================================================
 
@@ -381,6 +754,36 @@ class ChatManager(Base):
 
     __table_args__ = (
         UniqueConstraint("chat_id", "user_id", name="uq_chat_manager"),
+    )
+
+
+# =========================================================
+# CHAT MANAGER INVITES (приглашения админов в кабинет чата)
+# =========================================================
+
+class ChatManagerInvite(Base):
+    __tablename__ = "chat_manager_invites"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.id", ondelete="CASCADE"),
+        index=True,
+    )
+    owner_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    target_telegram_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    target_username: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    connected_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="sent")  # sent|connecting|connected
+    created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("chat_id", "owner_user_id", "target_telegram_id", name="uq_chat_manager_invite_tg"),
     )
 
 
@@ -424,6 +827,9 @@ class ModerationLog(Base):
 
     reason: Mapped[str | None] = mapped_column(String(255))
 
+    # Конкретный триггер: стоп-слово, URL, фрагмент и т.п. (как Verdict.details в лог-чате).
+    detail: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+
     message_text: Mapped[str | None] = mapped_column(String(2000))
 
     created_at: Mapped[str] = mapped_column(
@@ -447,6 +853,8 @@ class PromoCode(Base):
     code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     tariff: Mapped[str] = mapped_column(String(32), default=Tariff.PREMIUM.value)  # premium, premium_trial
     days: Mapped[int] = mapped_column(Integer, default=0)  # 0 = бессрочно до явной отмены, 3 = пробный 3 дня
+    grant_tokens: Mapped[float] = mapped_column(default=0.0)  # +subscription tokens
+    grant_aurum: Mapped[float] = mapped_column(default=0.0)  # +AURUM
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     used_by_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -486,9 +894,153 @@ class Payment(Base):
     status: Mapped[str] = mapped_column(String(32), default="pending")
     provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
     payment_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    receipt_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now()
     )
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CreditLedger(Base):
+    """История начислений/списаний кредитов."""
+    __tablename__ = "credit_ledger"
+    __table_args__ = (
+        UniqueConstraint("user_id", "external_key", name="uq_credit_ledger_user_external"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    delta: Mapped[float] = mapped_column(nullable=False)  # +начисление / -списание
+    reason: Mapped[str] = mapped_column(String(64), default="adjust")
+    external_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PartnerPayoutRequest(Base):
+    """Заявка партнера на вывод средств в RUB."""
+    __tablename__ = "partner_payout_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    amount_rub: Mapped[float] = mapped_column(nullable=False)
+    method: Mapped[str] = mapped_column(String(32), default="sbp")
+    requisites: Mapped[str] = mapped_column(String(255), nullable=False)
+    full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="new")  # new|approved|paid|rejected|frozen
+    risk_flag: Mapped[bool] = mapped_column(Boolean, default=False)
+    risk_note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    admin_note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    payout_notice_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class PartnerCommission(Base):
+    """Начисления по партнерской программе (уровни 1-3)."""
+    __tablename__ = "partner_commissions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    source_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    payment_id: Mapped[int] = mapped_column(Integer, ForeignKey("payments.id", ondelete="CASCADE"), index=True)
+    level: Mapped[int] = mapped_column(Integer, nullable=False)
+    rate: Mapped[float] = mapped_column(nullable=False)
+    sales_amount_rub: Mapped[float] = mapped_column(nullable=False)
+    reward_amount_rub: Mapped[float] = mapped_column(nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="pending")  # pending|available|paid|cancelled
+    available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# =========================================================
+# ADMIN BROADCAST (рассылка постов из админки)
+# =========================================================
+
+
+class AdminBroadcast(Base):
+    __tablename__ = "admin_broadcasts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(255), default="")
+    body_text: Mapped[str] = mapped_column(Text, default="")
+    parse_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    keyboard_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    media_kind: Mapped[str] = mapped_column(String(32), default="none")
+    media_local_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    media_original_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    telegram_file_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="draft")
+    last_target: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    admin_telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    recipient_total: Mapped[int] = mapped_column(Integer, default=0)
+    recipient_ok: Mapped[int] = mapped_column(Integer, default=0)
+    recipient_fail: Mapped[int] = mapped_column(Integer, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    autopost_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    media_items: Mapped[list["AdminBroadcastMedia"]] = relationship(
+        back_populates="broadcast",
+        cascade="all, delete-orphan",
+        order_by="AdminBroadcastMedia.id",
+    )
+
+
+class AdminBroadcastMedia(Base):
+    __tablename__ = "admin_broadcast_media"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    broadcast_id: Mapped[int] = mapped_column(Integer, ForeignKey("admin_broadcasts.id", ondelete="CASCADE"), index=True)
+    media_kind: Mapped[str] = mapped_column(String(32), default="photo")
+    media_local_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    media_original_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    telegram_file_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    broadcast: Mapped[AdminBroadcast] = relationship(back_populates="media_items")
+
+
+class AdminBroadcastDelivery(Base):
+    __tablename__ = "admin_broadcast_delivery"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    broadcast_id: Mapped[int] = mapped_column(Integer, ForeignKey("admin_broadcasts.id", ondelete="CASCADE"), index=True)
+    batch_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    target_kind: Mapped[str] = mapped_column(String(16), default="user", index=True)  # user | group
+    target_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    ok: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class AdminBroadcastRun(Base):
+    __tablename__ = "admin_broadcast_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    broadcast_id: Mapped[int] = mapped_column(Integer, ForeignKey("admin_broadcasts.id", ondelete="CASCADE"), index=True)
+    target_kind: Mapped[str] = mapped_column(String(16), default="users", index=True)  # users | groups | all
+    recipient_total: Mapped[int] = mapped_column(Integer, default=0)
+    recipient_ok: Mapped[int] = mapped_column(Integer, default=0)
+    recipient_fail: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    run_source: Mapped[str | None] = mapped_column(String(16), nullable=True)  # manual | autopost
+
+
+class AutopostCampaign(Base):
+    """Независимое расписание автопоста (не привязано к черновику в редакторе)."""
+
+    __tablename__ = "autopost_campaigns"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    admin_telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    # Порядковый номер кампании у владельца на момент создания (1, 2, 3…); не глобальный id
+    user_seq: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    title: Mapped[str] = mapped_column(String(255), default="")
+    # Черновик для filter_autopost_broadcast_refs (ротация); при удалении поста — SET NULL, задайте заново в UI
+    anchor_broadcast_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    autopost_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

@@ -11,5 +11,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . /app
 
+# Проверка /health (таймаут щедрее при холодном старте uvicorn + импорты).
+HEALTHCHECK --interval=30s --timeout=10s --start-period=35s --retries=5 \
+  CMD python -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/health', timeout=8)"
+
 # Railway подставляет PORT в рантайме; в exec-форме JSON переменные не раскрываются — shell:
 CMD ["sh", "-c", "exec uvicorn app.api.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

@@ -1,15 +1,28 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import { openTelegramDeepLink } from '../utils/openTelegramDeepLink'
 
-const { api, fetch, hasInitData } = useApi()
+const { api, fetchSilent, hasInitData } = useApi()
 const { showToast } = useToast()
+const route = useRoute()
+const router = useRouter()
 const addToGroupUrl = ref(null)
+const addToChannelUrl = ref(null)
+const preparedAddGroupButtonId = ref(null)
 const pendingChats = ref([])
+const pendingLoading = ref(false)
 
 const ADMIN_RIGHTS = 'delete_messages+restrict_members+invite_users+pin_messages'
+const CHANNEL_ADMIN_RIGHTS = 'post_messages+edit_messages+delete_messages+invite_users'
+const connectKind = ref('group')
+const isGroupKind = computed(() => connectKind.value === 'group')
+const pageTitle = computed(() => (isGroupKind.value ? 'Подключить группу' : 'Подключить канал'))
+const pendingGroups = computed(() => (pendingChats.value || []).filter((c) => String(c?.chat_kind || 'group') !== 'channel'))
+const pendingChannels = computed(() => (pendingChats.value || []).filter((c) => String(c?.chat_kind || '') === 'channel'))
+const pendingCurrentKind = computed(() => (isGroupKind.value ? pendingGroups.value : pendingChannels.value))
 
 function buildAddUrl(username) {
   const u = (username || '').replace(/^@/, '').trim()
@@ -17,32 +30,113 @@ function buildAddUrl(username) {
   return `https://t.me/${u}?startgroup=connect&admin=${ADMIN_RIGHTS}`
 }
 
-onMounted(async () => {
+async function loadConnectData() {
   if (!hasInitData.value) return
+  pendingLoading.value = true
   try {
     const [botData, pendingData] = await Promise.all([
-      fetch(() => api.botInfo()).catch(() => null),
-      fetch(() => api.connectPending()).catch(() => ({ chats: [] })),
+      fetchSilent(() => api.botInfo()).catch(() => null),
+      fetchSilent(() => api.connectPending()).catch(() => ({ chats: [] })),
     ])
     addToGroupUrl.value = botData?.add_to_group_url || buildAddUrl(botData?.username)
+    const username = String(botData?.username || '').replace(/^@/, '').trim()
+    addToChannelUrl.value = username ? `https://t.me/${username}?startchannel=connect_channel&admin=${CHANNEL_ADMIN_RIGHTS}` : null
+    preparedAddGroupButtonId.value = botData?.prepared_add_group_button_id || null
     pendingChats.value = pendingData?.chats || []
   } catch {
     //
+  } finally {
+    pendingLoading.value = false
   }
-})
+}
+
+onMounted(loadConnectData)
+
+watch(
+  () => String(route.query.kind || 'group').toLowerCase(),
+  (v) => {
+    connectKind.value = v === 'channel' ? 'channel' : 'group'
+  },
+  { immediate: true },
+)
 
 function openAddToGroup() {
-  if (!addToGroupUrl.value) return
-  const ok = openTelegramDeepLink(addToGroupUrl.value)
-  if (!ok) {
-    showToast('Откройте эту кнопку из Telegram-приложения, не из браузера.')
+  const tg = typeof window !== 'undefined' ? window.Telegram?.WebApp : null
+  // 1) Стабильно для защиты: t.me/...?startgroup=connect&admin= (не reportschat_* из «Отчёты»).
+  if (addToGroupUrl.value) {
+    const ok = openTelegramDeepLink(addToGroupUrl.value)
+    if (ok) {
+      return
+    }
+  }
+  // 2) Фоллбек Mini App: нативный выбор чата
+  const prep = preparedAddGroupButtonId.value
+  if (prep && typeof tg?.requestChat === 'function') {
+    try {
+      tg.requestChat(prep, () => {
+        loadConnectData()
+      })
+      return
+    } catch {
+      //
+    }
+  }
+  showToast('Откройте мини-приложение из Telegram. Если ссылка не сработала, обновите экран (потяните вниз) и повторите.')
+}
+
+function openAddToChannel() {
+  if (addToChannelUrl.value) {
+    const ok = openTelegramDeepLink(addToChannelUrl.value)
+    if (ok) return
+  }
+  showToast('Откройте мини-приложение из Telegram и повторите подключение канала.')
+}
+
+async function clearAllPendingChats() {
+  if (!hasInitData.value) return
+  if (!pendingCurrentKind.value.length) {
+    showToast('Список уже пуст')
+    return
+  }
+  const kindLabel = isGroupKind.value ? 'групп' : 'каналов'
+  const ok = window.confirm(`Очистить список ожидающих ${kindLabel}? Записи будут удалены из панели.`)
+  if (!ok) return
+  pendingLoading.value = true
+  try {
+    const data = await fetchSilent(() => api.connectClearAllPending())
+    await loadConnectData()
+    showToast(`Удалено записей: ${data?.removed ?? 0}`)
+  } catch {
+    showToast('Не удалось очистить список')
+  } finally {
+    pendingLoading.value = false
   }
 }
 </script>
 
 <template>
   <div class="space-y-4">
-    <h1 class="text-xl font-semibold text-gray-900 dark:text-white md:text-2xl">Подключить группу</h1>
+    <div class="flex items-center justify-between gap-2">
+      <h1 class="text-xl font-semibold text-gray-900 dark:text-white md:text-2xl">{{ pageTitle }}</h1>
+      <div class="inline-flex rounded-xl border border-white/10 bg-black/25 p-1 text-[11px]">
+        <button
+          type="button"
+          class="rounded-lg px-2 py-1 font-semibold"
+          :class="isGroupKind ? 'bg-lime-500/90 text-slate-900' : 'text-slate-200'"
+          @click="router.replace({ path: '/connect', query: { kind: 'group' } })"
+        >
+          Группа
+        </button>
+        <button
+          type="button"
+          class="rounded-lg px-2 py-1 font-semibold"
+          :class="!isGroupKind ? 'bg-amber-400/90 text-slate-900' : 'text-slate-200'"
+          @click="router.replace({ path: '/connect', query: { kind: 'channel' } })"
+        >
+          Канал
+        </button>
+      </div>
+    </div>
 
     <div
       v-if="!hasInitData"
@@ -52,38 +146,63 @@ function openAddToGroup() {
     </div>
 
     <template v-else>
-      <div class="rounded-xl border-2 border-red-500/60 bg-red-50 p-4 text-sm text-red-950 dark:border-red-700 dark:bg-red-950/30 dark:text-red-100">
-        <p class="font-medium">📱 На телефоне</p>
-        <p class="mt-2 leading-relaxed">
-          1. Нажмите зелёную кнопку ниже — Telegram сразу откроет выбор группы.<br>
-          2. Выберите группу и выдайте боту права администратора.
+      <div
+        class="rounded-2xl border border-white/12 bg-black/35 p-4 text-sm text-slate-200 shadow-[0_12px_40px_-20px_rgba(0,0,0,0.5)] ring-1 ring-black/30 backdrop-blur-sm dark:border-white/10 dark:bg-black/40 dark:ring-white/5"
+      >
+        <p class="text-xs font-semibold uppercase tracking-wide text-slate-400">Подключение</p>
+        <p v-if="isGroupKind" class="mt-2 text-xs leading-relaxed text-slate-300">
+          Выберите группу кнопкой ниже и выдайте боту админку: удаление сообщений и ограничение участников — без этого защита не работает. Затем настройте «Защита»; отчёты — в пункте меню «Отчёты».
         </p>
-      </div>
-
-      <div class="rounded-xl border-2 border-emerald-500/50 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-100">
-        <p class="leading-relaxed">
-          После выбора группа автоматически добавится в подключённые. Команду <code class="rounded bg-emerald-100 px-1 text-xs dark:bg-emerald-900/40">/check</code> писать не нужно.
+        <p v-else class="mt-2 text-xs leading-relaxed text-slate-300">
+          Подключите канал, чтобы запускать автопост/рассылки, видеть аналитику канала отдельно и управлять правами делегатов по каналу.
+          Если у канала есть обсуждение, статистика будет связана с группой обсуждения.
+        </p>
+        <p class="mt-2 text-[11px] leading-relaxed text-slate-500">
+          Если объекта нет в списке Telegram — добавьте бота в администраторы и снова откройте выбор.
         </p>
       </div>
 
       <div class="flex justify-center pt-1">
         <button
-          v-if="addToGroupUrl"
+          v-if="isGroupKind && (addToGroupUrl || preparedAddGroupButtonId)"
           type="button"
-          class="w-full max-w-sm rounded-xl bg-primary-500 px-6 py-3.5 text-base font-semibold text-guardian-ink shadow-sm shadow-primary-500/25 transition hover:bg-primary-400 active:scale-[0.99]"
+          class="guard-green-soft max-w-[220px] rounded-xl px-4 py-2 text-sm font-semibold transition active:scale-[0.99]"
           @click="openAddToGroup"
         >
-          ➕ Выбрать группу
+          Выбрать группу
+        </button>
+        <button
+          v-else-if="!isGroupKind && addToChannelUrl"
+          type="button"
+          class="max-w-[220px] rounded-xl bg-amber-400/95 px-4 py-2 text-sm font-semibold text-slate-900 shadow-[0_10px_30px_-12px_rgba(251,191,36,0.75)] transition active:scale-[0.99]"
+          @click="openAddToChannel"
+        >
+          Подключить канал
         </button>
         <p v-else class="py-4 text-center text-sm text-gray-500 dark:text-gray-400">Загрузка ссылки…</p>
       </div>
 
-      <div class="rounded-xl border-2 border-sky-500/40 bg-sky-50/90 p-4 text-sm text-sky-950 dark:border-sky-600 dark:bg-sky-950/25 dark:text-sky-100">
-        <p class="font-medium">Чаты, ожидающие подключения</p>
-        <ul v-if="pendingChats.length" class="mt-2 list-disc space-y-1 pl-5">
-          <li v-for="c in pendingChats" :key="c.id">{{ c.title }}</li>
+      <div
+        class="rounded-2xl border border-sky-400/25 bg-sky-950/20 p-3.5 text-xs text-sky-100/95 ring-1 ring-sky-500/15 backdrop-blur-sm dark:border-sky-500/25 dark:bg-sky-950/25 dark:text-sky-100"
+      >
+        <p class="font-medium text-sky-50/95">Ожидают подключения {{ isGroupKind ? 'группы' : 'каналы' }}</p>
+        <ul v-if="pendingCurrentKind.length" class="mt-1.5 list-disc space-y-0.5 pl-4 text-sky-100/90">
+          <li v-for="c in pendingCurrentKind" :key="c.id">
+            {{ c.title }}
+            <span v-if="c.is_shared" class="ml-1 rounded border border-violet-500/40 bg-violet-500/20 px-1 py-[1px] text-[10px] text-violet-100">делегировано</span>
+          </li>
         </ul>
-        <p v-else class="mt-2 text-sky-900/85 dark:text-sky-100/85">Пока пусто.</p>
+        <p v-else class="mt-1.5 text-sky-200/70">Пока пусто.</p>
+        <div class="mt-3">
+          <button
+            type="button"
+            class="rounded-lg border border-rose-400 px-3 py-1.5 text-xs font-semibold text-rose-900 hover:bg-rose-50 dark:border-rose-600 dark:text-rose-100 dark:hover:bg-rose-950/40 disabled:opacity-50"
+            :disabled="pendingLoading"
+            @click="clearAllPendingChats"
+          >
+            Очистить список
+          </button>
+        </div>
       </div>
     </template>
   </div>

@@ -3,6 +3,7 @@ export const navItems = [
   { path: '/chats', name: 'Chats', label: 'Подключённые чаты', icon: 'chats' },
   { path: '/protection', name: 'Protection', label: 'Защита', icon: 'shield' },
   { path: '/reports', name: 'Reports', label: 'Отчёты', icon: 'reports' },
-  { path: '/billing', name: 'Billing', label: 'Тариф и оплата', icon: 'billing' },
+  { path: '/', name: 'Billing', label: 'Тариф и оплата', icon: 'billing', section: 'billing' },
+  { path: '/', name: 'Referral', label: 'Реферальная программа', icon: 'gift', section: 'partner' },
   { path: '/connect', name: 'Connect', label: 'Подключить группу', icon: 'connect' },
 ]

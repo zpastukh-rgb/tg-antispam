@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
+from pathlib import Path
+from urllib.parse import quote_plus
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple, List, Dict
@@ -15,19 +18,33 @@ from aiogram.types import (
     Message,
     CallbackQuery,
     InlineKeyboardMarkup,
+    InlineKeyboardButton,
     KeyboardButton,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
     KeyboardButtonRequestChat,
     ChatAdministratorRights,
+    WebAppInfo,
+    FSInputFile,
+    InputMediaPhoto,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from sqlalchemy import select, or_, func
+from sqlalchemy import select, or_, func, update
 
 from app.db.session import get_session
-from app.db.models import Chat, Rule, UserContext, ChatManager, StopWord
-from app.services.user_service import get_or_create_user, can_add_chat, TARIFF_CHAT_LIMITS
+from app.db.models import Chat, Rule, UserContext, ChatManager, StopWord, Payment, CreditLedger
+from app.db.ensure_defaults import DEFAULT_PREMIUM7_PROMO_CODE, DEFAULT_PREMIUM14_PROMO_CODE
+from app.services.group_connect_actor import resolve_guard_connect_actor_for_group, telegram_user_is_chat_creator
+from app.services.user_service import (
+    get_or_create_user,
+    can_add_chat,
+    TARIFF_CHAT_LIMITS,
+    effective_chat_limit,
+    ensure_user_chat_limit_synced_for_tariff,
+)
+from app.api.service import apply_promo_code
+from app.services.admin_roles import is_full_admin_user
 
 logger = logging.getLogger(__name__)
 from app.texts.guardian_billing import (
@@ -41,7 +58,6 @@ from app.texts.guardian_billing import (
     REMINDER_PREMIUM_SOFT,
     SPAM_DELETED_WITH_PREMIUM_HINT,
     NEWBIE_MODE_ACTIVATED,
-    ANTIRAID_ACTIVATED,
     SUBSCRIPTION_EXPIRED,
 )
 
@@ -49,7 +65,7 @@ from app.texts.guardian_billing import (
 router = Router()
 
 # =========================================================
-# 😈 AntiSpam Guardian — ПАНЕЛЬ (PRO)
+# 😈 AntiSpam Guard — ПАНЕЛЬ (PRO)
 # ---------------------------------------------------------
 # • Inline UI (2 колонки) + подменю
 # • одно сообщение (edit вместо спама)
@@ -188,10 +204,14 @@ CB_GLOBAL_ANTISPAM_TOGGLE = "p:ga_toggle"
 CB_GLOBAL_ANTISPAM_ADD = "p:ga_add"
 CB_PROFANITY = "p:profanity"
 CB_PROFANITY_TOGGLE = "p:prof_toggle"
+CB_PROFANITY_MAT_TOGGLE = "p:prof_mat_toggle"
+CB_PROFANITY_JOBS_TOGGLE = "p:prof_jobs_toggle"
+CB_PROFANITY_CASINO_TOGGLE = "p:prof_casino_toggle"
 CB_PROMO_ENTER = "p:promo_enter"
 CB_COPY_SETTINGS = "p:copy_settings"
 CB_COPY_TARGET = "p:copy_target:"  # + chat_id
 CB_PUBLIC_ALERTS = "p:public_alerts"
+CB_REF = "p:ref"
 # Капча на первое сообщение (ТЗ доработка Защита)
 CB_CAPTCHA_FIRST = "p:captcha_first"
 CB_CAPTCHA_FIRST_ON = "p:captcha_first_on"
@@ -202,12 +222,14 @@ CB_FILTER_MEDIA = "p:fl_media"
 CB_FILTER_BUTTONS = "p:fl_buttons"
 CB_FILTER_ALL_CAPTCHA = "p:fl_all_captcha"
 CB_FILTER_JOIN_MSG = "p:fl_join"
+CB_FILTER_LEFT_MSG = "p:fl_left"
 CB_FILTER_SILENCE = "p:fl_silence"
 CB_FILTER_SPAM = "p:fl_spam"
 # Режимы фильтра: allow / captcha / forbid
 CB_FILTER_SET = "p:fl_set:"  # + mode (allow|captcha|forbid) + key (links|media|buttons)
 CB_FILTER_ALL_CAPTCHA_TIME = "p:fl_cap:"   # + minutes
 CB_FILTER_JOIN_TOGGLE = "p:fl_join_t"
+CB_FILTER_LEFT_TOGGLE = "p:fl_left_t"
 CB_FILTER_SILENCE_TIME = "p:fl_sil:"       # + minutes
 CB_FILTER_SPAM_TOGGLE = "p:fl_spam_t"
 CB_PUBLIC_ALERTS_ON = "p:pa_on"
@@ -246,6 +268,21 @@ REPORTS_REQUEST_ID = 0x7E18  # request_id для выбора чата отчё�
 
 # user_id -> protected chat_id (для какого чата настраиваем чат отчётов)
 _pending_reports_for: Dict[int, int] = {}
+# Защита от гонки: чат, выбранный как чат отчётов, не должен автоподключаться как защищаемый.
+_reports_chat_guard_until: Dict[int, datetime] = {}
+
+
+def _mark_reports_chat_guard(chat_id: int, ttl_minutes: int = 15) -> None:
+    _reports_chat_guard_until[int(chat_id)] = datetime.now(timezone.utc) + timedelta(minutes=max(1, int(ttl_minutes)))
+
+
+def _is_reports_chat_guarded(chat_id: int) -> bool:
+    now = datetime.now(timezone.utc)
+    for cid, until in list(_reports_chat_guard_until.items()):
+        if until <= now:
+            _reports_chat_guard_until.pop(cid, None)
+    until = _reports_chat_guard_until.get(int(chat_id))
+    return bool(until and until > now)
 # user_id -> True (ожидаем ввод user_id для добавления в антиспам базу)
 _pending_antispam_add: Dict[int, bool] = {}
 _pending_promo: Dict[int, bool] = {}
@@ -280,6 +317,8 @@ def _human_mode(mode: str) -> str:
         return "🚫 Вышвырнуть"
     if mode == "mute":
         return "🔇 Притушить"
+    if mode == "observe":
+        return "👁 Заметить"
     return "🧹 Снести"
 
 
@@ -289,6 +328,8 @@ def _next_mode(mode: str) -> str:
         return "mute"
     if mode == "mute":
         return "ban"
+    if mode == "ban":
+        return "observe"
     return "delete"
 
 
@@ -326,11 +367,13 @@ async def _managed_chats(session, user_id: int) -> List[Chat]:
     owner_user_id == user_id или менеджер через ChatManager.
     """
     sub = select(ChatManager.chat_id).where(ChatManager.user_id == user_id).subquery()
+    log_targets = select(Chat.log_chat_id).where(Chat.log_chat_id.is_not(None))
     res = await session.execute(
         select(Chat)
         .where(
             Chat.is_log_chat == False,  # noqa: E712
             Chat.is_active == True,  # noqa: E712
+            Chat.id.not_in(log_targets),
             or_(
                 Chat.owner_user_id == user_id,
                 Chat.id.in_(select(sub.c.chat_id)),
@@ -356,12 +399,14 @@ async def _user_log_chats(session, user_id: int) -> List[Chat]:
 
 async def _pending_chats(session, user_id: int) -> List[Chat]:
     """Чаты, куда пользователь добавил бота, но ещё не подключил к защите (is_active=False)."""
+    log_targets = select(Chat.log_chat_id).where(Chat.log_chat_id.is_not(None))
     res = await session.execute(
         select(Chat)
         .where(
             Chat.owner_user_id == user_id,
             Chat.is_log_chat == False,  # noqa: E712
             Chat.is_active == False,  # noqa: E712
+            Chat.id.not_in(log_targets),
         )
         .order_by(Chat.id.desc())
     )
@@ -407,6 +452,9 @@ async def _get_or_create_rule(session, chat_id: int) -> Rule:
         newbie_enabled=True,
         newbie_minutes=10,
         log_enabled=True,
+        filter_profanity_enabled=True,
+        filter_jobs_enabled=True,
+        filter_casino_enabled=True,
         public_alerts_enabled=False,
         public_alerts_every_n=5,
         public_alerts_min_interval_sec=300,
@@ -431,7 +479,17 @@ async def _edit_panel(bot, user_id: int, text: str, kb: InlineKeyboardMarkup) ->
             )
             return
         except Exception:
-            pass
+            try:
+                await bot.edit_message_caption(
+                    caption=text,
+                    chat_id=user_id,
+                    message_id=msg_id,
+                    parse_mode="Markdown",
+                    reply_markup=kb,
+                )
+                return
+            except Exception:
+                pass
 
     m = await bot.send_message(user_id, text, parse_mode="Markdown", reply_markup=kb)
     _cache_set(user_id, m.message_id)
@@ -442,7 +500,11 @@ async def _edit_or_send(cb: CallbackQuery, text: str, kb: InlineKeyboardMarkup) 
         await cb.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
         _cache_set(cb.from_user.id, cb.message.message_id)
     except Exception:
-        await _edit_panel(cb.bot, cb.from_user.id, text, kb)
+        try:
+            await cb.message.edit_caption(caption=text, parse_mode="Markdown", reply_markup=kb)
+            _cache_set(cb.from_user.id, cb.message.message_id)
+        except Exception:
+            await _edit_panel(cb.bot, cb.from_user.id, text, kb)
 
 
 async def _get_selected_or_alert(cb: CallbackQuery) -> Optional[int]:
@@ -465,6 +527,78 @@ def _kb_back_to_main() -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
+async def _build_referral_screen(bot, tg_user_id: int, from_user) -> tuple[str, InlineKeyboardMarkup, str | None]:
+    me = await bot.get_me()
+    username = (me.username or "").strip()
+    if not username:
+        return "Не удалось сформировать ссылку. Попробуйте позже.", _kb_back_to_main(), None
+    ref_link = f"https://t.me/{username}?start=ref_{tg_user_id}"
+    share_text = "Guard защищает чаты от спама. Подключай и настраивай за минуты."
+    share_url = f"https://t.me/share/url?url={quote_plus(ref_link)}&text={quote_plus(share_text)}"
+
+    async with await get_session() as session:
+        user = await get_or_create_user(
+            session,
+            tg_user_id,
+            username=getattr(from_user, "username", None),
+            first_name=getattr(from_user, "first_name", None),
+        )
+        invited = int(getattr(user, "ref_invited_count", 0) or 0)
+        paid = int(getattr(user, "ref_paid_count", 0) or 0)
+        aurum_balance = float(getattr(user, "aurum_credits", 0.0) or 0.0)
+        bonus_balance = float(getattr(user, "bonus_credits", 0.0) or 0.0)
+        sub_until = getattr(user, "subscription_until", None)
+        now = datetime.now(timezone.utc)
+        days_left = 0
+        if sub_until:
+            if sub_until.tzinfo is None:
+                sub_until = sub_until.replace(tzinfo=timezone.utc)
+            days_left = max(0, (sub_until.date() - now.date()).days)
+        # Берём период из последней успешной оплаты для строки "Доступ".
+        pr = await session.execute(
+            select(Payment.months).where(
+                Payment.user_id == user.id,
+                Payment.status == "succeeded",
+            ).order_by(Payment.created_at.desc()).limit(1)
+        )
+        last_months = pr.scalar_one_or_none()
+
+    access_lbl = f"{last_months} мес." if last_months else "без активного периода"
+    active_until = sub_until.strftime("%d.%m.%Y %H:%M") if sub_until else "—"
+    ref_link_md = f"`{ref_link}`"
+    aurum_balance_str = str(int(aurum_balance)) if aurum_balance == int(aurum_balance) else f"{aurum_balance:.2f}"
+    bonus_balance_str = str(int(bonus_balance)) if bonus_balance == int(bonus_balance) else f"{bonus_balance:.2f}"
+    txt = (
+        "🎁 *Реферальная программа Guard*\n\n"
+        f"Доступ: ✅ {access_lbl}\n"
+        f"├ Осталось дней: *{days_left}*\n"
+        f"└ Активен до: *{active_until}*\n\n"
+        "Баланс:\n"
+        f"├ AURUM (рассылки/ИИ): *{aurum_balance_str}* ✨\n"
+        f"└ Партнёрские токены: *{bonus_balance_str}* ⚡\n\n"
+        "Ваша партнёрская ссылка:\n"
+        f"└ {ref_link_md}\n\n"
+        "⬆️ Нажмите на неё, чтобы скопировать и поделитесь с друзьями! 🎁\n\n"
+        "Приглашённых людей:\n"
+        f"└ Всего: *{invited}*, Оплачивают: *{paid}*"
+    )
+    kb = InlineKeyboardBuilder()
+    referral_info_url = _mini_app_partner_url()
+    if referral_info_url:
+        kb.row(InlineKeyboardButton(text="⚙️ Подробнее о программе", web_app=WebAppInfo(url=referral_info_url)))
+    else:
+        kb.button(text="⚙️ Условия доступа", callback_data="p:ref_access")
+    kb.button(text="✨ Партнёрские → AURUM", callback_data="p:ref_bonus_to_aurum")
+    kb.button(text="⭐ Поделиться", url=share_url)
+    kb.button(text="⬅️ Назад", callback_data=CB_MAIN)
+    kb.adjust(1)
+
+    banner_path = str((Path(__file__).resolve().parent.parent.parent / "static" / "referral_banner.jpg"))
+    if not Path(banner_path).exists():
+        banner_path = None
+    return txt, kb.as_markup(), banner_path
+
+
 def _kb_cancel() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.button(text="✖️ Отмена", callback_data=CB_CANCEL)
@@ -477,34 +611,45 @@ ADDGROUP_PANEL_TEXT = (
     "Нажми *кнопку под полем ввода* — откроется выбор группы, затем Telegram предложит выдать боту права администратора."
 )
 
-def _kb_main() -> InlineKeyboardMarkup:
-    """Главное меню: Подключённые чаты, Тариф, Подключить чат, Добавить бота в группу."""
+def _kb_main(bot_username: str | None = None) -> InlineKeyboardMarkup:
+    """Главное меню: Подключённые чаты, Тариф, Подключить группу."""
+    mini_chats_url = _mini_app_chats_url()
+    mini_connect_url = _mini_app_connect_url()
+    mini_billing_url = _mini_app_billing_url()
     b = InlineKeyboardBuilder()
-    b.button(text="📂 Подключённые чаты", callback_data=CB_CHATS)
-    b.button(text="💳 Тариф и оплата", callback_data=CB_BILLING)
-    b.button(text="➕ Добавить бота в группу", callback_data=CB_ADDGROUP)
-    b.button(text="➕ Подключить чат", callback_data=CB_CONNECT)
+    if mini_chats_url:
+        b.row(InlineKeyboardButton(text="📂 Подключённые чаты", web_app=WebAppInfo(url=mini_chats_url)))
+    else:
+        b.button(text="📂 Подключённые чаты", callback_data=CB_CHATS)
+    if mini_billing_url:
+        b.row(InlineKeyboardButton(text="💳 Тариф и оплата", web_app=WebAppInfo(url=mini_billing_url)))
+    else:
+        b.button(text="💳 Тариф и оплата", callback_data=CB_BILLING)
+    b.button(text="🎁 Реферальная программа", callback_data=CB_REF)
+    if mini_connect_url:
+        b.row(InlineKeyboardButton(text="➕ Подключить группу", web_app=WebAppInfo(url=mini_connect_url)))
+    else:
+        b.button(text="➕ Подключить чат", callback_data=CB_CONNECT)
     b.adjust(1)
     return b.as_markup()
 
 
 def _kb_protection() -> InlineKeyboardMarkup:
-    """ТЗ доработка Защита: Капча, Фильтры, Наказания, Новички, Стоп-слова, Публичные сообщения, Анти-рейд. Назад → управление группой."""
+    """ТЗ доработка Защита: Капча, Фильтры, Наказания, Новички, Стоп-слова, Публичные сообщения. Назад → управление группой."""
     b = InlineKeyboardBuilder()
     b.button(text="⚙ Фильтры", callback_data=CB_FILTERS)
     b.button(text="🔨 Наказания", callback_data=CB_PUNISH)
     b.button(text="👶 Новички", callback_data=CB_NEWBIE)
     b.button(text="🧠 Стоп-слова", callback_data=CB_STOPWORDS)
     b.button(text="📢 Публичные сообщения", callback_data=CB_PUBLIC_ALERTS)
-    b.button(text="🚨 Анти-рейд", callback_data=CB_RAID)
     b.button(text="📈 Антинакрутка", callback_data=CB_ANTINAKRUTKA)
     b.button(text="⬅️ Назад", callback_data=CB_BACK_TO_CHAT)
-    b.adjust(1, 1, 2, 2, 1, 1, 1)
+    b.adjust(1, 1, 2, 2, 1, 1)
     return b.as_markup()
 
 
 def _kb_public_alerts(rule: Rule) -> InlineKeyboardMarkup:
-    """Настройки Guardian сообщения (ТЗ): общий переключатель + раз в N удалений."""
+    """Настройки сообщений Guard (ТЗ): общий переключатель + раз в N удалений."""
     on_off = "ВКЛ" if getattr(rule, "guardian_messages_enabled", True) else "ВЫКЛ"
     every = getattr(rule, "public_alerts_every_n", 5)
     interval_sec = getattr(rule, "public_alerts_min_interval_sec", 300)
@@ -531,17 +676,13 @@ def _kb_chats_modes() -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
-def _kb_chat_manage() -> InlineKeyboardMarkup:
-    """Внутри выбранного чата: Защита, Отчёты, Очистка, Антиспам база, Перенос настроек, Сменить чат, Назад."""
+def _kb_chat_manage(open_protection_url: str | None) -> InlineKeyboardMarkup:
+    """Внутри выбранного чата: одна кнопка открытия защиты + выбор чата."""
     b = InlineKeyboardBuilder()
-    b.button(text="🛡 Защита", callback_data=CB_PROTECTION)
-    b.button(text="🧾 Отчёты", callback_data=CB_REPORTS)
-    b.button(text="🧹 Очистить от удалённых", callback_data=CB_CLEAN_DELETED)
-    b.button(text="📋 Антиспам база", callback_data=CB_GLOBAL_ANTISPAM)
-    b.button(text="🚫 Фильтр мата", callback_data=CB_PROFANITY)
-    b.button(text="📤 Перенести настройки", callback_data=CB_COPY_SETTINGS)
+    if open_protection_url:
+        b.row(InlineKeyboardButton(text="🛡 Защита выбранной группы", web_app=WebAppInfo(url=open_protection_url)))
     b.button(text="🔄 Сменить чат", callback_data=CB_PICK_CHAT)
-    b.button(text="⬅️ Назад", callback_data=CB_CHATS_ONE)
+    b.button(text="⬅️ Назад", callback_data=CB_MAIN)
     b.adjust(1)
     return b.as_markup()
 
@@ -565,6 +706,20 @@ def _filter_policy_label(mode: str) -> str:
     return "РАЗРЕШЕНЫ"
 
 
+def _filter_links_mode_label(mode: str) -> str:
+    m = (mode or "").strip().lower()
+    return {
+        "allow": "РАЗРЕШЕНЫ",
+        "captcha": "ПРОВЕРЯЮ КАПЧЕЙ",
+        "forbid": "КРОМЕ ДОВЕРЕННЫХ",
+        "delete_all": "РЕЖУ ВСЕ ССЫЛКИ",
+        "telegram_only": "ТОЛЬКО TELEGRAM",
+        "smart": "УМНЫЙ РЕЖИМ",
+        "open_blacklist": "КРОМЕ ЧЁРНОГО СПИСКА",
+        "allow_except_global": "КРОМЕ ГЛОБ. URL",
+    }.get(m, _filter_policy_label(m))
+
+
 def _kb_filters_main(rule: Rule, chat_title: str) -> InlineKeyboardMarkup:
     """ТЗ доработка: главный экран Фильтры — 8 подпунктов, Назад → Защита."""
     b = InlineKeyboardBuilder()
@@ -572,6 +727,7 @@ def _kb_filters_main(rule: Rule, chat_title: str) -> InlineKeyboardMarkup:
     b.button(text="🖼 Медиа / стикеры", callback_data=CB_FILTER_MEDIA)
     b.button(text="🔘 Сообщения с кнопками", callback_data=CB_FILTER_BUTTONS)
     b.button(text="👥 Сообщения «вступил в группу»", callback_data=CB_FILTER_JOIN_MSG)
+    b.button(text="🚪 Сообщения «покинул группу»", callback_data=CB_FILTER_LEFT_MSG)
     b.button(text="🔇 Режим тишины", callback_data=CB_FILTER_SILENCE)
     b.button(text="🛡 Защита от спама", callback_data=CB_FILTER_SPAM)
     b.button(text="⬅️ Назад", callback_data=CB_BACK_TO_PROTECTION)
@@ -609,6 +765,15 @@ def _kb_filter_join(rule: Rule) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.button(text="🗑 Удалять", callback_data=f"{CB_FILTER_JOIN_TOGGLE}:1")
     b.button(text="📌 Оставлять", callback_data=f"{CB_FILTER_JOIN_TOGGLE}:0")
+    b.button(text="⬅️ Назад", callback_data=CB_FILTERS)
+    b.adjust(2, 1)
+    return b.as_markup()
+
+
+def _kb_filter_left(rule: Rule) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="🗑 Удалять", callback_data=f"{CB_FILTER_LEFT_TOGGLE}:1")
+    b.button(text="📌 Оставлять", callback_data=f"{CB_FILTER_LEFT_TOGGLE}:0")
     b.button(text="⬅️ Назад", callback_data=CB_FILTERS)
     b.adjust(2, 1)
     return b.as_markup()
@@ -712,7 +877,7 @@ def _kb_stopwords_stub() -> InlineKeyboardMarkup:
 
 
 def _kb_raid_stub() -> InlineKeyboardMarkup:
-    """Анти-рейд: заглушка (Guardian Premium). Кнопка «Открыть подписку» + Назад."""
+    """Анти-рейд: заглушка (Guard Premium). Кнопка «Открыть подписку» + Назад."""
     b = InlineKeyboardBuilder()
     b.button(text=BUTTON_OPEN_SUBSCRIPTION, callback_data=CB_BILLING)
     b.button(text="⬅️ Назад", callback_data=CB_BACK_TO_PROTECTION)
@@ -746,7 +911,7 @@ def _kb_antinakrutka(rule: Rule) -> InlineKeyboardMarkup:
 
 
 def _kb_premium_plans(back_callback: str = CB_MAIN) -> InlineKeyboardMarkup:
-    """Клавиатура выбора периода подписки (Guardian Premium) и ввод промокода."""
+    """Клавиатура выбора периода подписки (Guard Premium) и ввод промокода."""
     b = InlineKeyboardBuilder()
     for months, label, _price, _savings in PREMIUM_PLANS:
         first_line = label.split("\n")[0].strip()
@@ -773,20 +938,115 @@ async def render_main(bot, user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
     """Главный экран: только 3 кнопки (ТЗ правки). Защита/Отчёты — внутри Подключённые чаты."""
     async with await get_session() as session:
         user = await get_or_create_user(session, user_id)
+        await ensure_user_chat_limit_synced_for_tariff(session, user)
+        await session.refresh(user)
         chats = await _managed_chats(session, user_id)
+        chat_limit_disp = effective_chat_limit(user, user_id)
         t = (user.tariff or "free").lower()
         tariff_label = "PREMIUM" if t in ("premium", "pro", "business") else "FREE"
         sub_until = _format_subscription_until(user.subscription_until)
+        aurum_credits = float(getattr(user, "aurum_credits", 0.0) or 0.0)
+        aurum_credits_str = str(int(aurum_credits)) if aurum_credits == int(aurum_credits) else f"{aurum_credits:.2f}"
+        bonus_credits = float(getattr(user, "bonus_credits", 0.0) or 0.0)
+        bonus_credits_str = str(int(bonus_credits)) if bonus_credits == int(bonus_credits) else f"{bonus_credits:.2f}"
         txt = (
-            "😈 *AntiSpam Guardian* на страже порядка.\n\n"
-            "Я защищаю чаты от:\n"
-            "• спама\n• рейдов\n• мусорных ссылок\n• ботов\n\n"
+            "Привет 👋\n\n"
+            "😈 Я [AntiSpam Guard](https://t.me/GuardAntiSpam_Bot)\n\n"
+            "Говорю по делу, режу спам без жалости и держу чат в порядке.\n\n"
+            "*Моя работа* - держать модерацию комментариев каналов и групп в железном кулаке.\n"
+            "*Расширенные фишки* включаются подпиской за токены ⚡\n\n"
+            "Быстро сношу *спам* и ссылки на левые ресурсы\n"
+            "Не пускаю персонажей со *спамными никами*\n"
+            "Гашу *флуд и накрутки*, пока они не устроили цирк\n\n"
+            "Все удобно настраивается в приложении по кнопкам ниже 👇\n\n"
+            "📋 Инструкция в приложении под знаком ℹ️\n"
+            "🌍 Поменять язык бота `/guard_lang`\n"
+            "🤝 Отблагодарить душевно `/guard_tip`\n\n"
             f"Тариф: *{tariff_label}*\n"
-            f"Подключено чатов: *{len(chats)} / {user.chat_limit}*\n"
-            f"Подписка до: *{sub_until}*\n\n"
-            "_Выберите действие:_"
+            f"Подключено чатов: *{len(chats)} / {chat_limit_disp}*\n"
+            f"Подписка до: *{sub_until}*\n"
+            f"AURUM ✨ *{aurum_credits_str}*\n"
+            f"Партнёрские токены *{bonus_credits_str}* ⚡\n\n"
+            "Все ваши чаты по кнопке ниже 👇🏻"
         )
-        return txt, _kb_main()
+        me = await bot.get_me()
+        return txt, _kb_main(getattr(me, "username", None))
+
+
+def _mini_app_base_url() -> Optional[str]:
+    url = (
+        os.getenv("MINI_APP_URL")
+        or os.getenv("WEBAPP_URL")
+        or os.getenv("RAILWAY_SERVICE_ACCOMPLISHED_CAT_URL")
+        or ""
+    ).strip()
+    if not url:
+        return None
+    if not url.startswith("http://") and not url.startswith("https://"):
+        url = f"https://{url}"
+    return url.rstrip("/")
+
+
+def _mini_app_connect_url() -> Optional[str]:
+    base = _mini_app_base_url()
+    if not base:
+        return None
+    return f"{base}/connect"
+
+
+def _mini_app_chats_url() -> Optional[str]:
+    base = _mini_app_base_url()
+    if not base:
+        return None
+    return f"{base}/chats"
+
+
+def _mini_app_protection_url() -> Optional[str]:
+    base = _mini_app_base_url()
+    if not base:
+        return None
+    return f"{base}/protection"
+
+
+def _mini_app_reports_url() -> Optional[str]:
+    base = _mini_app_base_url()
+    if not base:
+        return None
+    return f"{base}/reports"
+
+
+def _mini_app_startapp_link(bot_username: str, section: str) -> str:
+    """
+    Универсальный deep-link для Mini App (лучше совместим с клиентами, где web_app-кнопки работают нестабильно).
+    Если задан MINI_APP_SHORT_NAME — используем прямой формат /<short_name>?startapp=...
+    """
+    uname = (bot_username or "").strip().lstrip("@")
+    short_name = (os.getenv("MINI_APP_SHORT_NAME") or os.getenv("WEBAPP_SHORT_NAME") or "").strip().strip("/")
+    safe_section = (section or "panel").strip() or "panel"
+    if short_name:
+        return f"https://t.me/{uname}/{short_name}?startapp={safe_section}"
+    return f"https://t.me/{uname}?startapp={safe_section}"
+
+
+def _mini_app_billing_url() -> Optional[str]:
+    base = _mini_app_base_url()
+    if not base:
+        return None
+    return f"{base}/?section=billing"
+
+
+def _mini_app_referral_url(open_info: bool = False) -> Optional[str]:
+    base = _mini_app_base_url()
+    if not base:
+        return None
+    return f"{base}/referral?info=1" if open_info else f"{base}/referral"
+
+
+def _mini_app_partner_url() -> Optional[str]:
+    base = _mini_app_base_url()
+    if not base:
+        return None
+    return f"{base}/?section=partner"
 
 
 def _back_code(back_to: str, copy_mode: bool = False) -> str:
@@ -868,9 +1128,9 @@ async def render_pick_chat(
     return b.as_markup()
 
 
-# Кэш chat_id, для которых уже отправили приветствие (защита от двойного my_chat_member)
+# Кэш chat_id, для которых уже отправили приветствие (защита от двойного my_chat_member / chat_shared)
 _WELCOME_SENT_AT: Dict[int, float] = {}
-_WELCOME_SENT_TTL = 60  # секунд
+_WELCOME_SENT_TTL = 120  # секунд
 
 
 def _purge_old_welcome_sent() -> None:
@@ -880,33 +1140,88 @@ def _purge_old_welcome_sent() -> None:
         del _WELCOME_SENT_AT[cid]
 
 
-async def connect_chat_after_bot_added(
-    bot, chat_id: int, chat_title: str, user_id: int, username: str | None, first_name: str | None
-) -> bool:
-    """ТЗ ЧЕККК: после добавления бота как админа — подключить чат, приветствие в группу, сообщение в личку. Returns True если подключили."""
-    # Защита от двойного приветствия: проверка в самом начале (до любых await)
+async def _send_connect_welcome_once(bot, chat_id: int, chat_title: str, user_id: int) -> None:
+    """Одно приветствие в группу + одно сообщение владельцу в личку (дедуп по chat_id)."""
     _purge_old_welcome_sent()
     if chat_id in _WELCOME_SENT_AT:
-        return True
-    # Не подключать как защищаемую группу: чат журнала отчётов или куда уже шлют отчёты
+        return
+    _WELCOME_SENT_AT[chat_id] = time.monotonic()
+    try:
+        title_esc = (chat_title or "Чат").replace("*", "\\*")
+        welcome = (
+            "😈 AntiSpam Guard на месте.\n\n"
+            f"Группа *«{title_esc}»* теперь под защитой.\n\n"
+            "Я слежу за порядком:\n• режу спам\n• давлю подозрительные ссылки\n"
+            "• останавливаю мусор, рейды и лишний шум\n\n"
+            "_Что важно:_\n1. Не спамить.\n2. Не кидать ссылки без необходимости.\n"
+            "3. Не устраивать помойку в чате.\n4. Не лезть с враждой, оскорблениями и провокациями.\n\n"
+            "Нормальным людям — спокойно общаться.\nСпамерам — будет больно.\n\n_Админ управляет защитой._"
+        )
+        await bot.send_message(chat_id, welcome, parse_mode="Markdown")
+
+        protection_url = _mini_app_protection_url()
+        reports_url = _mini_app_reports_url()
+        me = await bot.get_me()
+        panel_url = f"https://t.me/{me.username}?start=panel"
+        protection_startapp_url = _mini_app_startapp_link(str(me.username or ""), "protection")
+        reports_startapp_url = _mini_app_startapp_link(str(me.username or ""), "reports")
+        kb_rows = []
+        # В зеркальных/сторонних клиентах web_app-кнопки часто не открываются.
+        # Для совместимости используем startapp deep-link'и (Telegram внутри сам откроет Mini App).
+        kb_rows.append([InlineKeyboardButton(text="🛡 Открыть защиту", url=protection_startapp_url)])
+        kb_rows.append([InlineKeyboardButton(text="📊 Подключить чат отчётов", url=reports_startapp_url)])
+        await bot.send_message(
+            user_id,
+            (
+                "✅ *Группа подключена*\n\n"
+                f"🏷 Группа: *{title_esc}*\n"
+                "🛡 Защита включена и готова к работе.\n\n"
+                "Что советую сделать дальше:\n"
+                "• открыть раздел *Защита* и проверить фильтры;\n"
+                "• подключить чат отчётов, чтобы видеть удаления/муты/баны."
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=kb_rows
+                or [[InlineKeyboardButton(text="⚙ Открыть панель", url=panel_url)]]
+            ),
+        )
+    except Exception as e:
+        logger.warning("connect welcome send failed chat=%s: %s", chat_id, e)
+        _WELCOME_SENT_AT.pop(chat_id, None)
+
+
+async def connect_chat_after_bot_added(
+    bot, chat_id: int, chat_title: str, user_id: int, username: str | None, first_name: str | None
+) -> tuple[bool, str | None]:
+    """Подключить чат после добавления бота. Возвращает (успех, код_ошибки): limit | owner | log | error."""
+    # Явный /start connect в группе — отменяем «ожидание чата отчётов» и гард от ложной привязки лога.
+    _reports_chat_guard_until.pop(int(chat_id), None)
+    _pending_reports_for.pop(int(user_id), None)
+    # Не подключать как защищаемую: чужой лог или уже куда-то привязан как лог (кроме снятия ложной пометки ниже).
     try:
         async with await get_session() as session:
             cr = await session.get(Chat, chat_id)
             if cr and cr.is_log_chat:
-                return False
+                ow = int(getattr(cr, "owner_user_id", 0) or 0)
+                if ow != int(user_id) or bool(getattr(cr, "is_active", False)):
+                    return False, "log"
+                await session.execute(
+                    update(Chat).where(Chat.log_chat_id == int(chat_id)).values(log_chat_id=None)
+                )
+                cr.is_log_chat = False
+                await session.commit()
             res = await session.execute(
-                select(Chat.id).where(Chat.log_chat_id == chat_id).limit(1)
+                select(Chat.id).where(Chat.log_chat_id == int(chat_id)).limit(1)
             )
             if res.scalar_one_or_none():
-                return False
-            if user_id in _pending_reports_for:
-                return False
+                return False, "log"
     except Exception:
         pass
     try:
-        already_connected = False
         async with await get_session() as session:
             await get_or_create_user(session, user_id, username=username, first_name=first_name)
+            log_targets = select(Chat.log_chat_id).where(Chat.log_chat_id.is_not(None))
             can_add, current_count, limit = await can_add_chat(session, user_id)
             if not can_add:
                 try:
@@ -916,24 +1231,37 @@ async def connect_chat_after_bot_added(
                     )
                 except Exception:
                     pass
-                return False
+                return False, "limit"
 
             chat_row = await session.get(Chat, chat_id)
             rule = await session.get(Rule, chat_id)
-            # Чат уже подключён (повторный my_chat_member) — не дублируем приветствие
+            prev_ow = int(getattr(chat_row, "owner_user_id", 0) or 0) if chat_row else 0
+            if chat_row and prev_ow not in (0, int(user_id)):
+                # «Ожидающий» чат мог остаться на менеджера (кто добавил бота); создатель группы забирает к себе
+                if (not bool(getattr(chat_row, "is_active", False))) and await telegram_user_is_chat_creator(
+                    bot, chat_id, int(user_id)
+                ):
+                    chat_row.owner_user_id = int(user_id)
+                else:
+                    try:
+                        await bot.send_message(
+                            user_id,
+                            "ℹ️ Эта группа в Guard уже привязана к другому Telegram‑аккаунту (кабинету), не к вашему.\n\n"
+                            "Если вы создатель группы — подключите из панели или нажмите /start здесь: кабинет "
+                            "привязывается к *создателю* чата, а не к тому, кто отправил команду.\n"
+                            "Иначе владелец может выдать доступ в «Админы и доступы».",
+                            parse_mode="Markdown",
+                        )
+                    except Exception:
+                        pass
+                    return False, "owner"
+            # Чат уже в БД как активный (например после chat_shared) — догоняем приветствие один раз
             if chat_row and chat_row.is_active and rule is not None:
-                already_connected = True
                 chat_row.title = chat_title
-                chat_row.owner_user_id = user_id
                 await _set_selected_chat(session, user_id, chat_id)
                 await session.commit()
-                return True
-
-            # Защита от гонки: только один поток отправляет приветствие (проверка + установка без await между ними)
-            _purge_old_welcome_sent()
-            if chat_id in _WELCOME_SENT_AT:
-                return True
-            _WELCOME_SENT_AT[chat_id] = time.monotonic()
+                await _send_connect_welcome_once(bot, chat_id, chat_title, user_id)
+                return True, None
 
             if not chat_row:
                 chat_row = Chat(
@@ -946,7 +1274,6 @@ async def connect_chat_after_bot_added(
                 session.add(chat_row)
             else:
                 chat_row.title = chat_title
-                chat_row.owner_user_id = user_id
                 chat_row.is_active = True
                 chat_row.is_log_chat = False
 
@@ -961,47 +1288,34 @@ async def connect_chat_after_bot_added(
                     newbie_enabled=True,
                     newbie_minutes=10,
                     log_enabled=True,
+                    filter_profanity_enabled=True,
+                    filter_jobs_enabled=True,
+                    filter_casino_enabled=True,
                 )
                 session.add(rule)
 
             await _set_selected_chat(session, user_id, chat_id)
             await session.commit()
 
-        title_esc = (chat_title or "Чат").replace("*", "\\*")
-        welcome = (
-            "😈 AntiSpam Guardian на месте.\n\n"
-            f"Группа *«{title_esc}»* теперь под защитой.\n\n"
-            "Я слежу за порядком:\n• режу спам\n• давлю подозрительные ссылки\n"
-            "• останавливаю мусор, рейды и лишний шум\n\n"
-            "_Что важно:_\n1. Не спамить.\n2. Не кидать ссылки без необходимости.\n"
-            "3. Не устраивать помойку в чате.\n4. Не лезть с враждой, оскорблениями и провокациями.\n\n"
-            "Нормальным людям — спокойно общаться.\nСпамерам — будет больно.\n\n_Админ управляет защитой._"
-        )
-        await bot.send_message(chat_id, welcome, parse_mode="Markdown")
-
-        me = await bot.get_me()
-        panel_url = f"https://t.me/{me.username}?start=panel"
-        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-        await bot.send_message(
-            user_id,
-            f"✅ *Группа подключена.*\n\nГруппа: *{title_esc}*\n\nНастрой защиту в панели.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⚙ Открыть настройки", url=panel_url)]
-            ]),
-        )
-        return True
+        await _send_connect_welcome_once(bot, chat_id, chat_title, user_id)
+        return True, None
     except Exception:
-        return False
+        return False, "error"
 
 
 async def render_chat_manage(bot, user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
-    """Экран «Управление группой» для выбранного чата (Защита, Отчёты, Сменить чат)."""
+    """Экран выбранной группы: одна кнопка открытия защиты + смена чата."""
     async with await get_session() as session:
         selected = await _get_selected_chat(session, user_id)
         if not selected:
-            return await render_main(bot, user_id)
+            chats = await _managed_chats(session, user_id)
+            if chats:
+                selected = chats[0].id
+                await _set_selected_chat(session, user_id, int(selected))
+            else:
+                return await render_main(bot, user_id)
         chat_row = await session.get(Chat, selected)
+        rule = await _get_or_create_rule(session, selected)
     title = (getattr(chat_row, "title", None) or "").strip() if chat_row else ""
     try:
         tg_chat = await bot.get_chat(selected)
@@ -1017,12 +1331,19 @@ async def render_chat_manage(bot, user_id: int) -> Tuple[str, InlineKeyboardMark
         pass
     if not title:
         title = await _get_chat_title(bot, selected)
+    master_on = "ВКЛ" if bool(getattr(rule, "master_anti_spam", True)) else "ВЫКЛ"
+    action = _human_mode(getattr(rule, "action_mode", "delete"))
+    silence = int(getattr(rule, "silence_minutes", 0) or 0)
+    silence_txt = "выкл" if silence <= 0 else _format_mute_minutes_long(silence)
     txt = (
-        "😈 *Управление группой*\n\n"
-        f"Группа: *{title}*\n\n"
-        "_Что делаем?_"
+        "🛡 *Подключённые чаты*\n\n"
+        f"Настройки для: *{title}*\n"
+        f"• Защита: *{master_on}*\n"
+        f"• Режим: *{action}*\n"
+        f"• Тишина: *{silence_txt}*\n\n"
+        "_Открыть защиту этого чата:_"
     )
-    return txt, _kb_chat_manage()
+    return txt, _kb_chat_manage(_mini_app_protection_url())
 
 
 # =========================================================
@@ -1104,7 +1425,7 @@ async def cmd_groups(message: Message):
 
 
 async def _send_premium_screen(bot, user_id: int, back_callback: str = CB_MAIN) -> None:
-    """Показать экран Guardian Premium: описание + кнопки периодов подписки."""
+    """Показать экран Guard Premium: описание + кнопки периодов подписки."""
     txt = CMD_PREMIUM_RESPONSE
     kb = _kb_premium_plans(back_callback=back_callback)
     await _edit_panel(bot, user_id, txt, kb)
@@ -1132,12 +1453,55 @@ async def cmd_premium(message: Message):
     await _send_premium_screen(message.bot, message.from_user.id)
 
 
+async def _is_full_admin_sender(session, message: Message) -> bool:
+    if not message.from_user:
+        return False
+    u = await get_or_create_user(
+        session,
+        int(message.from_user.id),
+        username=getattr(message.from_user, "username", None),
+        first_name=getattr(message.from_user, "first_name", None),
+    )
+    return is_full_admin_user(u, int(message.from_user.id))
+
+
+@router.message(Command("premium7"))
+async def cmd_premium7(message: Message):
+    if message.chat.type != "private" or not message.from_user:
+        return
+    await message.answer(
+        "Команда отключена. Используйте промокод в панели → Аккаунт → Промокод.\n"
+        f"Код Premium 7 дней: `{DEFAULT_PREMIUM7_PROMO_CODE}`",
+        parse_mode="Markdown",
+    )
+
+
+@router.message(Command("premium14"))
+async def cmd_premium14(message: Message):
+    if message.chat.type != "private" or not message.from_user:
+        return
+    await message.answer(
+        "Команда отключена. Используйте промокод в панели → Аккаунт → Промокод.\n"
+        f"Код Premium 14 дней: `{DEFAULT_PREMIUM14_PROMO_CODE}`",
+        parse_mode="Markdown",
+    )
+
+
+@router.message(Command("aurum1000"))
+async def cmd_aurum1000(message: Message):
+    if message.chat.type != "private" or not message.from_user:
+        return
+    await message.answer(
+        "Команда отключена. Используйте сложный промокод в панели → Аккаунт → Промокод.",
+    )
+
+
 @router.message(
     F.chat.type == "private",
     F.text.func(lambda t: (t or "").strip().lower() == "тариф"),
 )
 async def cmd_text_tariff(message: Message):
-    """Ответ на текст «тариф» — экран Guardian Premium."""
+    """Ответ на текст «тариф» — экран Guard Premium."""
     if not message.from_user:
         return
     _cache_clear(message.from_user.id)
@@ -1147,8 +1511,12 @@ async def cmd_text_tariff(message: Message):
 async def _try_delete_quiet(bot, chat_id: int, message_id: int) -> None:
     try:
         await bot.delete_message(chat_id, message_id)
-    except (TelegramBadRequest, TelegramForbiddenError):
+    except TelegramBadRequest:
         pass
+    except TelegramForbiddenError as e:
+        from app.services.diagnostics_incidents import record_panel_dm_delete_forbidden
+
+        await record_panel_dm_delete_forbidden(int(chat_id), int(message_id), e)
 
 
 async def _ban_from_chat_after_global_antispam(bot, chat_id: int, user_id: int) -> bool:
@@ -1275,7 +1643,7 @@ async def cmd_support(message: Message):
         await message.answer(CMD_PRIVATE_ONLY)
         return
     txt = (
-        "😈 *AntiSpam Guardian* слушает.\n\n"
+        "😈 *AntiSpam Guard* слушает.\n\n"
         "Контакт техподдержки: @pastukh_viscera\n\n"
         "_Перед тем как писать:_\n"
         "• убедитесь, что вопрос нельзя решить через панель\n"
@@ -1284,6 +1652,149 @@ async def cmd_support(message: Message):
         "Сообщения вида «Привет» / «Не работает» игнорируются."
     )
     await message.answer(txt, parse_mode="Markdown")
+
+
+@router.message(Command("guard_help"))
+async def cmd_guard_help(message: Message):
+    if message.chat.type != "private":
+        await message.answer(CMD_PRIVATE_ONLY)
+        return
+    base = _mini_app_base_url()
+    txt = (
+        "📋 Полная инструкция — в панели (значок *i* внутри приложения).\n\n"
+        "Откройте панель кнопкой *Меню* под полем ввода в этом чате или кнопкой ниже."
+    )
+    if base:
+        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+        await message.answer(
+            txt,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🛡 Открыть панель Guard", web_app=WebAppInfo(url=base))],
+            ]),
+        )
+    else:
+        await message.answer(
+            txt + "\n\n_(Кнопка недоступна: на сервере не задан MINI_APP_URL / WEBAPP_URL.)_",
+            parse_mode="Markdown",
+        )
+
+
+@router.message(Command("guard_ref"))
+async def cmd_guard_ref(message: Message):
+    if message.chat.type != "private":
+        await message.answer(CMD_PRIVATE_ONLY)
+        return
+    if not message.from_user:
+        return
+    txt, kb, banner_path = await _build_referral_screen(message.bot, message.from_user.id, message.from_user)
+    if banner_path:
+        from aiogram.types import FSInputFile
+        await message.answer_photo(FSInputFile(banner_path), caption=txt, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
+    else:
+        await message.answer(txt, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
+
+
+@router.callback_query(F.data == CB_REF)
+async def cb_ref(cb: CallbackQuery):
+    await cb.answer()
+    if not cb.from_user:
+        return
+    txt, kb, banner_path = await _build_referral_screen(cb.bot, cb.from_user.id, cb.from_user)
+    if banner_path:
+        try:
+            await cb.message.edit_media(
+                media=InputMediaPhoto(media=FSInputFile(banner_path), caption=txt, parse_mode="Markdown"),
+                reply_markup=kb,
+            )
+            _cache_set(cb.from_user.id, cb.message.message_id)
+            return
+        except Exception:
+            try:
+                await cb.message.edit_caption(caption=txt, parse_mode="Markdown", reply_markup=kb)
+                _cache_set(cb.from_user.id, cb.message.message_id)
+                return
+            except Exception:
+                pass
+    await _edit_or_send(cb, txt, kb)
+
+
+@router.message(Command("guard_lang"))
+async def cmd_guard_lang(message: Message):
+    if message.chat.type != "private":
+        await message.answer(CMD_PRIVATE_ONLY)
+        return
+    await message.answer("🌍 Смена языка появится в приложении в отдельном разделе")
+
+
+@router.message(Command("guard_tip"))
+async def cmd_guard_tip(message: Message):
+    if message.chat.type != "private":
+        await message.answer(CMD_PRIVATE_ONLY)
+        return
+    await message.answer("🤝 Поддержать Guard можно через раздел Тариф и оплата")
+
+
+@router.callback_query(F.data == "p:ref_access")
+async def cb_ref_access(cb: CallbackQuery):
+    await cb.answer()
+    txt = (
+        "⚙️ *Условия доступа Guard*\n\n"
+        "Доступ продлевается оплатами через ЮKassa\n"
+        "Реферальные проценты начисляются в партнёрские токены\n"
+        "и могут быть переведены в AURUM ✨ кнопкой в рефералке\n\n"
+        "Для продления откройте раздел Тариф и оплата и завершите платеж\n\n"
+        "Если автопродление вам не нужно, отключите его кнопкой ниже"
+    )
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⛔ Отключить автопродление", callback_data="p:ref_autorenew_off")
+    kb.button(text="⬅️ Назад", callback_data=CB_MAIN)
+    kb.adjust(1)
+    await _edit_or_send(cb, txt, kb.as_markup())
+
+
+@router.callback_query(F.data.in_(("p:ref_bonus_to_sub", "p:ref_bonus_to_aurum")))
+async def cb_ref_bonus_to_aurum(cb: CallbackQuery):
+    await cb.answer()
+    if not cb.from_user:
+        return
+    moved = 0.0
+    async with await get_session() as session:
+        user = await get_or_create_user(
+            session,
+            cb.from_user.id,
+            username=getattr(cb.from_user, "username", None),
+            first_name=getattr(cb.from_user, "first_name", None),
+        )
+        bonus = float(getattr(user, "bonus_credits", 0.0) or 0.0)
+        if bonus > 0:
+            moved = round(bonus, 2)
+            user.bonus_credits = round(max(0.0, bonus - moved), 2)
+            user.aurum_credits = round(float(getattr(user, "aurum_credits", 0.0) or 0.0) + moved, 2)
+            session.add(CreditLedger(user_id=int(user.id), delta=-moved, reason="bonus_to_aurum"))
+            session.add(CreditLedger(user_id=int(user.id), delta=+moved, reason="bonus_to_aurum_target"))
+            await session.commit()
+    if moved <= 0:
+        await cb.answer("Партнерских токенов пока нет", show_alert=True)
+    else:
+        moved_str = str(int(moved)) if moved == int(moved) else f"{moved:.2f}"
+        await cb.answer(f"Переведено в AURUM: {moved_str} ✨", show_alert=True)
+    txt, kb, _ = await _build_referral_screen(cb.bot, cb.from_user.id, cb.from_user)
+    await _edit_or_send(cb, txt, kb)
+
+
+@router.callback_query(F.data == "p:ref_autorenew_off")
+async def cb_ref_autorenew_off(cb: CallbackQuery):
+    await cb.answer("Готово")
+    txt = (
+        "⛔ *Автопродление отключено*\n\n"
+        "Чтобы снова включить доступ откройте Тариф и оплата\n"
+        "и завершите новую оплату в Guard"
+    )
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data=CB_MAIN)
+    kb.adjust(1)
+    await _edit_or_send(cb, txt, kb.as_markup())
 
 
 # =========================================================
@@ -1298,7 +1809,22 @@ async def cb_noop(cb: CallbackQuery):
 @router.callback_query(F.data == CB_MAIN)
 async def cb_main(cb: CallbackQuery):
     await cb.answer()
-    await show_panel(cb.bot, cb.from_user.id)
+    text, kb = await render_main(cb.bot, cb.from_user.id)
+    has_referral_media = bool(
+        getattr(cb.message, "photo", None)
+        or getattr(cb.message, "video", None)
+        or getattr(cb.message, "animation", None)
+        or getattr(cb.message, "document", None)
+    )
+    if has_referral_media:
+        new_msg = await cb.message.answer(text, parse_mode="Markdown", reply_markup=kb)
+        _cache_set(cb.from_user.id, new_msg.message_id)
+        try:
+            await cb.message.delete()
+        except Exception:
+            pass
+        return
+    await _edit_or_send(cb, text, kb)
 
 
 async def _render_protection_screen(bot, user_id: int, chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
@@ -1317,7 +1843,7 @@ async def _render_protection_screen(bot, user_id: int, chat_id: int) -> tuple[st
     # Текущие значения настроек раздела «Защита»
     cap_first = "ВКЛ" if getattr(rule, "first_message_captcha_enabled", False) else "ВЫКЛ"
     links_mode = _get_filter_links_mode(rule)
-    links_label = _filter_policy_label(links_mode)
+    links_label = _filter_links_mode_label(links_mode)
     media_mode = getattr(rule, "filter_media_mode", "allow")
     media_label = _filter_policy_label(media_mode)
     buttons_mode = getattr(rule, "filter_buttons_mode", "allow")
@@ -1325,6 +1851,7 @@ async def _render_protection_screen(bot, user_id: int, chat_id: int) -> tuple[st
     all_captcha_m = getattr(rule, "all_captcha_minutes", 0) or 0
     all_captcha = "ВЫКЛ" if all_captcha_m == 0 else f"на {_format_mute_minutes_long(all_captcha_m)}"
     join_msg = "Удалять" if getattr(rule, "delete_join_messages", True) else "Оставлять"
+    left_msg = "Удалять" if getattr(rule, "delete_left_messages", True) else "Оставлять"
     silence_m = getattr(rule, "silence_minutes", 0) or 0
     silence = "ВЫКЛ" if silence_m == 0 else _format_mute_minutes_long(silence_m)
     anti_spam = "ВКЛ" if getattr(rule, "master_anti_spam", True) else "ВЫКЛ"
@@ -1333,7 +1860,7 @@ async def _render_protection_screen(bot, user_id: int, chat_id: int) -> tuple[st
     newbie_on = "ВКЛ" if rule.newbie_enabled else "ВЫКЛ"
     newbie_m = int(rule.newbie_minutes or 10)
     stopwords_str = f"{stopwords_count} слов" if stopwords_count else "не настроены"
-    guardian = "ВКЛ" if getattr(rule, "guardian_messages_enabled", True) else "ВЫКЛ"
+    gm_on = "ВКЛ" if getattr(rule, "guardian_messages_enabled", True) else "ВЫКЛ"
     every_n = getattr(rule, "public_alerts_every_n", 5)
     interval_sec = getattr(rule, "public_alerts_min_interval_sec", 300)
     interval_min = interval_sec // 60
@@ -1345,16 +1872,18 @@ async def _render_protection_screen(bot, user_id: int, chat_id: int) -> tuple[st
         f"• 🖼 Медиа / стикеры: *{media_label}*\n"
         f"• 🔘 Кнопки: *{buttons_label}*\n"
         f"• 👥 Сообщения «вступил в группу»: *{join_msg}*\n"
+        f"• 🚪 Сообщения «покинул группу»: *{left_msg}*\n"
         f"• 🔇 Режим тишины: *{silence}*\n"
         f"• 🛡 Защита от спама: *{anti_spam}*\n"
         f"• 😈 Наказания: *{punish_mode}*, мут *{_format_mute_minutes_long(mute_m)}*\n"
         f"• 👶 Новички: *{newbie_on}*, окно *{newbie_m}* мин\n"
         f"• 🧠 Стоп-слова: *{stopwords_str}*\n"
-        f"• 📢 Guardian сообщения: *{guardian}*, раз в *{every_n}* удалений, интервал *{interval_min}* мин\n"
-        "• 🚨 Анти-рейд: Guardian Premium\n"
+        f"• 📢 Сообщения Guard: *{gm_on}*, раз в *{every_n}* удалений, интервал *{interval_min}* мин\n"
         f"• 📈 Антинакрутка: *{'ВКЛ' if getattr(rule, 'antinakrutka_enabled', False) else 'ВЫКЛ'}*\n"
         f"• 📋 Антиспам база (при входе): *{'ВКЛ' if getattr(rule, 'use_global_antispam_db', False) else 'ВЫКЛ'}*\n"
-        f"• 🚫 Фильтр мата: *{'ВКЛ' if getattr(rule, 'filter_profanity_enabled', False) else 'ВЫКЛ'}*\n\n"
+        f"• 🚫 Жёсткий словарь: мат *{'ВКЛ' if getattr(rule, 'filter_profanity_enabled', False) else 'ВЫКЛ'}*, "
+        f"подработки *{'ВКЛ' if getattr(rule, 'filter_jobs_enabled', False) else 'ВЫКЛ'}*, "
+        f"казино *{'ВКЛ' if getattr(rule, 'filter_casino_enabled', False) else 'ВЫКЛ'}*\n\n"
         "_Выберите пункт ниже для изменения._"
     )
     return txt, _kb_protection()
@@ -1514,7 +2043,7 @@ async def cb_antinakrutka_set(cb: CallbackQuery):
 
 @router.callback_query(F.data == CB_PUBLIC_ALERTS)
 async def cb_public_alerts(cb: CallbackQuery):
-    """📢 Guardian сообщения (ТЗ Напоминания): вкл/выкл + раз в N удалений, не чаще 72ч/30мин."""
+    """📢 Сообщения Guard (ТЗ Напоминания): вкл/выкл + раз в N удалений, не чаще 72ч/30мин."""
     await cb.answer()
     chat_id = await _get_selected_or_alert(cb)
     if not chat_id:
@@ -1526,7 +2055,7 @@ async def cb_public_alerts(cb: CallbackQuery):
     interval_sec = getattr(rule, "public_alerts_min_interval_sec", 300)
     interval_min = interval_sec // 60
     txt = (
-        "📢 *Guardian сообщения*\n\n"
+        "📢 *Сообщения Guard*\n\n"
         f"Сейчас: *{on_off}*\n"
         f"После каждых *{every}* удалений — короткая реплика в чат.\n"
         f"Минимальный интервал: *{interval_min}* мин\n"
@@ -1547,7 +2076,7 @@ async def cb_public_alerts_on(cb: CallbackQuery):
         rule.guardian_messages_enabled = True
         rule.public_alerts_enabled = True
         await session.commit()
-    txt = "📢 Guardian сообщения: *ВКЛ*. Раз в N удалений — реплика в чат; раз в 3 дня — сообщение в группе."
+    txt = "📢 Сообщения Guard: *ВКЛ*. Раз в N удалений — реплика в чат; раз в 3 дня — сообщение в группе."
     await _edit_or_send(cb, txt, _kb_public_alerts(rule))
 
 
@@ -1562,7 +2091,7 @@ async def cb_public_alerts_off(cb: CallbackQuery):
         rule.guardian_messages_enabled = False
         rule.public_alerts_enabled = False
         await session.commit()
-    txt = "📢 Guardian сообщения: *ВЫКЛ*. Сообщения в группе и после удалений отключены."
+    txt = "📢 Сообщения Guard: *ВЫКЛ*. Сообщения в группе и после удалений отключены."
     await _edit_or_send(cb, txt, _kb_public_alerts(rule))
 
 
@@ -1581,7 +2110,7 @@ async def cb_public_alerts_every(cb: CallbackQuery):
         rule.public_alerts_every_n = n
         await session.commit()
     on_off = "ВКЛ" if getattr(rule, "guardian_messages_enabled", True) else "ВЫКЛ"
-    txt = f"📢 Частота: каждые *{n}* удалений. Guardian сообщения: *{on_off}*."
+    txt = f"📢 Частота: каждые *{n}* удалений. Сообщения Guard: *{on_off}*."
     await _edit_or_send(cb, txt, _kb_public_alerts(rule))
 
 
@@ -1609,13 +2138,15 @@ async def cb_billing(cb: CallbackQuery):
     await cb.answer()
     async with await get_session() as session:
         user = await get_or_create_user(session, cb.from_user.id)
+        await ensure_user_chat_limit_synced_for_tariff(session, user)
+        await session.refresh(user)
         count = len(await _managed_chats(session, cb.from_user.id))
     t = (user.tariff or "free").lower()
     tariff_label = "PREMIUM" if t in ("premium", "pro", "business") else "FREE"
     sub_until = _format_subscription_until(user.subscription_until)
-    limit = user.chat_limit
+    limit = effective_chat_limit(user, cb.from_user.id)
     txt = (
-        "🛡 *Guardian Premium*\n\n"
+        "🛡 *Guard Premium*\n\n"
         f"Тариф: *{tariff_label}*\n"
         f"Подключено чатов: *{count} / {limit}*\n"
         f"Подписка до: *{sub_until}*\n\n"
@@ -1627,11 +2158,11 @@ async def cb_billing(cb: CallbackQuery):
 
 @router.callback_query(F.data == CB_PROMO_ENTER)
 async def cb_promo_enter(cb: CallbackQuery):
-    """Запрос ввода промокода (Premium / тест на 3 дня)."""
+    """Запрос ввода промокода Premium."""
     await cb.answer()
     _pending_promo[cb.from_user.id] = True
     await cb.message.answer(
-        "🎁 Отправь *промокод* одним сообщением (например TRIAL3 для теста Premium на 3 дня). Отмена: /cancel",
+        "🎁 Отправь *промокод* одним сообщением. Отмена: /cancel",
         parse_mode="Markdown",
     )
 
@@ -1667,7 +2198,7 @@ async def cb_plan_select(cb: CallbackQuery):
         except Exception:
             logger.exception("YooKassa create from bot panel")
             await cb.message.answer(
-                "Не удалось создать платёж. Попробуйте позже или откройте мини-приложение → Тариф и оплата."
+                "Не удалось создать платёж. Попробуйте позже или откройте раздел «Тариф и оплата»."
             )
             return
         txt = (
@@ -1695,10 +2226,10 @@ async def cb_plan_select(cb: CallbackQuery):
 
 @router.callback_query(F.data == CB_CHATS)
 async def cb_chats_menu(cb: CallbackQuery):
-    """Подключённые чаты: выбор режима — одна группа / все группы (ТЗ правки)."""
+    """Подключённые чаты: сразу экран выбранной группы (без режима one/all)."""
     await cb.answer()
-    txt = "📂 *Подключённые чаты*\n\nВыбери режим:"
-    await _edit_or_send(cb, txt, _kb_chats_modes())
+    text, kb = await render_chat_manage(cb.bot, cb.from_user.id)
+    await _edit_or_send(cb, text, kb)
 
 
 @router.callback_query(F.data == CB_CHATS_ONE)
@@ -1976,28 +2507,33 @@ async def cb_copy_target(cb: CallbackQuery):
 
 @router.callback_query(F.data == CB_PROFANITY)
 async def cb_profanity(cb: CallbackQuery):
-    """Экран «Фильтр мата»: только вкл/выкл в чате (список слов скрыт)."""
+    """Экран «Жёсткий словарь»: категории с отдельными тумблерами."""
     await cb.answer()
     chat_id = await _get_selected_or_alert(cb)
     if not chat_id:
         return
     async with await get_session() as session:
         rule = await _get_or_create_rule(session, chat_id)
-        use_prof = bool(getattr(rule, "filter_profanity_enabled", False))
+        use_mat = bool(getattr(rule, "filter_profanity_enabled", False))
+        use_jobs = bool(getattr(rule, "filter_jobs_enabled", False))
+        use_casino = bool(getattr(rule, "filter_casino_enabled", False))
     txt = (
-        "🚫 *Фильтр мата*\n\n"
-        "Нецензурная лексика обрабатывается по правилам наказаний в этом чате. "
-        "Содержимое словаря в интерфейсе не показывается.\n\n"
-        f"• В этом чате: *{'ВКЛ' if use_prof else 'ВЫКЛ'}*"
+        "🚫 *Guard: Жёсткий словарь*\n\n"
+        "Режет по корням и искажённым формам. Наказание берётся из раздела «Наказания».\n\n"
+        f"• Мат: *{'ВКЛ' if use_mat else 'ВЫКЛ'}*\n"
+        f"• Мутные подработки: *{'ВКЛ' if use_jobs else 'ВЫКЛ'}*\n"
+        f"• Казино / ставки: *{'ВКЛ' if use_casino else 'ВЫКЛ'}*"
     )
     b = InlineKeyboardBuilder()
-    b.button(text=f"{'❌ Выключить' if use_prof else '✅ Включить'} в этом чате", callback_data=CB_PROFANITY_TOGGLE)
+    b.button(text=f"🚫 Мат: {'ВКЛ' if use_mat else 'ВЫКЛ'}", callback_data=CB_PROFANITY_MAT_TOGGLE)
+    b.button(text=f"🕵️ Подработки: {'ВКЛ' if use_jobs else 'ВЫКЛ'}", callback_data=CB_PROFANITY_JOBS_TOGGLE)
+    b.button(text=f"🎰 Казино/ставки: {'ВКЛ' if use_casino else 'ВЫКЛ'}", callback_data=CB_PROFANITY_CASINO_TOGGLE)
     b.button(text="⬅️ Назад", callback_data=CB_BACK_TO_CHAT)
     b.adjust(1)
     await _edit_or_send(cb, txt, b.as_markup())
 
 
-@router.callback_query(F.data == CB_PROFANITY_TOGGLE)
+@router.callback_query(F.data == CB_PROFANITY_MAT_TOGGLE)
 async def cb_profanity_toggle(cb: CallbackQuery):
     await cb.answer()
     chat_id = await _get_selected_or_alert(cb)
@@ -2006,6 +2542,32 @@ async def cb_profanity_toggle(cb: CallbackQuery):
     async with await get_session() as session:
         rule = await _get_or_create_rule(session, chat_id)
         rule.filter_profanity_enabled = not getattr(rule, "filter_profanity_enabled", False)
+        await session.commit()
+    await cb_profanity(cb)
+
+
+@router.callback_query(F.data == CB_PROFANITY_JOBS_TOGGLE)
+async def cb_profanity_jobs_toggle(cb: CallbackQuery):
+    await cb.answer()
+    chat_id = await _get_selected_or_alert(cb)
+    if not chat_id:
+        return
+    async with await get_session() as session:
+        rule = await _get_or_create_rule(session, chat_id)
+        rule.filter_jobs_enabled = not getattr(rule, "filter_jobs_enabled", False)
+        await session.commit()
+    await cb_profanity(cb)
+
+
+@router.callback_query(F.data == CB_PROFANITY_CASINO_TOGGLE)
+async def cb_profanity_casino_toggle(cb: CallbackQuery):
+    await cb.answer()
+    chat_id = await _get_selected_or_alert(cb)
+    if not chat_id:
+        return
+    async with await get_session() as session:
+        rule = await _get_or_create_rule(session, chat_id)
+        rule.filter_casino_enabled = not getattr(rule, "filter_casino_enabled", False)
         await session.commit()
     await cb_profanity(cb)
 
@@ -2064,7 +2626,16 @@ async def cb_filters(cb: CallbackQuery):
 
 def _get_filter_links_mode(rule: Rule) -> str:
     mode = getattr(rule, "filter_links_mode", None)
-    if mode in ("allow", "captcha", "forbid"):
+    if mode in (
+        "allow",
+        "captcha",
+        "forbid",
+        "delete_all",
+        "telegram_only",
+        "smart",
+        "open_blacklist",
+        "allow_except_global",
+    ):
         return mode
     return "forbid" if rule.filter_links else "allow"
 
@@ -2078,7 +2649,10 @@ async def cb_filter_links(cb: CallbackQuery):
     async with await get_session() as session:
         rule = await _get_or_create_rule(session, chat_id)
     mode = _get_filter_links_mode(rule)
-    txt = f"🔗 *Ссылки*\n\nТекущее состояние: *{_filter_policy_label(mode)}*"
+    txt = (
+        f"🔗 *Ссылки*\n\nТекущее состояние: *{_filter_links_mode_label(mode)}*\n\n"
+        "Расширенные режимы (умный, только Telegram, чёрный список и т.д.) — в Mini App → Защита → Ссылки."
+    )
     await _edit_or_send(cb, txt, _kb_filter_policy(rule, "links"))
 
 
@@ -2183,6 +2757,20 @@ async def cb_filter_join_msg(cb: CallbackQuery):
     await _edit_or_send(cb, txt, _kb_filter_join(rule))
 
 
+@router.callback_query(F.data == CB_FILTER_LEFT_MSG)
+async def cb_filter_left_msg(cb: CallbackQuery):
+    await cb.answer()
+    chat_id = await _get_selected_or_alert(cb)
+    if not chat_id:
+        return
+    async with await get_session() as session:
+        rule = await _get_or_create_rule(session, chat_id)
+    delete_ = getattr(rule, "delete_left_messages", True)
+    state = "УДАЛЯЮ" if delete_ else "ОСТАВЛЯЮ"
+    txt = f"🚪 *Служебные сообщения о выходе из группы*\n\nТекущее состояние: *{state}*"
+    await _edit_or_send(cb, txt, _kb_filter_left(rule))
+
+
 @router.callback_query(F.data.startswith(CB_FILTER_JOIN_TOGGLE))
 async def cb_filter_join_toggle(cb: CallbackQuery):
     await cb.answer()
@@ -2198,6 +2786,23 @@ async def cb_filter_join_toggle(cb: CallbackQuery):
         rule.delete_join_messages = bool(val)
         await session.commit()
     await cb_filter_join_msg(cb)
+
+
+@router.callback_query(F.data.startswith(CB_FILTER_LEFT_TOGGLE))
+async def cb_filter_left_toggle(cb: CallbackQuery):
+    await cb.answer()
+    try:
+        val = int(cb.data.split(":")[-1])
+    except (ValueError, IndexError):
+        val = 1
+    chat_id = await _get_selected_or_alert(cb)
+    if not chat_id:
+        return
+    async with await get_session() as session:
+        rule = await _get_or_create_rule(session, chat_id)
+        rule.delete_left_messages = bool(val)
+        await session.commit()
+    await cb_filter_left_msg(cb)
 
 
 @router.callback_query(F.data == CB_FILTER_SILENCE)
@@ -2494,11 +3099,19 @@ async def cb_connect_reports(cb: CallbackQuery):
     await cb.answer()
     _pending_reports_for[cb.from_user.id] = protected_chat_id
     try:
+        me = await cb.bot.get_me()
+        username = me.username or "bot"
+        pick_url = f"https://t.me/{username}?startgroup=reportschat_{protected_chat_id}"
+        await cb.bot.send_message(cb.from_user.id, "\u2063", reply_markup=ReplyKeyboardRemove())
+        kb = InlineKeyboardBuilder()
+        kb.button(text="📋 Выбрать чат отчётов", url=pick_url)
+        kb.adjust(1)
         await cb.message.answer(
-            "Нажми *«Выбрать чат отчётов»* ниже и укажи группу. "
-            "Права администратора в чате отчётов не нужны — только возможность писать сообщения.",
+            "⬅️ *Управляй Guard через кнопку «Меню» сверху.*\n\n"
+            "Кнопку под полем ввода мы отключили. "
+            "Нажми кнопку ниже, чтобы открыть выбор чата отчётов.",
             parse_mode="Markdown",
-            reply_markup=_kb_connect_reports_chat(),
+            reply_markup=kb.as_markup(),
         )
     except Exception as e:
         import logging
@@ -2514,17 +3127,26 @@ async def cb_connect_reports(cb: CallbackQuery):
 
 @router.callback_query(F.data == CB_PICK_REPORTS_CHAT)
 async def cb_pick_reports_chat(cb: CallbackQuery):
-    """Как «Подключить»: одна reply-кнопка и выбор чата, без инлайн-списка."""
+    """Выбор нового чата отчётов через inline deep-link кнопку."""
     await cb.answer()
     protected_chat_id = await _get_selected_or_alert(cb)
     if not protected_chat_id:
         return
     _pending_reports_for[cb.from_user.id] = protected_chat_id
     try:
+        me = await cb.bot.get_me()
+        username = me.username or "bot"
+        pick_url = f"https://t.me/{username}?startgroup=reportschat_{protected_chat_id}"
+        await cb.bot.send_message(cb.from_user.id, "\u2063", reply_markup=ReplyKeyboardRemove())
+        kb = InlineKeyboardBuilder()
+        kb.button(text="📋 Выбрать новый чат отчётов", url=pick_url)
+        kb.adjust(1)
         await cb.message.answer(
-            "Нажми *«Выбрать чат отчётов»* ниже и укажи новую группу для отчётов.",
+            "⬅️ *Управляй Guard через кнопку «Меню» сверху.*\n\n"
+            "Кнопку под полем ввода мы отключили. "
+            "Нажми кнопку ниже, чтобы выбрать новый чат отчётов.",
             parse_mode="Markdown",
-            reply_markup=_kb_connect_reports_chat(),
+            reply_markup=kb.as_markup(),
         )
     except Exception as e:
         import logging
@@ -2599,30 +3221,16 @@ async def cb_reports_help(cb: CallbackQuery):
 # CONNECT (инструкция без метаний)
 # =========================================================
 
-# ТЗ ЧЕККК: права бота при добавлении через выбор чата (минимально нужные для защиты)
+# ТЗ ЧЕККК: права бота при добавлении через выбор чата (минимум для модерации).
+# user_administrator_rights не задаём — иначе Telegram показывает только чаты, где у вас есть ВСЕ эти права (список режется).
 BOT_ADMIN_RIGHTS = ChatAdministratorRights(
     is_anonymous=False,
-    can_manage_chat=True,
+    can_manage_chat=False,
     can_delete_messages=True,
     can_manage_video_chats=False,
     can_restrict_members=True,
     can_promote_members=False,
-    can_change_info=True,
-    can_invite_users=True,
-    can_post_stories=False,
-    can_edit_stories=False,
-    can_delete_stories=False,
-    can_pin_messages=True,
-)
-# Для модалки «назначить админа»: права пользователя в чате (superset прав бота) — без этого клиент может не показать диалог
-USER_ADMIN_RIGHTS_FOR_REQUEST = ChatAdministratorRights(
-    is_anonymous=False,
-    can_manage_chat=True,
-    can_delete_messages=True,
-    can_manage_video_chats=False,
-    can_restrict_members=True,
-    can_promote_members=False,
-    can_change_info=True,
+    can_change_info=False,
     can_invite_users=True,
     can_post_stories=False,
     can_edit_stories=False,
@@ -2684,7 +3292,6 @@ def _kb_connect_request_chat_with_admin() -> ReplyKeyboardMarkup:
                         request_id=CONNECT_REQUEST_ID,
                         chat_is_channel=False,
                         request_title=True,
-                        user_administrator_rights=USER_ADMIN_RIGHTS_FOR_REQUEST,
                         bot_administrator_rights=BOT_ADMIN_RIGHTS,
                         bot_is_member=False,
                     ),
@@ -2720,9 +3327,10 @@ async def cb_addgroup(cb: CallbackQuery):
         from aiogram.types import InlineKeyboardButton
         me = await cb.bot.get_me()
         username = me.username or "bot"
-        add_url = f"https://t.me/{username}?startgroup"
+        admin_q = "delete_messages+restrict_members+invite_users+pin_messages"
+        add_url = f"https://t.me/{username}?startgroup=connect&admin={admin_q}"
         fallback_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Добавить бота в группу (затем выдайте права вручную)", url=add_url)],
+            [InlineKeyboardButton(text="➕ Добавить бота в группу (с правами администратора)", url=add_url)],
         ])
         await cb.bot.send_message(
             cb.from_user.id,
@@ -2791,14 +3399,14 @@ async def cb_connect_confirm(cb: CallbackQuery):
         return
 
     bot = cb.bot
-    user_id = cb.from_user.id
+    actor_id = cb.from_user.id
 
     try:
         chat = await bot.get_chat(chat_id)
         if chat.type not in ("group", "supergroup"):
             await cb.answer("Только группы 😈", show_alert=True)
             return
-        member = await bot.get_chat_member(chat_id, user_id)
+        member = await bot.get_chat_member(chat_id, actor_id)
         if member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
             await cb.answer("Только админ группы может подключить чат 😈", show_alert=True)
             return
@@ -2814,14 +3422,16 @@ async def cb_connect_confirm(cb: CallbackQuery):
         await cb.answer("Не удалось проверить чат 😈", show_alert=True)
         return
 
+    owner_id, owner_un, owner_fn = await resolve_guard_connect_actor_for_group(bot, chat_id, cb.from_user)
+
     try:
         async with await get_session() as session:
-            await get_or_create_user(session, user_id, username=cb.from_user.username, first_name=cb.from_user.first_name)
-            can_add, current_count, limit = await can_add_chat(session, user_id)
+            await get_or_create_user(session, owner_id, username=owner_un, first_name=owner_fn)
+            can_add, current_count, limit = await can_add_chat(session, owner_id)
             if not can_add:
                 try:
                     await bot.send_message(
-                        user_id,
+                        actor_id,
                         f"❌ Лимит чатов: {current_count} из {limit}. Повысь тариф в панели: 💳 Тариф и оплата.",
                     )
                 except Exception:
@@ -2833,14 +3443,23 @@ async def cb_connect_confirm(cb: CallbackQuery):
                 chat_row = Chat(
                     id=chat_id,
                     title=chat.title,
-                    owner_user_id=user_id,
+                    owner_user_id=owner_id,
                     is_active=True,
                     is_log_chat=False,
                 )
                 session.add(chat_row)
             else:
+                ow = int(getattr(chat_row, "owner_user_id", 0) or 0)
+                if ow not in (0, int(owner_id)):
+                    if (not bool(chat_row.is_active)) and await telegram_user_is_chat_creator(bot, chat_id, owner_id):
+                        chat_row.owner_user_id = int(owner_id)
+                    else:
+                        await cb.answer(
+                            "Группа уже привязана к другому Telegram‑аккаунту в Guard. Делегирование выдаёт только владелец.",
+                            show_alert=True,
+                        )
+                        return
                 chat_row.title = chat.title
-                chat_row.owner_user_id = user_id
                 chat_row.is_active = True
                 chat_row.is_log_chat = False
 
@@ -2856,15 +3475,18 @@ async def cb_connect_confirm(cb: CallbackQuery):
                     newbie_enabled=True,
                     newbie_minutes=10,
                     log_enabled=True,
+                    filter_profanity_enabled=True,
+                    filter_jobs_enabled=True,
+                    filter_casino_enabled=True,
                 )
                 session.add(rule)
 
-            await _set_selected_chat(session, user_id, chat_id)
+            await _set_selected_chat(session, owner_id, chat_id)
             await session.commit()
 
         title_esc = (chat.title or "Чат").replace("*", "\\*")
         welcome = (
-            "😈 AntiSpam Guardian на месте.\n\n"
+            "😈 AntiSpam Guard на месте.\n\n"
             f"Группа *«{title_esc}»* теперь под защитой.\n\n"
             "Я слежу за порядком:\n• режу спам\n• давлю подозрительные ссылки\n"
             "• останавливаю мусор, рейды и лишний шум\n\n"
@@ -2876,11 +3498,10 @@ async def cb_connect_confirm(cb: CallbackQuery):
             await bot.send_message(chat_id, welcome, parse_mode="Markdown")
         except Exception:
             pass
-
         try:
             await cb.message.edit_text("✅ Группа подключена к защите. Управление — в панели.", reply_markup=_kb_back_to_main())
         except Exception:
-            await _edit_panel(bot, user_id, "✅ Группа подключена. Открой панель: /panel", _kb_back_to_main())
+            await _edit_panel(bot, actor_id, "✅ Группа подключена. Открой панель: /panel", _kb_back_to_main())
     except Exception:
         await cb.answer(
             "Ошибка базы данных. Примените миграции (миграция 008). См. DEPLOY-RAILWAY.md.",
@@ -2947,6 +3568,7 @@ async def on_chat_shared(message: Message):
             await message.answer("Сессия истекла. Зайди в Отчёты и нажми «Подключить чат отчётов» снова.", reply_markup=ReplyKeyboardRemove())
             return
         reports_chat_id = message.chat_shared.chat_id
+        _mark_reports_chat_guard(int(reports_chat_id))
         reports_title = (message.chat_shared.title or "").strip() or str(reports_chat_id)
         try:
             async with await get_session() as session:
@@ -2966,6 +3588,7 @@ async def on_chat_shared(message: Message):
                 else:
                     log_chat_row.title = reports_title
                     log_chat_row.is_log_chat = True
+                    log_chat_row.is_active = False
                     log_chat_row.owner_user_id = user_id
                 await session.commit()
 
@@ -2981,7 +3604,7 @@ async def on_chat_shared(message: Message):
             title_esc = protected_title.replace("*", "\\*")
 
             msg_text = (
-                "😈 *AntiSpam Guardian* — чат отчётов для группы "
+                "😈 *AntiSpam Guard* — чат отчётов для группы "
                 f"*«{title_esc}»*.\n\n"
                 "Сюда приходят служебные отчёты о модерации (удаления, муты, баны и т.д.). "
                 "Обычных участников здесь не трогаю."
@@ -3001,14 +3624,14 @@ async def on_chat_shared(message: Message):
 
     chat_id = message.chat_shared.chat_id
     bot = message.bot
-    user_id = message.from_user.id
+    actor_id = message.from_user.id
 
     try:
         chat = await bot.get_chat(chat_id)
         if chat.type not in ("group", "supergroup"):
             await message.answer("Только группы можно подключить 😈", reply_markup=ReplyKeyboardRemove())
             return
-        member = await bot.get_chat_member(chat_id, user_id)
+        member = await bot.get_chat_member(chat_id, actor_id)
         if member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
             await message.answer("Только админ группы может подключить чат 😈", reply_markup=ReplyKeyboardRemove())
             return
@@ -3024,10 +3647,12 @@ async def on_chat_shared(message: Message):
         await message.answer("Не удалось проверить чат 😈", reply_markup=ReplyKeyboardRemove())
         return
 
+    owner_id, owner_un, owner_fn = await resolve_guard_connect_actor_for_group(bot, chat_id, message.from_user)
+
     try:
         async with await get_session() as session:
-            await get_or_create_user(session, user_id, username=message.from_user.username, first_name=message.from_user.first_name)
-            can_add, current_count, limit = await can_add_chat(session, user_id)
+            await get_or_create_user(session, owner_id, username=owner_un, first_name=owner_fn)
+            can_add, current_count, limit = await can_add_chat(session, owner_id)
             if not can_add:
                 await message.answer(
                     f"❌ Лимит чатов: {current_count} из {limit}. Повысь тариф в панели: 💳 Тариф и оплата.",
@@ -3040,14 +3665,23 @@ async def on_chat_shared(message: Message):
                 chat_row = Chat(
                     id=chat_id,
                     title=chat.title,
-                    owner_user_id=user_id,
+                    owner_user_id=owner_id,
                     is_active=True,
                     is_log_chat=False,
                 )
                 session.add(chat_row)
             else:
+                ow = int(getattr(chat_row, "owner_user_id", 0) or 0)
+                if ow not in (0, int(owner_id)):
+                    if (not bool(chat_row.is_active)) and await telegram_user_is_chat_creator(bot, chat_id, owner_id):
+                        chat_row.owner_user_id = int(owner_id)
+                    else:
+                        await message.answer(
+                            "Группа уже привязана к другому Telegram‑аккаунту в Guard. Делегирование выдаёт только владелец.",
+                            reply_markup=ReplyKeyboardRemove(),
+                        )
+                        return
                 chat_row.title = chat.title
-                chat_row.owner_user_id = user_id
                 chat_row.is_active = True
                 chat_row.is_log_chat = False
 
@@ -3063,27 +3697,14 @@ async def on_chat_shared(message: Message):
                     newbie_enabled=True,
                     newbie_minutes=10,
                     log_enabled=True,
+                    filter_profanity_enabled=True,
+                    filter_jobs_enabled=True,
+                    filter_casino_enabled=True,
                 )
                 session.add(rule)
 
-            await _set_selected_chat(session, user_id, chat_id)
+            await _set_selected_chat(session, owner_id, chat_id)
             await session.commit()
-
-        title_esc = (chat.title or "Чат").replace("*", "\\*")
-        welcome = (
-            "😈 AntiSpam Guardian на месте.\n\n"
-            f"Группа *«{title_esc}»* теперь под защитой.\n\n"
-            "Я слежу за порядком:\n• режу спам\n• давлю подозрительные ссылки\n"
-            "• останавливаю мусор, рейды и лишний шум\n\n"
-            "_Что важно:_\n1. Не спамить.\n2. Не кидать ссылки без необходимости.\n"
-            "3. Не устраивать помойку в чате.\n4. Не лезть с враждой, оскорблениями и провокациями.\n\n"
-            "Нормальным людям — спокойно общаться.\nСпамерам — будет больно.\n\n_Админ управляет защитой._"
-        )
-        try:
-            await bot.send_message(chat_id, welcome, parse_mode="Markdown")
-        except Exception:
-            pass
-
         await message.answer(
             "✅ Группа подключена к защите. Управление — в панели.",
             reply_markup=ReplyKeyboardRemove(),

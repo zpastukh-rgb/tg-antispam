@@ -102,7 +102,7 @@ docker compose up -d bot
 python -m app.main
 ```
 
-Бот начнёт polling. В логах должно быть что-то вроде: «AntiSpam Guardian запущен».
+Бот начнёт polling. В логах должно быть что-то вроде: «AntiSpam Guard запущен».
 
 ---
 

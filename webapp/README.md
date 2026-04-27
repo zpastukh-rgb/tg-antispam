@@ -1,4 +1,4 @@
-# AntiSpam Guardian — Mini App (админ-панель)
+# AntiSpam Guard — Mini App (админ-панель)
 
 Vue 3 + Vite + Tailwind CSS. Адаптивная панель с сайдбаром, сменой темы и разделами бота. Данные загружаются с бэкенд-API по заголовку `X-Telegram-Init-Data`.
 
@@ -29,7 +29,7 @@ VITE_API_BASE_URL=http://localhost:8000
 
 ## Структура
 
-- **Header**: логотип Guardian, меню (мобильные), переключатель темы.
+- **Header**: логотип Guard, меню (мобильные), переключатель темы.
 - **Sidebar**: Главная, Подключённые чаты, Защита, Отчёты, Тариф и оплата, Подключить чат.
 - **Контент**: данные с `/api/me`, `/api/chats`, `/api/chat/:id`, `/api/billing` и т.д.
 

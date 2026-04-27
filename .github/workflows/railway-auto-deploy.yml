@@ -1,0 +1,95 @@
+name: Railway Auto Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      bot: ${{ steps.filter.outputs.bot }}
+      api: ${{ steps.filter.outputs.api }}
+      webapp: ${{ steps.filter.outputs.webapp }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            bot:
+              - 'app/**'
+              - 'requirements.txt'
+              - 'Dockerfile.bot'
+              - 'migrations/**'
+              - 'app/db/**'
+            api:
+              - 'app/api/**'
+              - 'app/services/**'
+              - 'requirements.txt'
+              - 'Dockerfile.api'
+              - 'migrations/**'
+              - 'app/db/**'
+            webapp:
+              - 'webapp/**'
+              - 'Dockerfile.webapp'
+
+  deploy-bot:
+    needs: changes
+    if: ${{ needs.changes.outputs.bot == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm i -g @railway/cli
+
+      - name: Deploy tg-antispam
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+          RAILWAY_ENVIRONMENT: ${{ secrets.RAILWAY_ENVIRONMENT }}
+        run: railway up -s tg-antispam -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -d
+
+  deploy-api:
+    needs: changes
+    if: ${{ needs.changes.outputs.api == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm i -g @railway/cli
+
+      - name: Deploy zealous-bravery
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+          RAILWAY_ENVIRONMENT: ${{ secrets.RAILWAY_ENVIRONMENT }}
+        run: railway up -s zealous-bravery -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -d
+
+  deploy-webapp:
+    needs: changes
+    if: ${{ needs.changes.outputs.webapp == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm i -g @railway/cli
+
+      - name: Deploy accomplished-cat
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+          RAILWAY_ENVIRONMENT: ${{ secrets.RAILWAY_ENVIRONMENT }}
+        run: railway up -s accomplished-cat -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -d

@@ -3,6 +3,9 @@ defineProps({
   name: { type: String, required: true },
   class: { type: String, default: 'w-5 h-5' },
 })
+
+const partnerHandshakeSrc = `${import.meta.env.BASE_URL}icons/partner-handshake.png`
+const supportHeadsetSrc = `${import.meta.env.BASE_URL}icons/support-headset.png`
 </script>
 
 <template>
@@ -42,6 +45,79 @@ defineProps({
       <circle cx="9" cy="7" r="4" />
       <line x1="19" y1="8" x2="19" y2="14" />
       <line x1="22" y1="11" x2="16" y2="11" />
+    </template>
+    <!-- gift -->
+    <template v-else-if="name === 'gift'">
+      <rect x="3" y="8" width="18" height="13" rx="2" />
+      <path d="M12 8v13" />
+      <path d="M3 12h18" />
+      <path d="M12 8c-1.8 0-3.5-1-3.5-2.6S9.7 2 11.1 3.1C12 3.8 12 5 12 8z" />
+      <path d="M12 8c1.8 0 3.5-1 3.5-2.6S14.3 2 12.9 3.1C12 3.8 12 5 12 8z" />
+    </template>
+    <!-- account -->
+    <template v-else-if="name === 'account'">
+      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+      <circle cx="12" cy="7" r="4" />
+    </template>
+    <!-- partner: PNG рукопожатие из макета (public/icons/partner-handshake.png) -->
+    <template v-else-if="name === 'partner'">
+      <image
+        :href="partnerHandshakeSrc"
+        x="0"
+        y="0"
+        width="24"
+        height="24"
+        preserveAspectRatio="xMidYMid meet"
+      />
+    </template>
+    <!-- support: техподдержка (PNG гарнитура) -->
+    <template v-else-if="name === 'support'">
+      <image
+        :href="supportHeadsetSrc"
+        x="0"
+        y="0"
+        width="24"
+        height="24"
+        preserveAspectRatio="xMidYMid meet"
+      />
+    </template>
+    <!-- community -->
+    <template v-else-if="name === 'community'">
+      <path d="M21 11.5a8.5 8.5 0 1 1-3.2-6.6" />
+      <path d="M22 2l-8.5 8.5" />
+      <path d="M22 2l-5 14-3.5-5.5L8 7z" />
+    </template>
+    <!-- bolt -->
+    <template v-else-if="name === 'bolt'">
+      <polygon points="13 2 4 14 11 14 9 22 20 9 13 9" />
+    </template>
+    <!-- help -->
+    <template v-else-if="name === 'help'">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 1.8-2.5 2.2-2.5 4" />
+      <circle cx="12" cy="17" r="0.9" fill="currentColor" stroke="none" />
+    </template>
+    <!-- chevrons-down -->
+    <template v-else-if="name === 'chevrons-down'">
+      <polyline points="7 9 12 14 17 9" />
+      <polyline points="7 14 12 19 17 14" />
+    </template>
+    <!-- settings -->
+    <template v-else-if="name === 'settings'">
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1 1 0 0 0 .2 1.1l.1.1a1 1 0 0 1 0 1.4l-1.4 1.4a1 1 0 0 1-1.4 0l-.1-.1a1 1 0 0 0-1.1-.2 1 1 0 0 0-.6.9V20a1 1 0 0 1-1 1h-2a1 1 0 0 1-1-1v-.2a1 1 0 0 0-.6-.9 1 1 0 0 0-1.1.2l-.1.1a1 1 0 0 1-1.4 0l-1.4-1.4a1 1 0 0 1 0-1.4l.1-.1a1 1 0 0 0 .2-1.1 1 1 0 0 0-.9-.6H4a1 1 0 0 1-1-1v-2a1 1 0 0 1 1-1h.2a1 1 0 0 0 .9-.6 1 1 0 0 0-.2-1.1l-.1-.1a1 1 0 0 1 0-1.4l1.4-1.4a1 1 0 0 1 1.4 0l.1.1a1 1 0 0 0 1.1.2H9a1 1 0 0 0 .6-.9V4a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v.2a1 1 0 0 0 .6.9 1 1 0 0 0 1.1-.2l.1-.1a1 1 0 0 1 1.4 0l1.4 1.4a1 1 0 0 1 0 1.4l-.1.1a1 1 0 0 0-.2 1.1V9c0 .4.2.7.6.9H20a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1h-.2a1 1 0 0 0-.4 2z" />
+    </template>
+    <!-- calculator -->
+    <template v-else-if="name === 'calculator'">
+      <rect x="5" y="2" width="14" height="20" rx="2" />
+      <rect x="8" y="5" width="8" height="3" rx="0.5" />
+      <rect x="8" y="11" width="2.5" height="2.5" rx="0.3" />
+      <rect x="11.25" y="11" width="2.5" height="2.5" rx="0.3" />
+      <rect x="14.5" y="11" width="2.5" height="2.5" rx="0.3" />
+      <rect x="8" y="14.5" width="2.5" height="2.5" rx="0.3" />
+      <rect x="11.25" y="14.5" width="2.5" height="2.5" rx="0.3" />
+      <rect x="14.5" y="14.5" width="2.5" height="6" rx="0.3" />
+      <rect x="8" y="18" width="5.75" height="2.5" rx="0.3" />
     </template>
     <!-- sun -->
     <template v-else-if="name === 'sun'">

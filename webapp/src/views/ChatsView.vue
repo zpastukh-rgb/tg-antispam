@@ -1,31 +1,246 @@
 <script setup>
-import { ref, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, onMounted, onUnmounted, watch, computed, nextTick } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import { useApi } from '../composables/useApi'
+import { guardLog, guardWarn } from '../utils/guardDebugLog'
+import { useCabinetMode } from '../composables/useCabinetMode'
+import { useDashboardSection } from '../composables/useDashboardSection'
+import { useToast } from '../composables/useToast'
+import ChannelPostRulesModal from '../components/ChannelPostRulesModal.vue'
 
 const router = useRouter()
-const { api, loading, error, fetch, hasInitData } = useApi()
+const route = useRoute()
+const { api, error, fetchSilent, hasInitData } = useApi()
+const { showToast } = useToast()
+const { setCabinetMode } = useCabinetMode()
+const { setDashboardSection } = useDashboardSection()
+/** Только фиолетовый ADM: ?cabinet=delegated. Обычный список чатов не зависит от localStorage — всегда свои + делегированные. */
+const delegatedChatsOnly = computed(() => String(route.query.cabinet || '').toLowerCase() === 'delegated')
+const focusThreatOnly = computed(() => String(route.query.threat || '') === '1')
+/** Первый запрос списка: без глобального loading, но не показываем «нет чатов» до ответа API */
+const chatsFirstLoad = ref(true)
+const chatsBg = `${import.meta.env.BASE_URL}app-global-bg.png`
 const chats = ref([])
 const selectedChatId = ref(null)
+const pendingCount = ref(0)
+const pendingLoading = ref(false)
+const cabinetTab = ref('all') // all | mine | shared
+/** Пресет внутри вкладки кабинета: все сущности | только группы | только каналы */
+const kindPreset = ref('all') // all | groups | channels
+const managersModalChat = ref(null)
+const managersData = ref({ managers: [], can_manage_access: false, limit: 3 })
+const managersLoading = ref(false)
+const addManagerValue = ref('')
+const isPremium = ref(false)
+const showCabinetInfoModal = ref(false)
+const showDelegatedInfoModal = ref(false)
+const showManagersInfoModal = ref(false)
+const spikeAlertsByChat = ref({})
+
+const channelPostRulesOpen = ref(false)
+const channelPostRulesDiscussionId = ref(0)
+const channelPostRulesChannelId = ref(0)
+const channelPostRulesChannelTitle = ref('')
+
+async function openChannelPostRules(chat) {
+  if (!chat || chat.locked_by_limit) return
+  let did = Number(chat.linked_discussion_chat_id || 0)
+  if (!did && Number(chat.id || 0)) {
+    try {
+      const row = await fetchSilent(() => api.chat(Number(chat.id), { refreshTelegram: true }))
+      did = Number(row?.linked_discussion_chat_id || 0)
+      if (did > 0) {
+        const idx = (chats.value || []).findIndex((c) => Number(c?.id || 0) === Number(chat.id))
+        if (idx >= 0) {
+          const next = [...chats.value]
+          next[idx] = {
+            ...next[idx],
+            linked_discussion_chat_id: did,
+            linked_discussion_title: row?.linked_discussion_title || next[idx]?.linked_discussion_title || '',
+          }
+          chats.value = next
+        }
+      }
+    } catch {
+      // fallback ниже: покажем штатный тост
+    }
+  }
+  if (!did) {
+    try {
+      const freshList = await fetchSilent(() => api.chats(delegatedChatsOnly.value ? 'shared' : 'all', { refreshTelegram: true }))
+      const rows = Array.isArray(freshList?.chats) ? freshList.chats : []
+      chats.value = delegatedChatsOnly.value ? rows.filter((c) => !!c.is_shared) : [...rows].sort((a, b) => Number(!!b.is_shared) - Number(!!a.is_shared))
+      const fresh = (chats.value || []).find((c) => Number(c?.id || 0) === Number(chat.id))
+      did = Number(fresh?.linked_discussion_chat_id || 0)
+    } catch {
+      // fallback ниже: покажем штатный тост
+    }
+  }
+  if (!did) {
+    showToast('У канала нет привязанного обсуждения в Telegram — настрой в канале «Обсуждение»')
+    return
+  }
+  channelPostRulesDiscussionId.value = did
+  channelPostRulesChannelId.value = Number(chat.id || 0)
+  channelPostRulesChannelTitle.value = String(chat.title || '').trim() || 'Канал'
+  channelPostRulesOpen.value = true
+}
+
+const chatsInfoModalOpen = computed(
+  () =>
+    showCabinetInfoModal.value ||
+    showDelegatedInfoModal.value ||
+    showManagersInfoModal.value,
+)
+
+watch(
+  chatsInfoModalOpen,
+  (open) => {
+    if (typeof document === 'undefined') return
+    const html = document.documentElement
+    const body = document.body
+    if (open) {
+      html.style.overflow = 'hidden'
+      body.style.overflow = 'hidden'
+    } else {
+      html.style.overflow = ''
+      body.style.overflow = ''
+    }
+  },
+  { flush: 'post' },
+)
+
+let stopVis = null
+let managersPollTimer = null
+
+async function scrollToFirstThreatChat() {
+  if (!focusThreatOnly.value) return
+  const firstThreat = visibleChatsForThreatScroll().find((c) => !!chatSpikeAlert(c))
+  const chatId = Number(firstThreat?.id || 0)
+  if (!chatId || typeof document === 'undefined') return
+  await nextTick()
+  requestAnimationFrame(() => {
+    const el = document.querySelector(`[data-chat-id="${chatId}"]`)
+    if (!el || typeof el.scrollIntoView !== 'function') return
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  })
+}
+
+async function loadChats() {
+  if (!hasInitData.value) {
+    guardLog('Chats', 'loadChats: skip (no initData)')
+    return
+  }
+  guardLog('Chats', 'loadChats: start')
+  const mode = delegatedChatsOnly.value ? 'shared' : 'all'
+  try {
+    const [data, p, me] = await Promise.all([
+      fetchSilent(() => api.chats(mode)),
+      fetchSilent(() => api.connectPending()).catch(() => ({ chats: [] })),
+      fetchSilent(() => api.me()).catch(() => ({ is_premium: false })),
+    ])
+    const rows = data.chats || []
+    chats.value = delegatedChatsOnly.value
+      ? rows.filter((c) => !!c.is_shared)
+      : [...rows].sort((a, b) => Number(!!b.is_shared) - Number(!!a.is_shared))
+    if (!delegatedChatsOnly.value && focusThreatOnly.value) {
+      cabinetTab.value = 'shared'
+    }
+    isPremium.value = !!me?.is_premium
+    selectedChatId.value = data.selected_chat_id ?? null
+    pendingCount.value = Array.isArray(p?.chats) ? p.chats.length : 0
+    try {
+      const a = await fetchSilent(() => api.spikeAlerts())
+      const map = {}
+      for (const row of a?.items || []) {
+        const cid = Number(row?.chat_id || 0)
+        if (!cid) continue
+        map[cid] = row
+      }
+      spikeAlertsByChat.value = map
+    } catch {
+      spikeAlertsByChat.value = {}
+    }
+    await scrollToFirstThreatChat()
+    guardLog('Chats', 'loadChats OK', {
+      count: chats.value.length,
+      selected: selectedChatId.value,
+      pending: pendingCount.value,
+    })
+  } catch (e) {
+    guardWarn('Chats', 'loadChats failed', e)
+  } finally {
+    chatsFirstLoad.value = false
+  }
+}
+
+function chatSpikeAlert(chat) {
+  const cid = Number(chat?.id || 0)
+  if (!cid) return null
+  return spikeAlertsByChat.value[cid] || null
+}
 
 onMounted(async () => {
-  if (!hasInitData.value) return
-  try {
-    const data = await fetch(() => api.chats())
-    chats.value = data.chats || []
-    selectedChatId.value = data.selected_chat_id ?? null
-  } catch {
-    //
+  await loadChats()
+  const onVis = () => {
+    if (document.visibilityState === 'visible') loadChats()
+  }
+  document.addEventListener('visibilitychange', onVis)
+  stopVis = () => document.removeEventListener('visibilitychange', onVis)
+})
+
+onUnmounted(() => {
+  if (stopVis) stopVis()
+  if (managersPollTimer) clearInterval(managersPollTimer)
+  if (typeof document !== 'undefined') {
+    document.documentElement.style.overflow = ''
+    document.body.style.overflow = ''
   }
 })
 
+watch(
+  () => route.query.cabinet,
+  () => {
+    loadChats()
+  },
+)
+
+watch(cabinetTab, () => {
+  kindPreset.value = 'all'
+})
+
+watch(
+  () => delegatedChatsOnly.value,
+  () => {
+    kindPreset.value = 'all'
+  },
+)
+
 async function selectChat(id) {
   if (!hasInitData.value) return
+  guardLog('Chats', 'selectChat', { id })
   try {
-    await fetch(() => api.selectChat(id))
+    await fetchSilent(() => api.selectChat(id))
     selectedChatId.value = id
-  } catch {
-    //
+  } catch (e) {
+    guardWarn('Chats', 'selectChat failed', e)
+  }
+}
+
+async function removeChat(chat) {
+  if (!chat?.id || !hasInitData.value) return
+  const kindLabel = isChannelRow(chat) ? 'канал' : 'группу'
+  const ok = window.confirm(`Удалить ${kindLabel} «${chat.title || chat.id}» из подключённых?`)
+  if (!ok) return
+  try {
+    const data = await fetchSilent(() => api.removeChat(chat.id))
+    chats.value = chats.value.filter((c) => c.id !== chat.id)
+    if (selectedChatId.value === chat.id) {
+      selectedChatId.value = data?.selected_chat_id ?? null
+    }
+    guardLog('Chats', 'removeChat OK', { removedId: chat.id })
+  } catch (e) {
+    guardWarn('Chats', 'removeChat failed', e)
   }
 }
 
@@ -34,13 +249,274 @@ function goToProtection(chatId) {
 }
 
 function goToReports(chatId) {
-  selectChat(chatId).then(() => router.push('/reports'))
+  const row = (chats.value || []).find((c) => Number(c.id) === Number(chatId))
+  setCabinetMode(row?.is_shared ? 'delegated' : 'owner')
+  setDashboardSection('account')
+  // Переходим в отдельную страницу отчётов (внутри приложения) — это стабильнее, чем модалка на Dashboard.
+  selectChat(chatId).catch(() => {})
+  router.push({ path: '/reports', query: { chat_id: String(chatId) } })
+}
+
+function goToPremiumBilling() {
+  const q = { ...route.query, section: 'billing' }
+  delete q.scroll
+  void router.push({ path: '/', query: q })
+}
+
+async function activatePendingFromEmpty() {
+  if (!hasInitData.value) return
+  pendingLoading.value = true
+  try {
+    const data = await fetchSilent(() => api.connectActivatePending())
+    await loadChats()
+    if (!data?.connected) {
+      window.alert('Бот должен быть администратором в группе. Выдайте права и повторите.')
+    }
+  } finally {
+    pendingLoading.value = false
+  }
+}
+
+function protectionActive(chat) {
+  return chat.master_anti_spam !== false
+}
+
+function ownerLabelPlain(chat) {
+  if (!chat?.is_shared) return 'Мой кабинет'
+  const u = (chat.owner_username || '').trim().replace(/^@+/, '')
+  if (u) return u
+  const n = (chat.owner_first_name || '').trim()
+  if (n) return n
+  return String(chat.owner_user_id || '').trim()
+}
+
+function openTelegramProfileFromUsername(raw) {
+  const u = String(raw || '').trim().replace(/^@+/, '')
+  if (!u) return
+  const url = `https://t.me/${u}`
+  const tg = window.Telegram?.WebApp
+  try {
+    if (typeof tg?.openTelegramLink === 'function') {
+      tg.openTelegramLink(url)
+      return
+    }
+  } catch {
+    //
+  }
+  try {
+    if (typeof tg?.openLink === 'function') {
+      tg.openLink(url)
+      return
+    }
+  } catch {
+    //
+  }
+  window.open(url, '_blank', 'noopener,noreferrer')
+}
+
+function sortChatsByAvailability(arr) {
+  return [...(arr || [])].sort((a, b) => {
+    const lockDiff = Number(!!a?.locked_by_limit) - Number(!!b?.locked_by_limit)
+    if (lockDiff !== 0) return lockDiff
+    return String(a?.title || '').localeCompare(String(b?.title || ''), 'ru')
+  })
+}
+
+function isChannelRow(c) {
+  return String(c?.chat_kind || 'group').toLowerCase() === 'channel'
+}
+
+/** Порядок: «Все» — делегаты → свои каналы → свои группы; «Мой» — каналы → группы; «Доступы» — группы → каналы делегата. */
+const orderedDisplayRows = computed(() => {
+  const list = chats.value || []
+  if (delegatedChatsOnly.value) {
+    return sortChatsByAvailability(list.filter((c) => !!c.is_shared))
+  }
+  if (cabinetTab.value === 'mine') {
+    const own = list.filter((c) => !c.is_shared)
+    return [
+      ...sortChatsByAvailability(own.filter((c) => isChannelRow(c))),
+      ...sortChatsByAvailability(own.filter((c) => !isChannelRow(c))),
+    ]
+  }
+  if (cabinetTab.value === 'shared') {
+    const sh = list.filter((c) => !!c.is_shared)
+    return [
+      ...sortChatsByAvailability(sh.filter((c) => !isChannelRow(c))),
+      ...sortChatsByAvailability(sh.filter((c) => isChannelRow(c))),
+    ]
+  }
+  const shared = list.filter((c) => !!c.is_shared)
+  const own = list.filter((c) => !c.is_shared)
+  return [
+    ...sortChatsByAvailability(shared),
+    ...sortChatsByAvailability(own.filter((c) => isChannelRow(c))),
+    ...sortChatsByAvailability(own.filter((c) => !isChannelRow(c))),
+  ]
+})
+
+const filteredByKindPreset = computed(() => {
+  const r = orderedDisplayRows.value
+  if (kindPreset.value === 'groups') return r.filter((c) => !isChannelRow(c))
+  if (kindPreset.value === 'channels') return r.filter((c) => isChannelRow(c))
+  return r
+})
+
+const frameDelegated = computed(() => filteredByKindPreset.value.filter((c) => !!c.is_shared))
+const frameOwnChannels = computed(() => filteredByKindPreset.value.filter((c) => !c.is_shared && isChannelRow(c)))
+const frameOwnGroups = computed(() => filteredByKindPreset.value.filter((c) => !c.is_shared && !isChannelRow(c)))
+
+const frameDelegatedHasThreat = computed(() => (frameDelegated.value || []).some((c) => !!chatSpikeAlert(c)))
+
+/** Для навигации по «под угрозой» — тот же порядок, что на экране. */
+function visibleChatsForThreatScroll() {
+  return [...frameDelegated.value, ...frameOwnChannels.value, ...frameOwnGroups.value]
+}
+
+function sharedCabinetsCount() {
+  return (chats.value || []).filter((c) => !!c.is_shared).length
+}
+
+function chatCardClass(chat) {
+  const spike = !!focusThreatOnly.value && !!chatSpikeAlert(chat)
+  const spikeCls = spike ? 'ring-2 ring-yellow-300/70 shadow-[0_0_20px_-10px_rgba(250,204,21,0.95)]' : ''
+  if (isChannelRow(chat)) {
+    const base = chat.is_shared
+      ? 'rounded-xl border border-violet-400/25 bg-violet-950/20 p-2.5 shadow-md ring-1 ring-violet-500/20 backdrop-blur-sm'
+      : 'rounded-xl border border-emerald-500/20 bg-black/40 p-2.5 shadow-md ring-1 ring-emerald-900/25 backdrop-blur-sm dark:bg-black/45'
+    return [base, spikeCls]
+  }
+  const base = chat.is_shared
+    ? 'rounded-xl border border-violet-400/25 bg-violet-950/20 p-2.5 shadow-md ring-1 ring-violet-500/20 backdrop-blur-sm'
+    : 'rounded-xl border border-white/12 bg-black/40 p-2.5 shadow-md ring-1 ring-black/30 backdrop-blur-sm dark:bg-black/45 dark:ring-white/5'
+  return [base, spikeCls]
+}
+
+async function openManagers(chat) {
+  if (!chat?.id) return
+  managersModalChat.value = chat
+  managersLoading.value = true
+  try {
+    managersData.value = await fetchSilent(() => api.chatManagers(chat.id))
+    if (managersPollTimer) clearInterval(managersPollTimer)
+    managersPollTimer = setInterval(async () => {
+      if (!managersModalChat.value?.id) return
+      try {
+        managersData.value = await fetchSilent(() => api.chatManagers(managersModalChat.value.id))
+      } catch {
+        //
+      }
+    }, 7000)
+  } finally {
+    managersLoading.value = false
+  }
+}
+
+function closeManagers() {
+  if (managersPollTimer) {
+    clearInterval(managersPollTimer)
+    managersPollTimer = null
+  }
+  managersModalChat.value = null
+  addManagerValue.value = ''
+}
+
+async function addManager() {
+  if (!managersModalChat.value?.id) return
+  const raw = String(addManagerValue.value || '').trim()
+  if (!raw) return
+  const payload = raw.startsWith('@') || Number.isNaN(Number(raw))
+    ? { username: raw }
+    : { telegram_id: Number(raw) }
+  managersLoading.value = true
+  try {
+    const res = await fetchSilent(() => api.chatManagerAdd(managersModalChat.value.id, payload))
+    managersData.value = { ...managersData.value, ...res }
+    addManagerValue.value = ''
+    await loadChats()
+  } catch (e) {
+    const d = e?.body?.detail || e?.message || 'Не удалось добавить админа'
+    window.alert(String(d))
+  } finally {
+    managersLoading.value = false
+  }
+}
+
+async function removeManager(uid) {
+  if (!managersModalChat.value?.id || !uid) return
+  managersLoading.value = true
+  try {
+    const res = await fetchSilent(() => api.chatManagerRemove(managersModalChat.value.id, uid))
+    managersData.value = { ...managersData.value, ...res }
+    await loadChats()
+  } finally {
+    managersLoading.value = false
+  }
+}
+
+async function cancelInvite(inviteId) {
+  if (!managersModalChat.value?.id || !inviteId) return
+  managersLoading.value = true
+  try {
+    const res = await fetchSilent(() => api.chatManagerInviteCancel(managersModalChat.value.id, inviteId))
+    managersData.value = { ...managersData.value, ...res }
+  } finally {
+    managersLoading.value = false
+  }
+}
+
+function inviteStatusLabel(s) {
+  const v = String(s || '').toLowerCase()
+  if (v === 'connected') return 'Подключился'
+  if (v === 'connecting') return 'Подключается'
+  return 'Отправлено'
+}
+
+function canOpenManagers(chat) {
+  return !chat?.is_shared && !!isPremium.value
+}
+
+function openDelegatedBroadcast(chatId) {
+  setCabinetMode('delegated')
+  try {
+    localStorage.setItem('guard.delegated.broadcast.chat_id', String(chatId))
+  } catch {
+    //
+  }
+  const nav = router.push({ path: '/admin', query: { cabinet: 'delegated' } })
+  if (nav && typeof nav.catch === 'function') {
+    nav.catch((err) => {
+      const n = String(err?.name || err || '')
+      if (n.includes('duplicat') || n.includes('NavigationDuplicated')) return
+      guardWarn('Chats', 'openDelegatedBroadcast: navigate', err)
+    })
+  }
+}
+
+function openChannelBroadcast(chat) {
+  if (!chat?.id) return
+  setCabinetMode(chat.is_shared ? 'delegated' : 'owner')
+  try {
+    localStorage.setItem('guard.broadcast.open_channel_id', String(Number(chat.id)))
+  } catch {
+    //
+  }
+  const q = { tab: 'broadcasts' }
+  if (chat.is_shared) q.cabinet = 'delegated'
+  const nav = router.push({ path: '/admin', query: q })
+  if (nav && typeof nav.catch === 'function') {
+    nav.catch((err) => {
+      const n = String(err?.name || err || '')
+      if (n.includes('duplicat') || n.includes('NavigationDuplicated')) return
+      guardWarn('Chats', 'openChannelBroadcast: navigate', err)
+    })
+  }
 }
 </script>
 
 <template>
-  <div class="space-y-6">
-    <h1 class="text-xl font-semibold text-gray-900 dark:text-white md:text-2xl">Подключённые чаты</h1>
+  <div class="space-y-5">
+    <h1 class="text-xl font-semibold text-gray-900 dark:text-white md:text-2xl">Подключённые чаты и каналы</h1>
 
     <div v-if="!hasInitData" class="rounded-xl border border-amber-200 bg-amber-50 p-4 text-amber-800 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-200">
       Откройте панель из Telegram.
@@ -50,50 +526,632 @@ function goToReports(chatId) {
       {{ error }}
     </div>
 
-    <div v-else-if="loading && !chats.length" class="rounded-xl border border-gray-200 bg-white p-8 text-center dark:border-gray-700 dark:bg-gray-800">
-      <span class="text-gray-500 dark:text-gray-400">Загрузка…</span>
+    <div
+      v-else-if="chatsFirstLoad && !chats.length"
+      class="relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-slate-900/88 via-slate-950/90 to-black/95 p-6 text-center text-slate-100 shadow-[0_16px_50px_-16px_rgba(0,0,0,0.85)] backdrop-blur-xl ring-1 ring-white/10"
+      aria-busy="true"
+    >
+      <div class="mx-auto mb-3 inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/8 px-3 py-1.5 text-xs font-semibold text-slate-100 shadow-[0_0_20px_-10px_rgba(255,255,255,0.35)]">
+        <span class="inline-block hourglass-flip">⏳</span>
+        Загружаю подключённые чаты…
+      </div>
+      <div class="space-y-2.5">
+        <div class="mx-auto h-3 w-2/3 max-w-[14rem] animate-pulse rounded bg-white/15" />
+        <div class="h-20 animate-pulse rounded-xl bg-white/10" />
+        <div class="h-20 animate-pulse rounded-xl bg-white/10" />
+      </div>
     </div>
 
     <div v-else-if="!chats.length" class="rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-800">
       <p class="text-gray-600 dark:text-gray-400">Пока нет подключённых чатов.</p>
       <p class="mt-2 text-sm text-gray-500 dark:text-gray-500">Добавьте бота в группу и подключите чат в разделе «Подключить группу».</p>
+      <div class="mt-4 flex flex-wrap gap-2">
+        <button
+          v-if="pendingCount > 0"
+          type="button"
+          class="guard-green-soft rounded-lg px-3 py-1.5 text-sm font-semibold disabled:opacity-50"
+          :disabled="pendingLoading"
+          @click="activatePendingFromEmpty"
+        >
+          Подключить ожидающие ({{ pendingCount }})
+        </button>
+        <button
+          type="button"
+          class="rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-100 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"
+          @click="router.push('/connect')"
+        >
+          Перейти в «Подключить группу»
+        </button>
+      </div>
     </div>
 
-    <div v-else class="space-y-3">
+    <div
+      v-else
+      class="relative -mx-4 overflow-hidden rounded-2xl border border-white/10 shadow-lg md:-mx-6"
+    >
       <div
-        v-for="chat in chats"
-        :key="chat.id"
-        class="flex flex-col gap-2 rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800 sm:flex-row sm:items-center sm:justify-between"
-      >
-        <div>
-          <p class="font-medium text-gray-900 dark:text-white">{{ chat.title }}</p>
-          <p v-if="chat.id === selectedChatId" class="text-xs text-primary-600 dark:text-primary-400">Выбран для настроек</p>
+        class="pointer-events-none absolute inset-0 bg-cover bg-center"
+        :style="{ backgroundImage: `url(${chatsBg})` }"
+        aria-hidden="true"
+      />
+      <div class="absolute inset-0 bg-slate-950/55 dark:bg-black/50" aria-hidden="true" />
+      <div class="relative z-10 space-y-2 px-4 py-3 pb-10 md:px-6 md:pb-12">
+        <div v-if="!delegatedChatsOnly" class="mb-1 flex flex-wrap gap-1">
+          <button type="button" class="rounded-lg px-2 py-1 text-[11px] font-semibold"
+            :class="cabinetTab==='all' ? 'guard-green-soft' : 'border border-white/20 bg-white/10 text-slate-100'"
+            @click="cabinetTab='all'">
+            Все кабинеты
+          </button>
+          <button type="button" class="rounded-lg px-2 py-1 text-[11px] font-semibold"
+            :class="cabinetTab==='mine' ? 'guard-green-soft' : 'border border-white/20 bg-white/10 text-slate-100'"
+            @click="cabinetTab='mine'">
+            Мой кабинет
+          </button>
+          <button type="button" class="rounded-lg px-2 py-1 text-[11px] font-semibold"
+            :class="cabinetTab==='shared' ? 'guard-green-soft' : 'border border-white/20 bg-white/10 text-slate-100'"
+            @click="cabinetTab='shared'">
+            Доступы
+          </button>
+          <button
+            type="button"
+            class="inline-flex h-6 min-w-6 items-center justify-center rounded-full border border-sky-400/35 bg-sky-950/25 px-1.5 text-[10px] font-extrabold text-sky-200"
+            @click="showCabinetInfoModal = true"
+          >
+            i
+          </button>
         </div>
-        <div class="flex flex-wrap gap-2">
+        <div v-else class="rounded-xl border border-violet-400/25 bg-violet-950/20 p-2 text-[11px] text-violet-100">
+          <div class="flex items-start justify-between gap-2">
+            <span><span class="font-semibold">i</span> Фиолетовый ADM: сюда пускают чужим ключом — вижу только делегированные сущности; для групп — «Защита» и рассылка в группы, для каналов — «Рассылка» в ADM (в каналы), по тем правам, что тебе выдали.</span>
+            <button
+              type="button"
+              class="inline-flex h-6 min-w-6 items-center justify-center rounded-full border border-violet-300/40 bg-violet-900/35 px-1.5 text-[10px] font-extrabold text-violet-100"
+              @click="showDelegatedInfoModal = true"
+            >
+              i
+            </button>
+          </div>
+        </div>
+        <div class="mb-2 flex flex-wrap gap-1">
           <button
             type="button"
-            class="rounded-lg bg-primary-500 px-3 py-1.5 text-sm font-semibold text-guardian-ink hover:bg-primary-400"
-            @click="goToProtection(chat.id)"
+            class="rounded-lg px-2 py-1 text-[10px] font-semibold"
+            :class="[
+              kindPreset === 'all' ? 'guard-green-soft' : '',
+              delegatedChatsOnly
+                ? kindPreset !== 'all'
+                  ? 'border border-violet-400/25 bg-violet-950/30 text-violet-100'
+                  : ''
+                : kindPreset !== 'all'
+                  ? 'border border-white/15 bg-white/8 text-slate-200'
+                  : '',
+            ]"
+            @click="kindPreset = 'all'"
           >
-            Защита
+            Все
           </button>
           <button
             type="button"
-            class="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
-            @click="goToReports(chat.id)"
+            class="rounded-lg px-2 py-1 text-[10px] font-semibold"
+            :class="[
+              kindPreset === 'groups' ? 'guard-green-soft' : '',
+              delegatedChatsOnly
+                ? kindPreset !== 'groups'
+                  ? 'border border-violet-400/25 bg-violet-950/30 text-violet-100'
+                  : ''
+                : kindPreset !== 'groups'
+                  ? 'border border-white/15 bg-white/8 text-slate-200'
+                  : '',
+            ]"
+            @click="kindPreset = 'groups'"
           >
-            Отчёты
+            Группы
           </button>
           <button
-            v-if="chat.id !== selectedChatId"
             type="button"
-            class="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100 dark:border-gray-600 dark:text-gray-400 dark:hover:bg-gray-700"
-            @click="selectChat(chat.id)"
+            class="rounded-lg px-2 py-1 text-[10px] font-semibold"
+            :class="[
+              kindPreset === 'channels' ? 'guard-green-soft' : '',
+              delegatedChatsOnly
+                ? kindPreset !== 'channels'
+                  ? 'border border-violet-400/25 bg-violet-950/30 text-violet-100'
+                  : ''
+                : kindPreset !== 'channels'
+                  ? 'border border-white/15 bg-white/8 text-slate-200'
+                  : '',
+            ]"
+            @click="kindPreset = 'channels'"
           >
-            Выбрать
+            Каналы
           </button>
+        </div>
+        <div v-if="cabinetTab === 'shared' && !delegatedChatsOnly" class="rounded-xl border border-white/12 bg-black/35 p-2.5">
+          <div class="flex items-center justify-between gap-2">
+            <div>
+              <p class="text-sm font-semibold text-white">Админы и доступы</p>
+              <p class="text-[11px] text-slate-300">Настройка доступна в Premium и только владельцу кабинета.</p>
+            </div>
+            <span class="rounded-full border border-violet-400/35 bg-violet-500/15 px-2 py-0.5 text-[10px] font-semibold text-violet-200">
+              Доступы: {{ sharedCabinetsCount() }}
+            </span>
+          </div>
+        </div>
+        <p
+          v-if="chats.length && !frameDelegated.length && !frameOwnChannels.length && !frameOwnGroups.length"
+          class="rounded-lg border border-white/10 bg-black/30 px-2 py-2 text-center text-[11px] text-slate-300"
+        >
+          Нет сущностей для выбранного пресета. Переключите «Все», «Группы» или «Каналы».
+        </p>
+
+        <div v-if="frameDelegated.length" class="space-y-2 rounded-xl border border-white/12 bg-black/35 p-2.5">
+          <div
+            class="flex items-center justify-between rounded-lg border border-violet-400/30 bg-violet-900/25 px-2 py-1 text-[11px] font-semibold text-violet-100"
+          >
+            <span>{{ cabinetTab === 'shared' || delegatedChatsOnly ? 'Делегированные чаты и каналы' : 'Делегированные' }}</span>
+            <span
+              v-if="frameDelegatedHasThreat"
+              class="relative inline-flex items-center justify-center"
+              title="В делегированном кабинете есть чат под угрозой"
+            >
+              <span class="absolute inline-flex h-4 w-4 animate-ping rounded-full bg-yellow-400/55" />
+              <span class="relative text-[12px] leading-none text-yellow-300">⚠</span>
+            </span>
+          </div>
+          <div v-for="chat in frameDelegated" :key="'fd-' + chat.id" :data-chat-id="chat.id" :class="chatCardClass(chat)">
+            <div class="flex items-start gap-2">
+              <div class="min-w-0 flex-1">
+                <p class="truncate text-sm font-bold leading-tight text-white">{{ chat.title }}</p>
+                <div class="mt-0.5 flex flex-wrap items-center gap-1">
+                  <template v-if="(chat.owner_username || '').trim()">
+                    <span class="text-[10px] text-slate-300">Кабинет</span>
+                    <button
+                      type="button"
+                      class="text-[10px] font-semibold text-cyan-300 underline decoration-cyan-500/40"
+                      @click="openTelegramProfileFromUsername(chat.owner_username)"
+                    >
+                      @{{ String(chat.owner_username).replace(/^@+/, '') }}
+                    </button>
+                  </template>
+                  <p v-else class="text-[10px] text-slate-300">Кабинет {{ ownerLabelPlain(chat) }}</p>
+                  <span
+                    v-if="isChannelRow(chat)"
+                    class="rounded-full border border-emerald-400/40 bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-emerald-100"
+                  >Канал</span>
+                  <span
+                    v-else
+                    class="rounded-full border border-violet-400/35 bg-violet-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-violet-100"
+                  >Группа</span>
+                  <span
+                    class="rounded-full border border-violet-400/35 bg-violet-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-violet-100"
+                  >Делегированный</span>
+                  <span
+                    v-if="chatSpikeAlert(chat)"
+                    class="rounded-full border border-yellow-400/45 bg-yellow-500/20 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-yellow-100"
+                  >⚠ под угрозой</span>
+                </div>
+                <p
+                  v-if="isChannelRow(chat) && (chat.linked_discussion_title || chat.linked_discussion_chat_id)"
+                  class="mt-0.5 text-[10px] text-slate-400"
+                >
+                  Обсуждение:
+                  <span class="font-medium text-slate-200">{{ chat.linked_discussion_title || ('#' + chat.linked_discussion_chat_id) }}</span>
+                </p>
+                <p v-if="chat.locked_by_limit" class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">Лимит Free: нужен Premium</p>
+                <p v-else-if="protectionActive(chat)" class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-lime-300">
+                  {{ isChannelRow(chat) ? 'Подключён' : 'Активен' }}
+                </p>
+                <p v-else class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-400">Не активен</p>
+              </div>
+              <button
+                v-if="!chat.locked_by_limit"
+                type="button"
+                class="shrink-0 rounded-lg border border-red-500/35 bg-red-950/25 px-2 py-1 text-xs text-red-200 hover:bg-red-950/40"
+                :aria-label="isChannelRow(chat) ? 'Удалить канал' : 'Удалить группу'"
+                @click="removeChat(chat)"
+              >✕</button>
+            </div>
+            <div class="mt-2 flex flex-wrap gap-1 border-t border-white/10 pt-2">
+              <template v-if="isChannelRow(chat)">
+                <button
+                  v-if="!chat.locked_by_limit"
+                  type="button"
+                  class="guard-green-soft rounded-lg px-2 py-1 text-[11px] font-semibold leading-tight"
+                  @click="openChannelBroadcast(chat)"
+                >Рассылка</button>
+                <button
+                  v-if="!chat.locked_by_limit"
+                  type="button"
+                  class="rounded-lg border border-white/15 bg-white/10 px-2 py-1 text-[11px] font-semibold leading-tight text-slate-100 hover:bg-white/20"
+                  @click="openChannelPostRules(chat)"
+                >Настройки</button>
+                <button
+                  v-else
+                  type="button"
+                  class="rounded-lg border border-amber-400/40 bg-amber-900/30 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-100"
+                  @click="goToPremiumBilling"
+                >💳 Premium</button>
+              </template>
+              <template v-else>
+                <button
+                  v-if="!chat.locked_by_limit"
+                  type="button"
+                  class="guard-green-soft rounded-lg px-2 py-1 text-[11px] font-semibold leading-tight"
+                  @click="goToProtection(chat.id)"
+                >Защита <span v-if="chatSpikeAlert(chat)">⚠</span></button>
+                <button
+                  v-else
+                  type="button"
+                  class="rounded-lg border border-amber-400/40 bg-amber-900/30 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-100"
+                  @click="goToPremiumBilling"
+                >💳 Premium: открыть и защитить</button>
+                <button
+                  type="button"
+                  class="rounded-lg border border-violet-400/35 bg-violet-900/30 px-2 py-1 text-[11px] font-semibold leading-tight text-violet-200"
+                  @click="openDelegatedBroadcast(chat.id)"
+                >Рассылка в группы</button>
+              </template>
+              <button
+                v-if="canOpenManagers(chat)"
+                type="button"
+                class="inline-flex min-w-0 max-w-full items-center justify-center gap-1 rounded-lg border border-white/15 bg-white/10 px-2.5 py-1 text-[11px] font-semibold leading-tight text-slate-100 hover:bg-white/20"
+                @click="openManagers(chat)"
+              >
+                <span>Админы</span>
+                <span v-if="(Number(chat.managers_count) || 0) > 0" class="min-w-[1.1rem] shrink-0 tabular-nums text-cyan-200/95">{{ Number(chat.managers_count) || 0 }}</span>
+              </button>
+              <button
+                v-if="!chat.locked_by_limit && !isChannelRow(chat)"
+                type="button"
+                class="rounded-lg border border-white/15 bg-white/10 px-2 py-1 text-[11px] font-semibold leading-tight text-slate-100 hover:bg-white/20"
+                @click="goToReports(chat.id)"
+              >{{ chat.log_chat_id ? 'Отчёты ✓' : 'Отчёты' }}</button>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="frameOwnChannels.length" class="space-y-2 rounded-xl border border-white/12 bg-black/35 p-2.5">
+          <div class="rounded-lg border border-emerald-400/30 bg-emerald-950/25 px-2 py-1 text-[11px] font-semibold text-emerald-100">
+            Каналы
+          </div>
+          <div v-for="chat in frameOwnChannels" :key="'oc-' + chat.id" :data-chat-id="chat.id" :class="chatCardClass(chat)">
+            <div class="flex items-start gap-2">
+              <div class="min-w-0 flex-1">
+                <p class="truncate text-sm font-bold leading-tight text-white">{{ chat.title }}</p>
+                <div class="mt-0.5 flex flex-wrap items-center gap-1">
+                  <p class="text-[10px] text-slate-300">Мой кабинет</p>
+                  <span class="rounded-full border border-emerald-400/40 bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-emerald-100">Канал</span>
+                </div>
+                <p v-if="chat.linked_discussion_title || chat.linked_discussion_chat_id" class="mt-0.5 text-[10px] text-slate-400">
+                  Обсуждение:
+                  <span class="font-medium text-slate-200">{{ chat.linked_discussion_title || ('#' + chat.linked_discussion_chat_id) }}</span>
+                </p>
+                <p v-if="chat.locked_by_limit" class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">Лимит Free: нужен Premium</p>
+                <p v-else-if="protectionActive(chat)" class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-lime-300">Подключён</p>
+                <p v-else class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-400">Не активен</p>
+              </div>
+              <button
+                v-if="!chat.locked_by_limit"
+                type="button"
+                class="shrink-0 rounded-lg border border-red-500/35 bg-red-950/25 px-2 py-1 text-xs text-red-200"
+                aria-label="Удалить канал"
+                @click="removeChat(chat)"
+              >✕</button>
+            </div>
+            <div class="mt-2 flex flex-wrap gap-1 border-t border-white/10 pt-2">
+              <button
+                v-if="!chat.locked_by_limit"
+                type="button"
+                class="guard-green-soft rounded-lg px-2 py-1 text-[11px] font-semibold leading-tight"
+                @click="openChannelBroadcast(chat)"
+              >Рассылка</button>
+              <button
+                v-if="!chat.locked_by_limit"
+                type="button"
+                class="rounded-lg border border-white/15 bg-white/10 px-2 py-1 text-[11px] font-semibold leading-tight text-slate-100 hover:bg-white/20"
+                @click="openChannelPostRules(chat)"
+              >Настройки</button>
+              <button
+                v-else
+                type="button"
+                class="rounded-lg border border-amber-400/40 bg-amber-900/30 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-100"
+                @click="goToPremiumBilling"
+              >💳 Premium</button>
+              <button
+                v-if="canOpenManagers(chat)"
+                type="button"
+                class="inline-flex min-w-0 max-w-full items-center justify-center gap-1 rounded-lg border border-white/15 bg-white/10 px-2.5 py-1 text-[11px] font-semibold leading-tight text-slate-100"
+                @click="openManagers(chat)"
+              >
+                <span>Админы</span>
+                <span v-if="(Number(chat.managers_count) || 0) > 0" class="min-w-[1.1rem] shrink-0 tabular-nums text-cyan-200/95">{{ Number(chat.managers_count) || 0 }}</span>
+              </button>
+              <button
+                v-else
+                type="button"
+                class="rounded-lg border border-amber-400/35 bg-amber-900/25 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-200"
+                @click="router.push('/')"
+              >Админы 🔒 Premium</button>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="frameOwnGroups.length" class="space-y-2 rounded-xl border border-white/12 bg-black/35 p-2.5">
+          <div class="rounded-lg border border-cyan-400/25 bg-cyan-900/20 px-2 py-1 text-[11px] font-semibold text-cyan-100">
+            Мои чаты
+          </div>
+          <div v-for="chat in frameOwnGroups" :key="'og-' + chat.id" :data-chat-id="chat.id" :class="chatCardClass(chat)">
+            <div class="flex items-start gap-2">
+              <div class="min-w-0 flex-1">
+                <p class="truncate text-sm font-bold leading-tight text-white">{{ chat.title }}</p>
+                <div class="mt-0.5 flex flex-wrap items-center gap-1">
+                  <p class="text-[10px] text-slate-300">Мой кабинет</p>
+                  <span
+                    v-if="chatSpikeAlert(chat)"
+                    class="rounded-full border border-yellow-400/45 bg-yellow-500/20 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-yellow-100"
+                  >⚠ под угрозой</span>
+                </div>
+                <p v-if="chat.locked_by_limit" class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">Лимит Free: нужен Premium</p>
+                <p v-else-if="protectionActive(chat)" class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-lime-300">Активен</p>
+                <p v-else class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-400">Не активен</p>
+              </div>
+              <button
+                v-if="!chat.locked_by_limit"
+                type="button"
+                class="shrink-0 rounded-lg border border-red-500/35 bg-red-950/25 px-2 py-1 text-xs text-red-200"
+                aria-label="Удалить группу"
+                @click="removeChat(chat)"
+              >✕</button>
+            </div>
+            <div class="mt-2 flex flex-wrap gap-1 border-t border-white/10 pt-2">
+              <button
+                v-if="!chat.locked_by_limit"
+                type="button"
+                class="guard-green-soft rounded-lg px-2 py-1 text-[11px] font-semibold leading-tight"
+                @click="goToProtection(chat.id)"
+              >Защита <span v-if="chatSpikeAlert(chat)">⚠</span></button>
+              <button
+                v-else
+                type="button"
+                class="rounded-lg border border-amber-400/40 bg-amber-900/30 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-100"
+                @click="goToPremiumBilling"
+              >💳 Premium: открыть и защитить</button>
+              <button
+                v-if="canOpenManagers(chat)"
+                type="button"
+                class="inline-flex min-w-0 max-w-full items-center justify-center gap-1 rounded-lg border border-white/15 bg-white/10 px-2.5 py-1 text-[11px] font-semibold leading-tight text-slate-100"
+                @click="openManagers(chat)"
+              >
+                <span>Админы</span>
+                <span v-if="(Number(chat.managers_count) || 0) > 0" class="min-w-[1.1rem] shrink-0 tabular-nums text-cyan-200/95">{{ Number(chat.managers_count) || 0 }}</span>
+              </button>
+              <button
+                v-else
+                type="button"
+                class="rounded-lg border border-amber-400/35 bg-amber-900/25 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-200"
+                @click="router.push('/')"
+              >Админы 🔒 Premium</button>
+              <button
+                v-if="!chat.locked_by_limit"
+                type="button"
+                class="rounded-lg border border-white/15 bg-white/10 px-2 py-1 text-[11px] font-semibold leading-tight text-slate-100"
+                @click="goToReports(chat.id)"
+              >{{ chat.log_chat_id ? 'Отчёты ✓' : 'Отчёты' }}</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
+
+    <div
+      v-if="managersModalChat"
+      class="fixed inset-0 z-[300] flex items-end justify-center bg-black/70 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
+      @click.self="closeManagers"
+    >
+      <div class="w-full max-w-xl rounded-2xl border border-white/15 bg-slate-950 p-4 text-slate-100 shadow-2xl">
+        <div class="mb-3 flex items-center justify-between gap-2 border-b border-white/10 pb-2">
+          <h3 class="text-sm font-semibold text-white">Админы чата: {{ managersModalChat.title }}</h3>
+          <div class="flex items-center gap-1">
+            <button
+              type="button"
+              class="inline-flex h-6 min-w-6 items-center justify-center rounded-full border border-sky-400/35 bg-sky-950/25 px-1.5 text-[10px] font-extrabold text-sky-200"
+              @click="showManagersInfoModal = true"
+            >
+              i
+            </button>
+            <button type="button" class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-white/10 hover:text-white" @click="closeManagers">✕</button>
+          </div>
+        </div>
+        <div v-if="managersLoading" class="text-xs text-slate-400">Загрузка…</div>
+        <div v-else class="space-y-2">
+          <div class="text-[11px] text-slate-300">Лимит: {{ managersData.managers?.length || 0 }}/{{ managersData.limit || 3 }}</div>
+          <div class="space-y-1.5">
+            <div v-for="m in (managersData.managers || [])" :key="`m-${m.user_id}`" class="flex items-center justify-between rounded-lg border border-white/12 bg-white/5 px-2 py-1.5 text-xs">
+              <div class="min-w-0">
+                <span class="truncate">
+                  {{ m.first_name || (m.username ? '@'+m.username : m.user_id) }}
+                  <span class="text-slate-400">({{ m.user_id }})</span>
+                </span>
+                <div class="mt-0.5">
+                  <span
+                    class="inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
+                    :class="m.is_online ? 'bg-emerald-500/20 text-emerald-200 ring-1 ring-emerald-400/30' : 'bg-slate-500/20 text-slate-300 ring-1 ring-slate-400/25'"
+                  >
+                    {{ m.is_online ? 'Онлайн' : 'Оффлайн' }}
+                  </span>
+                </div>
+              </div>
+              <div class="flex items-center gap-1">
+                <button
+                  v-if="managersData.can_manage_access"
+                  type="button"
+                  class="rounded border border-red-500/35 bg-red-950/25 px-1.5 py-0.5 text-[11px] text-red-200"
+                  @click="removeManager(m.user_id)"
+                >
+                  Удалить админа
+                </button>
+              </div>
+            </div>
+            <p v-if="!(managersData.managers || []).length" class="text-xs text-slate-400">Пока никого не добавили.</p>
+          </div>
+          <div v-if="managersData.can_manage_access" class="space-y-1">
+            <p class="text-[11px] text-slate-300">Статусы приглашений</p>
+            <div v-for="inv in (managersData.invites || [])" :key="`inv-${inv.id}`" class="flex items-center justify-between rounded-lg border border-white/10 bg-black/30 px-2 py-1 text-[11px]">
+              <span class="truncate text-slate-200">
+                {{ inv.target_username ? '@' + inv.target_username : (inv.target_telegram_id || '—') }}
+              </span>
+              <div class="flex items-center gap-1.5">
+                <span class="text-slate-300">{{ inviteStatusLabel(inv.status) }}</span>
+                <button
+                  v-if="managersData.can_manage_access && inv.status !== 'connected'"
+                  type="button"
+                  class="rounded border border-amber-500/35 bg-amber-950/25 px-1.5 py-0.5 text-[10px] text-amber-200"
+                  @click="cancelInvite(inv.id)"
+                >
+                  Отменить
+                </button>
+              </div>
+            </div>
+            <p v-if="!(managersData.invites || []).length" class="text-[11px] text-slate-500">Инвайтов пока нет.</p>
+          </div>
+          <div v-if="managersData.can_manage_access" class="mt-2 space-y-1.5">
+            <input v-model="addManagerValue" type="text" class="w-full rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-xs text-white outline-none"
+              placeholder="Telegram ID или @username" />
+            <button type="button" class="guard-green-soft rounded-lg px-3 py-2 text-xs font-semibold" @click="addManager">
+              Добавить админа
+            </button>
+          </div>
+          <p v-if="managersData.premium_enabled === false" class="text-xs text-amber-300">
+            Доступы админов чата доступны только на Premium у владельца кабинета.
+          </p>
+          <p v-if="!managersData.can_manage_access && managersData.premium_enabled !== false" class="text-xs text-slate-400">
+            Только владелец чата может добавлять/удалять админов.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <div
+      v-if="showCabinetInfoModal"
+      class="fixed inset-0 z-[320] flex items-end justify-center overscroll-none bg-black/70 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
+      @click.self="showCabinetInfoModal = false"
+      @wheel.self.prevent
+      @touchmove.self.prevent
+    >
+      <div class="w-full max-w-xl rounded-2xl border border-sky-500/40 bg-slate-950 p-4 text-slate-100 shadow-2xl">
+        <div class="mb-2 flex items-center justify-between border-b border-white/10 pb-2">
+          <h3 class="text-sm font-semibold">🛡️ Подключённые чаты и каналы</h3>
+          <button class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-white/10" @click="showCabinetInfoModal = false">✕</button>
+        </div>
+        <div class="max-h-[min(70vh,28rem)] space-y-3 overflow-y-auto overscroll-y-contain pr-1 text-xs leading-relaxed text-slate-300">
+          <p class="text-[11px] text-slate-400">
+            Один экран — все сущности, куда добавлен Guard. Ниже — зачем вкладки, пресеты и кнопки, чтобы админу и делегату не гадать.
+          </p>
+          <div class="rounded-lg border border-white/10 bg-white/[0.04] p-2.5">
+            <p class="text-[11px] font-semibold text-teal-200">Вкладки кабинета</p>
+            <ul class="mt-1 list-inside list-disc space-y-1 text-[11px] text-slate-300">
+              <li><span class="font-medium text-slate-200">Все кабинеты</span> — свои и делегированные вместе: сверху чужие (фиолетовый ADM), затем твои каналы, затем твои группы.</li>
+              <li><span class="font-medium text-slate-200">Мой кабинет</span> — только то, что ты владелец: сначала каналы, потом группы.</li>
+              <li><span class="font-medium text-slate-200">Доступы</span> — только чужие кабинеты, куда тебя пустили; здесь же блок «Админы и доступы» и счётчик выданных доступов.</li>
+            </ul>
+          </div>
+          <div class="rounded-lg border border-white/10 bg-white/[0.04] p-2.5">
+            <p class="text-[11px] font-semibold text-teal-200">Пресеты «Все / Группы / Каналы»</p>
+            <p class="mt-1 text-[11px] text-slate-300">
+              Фильтр внутри выбранной вкладки: по умолчанию <span class="text-slate-200">Все</span>. «Группы» и «Каналы» оставляют только нужный тип — удобно, когда список длинный.
+            </p>
+          </div>
+          <div class="rounded-lg border border-white/10 bg-white/[0.04] p-2.5">
+            <p class="text-[11px] font-semibold text-teal-200">Группы</p>
+            <p class="mt-1 text-[11px] text-slate-300">
+              <span class="font-medium text-slate-200">Защита</span> — настройки антиспама и модерации в Mini App.
+              <span class="font-medium text-slate-200">Отчёты</span> — сводка по чату (лог-чат и метрики); для каналов кнопку убрали: отчёты там пока не те, отдельный сценарий добавим позже.
+            </p>
+            <p class="mt-1.5 text-[11px] text-slate-400">
+              У делегата по группе ещё есть <span class="text-slate-200">Рассылка в группы</span> (ADM) — если владелец выдал право на рассылку по этому чату.
+            </p>
+          </div>
+          <div class="rounded-lg border border-emerald-500/25 bg-emerald-950/15 p-2.5">
+            <p class="text-[11px] font-semibold text-emerald-200">Каналы</p>
+            <p class="mt-1 text-[11px] text-slate-300">
+              Канал не «группа под защитой»: <span class="font-medium text-slate-200">Рассылка</span> в ADM (в ленту канала) и
+              <span class="font-medium text-slate-200">Настройки</span> — правила в комментариях (нужна привязанная группа обсуждения).
+              Строка «Обсуждение» подсказывает этот чат.
+            </p>
+            <p class="mt-1.5 text-[11px] text-slate-400">
+              Делегату для «Настройки» достаточно роли <span class="text-slate-200">админа чата на канале</span> в этом списке; отдельное приглашение в группу обсуждения не требуется.
+              В Telegram у бота должны быть права админа и в канале (рассылка), и в группе обсуждения (отправка правил в треды).
+            </p>
+          </div>
+          <div class="rounded-lg border border-violet-500/25 bg-violet-950/20 p-2.5">
+            <p class="text-[11px] font-semibold text-violet-200">Делегатам</p>
+            <p class="mt-1 text-[11px] text-slate-300">
+              Фиолетовые карточки — чужой кабинет: видишь только то, куда тебя пустили. Действия ограничены правами владельца; лишнего в кошелёк или чужие настройки не зайдёшь.
+            </p>
+            <p class="mt-1.5 text-[11px] text-slate-400">
+              По каналам: если владелец добавил тебя админом в «Админы чата» на <span class="text-slate-200">канале</span>, ты можешь открыть «Настройки» правил комментариев без отдельного приглашения в группу обсуждения.
+              Чтобы бот слал правила в треды, владелец должен выдать боту админку в группе обсуждения (это уже в Telegram).
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div
+      v-if="showDelegatedInfoModal"
+      class="fixed inset-0 z-[320] flex items-end justify-center overscroll-none bg-black/70 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
+      @click.self="showDelegatedInfoModal = false"
+      @wheel.self.prevent
+      @touchmove.self.prevent
+    >
+      <div class="w-full max-w-xl rounded-2xl border border-violet-500/40 bg-slate-950 p-4 text-slate-100 shadow-2xl">
+        <div class="mb-2 flex items-center justify-between border-b border-white/10 pb-2">
+          <h3 class="text-sm font-semibold">😈 Фиолетовый ADM</h3>
+          <button class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-white/10" @click="showDelegatedInfoModal = false">✕</button>
+        </div>
+        <p class="text-xs text-slate-300">Здесь только то, куда тебя пустили чужим доступом. «Защита» и «Рассылка» работают ровно в рамках выданных прав — без лазейки в чужой кошелёк.</p>
+      </div>
+    </div>
+
+    <div
+      v-if="showManagersInfoModal"
+      class="fixed inset-0 z-[330] flex items-end justify-center overscroll-none bg-black/70 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
+      @click.self="showManagersInfoModal = false"
+      @wheel.self.prevent
+      @touchmove.self.prevent
+    >
+      <div class="w-full max-w-xl rounded-2xl border border-sky-500/40 bg-slate-950 p-4 text-slate-100 shadow-2xl">
+        <div class="mb-2 flex items-center justify-between border-b border-white/10 pb-2">
+          <h3 class="text-sm font-semibold">😈 Админы чата</h3>
+          <button class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-white/10" @click="showManagersInfoModal = false">✕</button>
+        </div>
+        <p class="text-xs text-slate-300">
+          Статусы «Отправлено → Подключается → Подключился» я обновляю сам; онлайн подтягиваю по мере данных от Telegram. Список админов крутит только владелец с Premium — так спокойнее для безопасности.
+        </p>
+        <p class="mt-2 text-[11px] leading-relaxed text-slate-400">
+          Для <span class="text-slate-200">канала с обсуждением</span>: приглашённый здесь админ получает доступ в Mini App к рассылке в канал и к «Настройки» правил в комментариях (данные живут на чате обсуждения, но доступ выдаётся с канала).
+          В Telegram боту по-прежнему нужны админские права в канале и в группе обсуждения — иначе отправка в треды не сработает.
+        </p>
+      </div>
+    </div>
+
+    <ChannelPostRulesModal
+      v-model="channelPostRulesOpen"
+      :discussion-chat-id="channelPostRulesDiscussionId"
+      :channel-id="channelPostRulesChannelId"
+      :channel-title="channelPostRulesChannelTitle"
+    />
   </div>
 </template>
+
+<style scoped>
+@keyframes hourglassFlip {
+  0% { transform: rotate(0deg); }
+  50% { transform: rotate(180deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.hourglass-flip {
+  animation: hourglassFlip 0.9s ease-in-out infinite;
+  transform-origin: 50% 50%;
+}
+</style>

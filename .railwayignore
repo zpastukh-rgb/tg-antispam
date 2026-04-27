@@ -1,0 +1,21 @@
+# Local envs & deps (never needed in Railway build context from CLI snapshot)
+.git
+venv/
+.venv/
+.venv-debug/
+**/__pycache__/
+**/*.pyc
+webapp/node_modules/
+webapp/dist/
+
+# IDE / OS
+.idea/
+.vscode/
+.cursor/
+.DS_Store
+
+# Env files (secrets come from Railway variables)
+.env
+.env.docker
+
+*.log

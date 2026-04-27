@@ -1,5 +1,5 @@
 /** @type {import('tailwindcss').Config} */
-/** Палитра под аватар AntiSpam Guardian: лайм маскота, тёмный «серверный» фон, неон красный и циан. */
+/** Палитра под аватар AntiSpam Guard: лайм маскота, тёмный «серверный» фон, неон красный и циан. */
 export default {
   content: ['./index.html', './src/**/*.{vue,js,ts,jsx,tsx}'],
   darkMode: 'class',
@@ -7,6 +7,7 @@ export default {
     extend: {
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],
+        display: ['Manrope', 'Inter', 'system-ui', 'sans-serif'],
       },
       colors: {
         primary: {
