@@ -2292,7 +2292,7 @@ async function loadBcSendResultStats(broadcastId) {
   if (!bid) return
   bcSendResultLoading.value = true
   try {
-    const r = await fetch(() =>
+    const r = await fetchSilent(() =>
       api.adminBroadcastStats(
         bid,
         '',
@@ -2387,15 +2387,23 @@ function startBroadcastProgressPolling(id, target) {
     const bid = Number(bcSendModalBroadcastId.value || 0)
     if (!bid) return
     try {
-      const row = await fetch(() => api.adminBroadcast(bid))
+      const row = await fetchSilent(() => api.adminBroadcast(bid))
       bcSendLiveRow.value = row || { id: bid }
       upsertBroadcastInList(row || { id: bid })
-      if (bcStatsModalOpen.value && Number(bcStatsSelectedId.value || 0) === bid) {
+      if (
+        bcStatsModalOpen.value &&
+        Number(bcStatsSelectedId.value || 0) === bid &&
+        !bcSendModalOpen.value
+      ) {
         await loadBroadcastStats()
       }
       const st = String(row?.status || '').toLowerCase()
       const sentAt = row?.sent_at
-      const finishedAsDraftWithStats = st === 'draft' && !!sentAt
+      const okc = Number(row?.recipient_ok || 0)
+      const flc = Number(row?.recipient_fail || 0)
+      const totc = Number(row?.recipient_total || 0)
+      const countsLookComplete = totc > 0 && okc + flc >= totc
+      const finishedAsDraftWithStats = st === 'draft' && !!sentAt && countsLookComplete
       if (st === 'sent' || finishedAsDraftWithStats) {
         bcSendModalState.value = 'done'
         stopBroadcastProgressPolling()
@@ -4684,6 +4692,7 @@ watch(
     bcQuickDraftModalOpen.value ||
     bcShowAllRecentModal.value ||
     bcSendTargetModalOpen.value ||
+    bcSendModalOpen.value ||
     bcConfirmModalOpen.value ||
     bcShowBotsPicker.value,
   (lock) => {
