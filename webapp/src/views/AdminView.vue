@@ -531,18 +531,20 @@ async function submitBcConfirmedSend() {
   bcConfirmSending.value = true
   try {
     await persistCurrentBroadcast()
+    bcDismissBroadcastSendPrefaceOverlays()
+    const sendTargetKind =
+      bcConfirmMode.value === 'users'
+        ? 'users'
+        : bcConfirmMode.value === 'groups'
+          ? 'groups'
+          : 'mixed'
+    upsertBroadcastInList({ id: bid, status: 'sending' })
+    await startBroadcastProgressPolling(bid, sendTargetKind)
     await fetch(() =>
       api.adminBroadcastSend(bid, bcConfirmMode.value, bcConfirmMode.value === 'groups' ? bcConfirmChatIds.value : [], {
         keepDraftAfter: true,
       }),
     )
-    bcConfirmModalOpen.value = false
-    bcSendTargetModalOpen.value = false
-    bcShowGroupsPicker.value = false
-    bcShowChannelsPicker.value = false
-    bcShowBotsPicker.value = false
-    upsertBroadcastInList({ id: bid, status: 'sending' })
-    startBroadcastProgressPolling(bid, 'groups')
     bcSaveLocalSnapshot()
     try {
       meAdminProfile.value = await api.me()
@@ -550,7 +552,9 @@ async function submitBcConfirmedSend() {
       //
     }
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось отправить'))
+    bcSendModalState.value = 'failed'
+    bcSendModalText.value = String(e?.body?.detail || e?.message || 'Не удалось отправить')
+    stopBroadcastProgressPolling()
   } finally {
     bcConfirmSending.value = false
   }
@@ -1470,7 +1474,6 @@ const BC_SEND_MIN_VISIBLE_MS = 3000
 /** Время открытия экрана отправки — для BC_SEND_MIN_VISIBLE_MS */
 const bcSendSendingStartedAt = ref(0)
 /** Белый знак Telegram внутри круга (локальный svg в public/) */
-const bcTelegramPlaneIconUrl = `${import.meta.env.BASE_URL}broadcast/telegram-plane-white.svg`
 
 const adminBcBg = `${import.meta.env.BASE_URL}admin-bg-dark-final.png`
 /** Верхняя отсечка AURUM за один запуск/слот на бэкенде (broadcast_send_plan.BROADCAST_MAX_TOKENS). */
@@ -8823,19 +8826,24 @@ watch(
           <div class="flex min-h-0 flex-1 flex-col items-center justify-center">
             <div class="relative mx-auto w-full max-w-[19rem]">
               <div class="relative mx-auto h-[180px] w-[180px]">
+                <span
+                  class="pointer-events-none absolute left-1/2 top-1/2 h-[168px] w-[168px] -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/[0.06] shadow-[inset_0_0_0_6px_rgba(15,23,42,0.5),inset_0_10px_20px_rgba(15,23,42,0.55),inset_0_-8px_18px_rgba(2,6,23,0.8)]"
+                  aria-hidden="true"
+                />
                 <svg
-                  class="pointer-events-none absolute left-0 top-0 h-[180px] w-[180px] -rotate-90"
+                  class="pointer-events-none absolute left-0 top-0 h-[180px] w-[180px] -rotate-90 drop-shadow-[0_0_12px_rgba(99,102,241,0.4)]"
                   viewBox="0 0 120 120"
                   aria-hidden="true"
                 >
                   <defs>
                     <linearGradient id="bcSendNeonRing" x1="0%" y1="30%" x2="100%" y2="100%">
-                      <stop offset="0%" stop-color="#60a5fa" />
-                      <stop offset="50%" stop-color="#6366f1" />
-                      <stop offset="100%" stop-color="#8b5cf6" />
+                      <stop offset="0%" stop-color="#7c83ff" />
+                      <stop offset="52%" stop-color="#6366f1" />
+                      <stop offset="100%" stop-color="#7c3aed" />
                     </linearGradient>
                   </defs>
-                  <circle cx="60" cy="60" r="52" fill="none" stroke="rgba(148,163,184,0.14)" stroke-width="8" />
+                  <circle cx="60" cy="60" r="52" fill="none" stroke="rgba(148,163,184,0.12)" stroke-width="8" />
+                  <circle cx="60" cy="60" r="52" fill="none" stroke="rgba(2,6,23,0.5)" stroke-width="10" />
                   <circle
                     cx="60"
                     cy="60"
@@ -8855,13 +8863,16 @@ watch(
                     class="pointer-events-none absolute inset-0 rounded-full bg-[radial-gradient(circle,rgba(99,102,241,0.45)_0%,rgba(59,130,246,0.2)_35%,rgba(59,130,246,0.06)_60%,transparent_78%)] blur-[6px] bc-send-icon-pulse"
                     aria-hidden="true"
                   />
-                  <img
-                    :src="bcTelegramPlaneIconUrl"
-                    class="relative h-12 w-12 select-none object-contain drop-shadow-[0_0_24px_rgba(99,102,241,0.95)]"
-                    width="36"
-                    height="36"
-                    alt=""
-                  />
+                  <svg class="relative h-12 w-12 -rotate-[14deg] text-white drop-shadow-[0_0_18px_rgba(129,140,248,0.95)]" viewBox="0 0 24 24" aria-hidden="true">
+                    <path
+                      d="M21.7 2.3 2.9 10.2l6.2 2.5L19.9 5.8l-8 8.3v6l3.7-3.4 4.9 3.8z"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.8"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                  </svg>
                 </div>
                 <span
                   class="absolute -bottom-1 right-[-2.3rem] text-[22px] font-semibold tabular-nums tracking-tight text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.65)]"
