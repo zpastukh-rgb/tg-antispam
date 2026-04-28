@@ -108,6 +108,7 @@ const bcQuickDraftModalOpen = ref(false)
 const bcQuickTitleBaseline = ref('')
 const bcQuickDraftBaseline = ref(null)
 const bcOpeningQuickDraft = ref(false)
+const bcQuickDraftInitializing = ref(false)
 const bcSendTargetModalOpen = ref(false)
 const bcSendTargetChannels = ref(true)
 const bcSendTargetGroups = ref(false)
@@ -411,6 +412,16 @@ async function openQuickBroadcastDraft() {
   if (bcOpeningQuickDraft.value) return
   bcOpeningQuickDraft.value = true
   try {
+    const needsCreate = !bcSelectedId.value
+    if (needsCreate) {
+      bcQuickDraftInitializing.value = true
+      bcEditorOpen.value = false
+      bcQuickDraftModalOpen.value = true
+      bcTitle.value = String(bcTitle.value || 'Новый черновик')
+      bcBodyHtml.value = String(bcBodyHtml.value || '')
+      await nextTick()
+      if (bcBodyRef.value) bcBodyRef.value.innerHTML = bcBodyHtml.value || ''
+    }
     if (!bcSelectedId.value) {
       await createBcDraft()
     }
@@ -431,6 +442,7 @@ async function openQuickBroadcastDraft() {
     }
     bcUpdateFormatState()
   } finally {
+    bcQuickDraftInitializing.value = false
     bcOpeningQuickDraft.value = false
   }
 }
@@ -6491,8 +6503,8 @@ watch(
 
           <button
             type="button"
-            class="mt-3 w-full rounded-xl border border-indigo-400/45 bg-gradient-to-r from-indigo-600/95 to-blue-700/95 px-4 py-2 text-[18px] font-extrabold text-white shadow-[0_14px_30px_-16px_rgba(59,130,246,0.8)] disabled:cursor-not-allowed disabled:opacity-45"
-            :disabled="!bcHasMessageText()"
+            class="mt-3 w-full rounded-xl border border-indigo-400/45 bg-gradient-to-r from-indigo-600/95 to-blue-700/95 px-4 py-2 text-[15px] font-extrabold text-white shadow-[0_14px_30px_-16px_rgba(59,130,246,0.8)] disabled:cursor-not-allowed disabled:opacity-45"
+            :disabled="!bcHasMessageText() || bcQuickDraftInitializing"
             @click="openSendTargetModal"
           >
             Далее
@@ -6509,8 +6521,12 @@ watch(
           @click.self="bcSendTargetModalOpen = false"
         >
           <div class="flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-2">
-            <div class="w-full rounded-2xl border border-white/12 bg-[#0b111b]/95 p-3 text-zinc-100 shadow-[0_28px_80px_-24px_rgba(0,0,0,0.92)] ring-1 ring-white/[0.06]">
-          <p class="text-[19px] font-black text-white">Куда отправить</p>
+            <div class="flex min-h-0 w-full flex-1 flex-col rounded-2xl border border-white/[0.06] bg-[#0b111b]/95 p-3 text-zinc-100 shadow-[0_24px_72px_-28px_rgba(0,0,0,0.9)] ring-1 ring-white/[0.03]">
+          <div class="flex items-center justify-between gap-2">
+            <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/12 bg-white/[0.04] text-[14px] text-white/90" @click="bcSendTargetModalOpen = false">←</button>
+            <p class="text-[19px] font-black text-white">Куда отправить</p>
+            <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/12 bg-white/[0.04] text-[14px] text-white/90" @click="bcSendTargetModalOpen = false">✕</button>
+          </div>
           <p class="mt-0.5 text-[13px] text-zinc-400">Выберите получателей</p>
 
           <div class="mt-3 space-y-2">
@@ -6581,7 +6597,7 @@ watch(
 
           <button
             type="button"
-            class="mt-3 w-full rounded-xl border border-indigo-400/45 bg-gradient-to-r from-indigo-600/95 to-blue-700/95 px-4 py-2 text-[18px] font-extrabold text-white shadow-[0_14px_30px_-16px_rgba(59,130,246,0.8)] disabled:cursor-not-allowed disabled:opacity-45"
+            class="mt-auto w-full rounded-xl border border-indigo-400/45 bg-gradient-to-r from-indigo-600/95 to-blue-700/95 px-4 py-2 text-[15px] font-extrabold text-white shadow-[0_14px_30px_-16px_rgba(59,130,246,0.8)] disabled:cursor-not-allowed disabled:opacity-45"
             :disabled="bcSelectedTargetsCount <= 0"
             @click="proceedSendTargetModal"
           >
@@ -6592,9 +6608,10 @@ watch(
         </div>
       </Teleport>
 
+      <Teleport to="body">
       <div
         v-if="bcConfirmModalOpen"
-        class="fixed inset-0 z-[338] flex flex-col overflow-y-auto bg-[#070b12] px-1.5 pb-[max(5.75rem,calc(5.25rem+env(safe-area-inset-bottom,0px)))] pt-[max(0.25rem,calc(env(safe-area-inset-top,0px)+46px))]"
+        class="fixed inset-0 z-[10030] flex flex-col overflow-y-auto bg-[#070b12] px-1.5 pb-[max(5.75rem,calc(5.25rem+env(safe-area-inset-bottom,0px)))] pt-[max(0.25rem,calc(env(safe-area-inset-top,0px)+46px))]"
         @click.self="bcConfirmModalOpen = false"
       >
         <div
@@ -6649,6 +6666,7 @@ watch(
           </div>
         </div>
       </div>
+      </Teleport>
 
       <div
         v-if="bcShowAllRecentModal"
@@ -8968,7 +8986,7 @@ watch(
 
     <div
       v-if="bcShowGroupsPicker"
-      class="fixed inset-0 z-[346] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
+      class="fixed inset-0 z-[10040] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
       @click.self="bcShowGroupsPicker = false"
     >
       <div
@@ -9018,7 +9036,7 @@ watch(
 
     <div
       v-if="bcShowChannelsPicker"
-      class="fixed inset-0 z-[346] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
+      class="fixed inset-0 z-[10040] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
       @click.self="bcShowChannelsPicker = false"
     >
       <div
@@ -9068,7 +9086,7 @@ watch(
 
     <div
       v-if="bcShowBotsPicker"
-      class="fixed inset-0 z-[346] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
+      class="fixed inset-0 z-[10040] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
       @click.self="bcShowBotsPicker = false"
     >
       <div
