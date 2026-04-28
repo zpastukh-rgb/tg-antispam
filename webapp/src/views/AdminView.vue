@@ -8826,18 +8826,22 @@ watch(
                   />
                 </svg>
                 <div
-                  class="absolute left-1/2 top-1/2 flex h-[108px] w-[108px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-[#15192a]/55 ring-1 ring-white/10"
+                  class="absolute left-1/2 top-1/2 flex h-[112px] w-[112px] -translate-x-1/2 -translate-y-1/2 items-center justify-center"
                 >
+                  <span
+                    class="pointer-events-none absolute inset-0 rounded-full bg-[radial-gradient(circle,rgba(99,102,241,0.45)_0%,rgba(59,130,246,0.2)_35%,rgba(59,130,246,0.06)_60%,transparent_78%)] blur-[6px] bc-send-icon-pulse"
+                    aria-hidden="true"
+                  />
                   <img
                     :src="bcTelegramPlaneIconUrl"
-                    class="h-10 w-10 select-none object-contain drop-shadow-[0_0_22px_rgba(139,92,246,0.95)]"
+                    class="relative h-12 w-12 select-none object-contain drop-shadow-[0_0_24px_rgba(99,102,241,0.95)]"
                     width="36"
                     height="36"
                     alt=""
                   />
                 </div>
                 <span
-                  class="absolute top-1/2 right-[-2.5rem] -translate-y-1/2 text-[38px] font-semibold tabular-nums tracking-tight text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.65)]"
+                  class="absolute -bottom-0.5 right-[-1.9rem] text-[28px] font-semibold tabular-nums tracking-tight text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.65)]"
                 >
                   {{ bcSendProgressPercent }}%
                 </span>
@@ -8845,9 +8849,9 @@ watch(
             </div>
             <div class="mt-7 w-full max-w-[17.5rem] text-center">
               <p class="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">Отправлено</p>
-              <p class="mt-0.5 text-[33px] font-semibold tabular-nums leading-none text-white">
+              <p class="mt-0.5 text-[18px] font-semibold tabular-nums leading-none text-white">
                 {{ fmtIntSpace(bcSendProgressDone) }}
-                <span class="text-[22px] text-slate-500">из</span>
+                <span class="text-[16px] text-slate-500">из</span>
                 {{ fmtIntSpace(bcSendProgressTotal) }}
               </p>
             </div>
@@ -9348,6 +9352,14 @@ watch(
   0% { transform: rotate(0deg) scale(1); opacity: 0.92; }
   50% { transform: rotate(180deg) scale(1.08); opacity: 1; }
   100% { transform: rotate(360deg) scale(1); opacity: 0.92; }
+}
+.bc-send-icon-pulse {
+  animation: bc-send-icon-pulse 3s ease-in-out infinite;
+}
+@keyframes bc-send-icon-pulse {
+  0% { transform: scale(0.95); opacity: 0.55; }
+  50% { transform: scale(1.12); opacity: 0.9; }
+  100% { transform: scale(0.95); opacity: 0.55; }
 }
 /* Поля поста: явный светлый текст (Telegram WebView / без класса .dark на <html>) */
 .bc-post-input {
