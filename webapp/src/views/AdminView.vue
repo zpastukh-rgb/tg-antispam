@@ -8787,7 +8787,7 @@ watch(
     <Teleport to="body">
       <div
         v-if="bcSendModalOpen"
-        class="fixed inset-0 z-[10000] flex min-h-[100dvh] min-w-0 flex-col bg-[#09090b] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
+        class="fixed inset-0 z-[10100] flex min-h-[100dvh] min-w-0 flex-col bg-[#09090b] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
         @click.self="bcSendModalState === 'sending' ? null : closeBcSendModal()"
       >
         <div
