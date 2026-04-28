@@ -110,7 +110,7 @@ const bcQuickDraftBaseline = ref(null)
 const bcOpeningQuickDraft = ref(false)
 const bcQuickDraftInitializing = ref(false)
 const bcSendTargetModalOpen = ref(false)
-const bcSendTargetChannels = ref(true)
+const bcSendTargetChannels = ref(false)
 const bcSendTargetGroups = ref(false)
 const bcSendTargetBots = ref(false)
 const bcShowBotsPicker = ref(false)
@@ -448,6 +448,9 @@ async function openQuickBroadcastDraft() {
 }
 
 async function openSendTargetModal() {
+  bcSendTargetChannels.value = false
+  bcSendTargetGroups.value = false
+  bcSendTargetBots.value = false
   bcBroadcastGroupScope.value = 'mine'
   await Promise.all([loadBroadcastEligibleGroups(), loadBroadcastEligibleChannels()])
   bcSendTargetModalOpen.value = true
@@ -6385,7 +6388,7 @@ watch(
         >
           <div class="flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-2">
             <div class="flex min-h-0 flex-1 flex-col bg-[#0b111b]/95 p-3 text-zinc-100">
-          <div class="mb-2 flex items-start justify-between gap-2 border-b border-white/10 pb-2">
+          <div class="mb-2 flex items-start justify-between gap-2 border-b border-white/8 pb-2">
             <div class="min-w-0 flex-1">
               <p class="truncate text-[19px] font-black text-white">Новая рассылка</p>
               <div class="mt-1.5 flex min-w-0 items-center gap-1.5">
@@ -6429,7 +6432,7 @@ watch(
           <p class="text-[12px] font-semibold text-zinc-300">Текст сообщения</p>
           <div
             ref="bcBodyRef"
-            class="bc-editor mt-1.5 h-32 overflow-y-auto rounded-xl border border-white/[0.1] bg-zinc-950 px-3 py-2.5 text-sm leading-relaxed focus-within:border-cyan-500/45 focus-within:ring-1 focus-within:ring-cyan-500/25"
+            class="bc-editor mt-2 h-40 overflow-y-auto rounded-xl border border-white/[0.08] bg-zinc-950 px-3 py-2.5 text-sm leading-relaxed focus-within:border-white/20 focus-within:ring-0"
             contenteditable="true"
             @input="onBcEditorInput"
             @click="onBcEditorClick"
@@ -6503,7 +6506,7 @@ watch(
 
           <button
             type="button"
-            class="mt-3 w-full rounded-xl border border-indigo-400/45 bg-gradient-to-r from-indigo-600/95 to-blue-700/95 px-4 py-2 text-[15px] font-extrabold text-white shadow-[0_14px_30px_-16px_rgba(59,130,246,0.8)] disabled:cursor-not-allowed disabled:opacity-45"
+            class="mt-auto w-full rounded-xl border border-indigo-400/40 bg-gradient-to-r from-indigo-600/95 to-blue-700/95 px-4 py-2 text-[13px] font-extrabold text-white shadow-[0_14px_30px_-16px_rgba(59,130,246,0.8)] disabled:cursor-not-allowed disabled:opacity-45"
             :disabled="!bcHasMessageText() || bcQuickDraftInitializing"
             @click="openSendTargetModal"
           >
@@ -6521,18 +6524,18 @@ watch(
           @click.self="bcSendTargetModalOpen = false"
         >
           <div class="flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-2">
-            <div class="flex min-h-0 w-full flex-1 flex-col rounded-2xl border border-white/[0.06] bg-[#0b111b]/95 p-3 text-zinc-100 shadow-[0_24px_72px_-28px_rgba(0,0,0,0.9)] ring-1 ring-white/[0.03]">
+            <div class="flex min-h-0 w-full flex-1 flex-col rounded-2xl border border-white/[0.04] bg-[#0b111b]/95 p-3 text-zinc-100 shadow-[0_24px_72px_-28px_rgba(0,0,0,0.9)] ring-1 ring-white/[0.02]">
           <div class="flex items-center justify-between gap-2">
-            <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/12 bg-white/[0.04] text-[14px] text-white/90" @click="bcSendTargetModalOpen = false">←</button>
-            <p class="text-[19px] font-black text-white">Куда отправить</p>
-            <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/12 bg-white/[0.04] text-[14px] text-white/90" @click="bcSendTargetModalOpen = false">✕</button>
+            <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-white/[0.05] text-[14px] text-white/90" @click="bcSendTargetModalOpen = false">←</button>
+            <p class="pr-6 text-[19px] font-black text-white">Куда отправить</p>
+            <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-white/[0.05] text-[14px] text-white/90" @click="bcSendTargetModalOpen = false">✕</button>
           </div>
-          <p class="mt-0.5 text-[13px] text-zinc-400">Выберите получателей</p>
+          <p class="mt-2 text-[13px] text-zinc-400">Выберите получателей</p>
 
-          <div class="mt-3 space-y-2">
+          <div class="mt-4 space-y-2.5">
             <button
               type="button"
-              class="flex w-full items-center justify-between gap-3 rounded-xl border border-[#3d6dff]/45 bg-gradient-to-r from-[#142a62]/92 via-[#172f6e]/92 to-[#152b5f]/92 px-3 py-2.5 text-left"
+              class="flex w-full items-center justify-between gap-3 rounded-xl bg-white/[0.035] px-3 py-2.5 text-left"
               @click="bcSendTargetChannels = !bcSendTargetChannels"
             >
               <span class="min-w-0">
@@ -6544,7 +6547,7 @@ watch(
 
             <button
               type="button"
-              class="flex w-full items-center justify-between gap-3 rounded-xl border border-emerald-400/25 bg-gradient-to-r from-[#1e3f19]/92 via-[#1f4a1e]/90 to-[#183614]/92 px-3 py-2.5 text-left"
+              class="flex w-full items-center justify-between gap-3 rounded-xl bg-white/[0.035] px-3 py-2.5 text-left"
               @click="bcSendTargetGroups = !bcSendTargetGroups"
             >
               <span class="min-w-0">
@@ -6556,7 +6559,7 @@ watch(
 
             <button
               type="button"
-              class="flex w-full items-center justify-between gap-3 rounded-xl border border-amber-400/25 bg-gradient-to-r from-[#4f340f]/90 via-[#5d3d14]/90 to-[#41290c]/90 px-3 py-2.5 text-left"
+              class="flex w-full items-center justify-between gap-3 rounded-xl bg-white/[0.035] px-3 py-2.5 text-left"
               @click="bcSendTargetBots = !bcSendTargetBots"
             >
               <span class="min-w-0">
@@ -6567,13 +6570,13 @@ watch(
             </button>
           </div>
 
-          <div class="mt-3">
+          <div class="mt-5">
             <p class="text-[13px] font-semibold text-zinc-300">Выбрано</p>
             <div class="mt-1.5 space-y-1.5">
               <button
                 v-if="bcSendTargetChannels"
                 type="button"
-                class="flex w-full items-center justify-between rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-left text-[14px] font-semibold text-zinc-100"
+                class="flex w-full items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2 text-left text-[14px] font-semibold text-zinc-100"
                 @click="bcShowChannelsPicker = true"
               >
                 <span>{{ `Каналы: ${Number(bcSelectedChannelIds.length || 0)}` }}</span>
@@ -6582,22 +6585,22 @@ watch(
               <button
                 v-if="bcSendTargetGroups"
                 type="button"
-                class="flex w-full items-center justify-between rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-left text-[14px] font-semibold text-zinc-100"
+                class="flex w-full items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2 text-left text-[14px] font-semibold text-zinc-100"
                 @click="bcShowGroupsPicker = true"
               >
                 <span>{{ `Группы: ${Number(bcSelectedGroupIds.length || 0)}` }}</span>
                 <span>›</span>
               </button>
-              <div v-if="bcSendTargetBots" class="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-[14px] font-semibold text-zinc-100">
+              <div v-if="bcSendTargetBots" class="rounded-xl bg-white/[0.04] px-3 py-2 text-[14px] font-semibold text-zinc-100">
                 {{ `Боты (личка): ${Number(bcSelectedBotRecipientIds.length || 0)}` }}
               </div>
-              <p v-if="!bcSendTargetSummary.length" class="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-[12px] text-zinc-400">Ничего не выбрано</p>
+              <p v-if="!bcSendTargetSummary.length" class="rounded-xl bg-white/[0.03] px-3 py-2 text-[12px] text-zinc-400">Ничего не выбрано</p>
             </div>
           </div>
 
           <button
             type="button"
-            class="mt-auto w-full rounded-xl border border-indigo-400/45 bg-gradient-to-r from-indigo-600/95 to-blue-700/95 px-4 py-2 text-[15px] font-extrabold text-white shadow-[0_14px_30px_-16px_rgba(59,130,246,0.8)] disabled:cursor-not-allowed disabled:opacity-45"
+            class="mt-auto w-full rounded-xl border border-indigo-400/40 bg-gradient-to-r from-indigo-600/95 to-blue-700/95 px-4 py-2 text-[13px] font-extrabold text-white shadow-[0_14px_30px_-16px_rgba(59,130,246,0.8)] disabled:cursor-not-allowed disabled:opacity-45"
             :disabled="bcSelectedTargetsCount <= 0"
             @click="proceedSendTargetModal"
           >
@@ -8984,6 +8987,7 @@ watch(
       </div>
     </div>
 
+    <Teleport to="body">
     <div
       v-if="bcShowGroupsPicker"
       class="fixed inset-0 z-[10040] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
@@ -9033,7 +9037,9 @@ watch(
         </div>
       </div>
     </div>
+    </Teleport>
 
+    <Teleport to="body">
     <div
       v-if="bcShowChannelsPicker"
       class="fixed inset-0 z-[10040] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
@@ -9083,7 +9089,9 @@ watch(
         </div>
       </div>
     </div>
+    </Teleport>
 
+    <Teleport to="body">
     <div
       v-if="bcShowBotsPicker"
       class="fixed inset-0 z-[10040] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
@@ -9133,6 +9141,7 @@ watch(
         </div>
       </div>
     </div>
+    </Teleport>
 
     <div
       v-if="bcShowPreview && bcPreviewItem"
