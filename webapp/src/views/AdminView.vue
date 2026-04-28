@@ -6507,7 +6507,7 @@ watch(
           <button
             type="button"
             class="mt-auto w-full rounded-xl border border-indigo-400/40 bg-gradient-to-r from-indigo-600/95 to-blue-700/95 px-4 py-2 text-[13px] font-extrabold text-white shadow-[0_14px_30px_-16px_rgba(59,130,246,0.8)] disabled:cursor-not-allowed disabled:opacity-45"
-            :disabled="!bcHasMessageText() || bcQuickDraftInitializing"
+            :disabled="!bcHasMessageText()"
             @click="openSendTargetModal"
           >
             Далее
