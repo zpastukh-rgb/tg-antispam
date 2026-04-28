@@ -7830,9 +7830,10 @@ watch(
       </div>
     </div>
 
+    <Teleport to="body">
     <div
       v-if="bcAuxModal === 'keyboard'"
-      class="fixed inset-0 z-[345] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
+      class="fixed inset-0 z-[10080] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
       @click.self="bcAuxModal = ''"
     >
       <div
@@ -7891,10 +7892,12 @@ watch(
         </div>
       </div>
     </div>
+    </Teleport>
 
+    <Teleport to="body">
     <div
       v-if="bcAuxModal === 'media'"
-      class="fixed inset-0 z-[345] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
+      class="fixed inset-0 z-[10080] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
       @click.self="bcAuxModal = ''"
     >
       <div
@@ -7969,6 +7972,7 @@ watch(
         </div>
       </div>
     </div>
+    </Teleport>
 
     <div
       v-if="bcShowMainHelp"
