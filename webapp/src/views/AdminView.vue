@@ -8696,15 +8696,15 @@ watch(
             <div class="relative mx-auto w-full max-w-[17.5rem]">
               <div class="relative mx-auto h-[150px] w-[150px]">
                 <svg
-                  class="pointer-events-none absolute left-0 top-0 h-[150px] w-[150px] -rotate-90 drop-shadow-[0_0_18px_rgba(192,132,252,0.5)]"
+                  class="pointer-events-none absolute left-0 top-0 h-[150px] w-[150px] -rotate-90"
                   viewBox="0 0 120 120"
                   aria-hidden="true"
                 >
                   <defs>
                     <linearGradient id="bcSendNeonRing" x1="0%" y1="30%" x2="100%" y2="100%">
-                      <stop offset="0%" stop-color="#f0abfc" />
-                      <stop offset="50%" stop-color="#c084fc" />
-                      <stop offset="100%" stop-color="#7c3aed" />
+                      <stop offset="0%" stop-color="#60a5fa" />
+                      <stop offset="50%" stop-color="#6366f1" />
+                      <stop offset="100%" stop-color="#8b5cf6" />
                     </linearGradient>
                   </defs>
                   <circle cx="60" cy="60" r="52" fill="none" stroke="rgba(148,163,184,0.12)" stroke-width="9" />
@@ -8721,36 +8721,36 @@ watch(
                   />
                 </svg>
                 <div
-                  class="absolute left-1/2 top-1/2 flex h-[100px] w-[100px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-gradient-to-br from-violet-600/45 via-fuchsia-500/25 to-slate-900/35 shadow-[0_0_48px_-6px_rgba(168,85,247,0.55)] ring-1 ring-white/10"
+                  class="absolute left-1/2 top-1/2 flex h-[100px] w-[100px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-transparent ring-1 ring-white/10"
                 >
                   <img
                     :src="bcTelegramPlaneIconUrl"
-                    class="h-9 w-9 select-none object-contain"
+                    class="h-9 w-9 select-none object-contain drop-shadow-[0_0_22px_rgba(139,92,246,0.95)]"
                     width="36"
                     height="36"
                     alt=""
                   />
                 </div>
                 <span
-                  class="absolute bottom-1 -right-1 text-2xl font-semibold tabular-nums tracking-tight text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.65)]"
+                  class="absolute -bottom-1 right-[-0.95rem] text-[12px] font-semibold tabular-nums tracking-tight text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.65)]"
                 >
                   {{ bcSendProgressPercent }}%
                 </span>
               </div>
             </div>
-            <div class="mt-5 w-full max-w-[17.5rem] text-center">
+            <div class="mt-6 w-full max-w-[17.5rem] text-center">
               <p class="text-[9px] font-semibold uppercase tracking-[0.12em] text-slate-500">Отправлено</p>
-              <p class="mt-0.5 text-sm font-semibold tabular-nums leading-tight text-white">
+              <p class="mt-0.5 text-base font-semibold tabular-nums leading-tight text-white">
                 {{ fmtIntSpace(bcSendProgressDone) }}
                 <span class="text-slate-500">из</span>
                 {{ fmtIntSpace(bcSendProgressTotal) }}
               </p>
             </div>
           </div>
-          <div class="shrink-0 px-0 pb-3 pt-2">
+          <div class="shrink-0 px-0 pb-2 pt-1">
             <button
               type="button"
-              class="w-full rounded-2xl border border-white/[0.1] bg-white/[0.07] py-3.5 text-[15px] font-semibold text-white active:scale-[0.99] hover:bg-white/[0.1]"
+              class="mx-auto block w-[92%] rounded-xl border border-white/[0.1] bg-white/[0.07] py-2.5 text-[13px] font-semibold text-white active:scale-[0.99] hover:bg-white/[0.1]"
               @click="bcSendCancelWatching"
             >
               Отменить отправку
