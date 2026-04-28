@@ -6526,8 +6526,10 @@ watch(
           <div class="flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-2">
             <div class="flex min-h-0 w-full flex-1 flex-col rounded-2xl border border-white/[0.04] bg-[#0b111b]/95 p-3 text-zinc-100 shadow-[0_24px_72px_-28px_rgba(0,0,0,0.9)] ring-1 ring-white/[0.02]">
           <div class="flex items-center justify-between gap-2">
-            <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-transparent text-[14px] text-white/90 hover:bg-white/[0.08]" @click="bcSendTargetModalOpen = false">←</button>
-            <p class="pr-6 text-[19px] font-black text-white">Куда отправить</p>
+            <div class="flex min-w-0 items-center gap-1">
+              <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-transparent text-[14px] text-white/90 hover:bg-white/[0.08]" @click="bcSendTargetModalOpen = false">←</button>
+              <p class="truncate text-[19px] font-black text-white">Куда отправить</p>
+            </div>
             <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-transparent text-[14px] text-white/90 hover:bg-white/[0.08]" @click="bcSendTargetModalOpen = false">✕</button>
           </div>
           <p class="mt-2 text-[13px] text-zinc-400">Выберите получателей</p>
@@ -8792,14 +8794,14 @@ watch(
       >
         <div
           v-if="bcSendModalState === 'sending'"
-          class="flex min-h-[100dvh] w-full max-w-full flex-col px-4"
+          class="flex min-h-[100dvh] w-full max-w-full flex-col px-5"
         >
-          <p class="shrink-0 pt-2 text-[15px] font-semibold text-white">Отправка...</p>
+          <p class="shrink-0 pt-4 text-[16px] font-semibold text-white">Отправка...</p>
           <div class="flex min-h-0 flex-1 flex-col items-center justify-center">
-            <div class="relative mx-auto w-full max-w-[17.5rem]">
-              <div class="relative mx-auto h-[150px] w-[150px]">
+            <div class="relative mx-auto w-full max-w-[19rem]">
+              <div class="relative mx-auto h-[180px] w-[180px]">
                 <svg
-                  class="pointer-events-none absolute left-0 top-0 h-[150px] w-[150px] -rotate-90"
+                  class="pointer-events-none absolute left-0 top-0 h-[180px] w-[180px] -rotate-90"
                   viewBox="0 0 120 120"
                   aria-hidden="true"
                 >
@@ -8810,50 +8812,50 @@ watch(
                       <stop offset="100%" stop-color="#8b5cf6" />
                     </linearGradient>
                   </defs>
-                  <circle cx="60" cy="60" r="52" fill="none" stroke="rgba(148,163,184,0.12)" stroke-width="9" />
+                  <circle cx="60" cy="60" r="52" fill="none" stroke="rgba(148,163,184,0.14)" stroke-width="8" />
                   <circle
                     cx="60"
                     cy="60"
                     r="52"
                     fill="none"
                     stroke="url(#bcSendNeonRing)"
-                    stroke-width="9"
+                    stroke-width="8"
                     stroke-linecap="round"
                     :stroke-dasharray="bcSendCircleDash"
                     class="transition-[stroke-dasharray] duration-300 ease-out"
                   />
                 </svg>
                 <div
-                  class="absolute left-1/2 top-1/2 flex h-[100px] w-[100px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-transparent ring-1 ring-white/10"
+                  class="absolute left-1/2 top-1/2 flex h-[108px] w-[108px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-[#15192a]/55 ring-1 ring-white/10"
                 >
                   <img
                     :src="bcTelegramPlaneIconUrl"
-                    class="h-9 w-9 select-none object-contain drop-shadow-[0_0_22px_rgba(139,92,246,0.95)]"
+                    class="h-10 w-10 select-none object-contain drop-shadow-[0_0_22px_rgba(139,92,246,0.95)]"
                     width="36"
                     height="36"
                     alt=""
                   />
                 </div>
                 <span
-                  class="absolute -bottom-1 right-[-0.95rem] text-[12px] font-semibold tabular-nums tracking-tight text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.65)]"
+                  class="absolute top-1/2 right-[-2.5rem] -translate-y-1/2 text-[38px] font-semibold tabular-nums tracking-tight text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.65)]"
                 >
                   {{ bcSendProgressPercent }}%
                 </span>
               </div>
             </div>
-            <div class="mt-6 w-full max-w-[17.5rem] text-center">
-              <p class="text-[9px] font-semibold uppercase tracking-[0.12em] text-slate-500">Отправлено</p>
-              <p class="mt-0.5 text-base font-semibold tabular-nums leading-tight text-white">
+            <div class="mt-7 w-full max-w-[17.5rem] text-center">
+              <p class="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">Отправлено</p>
+              <p class="mt-0.5 text-[33px] font-semibold tabular-nums leading-none text-white">
                 {{ fmtIntSpace(bcSendProgressDone) }}
-                <span class="text-slate-500">из</span>
+                <span class="text-[22px] text-slate-500">из</span>
                 {{ fmtIntSpace(bcSendProgressTotal) }}
               </p>
             </div>
           </div>
-          <div class="shrink-0 px-0 pb-2 pt-1">
+          <div class="shrink-0 px-0 pb-4 pt-2">
             <button
               type="button"
-              class="mx-auto block w-[92%] rounded-xl border border-white/[0.1] bg-white/[0.07] py-2.5 text-[13px] font-semibold text-white active:scale-[0.99] hover:bg-white/[0.1]"
+              class="mx-auto block w-full rounded-2xl border border-white/[0.08] bg-white/[0.06] py-3.5 text-[14px] font-semibold text-white active:scale-[0.99] hover:bg-white/[0.1]"
               @click="bcSendCancelWatching"
             >
               Отменить отправку
@@ -8863,42 +8865,34 @@ watch(
 
         <div
           v-else-if="bcSendModalState === 'done'"
-          class="relative mx-auto flex w-full max-w-[22rem] flex-1 flex-col overflow-y-auto overscroll-contain px-4 pb-6 pt-2"
+          class="relative mx-auto flex w-full max-w-[22rem] flex-1 flex-col overflow-y-auto overscroll-contain px-4 pb-6 pt-4"
         >
-          <button
-            type="button"
-            class="bc-tool-btn absolute right-2 top-2 z-[2]"
-            aria-label="Закрыть"
-            @click="closeBcSendModal"
-          >
-            ✕
-          </button>
-          <p class="pr-8 text-[17px] font-semibold leading-snug text-white">Рассылка отправлена!</p>
+          <p class="text-[17px] font-semibold leading-snug text-white">Рассылка отправлена!</p>
           <div class="mt-5 flex flex-col items-center">
             <div
-              class="flex h-[92px] w-[92px] items-center justify-center rounded-full bg-emerald-500/15 shadow-[0_0_48px_-10px_rgba(52,211,153,0.65)] ring-2 ring-emerald-400/35"
+              class="flex h-[108px] w-[108px] items-center justify-center rounded-full bg-emerald-500/18 shadow-[0_0_48px_-10px_rgba(52,211,153,0.7)] ring-2 ring-emerald-400/40"
             >
-              <span class="text-3xl text-emerald-300">✓</span>
+              <span class="text-4xl text-emerald-300">✓</span>
             </div>
-            <p class="mt-3 text-[13px] text-slate-400">{{ bcSendCompletedAtLabel }}</p>
+            <p class="mt-3 text-[14px] text-slate-400">{{ bcSendCompletedAtLabel }}</p>
           </div>
 
           <div class="mt-5 grid grid-cols-3 gap-2">
-            <div class="rounded-xl border border-white/[0.06] bg-white/[0.03] px-2 py-2.5 text-center">
+            <div class="rounded-xl border border-white/[0.05] bg-white/[0.02] px-2 py-2.5 text-center">
               <p class="text-[10px] text-slate-500">Доставлено</p>
               <p class="mt-1 text-[15px] font-semibold tabular-nums text-white">{{ fmtIntSpace(bcSendDeliveredOk) }}</p>
               <p class="mt-0.5 text-[12px] font-semibold tabular-nums text-emerald-400">
                 {{ fmtPctTrim(bcSendDeliveredPct) }}
               </p>
             </div>
-            <div class="rounded-xl border border-white/[0.06] bg-white/[0.03] px-2 py-2.5 text-center">
+            <div class="rounded-xl border border-white/[0.05] bg-white/[0.02] px-2 py-2.5 text-center">
               <p class="text-[10px] text-slate-500">Клики · в ЛС</p>
               <p class="mt-1 text-[15px] font-semibold tabular-nums text-white">{{ fmtIntSpace(bcSendClicks) }}</p>
               <p class="mt-0.5 text-[12px] font-semibold tabular-nums text-emerald-400">
                 {{ fmtPctTrim(bcSendClicksPct) }}
               </p>
             </div>
-            <div class="rounded-xl border border-white/[0.06] bg-white/[0.03] px-2 py-2.5 text-center">
+            <div class="rounded-xl border border-white/[0.05] bg-white/[0.02] px-2 py-2.5 text-center">
               <p class="text-[10px] text-slate-500">Переходы · в чаты</p>
               <p class="mt-1 text-[15px] font-semibold tabular-nums text-white">{{ fmtIntSpace(bcSendTransitions) }}</p>
               <p class="mt-0.5 text-[12px] font-semibold tabular-nums text-emerald-400">
@@ -8906,7 +8900,7 @@ watch(
               </p>
             </div>
           </div>
-          <div class="mt-2 rounded-xl border border-white/[0.06] bg-white/[0.03] px-3 py-3 text-center">
+          <div class="mt-2 rounded-xl border border-white/[0.05] bg-white/[0.02] px-3 py-3 text-center">
             <p class="text-[10px] text-slate-500">CTR · охват базы</p>
             <p class="mt-1 text-2xl font-semibold tabular-nums text-emerald-400">{{ fmtPctTrim(bcSendCtrPct) }}</p>
           </div>
