@@ -106,6 +106,7 @@ const bcShowAllRecentModal = ref(false)
 const bcQuickDraftModalOpen = ref(false)
 /** Сохранённое на сервере название при открытии быстрого черновика — для кнопки ✓ */
 const bcQuickTitleBaseline = ref('')
+const bcQuickDraftBaseline = ref(null)
 const bcSendTargetModalOpen = ref(false)
 const bcSendTargetChannels = ref(true)
 const bcSendTargetGroups = ref(false)
@@ -412,8 +413,17 @@ async function openQuickBroadcastDraft() {
   bcEditorOpen.value = false
   bcQuickDraftModalOpen.value = true
   bcQuickTitleBaseline.value = String(bcTitle.value || '')
+  bcQuickDraftBaseline.value = null
   await nextTick()
   if (bcBodyRef.value) bcBodyRef.value.innerHTML = bcBodyHtml.value || ''
+  bcSyncEditorHtml()
+  bcQuickDraftBaseline.value = {
+    title: String(bcTitle.value || '').trim(),
+    body: String(bcNormalizeHtmlForTelegram(bcBodyHtml.value || '') || ''),
+    keyboard: JSON.stringify(bcBuildKeyboardPayload() || []),
+    mediaKind: String(bcMediaKindStored.value || 'none'),
+    mediaName: String(bcMediaOriginalName.value || ''),
+  }
   bcUpdateFormatState()
 }
 
@@ -3895,18 +3905,66 @@ async function createBcDraft() {
 
 async function saveBcDraft() {
   const id = bcSelectedId.value
-  if (!id) return
+  if (!id) return false
   bcSaving.value = true
+  let ok = false
   try {
     await persistCurrentBroadcast()
+    ok = true
     if (bcQuickDraftModalOpen.value) {
       bcQuickTitleBaseline.value = String(bcTitle.value || '')
+      bcQuickDraftBaseline.value = {
+        title: String(bcTitle.value || '').trim(),
+        body: String(bcNormalizeHtmlForTelegram(bcBodyHtml.value || '') || ''),
+        keyboard: JSON.stringify(bcBuildKeyboardPayload() || []),
+        mediaKind: String(bcMediaKindStored.value || 'none'),
+        mediaName: String(bcMediaOriginalName.value || ''),
+      }
     }
   } catch (e) {
     alert(String(e?.body?.detail || e?.message || 'Не удалось сохранить'))
   } finally {
     bcSaving.value = false
   }
+  return ok
+}
+
+function bcQuickDraftHasPendingChanges() {
+  if (!bcQuickDraftModalOpen.value) return false
+  bcSyncEditorHtml()
+  const cur = {
+    title: String(bcTitle.value || '').trim(),
+    body: String(bcNormalizeHtmlForTelegram(bcBodyHtml.value || '') || ''),
+    keyboard: JSON.stringify(bcBuildKeyboardPayload() || []),
+    mediaKind: String(bcMediaKindStored.value || 'none'),
+    mediaName: String(bcMediaOriginalName.value || ''),
+  }
+  const base = bcQuickDraftBaseline.value
+  if (!base) {
+    return !!(cur.title || cur.body || cur.keyboard !== '[]' || cur.mediaKind !== 'none' || cur.mediaName)
+  }
+  return (
+    cur.title !== String(base.title || '') ||
+    cur.body !== String(base.body || '') ||
+    cur.keyboard !== String(base.keyboard || '[]') ||
+    cur.mediaKind !== String(base.mediaKind || 'none') ||
+    cur.mediaName !== String(base.mediaName || '')
+  )
+}
+
+async function closeQuickBroadcastDraft() {
+  if (bcSaving.value) return
+  const hasChanges = bcQuickDraftHasPendingChanges()
+  if (hasChanges) {
+    const shouldSave = window.confirm('Сохранить изменения перед выходом?')
+    if (shouldSave) {
+      const saved = await saveBcDraft()
+      if (!saved) return
+    }
+  }
+  bcQuickDraftModalOpen.value = false
+  bcAuxModal.value = ''
+  bcEditorOpen.value = false
 }
 
 async function applyBcQuickDraftTitle() {
@@ -6302,10 +6360,10 @@ watch(
         <div
           v-if="bcQuickDraftModalOpen"
           class="fixed inset-0 z-[10000] flex min-h-[100dvh] min-w-0 flex-col bg-[#09090b] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
-          @click.self="bcQuickDraftModalOpen = false"
+          @click.self="closeQuickBroadcastDraft"
         >
-          <div class="mx-auto flex w-full max-w-lg flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-3">
-            <div class="w-full rounded-2xl border border-white/12 bg-[#0b111b]/95 p-3 text-zinc-100 shadow-[0_28px_80px_-24px_rgba(0,0,0,0.92)] ring-1 ring-white/[0.06]">
+          <div class="flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-2">
+            <div class="flex min-h-0 flex-1 flex-col bg-[#0b111b]/95 p-3 text-zinc-100">
           <div class="mb-2 flex items-start justify-between gap-2 border-b border-white/10 pb-2">
             <div class="min-w-0 flex-1">
               <p class="truncate text-[19px] font-black text-white">Новая рассылка</p>
@@ -6331,9 +6389,20 @@ watch(
                 </button>
               </div>
             </div>
-            <button type="button" class="rounded-lg px-2 py-1 text-[13px] font-bold text-[#70a8ff] hover:bg-white/10" :disabled="bcSaving" @click="saveBcDraft">
-              Сохранить
-            </button>
+            <div class="flex items-center gap-1">
+              <button type="button" class="rounded-lg px-2 py-1 text-[13px] font-bold text-[#70a8ff] hover:bg-white/10" :disabled="bcSaving" @click="saveBcDraft">
+                Сохранить
+              </button>
+              <button
+                type="button"
+                class="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/12 bg-white/[0.04] text-sm text-zinc-200 hover:bg-white/[0.1]"
+                aria-label="Закрыть"
+                :disabled="bcSaving"
+                @click="closeQuickBroadcastDraft"
+              >
+                ✕
+              </button>
+            </div>
           </div>
 
           <p class="text-[12px] font-semibold text-zinc-300">Текст сообщения</p>
