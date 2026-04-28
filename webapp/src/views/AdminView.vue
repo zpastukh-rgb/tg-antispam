@@ -6438,14 +6438,12 @@ watch(
           <div
             ref="bcBodyRef"
             class="bc-editor mt-2 h-40 overflow-y-auto rounded-xl border border-white/[0.08] bg-zinc-950 px-3 py-2.5 text-sm leading-relaxed focus-within:border-white/20 focus-within:ring-0"
-            :class="bcQuickDraftInitializing ? 'opacity-60' : ''"
-            :contenteditable="bcQuickDraftInitializing ? 'false' : 'true'"
+            contenteditable="true"
             @input="onBcEditorInput"
             @click="onBcEditorClick"
             @mouseup="bcUpdateFormatState"
             @keyup="bcUpdateFormatState"
           />
-          <p v-if="bcQuickDraftInitializing" class="mt-1 text-[11px] text-slate-500">Подготавливаем черновик…</p>
 
           <div class="mt-2 flex flex-wrap gap-1.5">
             <button type="button" class="bc-tool-btn min-w-[2.1rem] !px-2" :class="bcFormatState.bold ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatBold"><b>B</b></button>
@@ -8848,7 +8846,7 @@ watch(
                   />
                 </div>
                 <span
-                  class="absolute -bottom-0.5 right-[-1.9rem] text-[28px] font-semibold tabular-nums tracking-tight text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.65)]"
+                  class="absolute -bottom-1 right-[-2.3rem] text-[22px] font-semibold tabular-nums tracking-tight text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.65)]"
                 >
                   {{ bcSendProgressPercent }}%
                 </span>
