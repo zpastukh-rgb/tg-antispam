@@ -281,6 +281,12 @@ function fmtPctTrim(p) {
   const s = n.toFixed(1).replace('.', ',')
   return `${s}%`
 }
+function stripHtml(raw) {
+  return String(raw || '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
 
 const bcSendProgressTotal = computed(() => {
   const row = bcSendLiveRow.value
@@ -581,10 +587,7 @@ async function submitBcConfirmedSend() {
 }
 
 async function openQuickAutopost() {
-  if (!bcSelectedId.value) {
-    await createBcDraft()
-  }
-  bcAutopostingModalOpen.value = true
+  await openBcCampaignUxList()
 }
 
 /** Полная серверная админка (все вкладки). */
@@ -1544,6 +1547,380 @@ const bcAutopostCampaignAnchorBid = ref(null)
 const bcAutopostCampaignUserSeq = ref(null)
 /** Источник данных для модалки «недавние» */
 const bcAutopostDetailSource = ref('broadcast')
+/** Новый полноэкранный UX автокампаний */
+const bcCampaignUxOpen = ref(false)
+const bcCampaignUxScreen = ref('list') // list | wizard | review | success | manage | stats | progress | postEditor
+const bcCampaignUxStep = ref(1) // 1..4
+const bcCampaignUxBusy = ref(false)
+const bcCampaignUxManageId = ref(0)
+const bcCampaignUxStatsPeriod = ref(7)
+const bcCampaignUxStatsData = ref(null)
+const bcCampaignUxRecipientPickerOpen = ref(false)
+const bcCampaignUxRecipientPickerKind = ref('groups')
+const bcCampaignUxRecipientQuery = ref('')
+const bcCampaignUxEditingCampaignId = ref(0)
+const bcCampaignUxPostEditorId = ref(0)
+const bcCampaignUxPostEditorMode = ref('create') // create | edit
+const bcCampaignUxPostEditorReturn = ref('wizard')
+const bcCampaignUxWizard = ref({
+  title: '',
+  postIds: [],
+  campaignType: 'progress', // progress | rotation | simple
+  scheduleMode: 'every_day', // every_day | weekdays | interval
+  intervalDays: 1,
+  weekdays: [0, 1, 2, 3, 4],
+  sendTime: '09:00',
+  timezone: typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Yekaterinburg' : 'Asia/Yekaterinburg',
+  postsPerDay: 1,
+  spreadInWindow: true,
+  windowStart: '09:00',
+  windowEnd: '21:00',
+  targetChannels: true,
+  targetGroups: true,
+  targetBots: false,
+  selectedGroups: [],
+  selectedChannels: [],
+  customDays: '',
+})
+const bcCampaignUxSuccessInfo = ref({ id: 0, nextAt: '' })
+
+const bcCampaignUxManageItem = computed(() => {
+  const id = Number(bcCampaignUxManageId.value || 0)
+  return (bcAutopostCampaigns.value || []).find((c) => Number(c?.id || 0) === id) || null
+})
+const bcCampaignUxWizardCanNext = computed(() => {
+  const w = bcCampaignUxWizard.value
+  if (bcCampaignUxStep.value === 1) return !!String(w.title || '').trim() && Number(w.postIds?.length || 0) > 0
+  if (bcCampaignUxStep.value === 2) return ['progress', 'rotation', 'simple'].includes(String(w.campaignType || ''))
+  if (bcCampaignUxStep.value === 3) return !!String(w.sendTime || '').trim() && Number(w.postsPerDay || 0) > 0
+  if (bcCampaignUxStep.value === 4) return !!(w.targetChannels || w.targetGroups || w.targetBots)
+  return true
+})
+const bcCampaignUxSelectedSummary = computed(() => {
+  const w = bcCampaignUxWizard.value
+  return {
+    channels: w.targetChannels ? Number(w.selectedChannels?.length || 0) : 0,
+    groups: w.targetGroups ? Number(w.selectedGroups?.length || 0) : 0,
+    bots: w.targetBots ? Number(bcSelectedBotRecipientIds.value?.length || 0) : 0,
+  }
+})
+const bcCampaignUxEstimatedCost = computed(() => {
+  const s = bcCampaignUxSelectedSummary.value
+  return Math.max(0, Math.trunc((s.channels || 0) + (s.groups || 0)))
+})
+const bcCampaignUxPostMap = computed(() => {
+  const map = new Map()
+  for (const b of broadcasts.value || []) {
+    const bid = Number(b?.id || 0)
+    if (bid) map.set(bid, b)
+  }
+  return map
+})
+const bcCampaignUxWizardPosts = computed(() =>
+  (bcCampaignUxWizard.value.postIds || [])
+    .map((id) => bcCampaignUxPostMap.value.get(Number(id)))
+    .filter(Boolean),
+)
+const bcCampaignUxRecipientsFiltered = computed(() => {
+  const q = String(bcCampaignUxRecipientQuery.value || '').trim().toLowerCase()
+  const src = bcCampaignUxRecipientPickerKind.value === 'channels' ? bcBroadcastChannels.value : bcBroadcastGroups.value
+  if (!q) return src || []
+  return (src || []).filter((c) => String(c?.title || c?.username || bcNormalizeChatId(c)).toLowerCase().includes(q))
+})
+
+function bcCampaignUxStatusLabel(camp) {
+  const s = bcCampaignRunState(camp)
+  if (s === 'running') return 'Запущена'
+  if (s === 'paused') return 'Остановлена'
+  return 'Черновик'
+}
+function bcCampaignUxTodaySent(camp) {
+  const rows = Array.isArray(camp?.autopost?.recent_runs) ? camp.autopost.recent_runs : []
+  const now = new Date()
+  const y = now.getFullYear()
+  const m = now.getMonth()
+  const d = now.getDate()
+  return rows.filter((r) => {
+    const dt = new Date(String(r?.created_at || ''))
+    return !Number.isNaN(dt.getTime()) && dt.getFullYear() === y && dt.getMonth() === m && dt.getDate() === d
+  }).length
+}
+function bcCampaignUxNearestAt() {
+  const now = new Date()
+  const [h, mm] = String(bcCampaignUxWizard.value.sendTime || '09:00').split(':').map((x) => Number(x || 0))
+  const dt = new Date(now)
+  dt.setHours(Number.isFinite(h) ? h : 9, Number.isFinite(mm) ? mm : 0, 0, 0)
+  if (dt.getTime() <= now.getTime()) dt.setDate(dt.getDate() + 1)
+  return fmtDateTime(dt.toISOString())
+}
+function bcCampaignUxHydrateWizardFromCampaign(camp) {
+  const ap = camp?.autopost || {}
+  const brIds = Array.isArray(ap?.broadcast_ids) ? ap.broadcast_ids.map((x) => Number(x)).filter((x) => x > 0) : []
+  const useAll = !!ap?.use_all_broadcasts
+  bcCampaignUxWizard.value = {
+    title: String(camp?.title || `Кампания #${camp?.id || ''}`),
+    postIds: useAll ? (broadcasts.value || []).map((b) => Number(b?.id || 0)).filter((x) => x > 0) : brIds,
+    campaignType: useAll ? 'rotation' : (brIds.length <= 1 ? 'simple' : 'progress'),
+    scheduleMode: ap?.scheduleMode === 'weekdays' ? 'weekdays' : 'every_day',
+    intervalDays: 1,
+    weekdays: Array.isArray(ap?.weekdays) && ap.weekdays.length ? ap.weekdays.map((x) => Number(x)) : [0, 1, 2, 3, 4],
+    sendTime: String(ap?.windowStart || '09:00').slice(0, 5),
+    windowStart: String(ap?.windowStart || '09:00').slice(0, 5),
+    windowEnd: String(ap?.windowEnd || '21:00').slice(0, 5),
+    timezone: String(ap?.timezone || 'Asia/Yekaterinburg'),
+    postsPerDay: Math.max(1, Number(ap?.postsPerDay || 1)),
+    spreadInWindow: ap?.spreadInWindow !== false,
+    targetChannels: ap?.autopost_channels_disabled ? false : true,
+    targetGroups: true,
+    targetBots: String(ap?.autopost_target || 'groups') === 'users',
+    selectedGroups: Array.isArray(ap?.group_chat_ids) ? ap.group_chat_ids.map((x) => Number(x)).filter((x) => x < 0) : [],
+    selectedChannels: Array.isArray(ap?.channel_chat_ids) ? ap.channel_chat_ids.map((x) => Number(x)).filter((x) => x < 0) : [],
+    customDays: '',
+  }
+}
+function openBcCampaignUxManage(camp) {
+  const id = Number(camp?.id || 0)
+  if (!id) return
+  bcCampaignUxManageId.value = id
+  bcCampaignUxScreen.value = 'manage'
+  bcCampaignUxOpen.value = true
+}
+async function openBcCampaignUxList() {
+  bcCampaignUxOpen.value = true
+  bcCampaignUxScreen.value = 'list'
+  await loadAutopostCampaigns()
+}
+async function openBcCampaignUxWizard() {
+  if (!(broadcasts.value || []).length) {
+    await createBcDraft()
+  }
+  await loadBroadcastEligibleGroups()
+  await loadBroadcastEligibleChannels()
+  const selectedBid = Number(bcSelectedId.value || (broadcasts.value?.[0]?.id || 0) || 0)
+  bcCampaignUxWizard.value = {
+    title: '',
+    postIds: selectedBid ? [selectedBid] : [],
+    campaignType: 'progress',
+    scheduleMode: 'every_day',
+    intervalDays: 1,
+    weekdays: [0, 1, 2, 3, 4],
+    sendTime: '09:00',
+    windowStart: '09:00',
+    windowEnd: '21:00',
+    timezone: typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Yekaterinburg' : 'Asia/Yekaterinburg',
+    postsPerDay: 1,
+    spreadInWindow: true,
+    targetChannels: true,
+    targetGroups: true,
+    targetBots: false,
+    selectedGroups: [...(bcSelectedGroupIds.value || [])],
+    selectedChannels: [...(bcSelectedChannelIds.value || [])],
+    customDays: '',
+  }
+  bcCampaignUxEditingCampaignId.value = 0
+  bcCampaignUxStep.value = 1
+  bcCampaignUxScreen.value = 'wizard'
+  bcCampaignUxOpen.value = true
+}
+async function openBcCampaignUxEditCampaign(camp) {
+  const id = Number(camp?.id || 0)
+  if (!id) return
+  await loadBroadcastEligibleGroups()
+  await loadBroadcastEligibleChannels()
+  bcCampaignUxHydrateWizardFromCampaign(camp)
+  bcCampaignUxManageId.value = id
+  bcCampaignUxEditingCampaignId.value = id
+  bcCampaignUxStep.value = 1
+  bcCampaignUxScreen.value = 'wizard'
+  bcCampaignUxOpen.value = true
+}
+function bcCampaignUxBack() {
+  if (bcCampaignUxScreen.value === 'postEditor') {
+    bcCampaignUxScreen.value = String(bcCampaignUxPostEditorReturn.value || 'wizard')
+    return
+  }
+  if (bcCampaignUxScreen.value === 'wizard' && bcCampaignUxStep.value > 1) {
+    bcCampaignUxStep.value -= 1
+    return
+  }
+  if (bcCampaignUxScreen.value === 'review') {
+    bcCampaignUxScreen.value = 'wizard'
+    bcCampaignUxStep.value = 4
+    return
+  }
+  if (bcCampaignUxScreen.value === 'manage' || bcCampaignUxScreen.value === 'stats' || bcCampaignUxScreen.value === 'success') {
+    bcCampaignUxScreen.value = 'list'
+    return
+  }
+  bcCampaignUxOpen.value = false
+}
+function bcCampaignUxNextStep() {
+  if (!bcCampaignUxWizardCanNext.value) return
+  if (bcCampaignUxStep.value >= 4) {
+    bcCampaignUxScreen.value = 'review'
+    return
+  }
+  bcCampaignUxStep.value += 1
+}
+function bcCampaignUxTogglePost(id) {
+  const bid = Number(id || 0)
+  if (!bid) return
+  const set = new Set((bcCampaignUxWizard.value.postIds || []).map((x) => Number(x)))
+  if (set.has(bid)) set.delete(bid)
+  else set.add(bid)
+  bcCampaignUxWizard.value.postIds = [...set]
+}
+function bcCampaignUxMovePost(id, dir) {
+  const bid = Number(id || 0)
+  const list = [...(bcCampaignUxWizard.value.postIds || [])].map((x) => Number(x))
+  const idx = list.findIndex((x) => x === bid)
+  if (idx < 0) return
+  const j = idx + (Number(dir) > 0 ? 1 : -1)
+  if (j < 0 || j >= list.length) return
+  ;[list[idx], list[j]] = [list[j], list[idx]]
+  bcCampaignUxWizard.value.postIds = list
+}
+function bcCampaignUxRemovePost(id) {
+  const bid = Number(id || 0)
+  bcCampaignUxWizard.value.postIds = (bcCampaignUxWizard.value.postIds || []).map((x) => Number(x)).filter((x) => x !== bid)
+}
+function bcCampaignUxPostMeta(item) {
+  const hasMedia = !!(item?.media_items?.length || item?.media_original_name || item?.has_media_file)
+  const hasButtons = !!(item?.keyboard?.rows?.length || item?.keyboard_rows?.length)
+  if (hasMedia && hasButtons) return '🖼️🔗'
+  if (hasMedia) return '🖼️'
+  if (hasButtons) return '🔗'
+  return '✍️'
+}
+async function bcCampaignUxOpenPostEditor(id = 0) {
+  const bid = Number(id || 0)
+  bcCampaignUxPostEditorReturn.value = 'wizard'
+  if (bid > 0) {
+    const item = bcCampaignUxPostMap.value.get(bid)
+    if (!item) return
+    applyBroadcastToForm(item)
+    bcCampaignUxPostEditorId.value = bid
+    bcCampaignUxPostEditorMode.value = 'edit'
+    bcCampaignUxScreen.value = 'postEditor'
+    return
+  }
+  await createBcDraft()
+  bcCampaignUxPostEditorId.value = Number(bcSelectedId.value || 0)
+  bcCampaignUxPostEditorMode.value = 'create'
+  bcCampaignUxScreen.value = 'postEditor'
+}
+async function bcCampaignUxSavePostEditor() {
+  const ok = await saveBcDraft()
+  if (!ok) return
+  const bid = Number(bcSelectedId.value || bcCampaignUxPostEditorId.value || 0)
+  if (bid > 0 && !(bcCampaignUxWizard.value.postIds || []).includes(bid)) {
+    bcCampaignUxWizard.value.postIds = [...(bcCampaignUxWizard.value.postIds || []), bid]
+  }
+  bcCampaignUxScreen.value = 'wizard'
+}
+function bcCampaignUxToggleWeekday(day) {
+  const v = Number(day)
+  if (!(v >= 0 && v <= 6)) return
+  const set = new Set((bcCampaignUxWizard.value.weekdays || []).map((x) => Number(x)))
+  if (set.has(v)) set.delete(v)
+  else set.add(v)
+  bcCampaignUxWizard.value.weekdays = [...set].sort((a, b) => a - b)
+}
+function bcCampaignUxOpenRecipientPicker(kind) {
+  bcCampaignUxRecipientPickerKind.value = kind === 'channels' ? 'channels' : 'groups'
+  bcCampaignUxRecipientQuery.value = ''
+  bcCampaignUxRecipientPickerOpen.value = true
+}
+function bcCampaignUxToggleRecipient(id) {
+  const chatId = Number(id || 0)
+  if (!chatId) return
+  const field = bcCampaignUxRecipientPickerKind.value === 'channels' ? 'selectedChannels' : 'selectedGroups'
+  const set = new Set((bcCampaignUxWizard.value[field] || []).map((x) => Number(x)))
+  if (set.has(chatId)) set.delete(chatId)
+  else set.add(chatId)
+  bcCampaignUxWizard.value[field] = [...set]
+}
+function bcCampaignUxSelectAllRecipients() {
+  if (bcCampaignUxRecipientPickerKind.value === 'channels') {
+    bcCampaignUxWizard.value.selectedChannels = (bcBroadcastChannels.value || []).map((c) => bcNormalizeChatId(c)).filter((x) => x < 0)
+    return
+  }
+  bcCampaignUxWizard.value.selectedGroups = (bcBroadcastGroups.value || []).map((c) => bcNormalizeChatId(c)).filter((x) => x < 0)
+}
+function bcCampaignUxClearRecipients() {
+  if (bcCampaignUxRecipientPickerKind.value === 'channels') {
+    bcCampaignUxWizard.value.selectedChannels = []
+    return
+  }
+  bcCampaignUxWizard.value.selectedGroups = []
+}
+async function bcCampaignUxCreateCampaign() {
+  if (bcCampaignUxBusy.value) return
+  const w = bcCampaignUxWizard.value
+  const postIds = (w.postIds || []).map((x) => Number(x)).filter((x) => x > 0)
+  if (!String(w.title || '').trim() || !postIds.length) return
+  bcCampaignUxBusy.value = true
+  try {
+    const mode = String(w.scheduleMode || 'every_day')
+    const wdFromCustom = String(w.customDays || '')
+      .split(',')
+      .map((x) => Number(String(x || '').trim()))
+      .filter((n) => Number.isFinite(n) && n >= 0 && n <= 6)
+    const wd =
+      mode === 'weekdays'
+        ? [...(w.weekdays || [0, 1, 2, 3, 4])]
+        : mode === 'custom'
+          ? (wdFromCustom.length ? [...new Set(wdFromCustom)] : [1, 3, 5])
+          : [0, 1, 2, 3, 4, 5, 6]
+    const ap = {
+      runState: 'stopped',
+      scheduleMode: mode === 'weekdays' || mode === 'custom' ? 'weekdays' : 'every_day',
+      weekdays: wd,
+      postsPerDay: Math.max(1, Math.min(288, Number(w.postsPerDay || 1))),
+      timezone: String(w.timezone || 'Asia/Yekaterinburg').trim() || 'Asia/Yekaterinburg',
+      windowStart: String(w.windowStart || w.sendTime || '09:00'),
+      windowEnd: String(w.windowEnd || w.sendTime || '21:00'),
+      spreadInWindow: w.spreadInWindow !== false,
+      autopost_target: w.targetBots && !w.targetGroups && !w.targetChannels ? 'users' : 'groups',
+      group_chat_ids: w.targetGroups ? [...(w.selectedGroups || [])] : [],
+      channel_chat_ids: w.targetChannels ? [...(w.selectedChannels || [])] : [],
+      autopost_channels_disabled: !w.targetChannels,
+      use_all_broadcasts: w.campaignType === 'rotation',
+      broadcast_ids: w.campaignType === 'rotation' ? [] : [...postIds],
+    }
+    let cid = Number(bcCampaignUxEditingCampaignId.value || 0)
+    if (cid > 0) {
+      await fetch(() => api.adminAutopostCampaignPatch(cid, { title: String(w.title || '').trim(), autopost: ap }))
+    } else {
+      const created = await fetch(() => api.adminAutopostCampaignCreate({ anchor_broadcast_id: postIds[0] }))
+      cid = Number(created?.id || 0)
+      if (!cid) throw new Error('Кампания не создана')
+      await fetch(() => api.adminAutopostCampaignPatch(cid, { title: String(w.title || '').trim(), autopost: ap }))
+    }
+    await loadAutopostCampaigns()
+    bcCampaignUxSuccessInfo.value = { id: cid, nextAt: bcCampaignUxNearestAt() }
+    bcCampaignUxManageId.value = cid
+    bcCampaignUxScreen.value = 'success'
+  } catch (e) {
+    window.alert(String(e?.body?.detail || e?.message || 'Не удалось создать кампанию'))
+  } finally {
+    bcCampaignUxBusy.value = false
+  }
+}
+async function bcCampaignUxOpenStats(camp) {
+  const id = Number(camp?.id || bcCampaignUxManageId.value || 0)
+  if (!id) return
+  bcCampaignUxManageId.value = id
+  bcCampaignUxScreen.value = 'stats'
+  bcCampaignUxStatsData.value = null
+  try {
+    bcCampaignUxStatsData.value = await fetch(() =>
+      api.adminAutopostCampaignAutopostStats(id, Number(bcCampaignUxStatsPeriod.value || 7) || 7),
+    )
+  } catch {
+    bcCampaignUxStatsData.value = null
+  }
+}
 
 const BC_WEEKDAY_OPTS = [
   { v: 0, label: 'Пн' },
@@ -4886,7 +5263,9 @@ watch(
     bcSendTargetModalOpen.value ||
     bcSendModalOpen.value ||
     bcConfirmModalOpen.value ||
-    bcShowBotsPicker.value,
+    bcShowBotsPicker.value ||
+    bcCampaignUxOpen.value ||
+    bcCampaignUxRecipientPickerOpen.value,
   (lock) => {
     if (typeof document === 'undefined') return
     const body = document.body
@@ -6376,7 +6755,7 @@ watch(
           <button
             type="button"
             class="w-full rounded-xl border border-emerald-400/30 bg-gradient-to-r from-[#1e3f19]/92 via-[#1f4a1e]/90 to-[#183614]/92 px-3 py-2.5 text-left shadow-[0_12px_24px_-16px_rgba(34,197,94,0.7),inset_0_1px_0_rgba(255,255,255,0.11)] ring-1 ring-emerald-300/20 transition active:scale-[0.995]"
-            @click="openQuickAutopost"
+            @click="openBcCampaignUxList"
           >
             <span class="flex items-center gap-2.5">
               <span class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-emerald-200/15 bg-emerald-500/20 text-emerald-100 shadow-[0_0_18px_-8px_rgba(74,222,128,0.75)]">
@@ -7081,7 +7460,7 @@ watch(
               <button
                 type="button"
                 class="rounded-md border border-cyan-500/40 bg-cyan-950/40 px-2 py-1 text-[10px] font-semibold text-cyan-100"
-                @click="createBcAutopostCampaign"
+                @click="openBcCampaignUxWizard"
               >
                 + Кампания
               </button>
@@ -7094,6 +7473,10 @@ watch(
                 v-for="camp in bcAutopostCampaigns"
                 :key="`apc-${camp.id}`"
                 class="flex flex-col gap-1.5 rounded-lg border border-white/10 bg-black/25 px-2 py-1.5"
+                role="button"
+                tabindex="0"
+                @click="openBcCampaignUxManage(camp)"
+                @keydown.enter.prevent="openBcCampaignUxManage(camp)"
               >
                 <div class="flex flex-wrap items-center justify-between gap-1">
                   <div class="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -7242,6 +7625,334 @@ watch(
       </div>
     </div>
     </template>
+
+    <Teleport to="body">
+      <div
+        v-if="bcCampaignUxOpen"
+        class="fixed inset-0 z-[10200] flex h-[100dvh] min-w-0 flex-col overflow-hidden bg-[#05070B] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] text-white"
+      >
+        <div class="flex items-center justify-between border-b border-white/10 bg-black/20 px-4 py-3 backdrop-blur-sm">
+          <button type="button" class="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/[0.03] text-white/90 transition hover:bg-white/[0.08] active:scale-[0.98]" @click="bcCampaignUxBack">←</button>
+          <div class="min-w-0 text-center">
+            <p class="truncate text-[19px] font-extrabold tracking-tight">{{ bcCampaignUxScreen === 'list' ? 'Автокампании' : bcCampaignUxScreen === 'manage' ? (bcCampaignUxManageItem?.title || 'Управление кампанией') : bcCampaignUxScreen === 'stats' ? 'Статистика кампании' : 'Новая кампания' }}</p>
+            <p v-if="bcCampaignUxScreen === 'wizard'" class="text-[11px] font-medium text-slate-400">Шаг {{ bcCampaignUxStep }} из 4</p>
+          </div>
+          <button type="button" class="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/[0.03] text-white/90 transition hover:bg-white/[0.08] active:scale-[0.98]" @click="bcCampaignUxOpen = false">✕</button>
+        </div>
+
+        <div v-if="bcCampaignUxScreen === 'list'" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 pb-[max(5.5rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))]">
+          <p class="text-[13px] text-slate-300">Создавайте кампании и отправляйте сообщения по расписанию</p>
+          <button type="button" class="mt-3 w-full rounded-2xl border border-indigo-400/50 bg-gradient-to-r from-[#6d3ef7] via-[#4f46e5] to-[#355dff] px-4 py-3 text-[15px] font-extrabold shadow-[0_20px_44px_-18px_rgba(79,70,229,0.95)] transition hover:brightness-110 active:scale-[0.995]" @click="openBcCampaignUxWizard">+ Новая кампания</button>
+          <div class="mt-4 space-y-2.5">
+            <button
+              v-for="camp in bcAutopostCampaigns"
+              :key="`ux-camp-${camp.id}`"
+              type="button"
+              class="w-full rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_16px_30px_-24px_rgba(15,23,42,0.9)] transition hover:border-indigo-300/35 hover:bg-[#151A22]"
+              @click="openBcCampaignUxManage(camp)"
+            >
+              <div class="flex items-center justify-between gap-2">
+                <p class="truncate text-[16px] font-bold">{{ camp.title || `Кампания #${camp.id}` }}</p>
+                <span class="rounded-md border border-emerald-400/25 bg-emerald-500/10 px-2 py-0.5 text-[11px] text-emerald-300">{{ bcCampaignUxStatusLabel(camp) }}</span>
+              </div>
+              <div class="mt-2 grid grid-cols-2 gap-1 text-[11px] text-slate-300">
+                <span>Получатели: {{ Number((camp?.autopost?.group_chat_ids || []).length || 0) + Number((camp?.autopost?.channel_chat_ids || []).length || 0) }}</span>
+                <span>Постов: {{ Number((camp?.autopost?.broadcast_ids || []).length || 0) || (camp?.autopost?.use_all_broadcasts ? 'Все' : 0) }}</span>
+                <span>Сегодня: {{ bcCampaignUxTodaySent(camp) }}</span>
+                <span>CTR: {{ fmtPctTrim(Number(camp?.ctr || 0)) }}</span>
+              </div>
+            </button>
+            <div v-if="!bcAutopostCampaigns.length" class="rounded-2xl border border-dashed border-white/15 bg-[#11151C]/85 px-3 py-5 text-center">
+              <p class="text-[14px] font-semibold text-slate-200">Кампаний пока нет</p>
+              <p class="mt-1 text-[12px] text-slate-400">Создайте первую кампанию по кнопке выше</p>
+            </div>
+          </div>
+        </div>
+
+        <div v-else-if="bcCampaignUxScreen === 'wizard'" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 pb-[max(5.5rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))]">
+          <template v-if="bcCampaignUxStep === 1">
+            <p class="text-[12px] text-slate-400">Шаг 1 из 5</p>
+            <label class="mt-2 block text-[12px] font-semibold text-slate-300">Название кампании</label>
+            <input v-model="bcCampaignUxWizard.title" type="text" maxlength="255" class="mt-1 w-full rounded-2xl border border-white/10 bg-[#11151C] px-3 py-2.5 text-sm text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] focus:border-indigo-400/45 focus:outline-none focus:ring-1 focus:ring-indigo-400/30" placeholder="Например: Утренний прогрев" />
+            <p class="mt-3 text-[12px] font-semibold text-slate-300">Посты кампании</p>
+            <div class="mt-2 grid grid-cols-2 gap-2">
+              <button type="button" class="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxOpenPostEditor(0)">+ Создать новый пост</button>
+              <button type="button" class="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxWizard.postIds = [...new Set([...(bcCampaignUxWizard.postIds || []), ...broadcasts.map((b)=>Number(b.id||0)).filter((x)=>x>0)])]">Выбрать из шаблонов</button>
+            </div>
+            <div class="mt-2 max-h-44 space-y-1 overflow-y-auto rounded-2xl border border-white/10 bg-[#11151C] p-2">
+              <label v-for="b in broadcasts" :key="`wiz-post-${b.id}`" class="flex items-center gap-2 rounded-lg px-2 py-1.5 text-[12px] transition hover:bg-white/[0.06]">
+                <input type="checkbox" :checked="bcCampaignUxWizard.postIds.includes(Number(b.id))" @change="bcCampaignUxTogglePost(b.id)" />
+                <span class="truncate">{{ b.title || `Пост #${b.id}` }}</span>
+              </label>
+            </div>
+            <div class="mt-2 space-y-1.5 rounded-2xl border border-white/10 bg-[#11151C] p-2">
+              <div v-for="(p, pi) in bcCampaignUxWizardPosts" :key="`wiz-cpost-${p.id}`" class="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-2 py-1.5">
+                <span class="w-5 text-center text-[11px] text-slate-400">{{ pi + 1 }}</span>
+                <span class="text-sm">{{ bcCampaignUxPostMeta(p) }}</span>
+                <span class="min-w-0 flex-1 truncate text-[12px] text-slate-200">{{ stripHtml(p?.body_text || '') || p?.title || `Пост #${p.id}` }}</span>
+                <button type="button" class="rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 text-[10px]" @click="bcCampaignUxOpenPostEditor(p.id)">✎</button>
+                <button type="button" class="rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 text-[10px]" @click="bcCampaignUxMovePost(p.id, -1)">↑</button>
+                <button type="button" class="rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 text-[10px]" @click="bcCampaignUxMovePost(p.id, 1)">↓</button>
+                <button type="button" class="rounded-md border border-rose-500/35 bg-rose-900/35 px-1.5 py-0.5 text-[10px] text-rose-100" @click="bcCampaignUxRemovePost(p.id)">✕</button>
+              </div>
+            </div>
+            <p class="mt-2 text-[11px] text-slate-500">Совет: 3–7 постов дают лучший результат</p>
+          </template>
+
+          <template v-else-if="bcCampaignUxStep === 2">
+            <p class="text-[12px] text-slate-400">Шаг 2 из 5</p>
+            <p class="mt-2 text-[16px] font-bold">Тип кампании</p>
+            <div class="mt-3 space-y-2">
+              <button type="button" class="w-full rounded-2xl border px-3 py-3 text-left transition" :class="bcCampaignUxWizard.campaignType === 'progress' ? 'border-violet-400 bg-violet-500/12 shadow-[0_0_30px_-16px_rgba(139,92,246,0.75)]' : 'border-white/10 bg-[#11151C] hover:bg-[#151A22]'" @click="bcCampaignUxWizard.campaignType = 'progress'">
+                <p class="font-semibold">Прогрев</p>
+                <p class="text-[12px] text-slate-400">Посты отправляются по очереди по расписанию</p>
+              </button>
+              <button type="button" class="w-full rounded-2xl border px-3 py-3 text-left transition" :class="bcCampaignUxWizard.campaignType === 'rotation' ? 'border-violet-400 bg-violet-500/12 shadow-[0_0_30px_-16px_rgba(139,92,246,0.75)]' : 'border-white/10 bg-[#11151C] hover:bg-[#151A22]'" @click="bcCampaignUxWizard.campaignType = 'rotation'">
+                <p class="font-semibold">Ротация</p>
+                <p class="text-[12px] text-slate-400">Посты повторяются по кругу</p>
+              </button>
+              <button type="button" class="w-full rounded-2xl border px-3 py-3 text-left transition" :class="bcCampaignUxWizard.campaignType === 'simple' ? 'border-violet-400 bg-violet-500/12 shadow-[0_0_30px_-16px_rgba(139,92,246,0.75)]' : 'border-white/10 bg-[#11151C] hover:bg-[#151A22]'" @click="bcCampaignUxWizard.campaignType = 'simple'">
+                <p class="font-semibold">Простая</p>
+                <p class="text-[12px] text-slate-400">Один пост по расписанию</p>
+              </button>
+            </div>
+          </template>
+
+          <template v-else-if="bcCampaignUxStep === 3">
+            <p class="text-[12px] text-slate-400">Шаг 3 из 5</p>
+            <p class="mt-2 text-[16px] font-bold">Настройка расписания</p>
+            <div class="mt-3 space-y-2 rounded-2xl border border-white/10 bg-[#11151C] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+              <label class="text-[12px] text-slate-300">Частота</label>
+              <select v-model="bcCampaignUxWizard.scheduleMode" class="mt-1 w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none">
+                <option value="every_day">Каждый день</option>
+                <option value="weekdays">Дни недели</option>
+                <option value="interval">Интервал</option>
+                <option value="custom">Свои дни</option>
+              </select>
+              <div v-if="bcCampaignUxWizard.scheduleMode === 'weekdays'" class="flex flex-wrap gap-1.5 pt-1">
+                <button v-for="d in BC_WEEKDAY_OPTS" :key="`wiz-wd-${d.v}`" type="button" class="rounded-lg border px-2 py-1 text-[11px] transition" :class="bcCampaignUxWizard.weekdays.includes(d.v) ? 'border-violet-400 bg-violet-500/20 text-violet-100' : 'border-white/15 bg-black/20 hover:bg-white/[0.06]'" @click="bcCampaignUxToggleWeekday(d.v)">{{ d.label }}</button>
+              </div>
+              <div v-else-if="bcCampaignUxWizard.scheduleMode === 'interval'" class="grid grid-cols-[auto_1fr] items-center gap-2 pt-1">
+                <span class="text-[11px] text-slate-400">каждые</span>
+                <input v-model.number="bcCampaignUxWizard.intervalDays" type="number" min="1" max="365" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
+              </div>
+              <div v-else-if="bcCampaignUxWizard.scheduleMode === 'custom'" class="pt-1">
+                <input v-model="bcCampaignUxWizard.customDays" type="text" placeholder="Например: 1,3,5" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
+              </div>
+              <label class="text-[12px] text-slate-300">Время отправки</label>
+              <input v-model="bcCampaignUxWizard.sendTime" type="time" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
+              <label class="text-[12px] text-slate-300">Окно отправки</label>
+              <div class="grid grid-cols-2 gap-2">
+                <input v-model="bcCampaignUxWizard.windowStart" type="time" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
+                <input v-model="bcCampaignUxWizard.windowEnd" type="time" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
+              </div>
+              <label class="text-[12px] text-slate-300">Часовой пояс</label>
+              <input v-model="bcCampaignUxWizard.timezone" type="text" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
+              <label class="text-[12px] text-slate-300">Постов в день</label>
+              <input v-model.number="bcCampaignUxWizard.postsPerDay" type="number" min="1" max="288" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
+              <label class="flex items-center gap-2 text-[12px] text-slate-300"><input v-model="bcCampaignUxWizard.spreadInWindow" type="checkbox" /> Равномерно распределять</label>
+            </div>
+          </template>
+
+          <template v-else-if="bcCampaignUxStep === 4">
+            <p class="text-[12px] text-slate-400">Шаг 4 из 5</p>
+            <p class="mt-2 text-[16px] font-bold">Куда отправлять</p>
+            <div class="mt-3 space-y-2">
+              <label class="flex items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-sm transition hover:bg-[#151A22]"><span>Каналы</span><input v-model="bcCampaignUxWizard.targetChannels" type="checkbox" /></label>
+              <label class="flex items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-sm transition hover:bg-[#151A22]"><span>Группы</span><input v-model="bcCampaignUxWizard.targetGroups" type="checkbox" /></label>
+              <label class="flex items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-sm transition hover:bg-[#151A22]"><span>Боты / личка</span><input v-model="bcCampaignUxWizard.targetBots" type="checkbox" /></label>
+            </div>
+            <div class="mt-3 rounded-2xl border border-white/10 bg-[#11151C] px-3 py-2 text-[12px] text-slate-300">
+              <p>Выбрано</p>
+              <p class="mt-1">Каналы: {{ bcCampaignUxSelectedSummary.channels }}, Группы: {{ bcCampaignUxSelectedSummary.groups }}, Боты: {{ bcCampaignUxSelectedSummary.bots }}</p>
+            </div>
+            <div class="mt-2 flex gap-2">
+              <button type="button" class="flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxOpenRecipientPicker('channels')">Выбрать каналы</button>
+              <button type="button" class="flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxOpenRecipientPicker('groups')">Выбрать группы</button>
+            </div>
+          </template>
+
+          <div class="sticky bottom-0 mt-5 border-t border-white/10 bg-[#05070B] pt-3">
+            <button type="button" class="w-full rounded-2xl border border-indigo-400/45 bg-gradient-to-r from-[#6d3ef7] via-[#4f46e5] to-[#355dff] px-4 py-3 text-[14px] font-bold shadow-[0_18px_36px_-18px_rgba(79,70,229,0.95)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:brightness-100" :disabled="!bcCampaignUxWizardCanNext" @click="bcCampaignUxNextStep">Далее</button>
+          </div>
+        </div>
+
+        <div v-else-if="bcCampaignUxScreen === 'review'" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 pb-[max(5.5rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))]">
+          <p class="text-[12px] text-slate-400">Шаг 5 из 5</p>
+          <p class="mt-2 text-[18px] font-extrabold">Обзор кампании</p>
+          <div class="mt-3 space-y-2 rounded-2xl border border-white/10 bg-[#11151C] p-3 text-[13px] text-slate-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+            <p>Название: <b>{{ bcCampaignUxWizard.title }}</b></p>
+            <p>Тип: <b>{{ bcCampaignUxWizard.campaignType === 'progress' ? 'Прогрев' : bcCampaignUxWizard.campaignType === 'rotation' ? 'Ротация' : 'Простая' }}</b></p>
+            <p>Расписание: <b>{{ bcCampaignUxWizard.sendTime }} · {{ bcCampaignUxWizard.timezone }}</b></p>
+            <p>Получатели: <b>Каналы {{ bcCampaignUxSelectedSummary.channels }}, Группы {{ bcCampaignUxSelectedSummary.groups }}, Боты {{ bcCampaignUxSelectedSummary.bots }}</b></p>
+            <p>Постов: <b>{{ bcCampaignUxWizard.postIds.length }}</b></p>
+            <p>Примерная стоимость слота: <b class="text-amber-300">{{ bcCampaignUxEstimatedCost }} AURUM</b></p>
+            <p>Баланс AURUM: <b class="text-amber-200">{{ fmtBcTokens(meAdminProfile?.aurum_tokens || 0) }}</b></p>
+          </div>
+          <p class="mt-3 text-[12px] text-slate-400">После запуска кампания будет работать по расписанию.</p>
+          <div class="mt-4 flex gap-2">
+            <button type="button" class="flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxBack">Назад</button>
+            <button type="button" class="flex-1 rounded-xl border border-emerald-400/45 bg-gradient-to-r from-[#27b35f] to-[#36D67A] px-3 py-2 text-sm font-bold text-[#04130a] shadow-[0_18px_34px_-18px_rgba(54,214,122,0.95)] disabled:cursor-not-allowed disabled:opacity-50" :disabled="bcCampaignUxBusy" @click="bcCampaignUxCreateCampaign">{{ bcCampaignUxBusy ? (bcCampaignUxEditingCampaignId ? 'Сохранение...' : 'Создание...') : (bcCampaignUxEditingCampaignId ? 'Сохранить изменения' : 'Создать кампанию') }}</button>
+          </div>
+        </div>
+
+        <div v-else-if="bcCampaignUxScreen === 'success'" class="flex min-h-0 flex-1 flex-col items-center justify-center px-4 py-6 text-center">
+          <div class="flex h-28 w-28 items-center justify-center rounded-full border border-emerald-300/45 bg-emerald-500/20 text-5xl text-emerald-300 shadow-[0_0_64px_-12px_rgba(54,214,122,0.7),inset_0_0_20px_rgba(255,255,255,0.12)]">✓</div>
+          <p class="mt-4 text-[26px] font-extrabold">Кампания создана!</p>
+          <p class="mt-1 text-[13px] text-slate-300">Первые отправки запланированы на {{ bcCampaignUxSuccessInfo.nextAt || 'ближайшее окно' }}</p>
+          <div class="mt-5 w-full max-w-sm space-y-2">
+            <button type="button" class="w-full rounded-2xl border border-emerald-400/45 bg-gradient-to-r from-[#27b35f] to-[#36D67A] px-4 py-3 font-bold text-[#04130a] shadow-[0_18px_34px_-18px_rgba(54,214,122,0.95)] transition hover:brightness-110" @click="bcCampaignUxScreen = 'manage'">К кампании</button>
+            <button type="button" class="w-full rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxScreen = 'list'">К списку кампаний</button>
+          </div>
+        </div>
+
+        <div v-else-if="bcCampaignUxScreen === 'manage' && bcCampaignUxManageItem" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 pb-[max(5.5rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))]">
+          <p class="text-[12px] text-slate-400">Статус: <span class="text-slate-200">{{ bcCampaignUxStatusLabel(bcCampaignUxManageItem) }}</span></p>
+          <div class="mt-3 grid grid-cols-2 gap-2">
+            <button type="button" class="rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left transition hover:bg-[#151A22]" @click="openBcCampaignUxEditCampaign(bcCampaignUxManageItem)">
+              <p class="text-[12px] text-slate-400">Посты</p>
+              <p class="mt-1 text-sm font-semibold text-white">{{ Number((bcCampaignUxManageItem?.autopost?.broadcast_ids || []).length || 0) || (bcCampaignUxManageItem?.autopost?.use_all_broadcasts ? 'Все' : 0) }}</p>
+            </button>
+            <button type="button" class="rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left transition hover:bg-[#151A22]" @click="openBcCampaignUxEditCampaign(bcCampaignUxManageItem)">
+              <p class="text-[12px] text-slate-400">Расписание</p>
+              <p class="mt-1 text-sm font-semibold text-white">{{ String(bcCampaignUxManageItem?.autopost?.windowStart || '—') }}</p>
+            </button>
+            <button type="button" class="rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left transition hover:bg-[#151A22]" @click="openBcCampaignUxEditCampaign(bcCampaignUxManageItem)">
+              <p class="text-[12px] text-slate-400">Получатели</p>
+              <p class="mt-1 text-sm font-semibold text-white">{{ Number((bcCampaignUxManageItem?.autopost?.group_chat_ids || []).length || 0) + Number((bcCampaignUxManageItem?.autopost?.channel_chat_ids || []).length || 0) }}</p>
+            </button>
+            <button type="button" class="rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left transition hover:bg-[#151A22]" @click="bcCampaignUxOpenStats(bcCampaignUxManageItem)">
+              <p class="text-[12px] text-slate-400">Статистика</p>
+              <p class="mt-1 text-sm font-semibold text-emerald-300">Открыть</p>
+            </button>
+          </div>
+          <div class="mt-3 flex flex-wrap gap-2">
+            <button v-if="bcCampaignRunState(bcCampaignUxManageItem) === 'running'" type="button" class="rounded-xl border border-amber-400/40 bg-amber-900/50 px-3 py-2 text-xs font-semibold text-amber-100 transition hover:bg-amber-900/70" @click="bcCampaignPause(bcCampaignUxManageItem)">Пауза</button>
+            <button v-else type="button" class="rounded-xl border border-emerald-400/45 bg-emerald-700/85 px-3 py-2 text-xs font-semibold text-emerald-50 transition hover:brightness-110" @click="bcCampaignStartOrResume(bcCampaignUxManageItem)">Запустить</button>
+            <button type="button" class="rounded-xl border border-white/15 bg-white/[0.04] px-3 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignStop(bcCampaignUxManageItem)">Остановить</button>
+            <button type="button" class="rounded-xl border border-indigo-400/45 bg-indigo-900/40 px-3 py-2 text-xs font-semibold transition hover:bg-indigo-900/60" @click="bcCampaignUxOpenStats(bcCampaignUxManageItem)">Статистика</button>
+            <button type="button" class="rounded-xl border border-cyan-400/45 bg-cyan-900/35 px-3 py-2 text-xs font-semibold transition hover:bg-cyan-900/55" @click="bcCampaignUxScreen = 'progress'">Процесс отправки</button>
+          </div>
+          <div class="mt-4 space-y-2">
+            <button type="button" class="flex w-full items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left transition hover:bg-[#151A22]" @click="openBcCampaignUxEditCampaign(bcCampaignUxManageItem)"><span>Редактировать</span><span>›</span></button>
+            <button type="button" class="flex w-full items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left transition hover:bg-[#151A22]" @click="bcCampaignUxHydrateWizardFromCampaign(bcCampaignUxManageItem); bcCampaignUxEditingCampaignId = 0; bcCampaignUxStep = 1; bcCampaignUxScreen = 'wizard'"><span>Дублировать</span><span>›</span></button>
+            <button type="button" class="flex w-full items-center justify-between rounded-2xl border border-rose-500/45 bg-rose-950/40 px-3 py-3 text-left text-rose-100 transition hover:bg-rose-950/60" @click="deleteBcAutopostCampaign(bcCampaignUxManageItem)"><span>Удалить кампанию</span><span>›</span></button>
+          </div>
+        </div>
+
+        <div v-else-if="bcCampaignUxScreen === 'postEditor'" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 pb-[max(5.5rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))]">
+          <p class="text-[12px] text-slate-400">{{ bcCampaignUxPostEditorMode === 'edit' ? 'Редактирование поста' : 'Создание нового поста' }}</p>
+          <label class="mt-2 block text-[12px] font-semibold text-slate-300">Текст поста</label>
+          <div class="mt-1 flex flex-wrap gap-1.5">
+            <button type="button" class="bc-tool-btn text-[11px]" :class="bcFormatState.bold ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatBold"><b>Ж</b></button>
+            <button type="button" class="bc-tool-btn text-[11px]" :class="bcFormatState.italic ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatItalic"><i>К</i></button>
+            <button type="button" class="bc-tool-btn text-[11px]" :class="bcFormatState.underline ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatUnderline"><u>Ч</u></button>
+            <button type="button" class="bc-tool-btn text-[11px]" :class="bcFormatState.strike ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatStrike"><s>З</s></button>
+            <button type="button" class="bc-tool-btn text-[11px]" @mousedown.prevent @click="bcFormatLink">🔗</button>
+          </div>
+          <div
+            ref="bcBodyRef"
+            class="bc-editor mt-1.5 h-48 overflow-y-auto rounded-xl border border-white/[0.1] bg-zinc-950 px-3 py-2.5 text-sm leading-relaxed focus-within:border-cyan-500/45 focus-within:ring-1 focus-within:ring-cyan-500/25"
+            contenteditable="true"
+            @input="onBcEditorInput"
+            @click="onBcEditorClick"
+            @mouseup="bcUpdateFormatState"
+            @keyup="bcUpdateFormatState"
+          />
+          <p class="mt-1 text-[11px]" :class="bcCurrentLen() > bcCurrentMaxLen() ? 'text-rose-400' : 'text-slate-500'">{{ bcCurrentLen() }} / {{ bcCurrentMaxLen() }} символов</p>
+          <div class="mt-3 grid grid-cols-2 gap-2">
+            <button type="button" class="bc-tool-btn !w-full !justify-center text-[12px]" @click="bcAuxModal = 'keyboard'">Кнопки под постом</button>
+            <button type="button" class="bc-tool-btn !w-full !justify-center text-[12px]" @click="bcAuxModal = 'media'">Файл и медиа</button>
+          </div>
+          <div class="mt-4 flex gap-2">
+            <button type="button" class="flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm font-semibold" @click="bcCampaignUxScreen = 'wizard'">Назад</button>
+            <button type="button" class="flex-1 rounded-xl border border-emerald-400/45 bg-gradient-to-r from-[#27b35f] to-[#36D67A] px-3 py-2 text-sm font-bold text-[#04130a]" @click="bcCampaignUxSavePostEditor">Сохранить пост</button>
+          </div>
+        </div>
+
+        <div v-else-if="bcCampaignUxScreen === 'progress'" class="flex min-h-0 flex-1 flex-col items-center justify-center px-4 py-6 text-center">
+          <p class="self-start text-[28px] font-bold">Отправка...</p>
+          <div class="relative mt-8 h-44 w-44">
+            <svg class="absolute inset-0 h-full w-full -rotate-90" viewBox="0 0 120 120" aria-hidden="true">
+              <defs>
+                <linearGradient id="bcSendNeonRing" x1="0%" y1="30%" x2="100%" y2="100%">
+                  <stop offset="0%" stop-color="#7c83ff" />
+                  <stop offset="52%" stop-color="#6366f1" />
+                  <stop offset="100%" stop-color="#7c3aed" />
+                </linearGradient>
+              </defs>
+              <circle cx="60" cy="60" r="52" fill="none" stroke="rgba(148,163,184,0.16)" stroke-width="8" />
+              <circle cx="60" cy="60" r="52" fill="none" stroke="url(#bcSendNeonRing)" stroke-width="8" stroke-linecap="round" :stroke-dasharray="bcSendCircleDash" />
+            </svg>
+            <div class="absolute inset-0 flex items-center justify-center">
+              <img :src="bcTelegramPlaneIconUrl" class="h-11 w-11 object-contain drop-shadow-[0_0_22px_rgba(99,102,241,0.85)]" alt="" />
+            </div>
+            <span class="absolute bottom-1 -right-10 text-[34px] font-bold tabular-nums">{{ bcSendProgressPercent }}%</span>
+          </div>
+          <p class="mt-4 text-[12px] uppercase tracking-[0.14em] text-slate-500">Отправлено</p>
+          <p class="text-3xl font-bold tabular-nums">{{ fmtIntSpace(bcSendProgressDone) }} <span class="text-xl text-slate-400">из</span> {{ fmtIntSpace(bcSendProgressTotal) }}</p>
+          <p class="mt-2 text-sm text-rose-300">Ошибок: {{ Number(bcSendLiveRow?.recipient_fail || 0) }}</p>
+          <button type="button" class="mt-8 w-full max-w-sm rounded-2xl border border-rose-500/45 bg-rose-950/45 px-4 py-3 text-[15px] font-semibold text-rose-100 transition hover:bg-rose-900/55" @click="bcCampaignUxScreen = 'manage'">Остановить отправку</button>
+        </div>
+
+        <div v-else-if="bcCampaignUxScreen === 'stats'" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 pb-[max(5.5rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))]">
+          <div class="flex items-center gap-2">
+            <label class="text-[12px] text-slate-400">Период</label>
+            <select v-model.number="bcCampaignUxStatsPeriod" class="rounded-lg border border-white/10 bg-white/[0.05] px-2 py-1 text-xs focus:border-indigo-400/45 focus:outline-none" @change="bcCampaignUxOpenStats(bcCampaignUxManageItem)">
+              <option :value="1">Сегодня</option>
+              <option :value="7">7 дней</option>
+              <option :value="30">30 дней</option>
+              <option :value="90">Все время</option>
+            </select>
+          </div>
+          <div class="mt-3 grid grid-cols-2 gap-2">
+            <div class="rounded-xl border border-white/10 bg-[#11151C] p-2.5"><p class="text-[10px] text-slate-500">Доставлено</p><p class="text-lg font-bold">{{ Number(bcCampaignUxStatsData?.groups?.recipient_ok || 0) }}</p></div>
+            <div class="rounded-xl border border-white/10 bg-[#11151C] p-2.5"><p class="text-[10px] text-slate-500">Клики</p><p class="text-lg font-bold">{{ Number(bcCampaignUxStatsData?.groups?.clicks || 0) }}</p></div>
+            <div class="rounded-xl border border-white/10 bg-[#11151C] p-2.5"><p class="text-[10px] text-slate-500">Переходы</p><p class="text-lg font-bold">{{ Number(bcCampaignUxStatsData?.groups?.transitions || 0) }}</p></div>
+            <div class="rounded-xl border border-white/10 bg-[#11151C] p-2.5"><p class="text-[10px] text-slate-500">CTR</p><p class="text-lg font-bold text-emerald-300">{{ fmtPctTrim(Number(bcCampaignUxStatsData?.groups?.ctr || 0)) }}</p></div>
+          </div>
+          <p class="mt-3 text-[12px] text-slate-400">
+            {{ Number(bcCampaignUxStatsData?.groups?.ctr || 0) >= 8 ? 'CTR выше среднего' : 'Попробуйте сократить текст и усилить кнопку' }}
+          </p>
+          <button type="button" class="mt-4 w-full rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-sm font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxScreen = 'manage'">К кампании</button>
+        </div>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <div
+        v-if="bcCampaignUxRecipientPickerOpen"
+        class="fixed inset-0 z-[10220] flex h-[100dvh] min-w-0 flex-col overflow-hidden bg-[#05070B] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] text-white"
+      >
+        <div class="flex items-center justify-between border-b border-white/10 bg-black/20 px-4 py-3 backdrop-blur-sm">
+          <p class="text-[16px] font-bold">{{ bcCampaignUxRecipientPickerKind === 'channels' ? 'Выбор каналов' : 'Выбор групп' }}</p>
+          <button type="button" class="rounded-lg px-2 py-1 text-sm text-zinc-300 transition hover:bg-white/10" @click="bcCampaignUxRecipientPickerOpen = false">✕</button>
+        </div>
+        <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3 pb-[max(5.5rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))]">
+          <input v-model="bcCampaignUxRecipientQuery" type="text" placeholder="Поиск..." class="w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm placeholder:text-slate-500 focus:border-indigo-400/45 focus:outline-none" />
+          <div class="mt-3 space-y-1.5">
+            <label
+              v-for="c in bcCampaignUxRecipientsFiltered"
+              :key="`ux-r-${bcCampaignUxRecipientPickerKind}-${bcNormalizeChatId(c)}`"
+              class="flex items-center gap-2 rounded-xl border border-white/10 bg-[#11151C] px-3 py-2 text-sm transition hover:bg-[#151A22]"
+            >
+              <input
+                type="checkbox"
+                :checked="(bcCampaignUxRecipientPickerKind === 'channels' ? bcCampaignUxWizard.selectedChannels : bcCampaignUxWizard.selectedGroups).includes(bcNormalizeChatId(c))"
+                @change="bcCampaignUxToggleRecipient(bcNormalizeChatId(c))"
+              />
+              <span class="truncate">{{ c.title || c.username || bcNormalizeChatId(c) }}</span>
+            </label>
+            <p v-if="!bcCampaignUxRecipientsFiltered.length" class="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-[12px] text-slate-400">Ничего не найдено</p>
+          </div>
+        </div>
+        <div class="grid grid-cols-3 gap-2 border-t border-white/10 bg-black/20 px-4 py-3">
+          <button type="button" class="rounded-xl border border-white/10 bg-white/[0.04] px-2 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxSelectAllRecipients">Выбрать все</button>
+          <button type="button" class="rounded-xl border border-white/10 bg-white/[0.04] px-2 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxClearRecipients">Очистить</button>
+          <button type="button" class="rounded-xl border border-emerald-400/40 bg-gradient-to-r from-[#27b35f] to-[#36D67A] px-2 py-2 text-xs font-bold text-[#04130a] shadow-[0_16px_28px_-18px_rgba(54,214,122,0.95)] transition hover:brightness-110" @click="bcCampaignUxRecipientPickerOpen = false">Готово</button>
+        </div>
+      </div>
+    </Teleport>
 
     <div
       v-if="bcAutopostingModalOpen"
