@@ -1474,6 +1474,7 @@ const BC_SEND_MIN_VISIBLE_MS = 3000
 /** Время открытия экрана отправки — для BC_SEND_MIN_VISIBLE_MS */
 const bcSendSendingStartedAt = ref(0)
 /** Белый знак Telegram внутри круга (локальный svg в public/) */
+const bcTelegramPlaneIconUrl = `${import.meta.env.BASE_URL}broadcast/telegram-plane-white.svg`
 
 const adminBcBg = `${import.meta.env.BASE_URL}admin-bg-dark-final.png`
 /** Верхняя отсечка AURUM за один запуск/слот на бэкенде (broadcast_send_plan.BROADCAST_MAX_TOKENS). */
@@ -2481,7 +2482,9 @@ async function startBroadcastProgressPolling(id, target) {
       const totc = Number(row?.recipient_total || 0)
       const countsLookComplete = totc > 0 && okc + flc >= totc
       const finishedAsDraftWithStats = st === 'draft' && !!sentAt && countsLookComplete
-      if (st === 'sent' || finishedAsDraftWithStats) {
+      const sendingVisibleFor = Date.now() - Number(bcSendSendingStartedAt.value || 0)
+      const finishedBySentAtFallback = !!sentAt && st !== 'failed' && sendingVisibleFor >= 9000
+      if (st === 'sent' || finishedAsDraftWithStats || finishedBySentAtFallback) {
         stopBroadcastProgressPolling()
         const bidSnap = bid
         const t0 = bcSendSendingStartedAt.value || Date.now()
@@ -8863,16 +8866,13 @@ watch(
                     class="pointer-events-none absolute inset-0 rounded-full bg-[radial-gradient(circle,rgba(99,102,241,0.45)_0%,rgba(59,130,246,0.2)_35%,rgba(59,130,246,0.06)_60%,transparent_78%)] blur-[6px] bc-send-icon-pulse"
                     aria-hidden="true"
                   />
-                  <svg class="relative h-12 w-12 -rotate-[14deg] text-white drop-shadow-[0_0_18px_rgba(129,140,248,0.95)]" viewBox="0 0 24 24" aria-hidden="true">
-                    <path
-                      d="M21.7 2.3 2.9 10.2l6.2 2.5L19.9 5.8l-8 8.3v6l3.7-3.4 4.9 3.8z"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="1.8"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                    />
-                  </svg>
+                  <img
+                    :src="bcTelegramPlaneIconUrl"
+                    class="relative h-12 w-12 select-none object-contain drop-shadow-[0_0_24px_rgba(99,102,241,0.95)]"
+                    width="36"
+                    height="36"
+                    alt=""
+                  />
                 </div>
                 <span
                   class="absolute -bottom-1 right-[-2.3rem] text-[22px] font-semibold tabular-nums tracking-tight text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.65)]"
