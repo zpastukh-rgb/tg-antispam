@@ -311,12 +311,16 @@ const bcSendStatsBots = computed(() => bcSendResultSnapshot.value?.bots || null)
 const bcSendStatsGroups = computed(() => bcSendResultSnapshot.value?.groups || null)
 
 const bcSendDeliveredOk = computed(() => {
+  const aud = Number(bcSendResultSnapshot.value?.audience_ok || 0)
+  if (Number.isFinite(aud) && aud > 0) return Math.max(0, Math.trunc(aud))
   const o = bcSendStatsOverall.value
   const v = Number(o?.ok ?? o?.delivered ?? 0)
   return Number.isFinite(v) ? Math.max(0, Math.trunc(v)) : 0
 })
 
 const bcSendDeliveredTotal = computed(() => {
+  const aud = Number(bcSendResultSnapshot.value?.audience_total || 0)
+  if (Number.isFinite(aud) && aud > 0) return Math.max(0, Math.trunc(aud))
   const o = bcSendStatsOverall.value
   const v = Number(o?.total ?? o?.attempts ?? 0)
   return Number.isFinite(v) && v > 0 ? Math.trunc(v) : bcSendProgressTotal.value
@@ -328,6 +332,8 @@ const bcSendDeliveredPct = computed(() =>
 
 /** «Клики»: успешные доставки в личку боту (users). Подпись уточняется в карточке UI. */
 const bcSendClicks = computed(() => {
+  const real = Number(bcSendResultSnapshot.value?.real_clicks || 0)
+  if (Number.isFinite(real) && real >= 0) return Math.max(0, Math.trunc(real))
   const b = bcSendStatsBots.value
   const v = Number(b?.ok ?? 0)
   return Number.isFinite(v) ? Math.max(0, Math.trunc(v)) : 0
@@ -335,6 +341,8 @@ const bcSendClicks = computed(() => {
 
 /** «Переходы»: успешные доставки в группы/каналы (чаты). */
 const bcSendTransitions = computed(() => {
+  const real = Number(bcSendResultSnapshot.value?.real_transitions || 0)
+  if (Number.isFinite(real) && real >= 0) return Math.max(0, Math.trunc(real))
   const g = bcSendStatsGroups.value
   const v = Number(g?.ok ?? 0)
   return Number.isFinite(v) ? Math.max(0, Math.trunc(v)) : 0
@@ -356,7 +364,13 @@ const bcSendCtrDen = computed(() => {
   return Math.max(1, Math.trunc(sum))
 })
 
-const bcSendCtrPct = computed(() => fmtPctPartFromRatio(bcSendDeliveredOk.value, bcSendCtrDen.value))
+const bcSendCtrPct = computed(() => {
+  const clicksTotal = Number(bcSendResultSnapshot.value?.real_clicks_total || 0)
+  if (Number.isFinite(clicksTotal) && clicksTotal >= 0) {
+    return fmtPctPartFromRatio(Math.max(0, Math.trunc(clicksTotal)), bcSendDeliveredOk.value)
+  }
+  return fmtPctPartFromRatio(bcSendDeliveredOk.value, bcSendCtrDen.value)
+})
 
 const bcSendCompletedAtLabel = computed(() => {
   const row = bcSendLiveRow.value
@@ -8913,10 +8927,6 @@ watch(
             <p class="text-[10px] text-slate-500">CTR · охват базы</p>
             <p class="mt-1 text-2xl font-semibold tabular-nums text-emerald-400">{{ fmtPctTrim(bcSendCtrPct) }}</p>
           </div>
-          <p class="mt-2 text-center text-[10px] leading-snug text-slate-500">
-            «Клики» и «Переходы» здесь — это успешные доставки в личку и в группы/каналы по логам отправки. CTR — доля доставленных сообщений относительно всех подключённых групп/каналов и активных пользователей бота (не клики по ссылкам в тексте).
-          </p>
-
           <div class="mt-4 grid grid-cols-2 gap-2">
             <button
               type="button"

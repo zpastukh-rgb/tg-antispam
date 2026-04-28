@@ -18,7 +18,7 @@ from time import perf_counter
 
 import aiohttp
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from aiogram import Bot
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, BufferedInputFile
 from sqlalchemy import select, func, delete, text, case, or_, literal_column
@@ -49,6 +49,7 @@ from app.db.models import (
     AdminBroadcastMedia,
     AdminBroadcastDelivery,
     AdminBroadcastRun,
+    AdminBroadcastClick,
     AutopostCampaign,
     Channel,
     Chat,
@@ -7238,6 +7239,32 @@ async def api_admin_broadcasts_get(
     return broadcast_row_to_dict(row)
 
 
+@router.get("/public/broadcast/click")
+async def api_public_broadcast_click(
+    b: int,
+    k: str,
+    t: int,
+    u: str,
+    session: AsyncSession = Depends(get_db),
+):
+    """Трекинг реальных кликов/переходов по ссылкам из рассылки."""
+    url = str(u or "").strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid url")
+    row = await session.get(AdminBroadcast, int(b))
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+    ev = AdminBroadcastClick(
+        broadcast_id=int(b),
+        target_kind=str(k or "user")[:16],
+        target_id=int(t or 0),
+        url=url[:2000],
+    )
+    session.add(ev)
+    await session.commit()
+    return RedirectResponse(url=url, status_code=307)
+
+
 @router.get("/admin/broadcasts/{broadcast_id}/stats")
 async def api_admin_broadcasts_stats(
     broadcast_id: int,
@@ -7292,6 +7319,8 @@ async def api_admin_broadcasts_stats(
             AdminBroadcastRun.recipient_total,
             AdminBroadcastRun.recipient_ok,
             AdminBroadcastRun.recipient_fail,
+            AdminBroadcastRun.audience_total,
+            AdminBroadcastRun.audience_ok,
             AdminBroadcastRun.created_at,
             AdminBroadcastRun.sent_at,
         )
@@ -7341,8 +7370,10 @@ async def api_admin_broadcasts_stats(
         target_where.append(AdminBroadcastDelivery.target_kind.in_(("user", "users", "bot", "bots")))
 
     batches = []
+    latest_audience_total = 0
+    latest_audience_ok = 0
     if run_rows:
-        for rid, rtarget, rtotal, rok, rfail, rcreated, rsent in run_rows:
+        for rid, rtarget, rtotal, rok, rfail, raud_total, raud_ok, rcreated, rsent in run_rows:
             batches.append(
                 {
                     "batch_id": f"run:{int(rid)}",
@@ -7351,9 +7382,30 @@ async def api_admin_broadcasts_stats(
                     "total": int(rtotal or 0),
                     "ok": int(rok or 0),
                     "fail": int(rfail or 0),
+                    "audience_total": int(raud_total or 0),
+                    "audience_ok": int(raud_ok or 0),
                     "target_kind": str(rtarget or ""),
                 }
             )
+        latest_audience_total = int(run_rows[0][5] or 0)
+        latest_audience_ok = int(run_rows[0][6] or 0)
+
+    clicks_q = await session.execute(
+        select(
+            AdminBroadcastClick.target_kind,
+            func.count(AdminBroadcastClick.id),
+        ).where(AdminBroadcastClick.broadcast_id == int(broadcast_id)).group_by(AdminBroadcastClick.target_kind)
+    )
+    real_clicks_users = 0
+    real_clicks_groups = 0
+    for kind, cnt in clicks_q.all():
+        c = int(cnt or 0)
+        ks = str(kind or "").strip().lower()
+        if ks in {"group", "groups"}:
+            real_clicks_groups += c
+        else:
+            real_clicks_users += c
+    real_clicks_total = real_clicks_users + real_clicks_groups
 
     if has_delivery and has_batch_id and has_created_at:
         bq = await session.execute(
@@ -7467,8 +7519,18 @@ async def api_admin_broadcasts_stats(
         where_batch.append(AdminBroadcastDelivery.created_at <= to_dt)
 
     if active_batch.startswith("run:"):
-        run_map = {f"run:{int(rid)}": (str(rtarget or ""), int(rtotal or 0), int(rok or 0), int(rfail or 0)) for rid, rtarget, rtotal, rok, rfail, _, _ in run_rows}
-        rtarget, rtotal, rok, rfail = run_map.get(active_batch, ("", 0, 0, 0))
+        run_map = {
+            f"run:{int(rid)}": (
+                str(rtarget or ""),
+                int(rtotal or 0),
+                int(rok or 0),
+                int(rfail or 0),
+                int(raud_total or 0),
+                int(raud_ok or 0),
+            )
+            for rid, rtarget, rtotal, rok, rfail, raud_total, raud_ok, _, _ in run_rows
+        }
+        rtarget, rtotal, rok, rfail, raud_total, raud_ok = run_map.get(active_batch, ("", 0, 0, 0, 0, 0))
         if str(rtarget).lower() in {"group", "groups"}:
             bots_ok = bots_fail = 0
             groups_ok = int(rok)
@@ -7484,6 +7546,11 @@ async def api_admin_broadcasts_stats(
             "bots": {"ok": bots_ok, "fail": bots_fail, "total": bots_ok + bots_fail},
             "groups": {"ok": groups_ok, "fail": groups_fail, "total": groups_ok + groups_fail},
             "overall": {"ok": bots_ok + groups_ok, "fail": bots_fail + groups_fail, "total": bots_ok + groups_ok + bots_fail + groups_fail},
+            "audience_total": int(raud_total or latest_audience_total or 0),
+            "audience_ok": int(raud_ok or latest_audience_ok or 0),
+            "real_clicks": int(real_clicks_users),
+            "real_transitions": int(real_clicks_groups),
+            "real_clicks_total": int(real_clicks_total),
             "per_groups": [],
             "errors": [],
             "connected_groups_total": connected_groups_total,
@@ -7514,6 +7581,11 @@ async def api_admin_broadcasts_stats(
                 "fail": bots_fail + groups_fail,
                 "total": bots_ok + groups_ok + bots_fail + groups_fail,
             },
+            "audience_total": int(latest_audience_total or 0),
+            "audience_ok": int(latest_audience_ok or 0),
+            "real_clicks": int(real_clicks_users),
+            "real_transitions": int(real_clicks_groups),
+            "real_clicks_total": int(real_clicks_total),
             "per_groups": [],
             "errors": [],
             "connected_groups_total": connected_groups_total,
@@ -7556,6 +7628,11 @@ async def api_admin_broadcasts_stats(
                 "fail": bots_fail + groups_fail,
                 "total": bots_ok + groups_ok + bots_fail + groups_fail,
             },
+            "audience_total": int(latest_audience_total or 0),
+            "audience_ok": int(latest_audience_ok or 0),
+            "real_clicks": int(real_clicks_users),
+            "real_transitions": int(real_clicks_groups),
+            "real_clicks_total": int(real_clicks_total),
             "per_groups": [],
             "errors": [],
             "connected_groups_total": connected_groups_total,
@@ -7599,6 +7676,11 @@ async def api_admin_broadcasts_stats(
                 "fail": bots_fail + groups_fail,
                 "total": bots_ok + groups_ok + bots_fail + groups_fail,
             },
+            "audience_total": int(latest_audience_total or 0),
+            "audience_ok": int(latest_audience_ok or 0),
+            "real_clicks": int(real_clicks_users),
+            "real_transitions": int(real_clicks_groups),
+            "real_clicks_total": int(real_clicks_total),
             "per_groups": [],
             "errors": [],
             "connected_groups_total": connected_groups_total,
@@ -7713,6 +7795,11 @@ async def api_admin_broadcasts_stats(
             "fail": bots_fail + groups_fail,
             "total": bots_ok + groups_ok + bots_fail + groups_fail,
         },
+        "audience_total": int(latest_audience_total or 0),
+        "audience_ok": int(latest_audience_ok or 0),
+        "real_clicks": int(real_clicks_users),
+        "real_transitions": int(real_clicks_groups),
+        "real_clicks_total": int(real_clicks_total),
         "per_groups": per_groups,
         "errors": errors,
         "connected_groups_total": connected_groups_total,

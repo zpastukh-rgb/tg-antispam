@@ -1024,9 +1024,23 @@ class AdminBroadcastRun(Base):
     recipient_total: Mapped[int] = mapped_column(Integer, default=0)
     recipient_ok: Mapped[int] = mapped_column(Integer, default=0)
     recipient_fail: Mapped[int] = mapped_column(Integer, default=0)
+    # Реальный охват аудитории в выбранных чатах/каналах (member_count) + users (по 1).
+    audience_total: Mapped[int] = mapped_column(Integer, default=0)
+    audience_ok: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     run_source: Mapped[str | None] = mapped_column(String(16), nullable=True)  # manual | autopost
+
+
+class AdminBroadcastClick(Base):
+    __tablename__ = "admin_broadcast_clicks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    broadcast_id: Mapped[int] = mapped_column(Integer, ForeignKey("admin_broadcasts.id", ondelete="CASCADE"), index=True)
+    target_kind: Mapped[str] = mapped_column(String(16), default="user", index=True)  # user | group
+    target_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    url: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
 class AutopostCampaign(Base):

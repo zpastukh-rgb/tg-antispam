@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import uuid
+from urllib.parse import urlencode
 from pathlib import Path
 from tempfile import gettempdir
 from typing import Any
@@ -124,6 +125,95 @@ def keyboard_for_target(base: InlineKeyboardMarkup | None, target_kind: str) -> 
                 continue
             if getattr(b, "url", None):
                 line.append(InlineKeyboardButton(text=txt, url=str(b.url)))
+                continue
+            if getattr(b, "callback_data", None):
+                line.append(InlineKeyboardButton(text=txt, callback_data=str(b.callback_data)[:64]))
+                continue
+        if line:
+            rows.append(line)
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+
+def _broadcast_click_track_base() -> str:
+    raw = (
+        os.getenv("BROADCAST_TRACK_BASE_URL")
+        or os.getenv("GUARD_API_BASE_URL")
+        or os.getenv("VITE_API_BASE_URL")
+        or os.getenv("MINI_APP_URL")
+        or os.getenv("WEBAPP_URL")
+        or ""
+    )
+    return str(raw or "").strip().rstrip("/")
+
+
+def _wrap_tracked_url(
+    url: str,
+    *,
+    broadcast_id: int,
+    target_kind: str,
+    target_id: int,
+) -> str:
+    src = str(url or "").strip()
+    if not src:
+        return src
+    if not (src.startswith("http://") or src.startswith("https://")):
+        return src
+    base = _broadcast_click_track_base()
+    if not base:
+        return src
+    qs = urlencode(
+        {
+            "b": int(broadcast_id),
+            "k": str(target_kind or "user")[:16],
+            "t": int(target_id),
+            "u": src,
+        }
+    )
+    return f"{base}/api/public/broadcast/click?{qs}"
+
+
+def _track_keyboard_markup(
+    base: InlineKeyboardMarkup | None,
+    *,
+    broadcast_id: int,
+    target_kind: str,
+    target_id: int,
+) -> InlineKeyboardMarkup | None:
+    if not base:
+        return None
+    rows: list[list[InlineKeyboardButton]] = []
+    for row in (base.inline_keyboard or []):
+        line: list[InlineKeyboardButton] = []
+        for b in row:
+            txt = str(getattr(b, "text", "") or "").strip()
+            if not txt:
+                continue
+            wa = getattr(b, "web_app", None)
+            if wa and getattr(wa, "url", None):
+                line.append(
+                    InlineKeyboardButton(
+                        text=txt,
+                        url=_wrap_tracked_url(
+                            str(wa.url),
+                            broadcast_id=int(broadcast_id),
+                            target_kind=str(target_kind),
+                            target_id=int(target_id),
+                        ),
+                    )
+                )
+                continue
+            if getattr(b, "url", None):
+                line.append(
+                    InlineKeyboardButton(
+                        text=txt,
+                        url=_wrap_tracked_url(
+                            str(b.url),
+                            broadcast_id=int(broadcast_id),
+                            target_kind=str(target_kind),
+                            target_id=int(target_id),
+                        ),
+                    )
+                )
                 continue
             if getattr(b, "callback_data", None):
                 line.append(InlineKeyboardButton(text=txt, callback_data=str(b.callback_data)[:64]))
@@ -763,6 +853,8 @@ async def run_broadcast_job(
 
             ok = 0
             fail = 0
+            audience_total = 0
+            audience_ok = 0
             first_fail: str | None = None
             batch_id = uuid.uuid4().hex
             delivery_enabled = False
@@ -832,6 +924,19 @@ async def run_broadcast_job(
             for tid, target_kind in recipients:
                 try:
                     kb_target = keyboard_for_target(kb, target_kind)
+                    kb_target = _track_keyboard_markup(
+                        kb_target,
+                        broadcast_id=int(row.id),
+                        target_kind=str(target_kind),
+                        target_id=int(tid),
+                    )
+                    target_audience = 1
+                    if str(target_kind) == "group":
+                        try:
+                            target_audience = max(1, int(await bot.get_chat_member_count(int(tid))))
+                        except Exception:
+                            target_audience = 1
+                    audience_total += int(target_audience)
                     if not prepared_media:
                         await _send_text_with_fallback(
                             bot,
@@ -862,6 +967,7 @@ async def run_broadcast_job(
                                 reply_markup=kb_target,
                             )
                     ok += 1
+                    audience_ok += int(target_audience)
                     await _insert_delivery(True, None, int(tid))
                 except Exception as e:
                     fail += 1
@@ -900,6 +1006,8 @@ async def run_broadcast_job(
                         recipient_total=int(len(recipients)),
                         recipient_ok=int(ok),
                         recipient_fail=int(fail),
+                        audience_total=int(audience_total),
+                        audience_ok=int(audience_ok),
                         sent_at=datetime_now(),
                         run_source=str(run_source or "manual")[:16],
                     )
