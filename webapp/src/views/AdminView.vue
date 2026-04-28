@@ -6388,7 +6388,7 @@ watch(
         >
           <div class="flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-2">
             <div class="flex min-h-0 flex-1 flex-col bg-[#0b111b]/95 p-3 text-zinc-100">
-          <div class="mb-2 flex items-start justify-between gap-2 border-b border-white/8 pb-2">
+          <div class="mb-2 flex items-start justify-between gap-2 pb-2">
             <div class="min-w-0 flex-1">
               <p class="truncate text-[19px] font-black text-white">Новая рассылка</p>
               <div class="mt-1.5 flex min-w-0 items-center gap-1.5">
@@ -6419,7 +6419,7 @@ watch(
               </button>
               <button
                 type="button"
-                class="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/12 bg-white/[0.04] text-sm text-zinc-200 hover:bg-white/[0.1]"
+                class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-transparent text-sm text-zinc-200 hover:bg-white/[0.08]"
                 aria-label="Закрыть"
                 :disabled="bcSaving"
                 @click="closeQuickBroadcastDraft"
@@ -6526,9 +6526,9 @@ watch(
           <div class="flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-2">
             <div class="flex min-h-0 w-full flex-1 flex-col rounded-2xl border border-white/[0.04] bg-[#0b111b]/95 p-3 text-zinc-100 shadow-[0_24px_72px_-28px_rgba(0,0,0,0.9)] ring-1 ring-white/[0.02]">
           <div class="flex items-center justify-between gap-2">
-            <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-white/[0.05] text-[14px] text-white/90" @click="bcSendTargetModalOpen = false">←</button>
+            <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-transparent text-[14px] text-white/90 hover:bg-white/[0.08]" @click="bcSendTargetModalOpen = false">←</button>
             <p class="pr-6 text-[19px] font-black text-white">Куда отправить</p>
-            <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-white/[0.05] text-[14px] text-white/90" @click="bcSendTargetModalOpen = false">✕</button>
+            <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-transparent text-[14px] text-white/90 hover:bg-white/[0.08]" @click="bcSendTargetModalOpen = false">✕</button>
           </div>
           <p class="mt-2 text-[13px] text-zinc-400">Выберите получателей</p>
 
@@ -6621,7 +6621,7 @@ watch(
           class="mx-auto flex w-full max-w-[min(28rem,calc(100vw-0.75rem))] min-h-[calc(100dvh-7.9rem)] flex-col rounded-2xl border border-white/[0.08] bg-[#0a101a]/92 px-2.5 py-2.5 text-zinc-100 shadow-[0_22px_70px_-30px_rgba(0,0,0,0.88)]"
         >
           <div class="flex items-center gap-2">
-            <button type="button" class="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/18 bg-white/[0.04] text-[13px] text-white/90" @click="bcConfirmModalOpen = false">←</button>
+            <button type="button" class="inline-flex h-7 w-7 items-center justify-center rounded-full bg-transparent text-[13px] text-white/90 hover:bg-white/[0.08]" @click="bcConfirmModalOpen = false">←</button>
             <p class="text-[19px] font-bold text-white leading-none">Подтверждение</p>
           </div>
 
@@ -9000,7 +9000,7 @@ watch(
         <div class="shrink-0 border-b border-slate-700/60 p-4 pb-2">
           <div class="flex items-center justify-between">
             <p class="text-[26px] font-black text-white leading-none">Выбор групп</p>
-            <button type="button" class="bc-tool-btn" @click="bcShowGroupsPicker = false">✕</button>
+            <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-transparent text-sm text-white/90 hover:bg-white/[0.08]" @click="bcShowGroupsPicker = false">✕</button>
           </div>
           <p class="mt-2 text-[14px] text-slate-300">Выберите группы для рассылки</p>
           <div class="mt-2 flex items-center justify-between gap-2 text-[14px]">
@@ -9052,7 +9052,7 @@ watch(
         <div class="shrink-0 border-b border-slate-700/60 p-4 pb-2">
           <div class="flex items-center justify-between">
             <p class="text-[26px] font-black text-white leading-none">Выбор каналов</p>
-            <button type="button" class="bc-tool-btn" @click="bcShowChannelsPicker = false">✕</button>
+            <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-transparent text-sm text-white/90 hover:bg-white/[0.08]" @click="bcShowChannelsPicker = false">✕</button>
           </div>
           <p class="mt-2 text-[14px] text-slate-300">Выберите каналы для рассылки</p>
           <div class="mt-2 flex items-center justify-between gap-2 text-[14px]">
@@ -9104,7 +9104,7 @@ watch(
         <div class="shrink-0 border-b border-slate-700/60 p-4 pb-2">
           <div class="flex items-center justify-between">
             <p class="text-[26px] font-black text-white leading-none">Выбор ботов</p>
-            <button type="button" class="bc-tool-btn" @click="bcShowBotsPicker = false">✕</button>
+            <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-transparent text-sm text-white/90 hover:bg-white/[0.08]" @click="bcShowBotsPicker = false">✕</button>
           </div>
           <p class="mt-2 text-[14px] text-slate-300">Выберите получателей в личку</p>
           <div class="mt-2 flex items-center justify-between gap-2 text-[14px]">
