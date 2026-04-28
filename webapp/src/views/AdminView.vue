@@ -2531,7 +2531,12 @@ async function ensureEmojiPicker() {
 function bcSyncEditorHtml() {
   const el = bcBodyRef.value
   if (!el) return
-  bcBodyHtml.value = String(el.innerHTML || '')
+  const html = String(el.innerHTML || '')
+  const plain = String(el.innerText || '').trim()
+  const normalized = bcNormalizeHtmlForTelegram(html)
+  // iOS/WebView can temporarily leave innerHTML blank during IME composition.
+  // Fallback to plain text so "Далее/Отправить" sees already typed content.
+  bcBodyHtml.value = !normalized && plain ? plain : html
 }
 
 function bcRecordHistory(force = false) {
@@ -6433,12 +6438,14 @@ watch(
           <div
             ref="bcBodyRef"
             class="bc-editor mt-2 h-40 overflow-y-auto rounded-xl border border-white/[0.08] bg-zinc-950 px-3 py-2.5 text-sm leading-relaxed focus-within:border-white/20 focus-within:ring-0"
-            contenteditable="true"
+            :class="bcQuickDraftInitializing ? 'opacity-60' : ''"
+            :contenteditable="bcQuickDraftInitializing ? 'false' : 'true'"
             @input="onBcEditorInput"
             @click="onBcEditorClick"
             @mouseup="bcUpdateFormatState"
             @keyup="bcUpdateFormatState"
           />
+          <p v-if="bcQuickDraftInitializing" class="mt-1 text-[11px] text-slate-500">Подготавливаем черновик…</p>
 
           <div class="mt-2 flex flex-wrap gap-1.5">
             <button type="button" class="bc-tool-btn min-w-[2.1rem] !px-2" :class="bcFormatState.bold ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatBold"><b>B</b></button>
