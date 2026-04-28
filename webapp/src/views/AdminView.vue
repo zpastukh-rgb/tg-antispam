@@ -143,6 +143,26 @@ const bcButtonRows = ref([[{ text: '', url: '', web_app_url: '', callback_data: 
 const bcMediaKindStored = ref('none')
 const bcMediaOriginalName = ref('')
 const bcBodyRef = ref(null)
+function bcBodyEditors() {
+  const v = bcBodyRef.value
+  if (!v) return []
+  return Array.isArray(v) ? v.filter(Boolean) : [v]
+}
+function bcResolveBodyEditor() {
+  const list = bcBodyEditors()
+  if (!list.length) return null
+  const ae = document.activeElement
+  const focused = list.find((el) => el === ae || (ae && typeof el.contains === 'function' && el.contains(ae)))
+  if (focused) return focused
+  const visible = list.find((el) => el.isConnected && el.getClientRects().length > 0)
+  return visible || list[0] || null
+}
+function bcSetBodyEditorHtml(html) {
+  const next = String(html || '')
+  for (const el of bcBodyEditors()) {
+    el.innerHTML = next
+  }
+}
 const bcEmojiHostRef = ref(null)
 const bcEmojiOpen = ref(false)
 const bcShowMainHelp = ref(false)
@@ -434,7 +454,7 @@ async function openQuickBroadcastDraft() {
       bcTitle.value = String(bcTitle.value || 'Новый черновик')
       bcBodyHtml.value = String(bcBodyHtml.value || '')
       await nextTick()
-      if (bcBodyRef.value) bcBodyRef.value.innerHTML = bcBodyHtml.value || ''
+      bcSetBodyEditorHtml(bcBodyHtml.value || '')
     }
     if (!bcSelectedId.value) {
       await createBcDraft()
@@ -445,7 +465,7 @@ async function openQuickBroadcastDraft() {
     bcQuickTitleBaseline.value = String(bcTitle.value || '')
     bcQuickDraftBaseline.value = null
     await nextTick()
-    if (bcBodyRef.value) bcBodyRef.value.innerHTML = bcBodyHtml.value || ''
+    bcSetBodyEditorHtml(bcBodyHtml.value || '')
     bcSyncEditorHtml()
     bcQuickDraftBaseline.value = {
       title: String(bcTitle.value || '').trim(),
@@ -2557,7 +2577,7 @@ async function ensureEmojiPicker() {
 }
 
 function bcSyncEditorHtml() {
-  const el = bcBodyRef.value
+  const el = bcResolveBodyEditor()
   if (!el) return
   const html = String(el.innerHTML || '')
   const plain = String(el.innerText || '').trim()
@@ -2568,7 +2588,7 @@ function bcSyncEditorHtml() {
 }
 
 function bcRecordHistory(force = false) {
-  const el = bcBodyRef.value
+  const el = bcResolveBodyEditor()
   if (!el) return
   const html = String(el.innerHTML || '')
   if (!force) {
@@ -2596,7 +2616,7 @@ function bcCanRedo() {
 function bcUndo() {
   if (!bcCanUndo()) return
   bcHistoryIndex.value -= 1
-  const el = bcBodyRef.value
+  const el = bcResolveBodyEditor()
   if (!el) return
   el.innerHTML = String(bcHistory.value[bcHistoryIndex.value] || '')
   bcSyncEditorHtml()
@@ -2607,7 +2627,7 @@ function bcUndo() {
 function bcRedo() {
   if (!bcCanRedo()) return
   bcHistoryIndex.value += 1
-  const el = bcBodyRef.value
+  const el = bcResolveBodyEditor()
   if (!el) return
   el.innerHTML = String(bcHistory.value[bcHistoryIndex.value] || '')
   bcSyncEditorHtml()
@@ -2705,7 +2725,7 @@ function bcWrapRange(range, htmlOpen, htmlClose) {
 }
 
 function bcExec(cmd) {
-  const el = bcBodyRef.value
+  const el = bcResolveBodyEditor()
   if (!el) return
   el.focus()
   document.execCommand(cmd, false)
@@ -2731,7 +2751,7 @@ function bcEditItalic() { bcExecEdit('italic') }
 function bcEditUnderline() { bcExecEdit('underline') }
 function bcEditStrike() { bcExecEdit('strikeThrough') }
 function bcFormatSpoiler() {
-  const el = bcBodyRef.value
+  const el = bcResolveBodyEditor()
   if (!el) return
   el.focus()
   const range = bcCurrentRange()
@@ -2743,7 +2763,7 @@ function bcFormatSpoiler() {
   bcUpdateFormatState()
 }
 function bcFormatPre() {
-  const el = bcBodyRef.value
+  const el = bcResolveBodyEditor()
   if (!el) return
   el.focus()
   const sel = window.getSelection?.()
@@ -2756,7 +2776,7 @@ function bcFormatPre() {
   bcSavedTick.value = false
 }
 function bcFormatBlockquote() {
-  const el = bcBodyRef.value
+  const el = bcResolveBodyEditor()
   if (!el) return
   el.focus()
   const range = bcCurrentRange()
@@ -2768,7 +2788,7 @@ function bcFormatBlockquote() {
   bcUpdateFormatState()
 }
 function bcClearFormatting() {
-  const el = bcBodyRef.value
+  const el = bcResolveBodyEditor()
   if (!el) return
   // Полный сброс оформления: оставляем только чистый текст и эмодзи.
   // Скрытия/ссылки/цитаты/теги убираются, переносы строк сохраняются.
@@ -2783,7 +2803,7 @@ function bcClearFormatting() {
   bcSavedTick.value = false
 }
 function bcFormatCode() {
-  const el = bcBodyRef.value
+  const el = bcResolveBodyEditor()
   if (!el) return
   el.focus()
   const sel = window.getSelection?.()
@@ -2797,7 +2817,7 @@ function bcFormatCode() {
 }
 
 function bcFormatLink() {
-  const el = bcBodyRef.value
+  const el = bcResolveBodyEditor()
   if (!el) return
   const sel = window.getSelection?.()
   const range = sel && sel.rangeCount ? sel.getRangeAt(0).cloneRange() : bcSavedRange.value
@@ -2814,7 +2834,7 @@ function bcFormatLink() {
 function bcApplyLinkModal() {
   const href = String(bcLinkUrl.value || '').trim()
   if (!href) return
-  const el = bcBodyRef.value
+  const el = bcResolveBodyEditor()
   if (!el) return
   const sel = window.getSelection?.()
   el.focus()
@@ -2847,7 +2867,7 @@ function onBcEditInput(ev) {
 function onBcEmojiClick(ev) {
   const unicode = ev?.detail?.unicode
   if (!unicode) return
-  const el = bcBodyRef.value
+  const el = bcResolveBodyEditor()
   if (!el) return
   el.focus()
   bcInsertHtmlAtCursor(unicode)
@@ -2874,7 +2894,7 @@ function onBcEditorSelectionChange() {
   const sel = window.getSelection?.()
   if (!sel || !sel.rangeCount) return
   const range = sel.getRangeAt(0)
-  const editor = bcBodyRef.value
+  const editor = bcResolveBodyEditor()
   if (!editor) return
   if (!editor.contains(range.startContainer)) return
   bcSavedRange.value = range.cloneRange()
@@ -3932,8 +3952,8 @@ function applyBroadcastToForm(item) {
     applyAutopostFromServerItem(item)
   }
   nextTick(() => {
-    if (bcBodyRef.value) bcBodyRef.value.innerHTML = bcBodyHtml.value || ''
-    bcHistory.value = [String(bcBodyRef.value?.innerHTML || '')]
+    bcSetBodyEditorHtml(bcBodyHtml.value || '')
+    bcHistory.value = [String(bcResolveBodyEditor()?.innerHTML || '')]
     bcHistoryIndex.value = 0
     bcUpdateFormatState()
     bcSaveLocalSnapshot()
