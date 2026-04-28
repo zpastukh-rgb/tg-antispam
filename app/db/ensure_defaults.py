@@ -758,6 +758,23 @@ async def ensure_admin_broadcasts_schema(engine: AsyncEngine) -> None:
         # migrations/012: источник запуска (manual | autopost)
         "ALTER TABLE admin_broadcast_runs ADD COLUMN IF NOT EXISTS run_source VARCHAR(16)",
         "UPDATE admin_broadcast_runs SET run_source = 'manual' WHERE run_source IS NULL",
+        # migrations/020: аудитория и реальные клики по ссылкам
+        "ALTER TABLE admin_broadcast_runs ADD COLUMN IF NOT EXISTS audience_total INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE admin_broadcast_runs ADD COLUMN IF NOT EXISTS audience_ok INTEGER NOT NULL DEFAULT 0",
+        """
+        CREATE TABLE IF NOT EXISTS admin_broadcast_clicks (
+            id SERIAL PRIMARY KEY,
+            broadcast_id INTEGER NOT NULL REFERENCES admin_broadcasts(id) ON DELETE CASCADE,
+            target_kind VARCHAR(16) NOT NULL DEFAULT 'user',
+            target_id BIGINT NOT NULL,
+            url TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_admin_broadcast_clicks_broadcast_id ON admin_broadcast_clicks (broadcast_id)",
+        "CREATE INDEX IF NOT EXISTS ix_admin_broadcast_clicks_target_kind ON admin_broadcast_clicks (target_kind)",
+        "CREATE INDEX IF NOT EXISTS ix_admin_broadcast_clicks_target_id ON admin_broadcast_clicks (target_id)",
+        "CREATE INDEX IF NOT EXISTS ix_admin_broadcast_clicks_created_at ON admin_broadcast_clicks (created_at)",
     )
     try:
         async with engine.begin() as conn:

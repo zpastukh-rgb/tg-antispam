@@ -2484,6 +2484,8 @@ async function startBroadcastProgressPolling(id, target) {
       const finishedAsDraftWithStats = st === 'draft' && !!sentAt && countsLookComplete
       const sendingVisibleFor = Date.now() - Number(bcSendSendingStartedAt.value || 0)
       const finishedBySentAtFallback = !!sentAt && st !== 'failed' && sendingVisibleFor >= 9000
+      const errMsg = String(row?.error_message || '').trim()
+      const failedAsDraftWithError = st === 'draft' && !sentAt && !!errMsg && sendingVisibleFor >= 3500
       if (st === 'sent' || finishedAsDraftWithStats || finishedBySentAtFallback) {
         stopBroadcastProgressPolling()
         const bidSnap = bid
@@ -2497,6 +2499,12 @@ async function startBroadcastProgressPolling(id, target) {
         if (!bcSendModalOpen.value || Number(bcSendModalBroadcastId.value || 0) !== bidSnap) return
         bcSendModalState.value = 'done'
         await loadBcSendResultStats(bidSnap)
+        return
+      }
+      if (failedAsDraftWithError) {
+        bcSendModalState.value = 'failed'
+        bcSendModalText.value = errMsg || 'Ошибка отправки'
+        stopBroadcastProgressPolling()
         return
       }
       if (st === 'failed') {
