@@ -107,6 +107,7 @@ const bcQuickDraftModalOpen = ref(false)
 /** Сохранённое на сервере название при открытии быстрого черновика — для кнопки ✓ */
 const bcQuickTitleBaseline = ref('')
 const bcQuickDraftBaseline = ref(null)
+const bcOpeningQuickDraft = ref(false)
 const bcSendTargetModalOpen = ref(false)
 const bcSendTargetChannels = ref(true)
 const bcSendTargetGroups = ref(false)
@@ -407,24 +408,31 @@ function bcRecentStatusLabel(item) {
 }
 
 async function openQuickBroadcastDraft() {
-  if (!bcSelectedId.value) {
-    await createBcDraft()
+  if (bcOpeningQuickDraft.value) return
+  bcOpeningQuickDraft.value = true
+  try {
+    if (!bcSelectedId.value) {
+      await createBcDraft()
+    }
+    if (!bcSelectedId.value) return
+    bcEditorOpen.value = false
+    bcQuickDraftModalOpen.value = true
+    bcQuickTitleBaseline.value = String(bcTitle.value || '')
+    bcQuickDraftBaseline.value = null
+    await nextTick()
+    if (bcBodyRef.value) bcBodyRef.value.innerHTML = bcBodyHtml.value || ''
+    bcSyncEditorHtml()
+    bcQuickDraftBaseline.value = {
+      title: String(bcTitle.value || '').trim(),
+      body: String(bcNormalizeHtmlForTelegram(bcBodyHtml.value || '') || ''),
+      keyboard: JSON.stringify(bcBuildKeyboardPayload() || []),
+      mediaKind: String(bcMediaKindStored.value || 'none'),
+      mediaName: String(bcMediaOriginalName.value || ''),
+    }
+    bcUpdateFormatState()
+  } finally {
+    bcOpeningQuickDraft.value = false
   }
-  bcEditorOpen.value = false
-  bcQuickDraftModalOpen.value = true
-  bcQuickTitleBaseline.value = String(bcTitle.value || '')
-  bcQuickDraftBaseline.value = null
-  await nextTick()
-  if (bcBodyRef.value) bcBodyRef.value.innerHTML = bcBodyHtml.value || ''
-  bcSyncEditorHtml()
-  bcQuickDraftBaseline.value = {
-    title: String(bcTitle.value || '').trim(),
-    body: String(bcNormalizeHtmlForTelegram(bcBodyHtml.value || '') || ''),
-    keyboard: JSON.stringify(bcBuildKeyboardPayload() || []),
-    mediaKind: String(bcMediaKindStored.value || 'none'),
-    mediaName: String(bcMediaOriginalName.value || ''),
-  }
-  bcUpdateFormatState()
 }
 
 async function openSendTargetModal() {
@@ -6280,7 +6288,8 @@ watch(
         <div class="mt-3 space-y-2">
           <button
             type="button"
-            class="w-full rounded-xl border border-[#3d6dff]/65 bg-gradient-to-r from-[#142a62]/92 via-[#172f6e]/92 to-[#152b5f]/92 px-3 py-2.5 text-left shadow-[0_12px_24px_-16px_rgba(49,99,255,0.75),inset_0_1px_0_rgba(255,255,255,0.12)] ring-1 ring-[#5b8dff]/25 transition active:scale-[0.995]"
+            class="w-full rounded-xl border border-[#3d6dff]/65 bg-gradient-to-r from-[#142a62]/92 via-[#172f6e]/92 to-[#152b5f]/92 px-3 py-2.5 text-left shadow-[0_12px_24px_-16px_rgba(49,99,255,0.75),inset_0_1px_0_rgba(255,255,255,0.12)] ring-1 ring-[#5b8dff]/25 transition active:scale-[0.995] disabled:cursor-not-allowed disabled:opacity-60"
+            :disabled="bcOpeningQuickDraft"
             @click="openQuickBroadcastDraft"
           >
             <span class="flex items-center gap-2.5">
@@ -6493,12 +6502,14 @@ watch(
         </div>
       </Teleport>
 
-      <div
-        v-if="bcSendTargetModalOpen"
-        class="fixed inset-0 z-[335] flex items-start justify-center overflow-y-auto bg-black/80 px-3 pb-[max(6.25rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))] pt-[max(0.25rem,calc(env(safe-area-inset-top,0px)+46px))]"
-        @click.self="bcSendTargetModalOpen = false"
-      >
-        <div class="w-full max-w-lg rounded-2xl border border-white/12 bg-[#0b111b]/95 p-3 text-zinc-100 shadow-[0_28px_80px_-24px_rgba(0,0,0,0.92)] ring-1 ring-white/[0.06]">
+      <Teleport to="body">
+        <div
+          v-if="bcSendTargetModalOpen"
+          class="fixed inset-0 z-[10020] flex min-h-[100dvh] min-w-0 flex-col bg-[#09090b] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
+          @click.self="bcSendTargetModalOpen = false"
+        >
+          <div class="flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-2">
+            <div class="w-full rounded-2xl border border-white/12 bg-[#0b111b]/95 p-3 text-zinc-100 shadow-[0_28px_80px_-24px_rgba(0,0,0,0.92)] ring-1 ring-white/[0.06]">
           <p class="text-[19px] font-black text-white">Куда отправить</p>
           <p class="mt-0.5 text-[13px] text-zinc-400">Выберите получателей</p>
 
@@ -6576,8 +6587,10 @@ watch(
           >
             Далее
           </button>
+            </div>
+          </div>
         </div>
-      </div>
+      </Teleport>
 
       <div
         v-if="bcConfirmModalOpen"
