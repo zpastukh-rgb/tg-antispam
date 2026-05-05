@@ -32,6 +32,31 @@ git push -u origin main
 
 2. Добавь **PostgreSQL** (Add Service → Database → PostgreSQL).
 
+### База не на Railway, а на своём VDS (РФ)
+
+Если PostgreSQL крутится у провайдера в России (FirstVDS и т.д.), **не подключай** к боту Reference на сервис Postgres Railway. Задай строку сам:
+
+- Вручную в **Variables** сервиса бота: `DATABASE_URL` = `postgresql://USER:PASSWORD@IP:5432/ИМЯ_БД`  
+  (код сам переведёт в `postgresql+asyncpg`, см. `app/db/session.py`).
+- Или через CLI из корня репо (после `railway login` и `railway link` на **сервис бота**):
+
+```bash
+export DATABASE_URL='postgresql://guard:ПАРОЛЬ@ВАШ_IP:5432/guard'
+./scripts/railway_set_vds_database.sh
+```
+
+Сложный пароль удобнее передать как **PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE** (без `DATABASE_URL`):
+
+```bash
+export PGHOST=ВАШ_IP PGPORT=5432 PGUSER=guard PGDATABASE=guard
+export PGPASSWORD='пароль'
+./scripts/railway_set_vds_database.sh --pg
+```
+
+После этого **удали** старую переменную `DATABASE_URL`, если она всё ещё ссылается на Railway Postgres.
+
+---
+
 3. В сервисе бота открой **Variables**:
    - `BOT_TOKEN` — токен от @BotFather (значение вручную).
    - Подключение к БД — **один из вариантов**:

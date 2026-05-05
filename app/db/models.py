@@ -71,6 +71,11 @@ class User(Base):
     payment_method_bound: Mapped[bool] = mapped_column(Boolean, default=False)
     payment_method_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     payment_method_last4: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    # ЮKassa автоплатежи: id сохранённого способа оплаты (payment_method.id из API), режим последней оплаты
+    yookassa_payment_method_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    yookassa_last_mode: Mapped[str | None] = mapped_column(String(8), nullable=True)  # live | test
+    subscription_autorenew_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    autorenew_last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String(32), default="active")
@@ -99,6 +104,11 @@ class User(Base):
 
     # Mini App: черновики «правила в группе» (JSON-массив), синхронизация между устройствами одного tg-аккаунта.
     post_rules_drafts_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Legal gate (Mini App): фиксация согласий на сервере для админки.
+    legal_bundle_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    legal_pd_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    legal_marketing_opt_in: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Кто платит AURUM за рассылку, когда постит делегат (менеджер) в чужие чаты: owner | delegate | delegate_first
     delegate_broadcast_payer: Mapped[str] = mapped_column(String(24), default="delegate_first")
@@ -374,10 +384,16 @@ class Rule(Base):
     # delete | ban (банит именно sender_chat в группе, не пользователя).
     filter_channel_posts_action: Mapped[str] = mapped_column(String(16), default="delete")
 
-    # Guard жёсткий словарь: мат / мутные подработки / казино-ставки
+    # Guard жёсткий словарь: мат / подработки / казино / реклама / обзывательства /
+    # антирасист / антифашист / антипошлость
     filter_profanity_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     filter_jobs_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     filter_casino_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    filter_ads_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_insults_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_racism_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_nazi_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_vulgar_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     # Репутация (карма) за благодарности в группе.
     reputation_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
 
@@ -747,6 +763,13 @@ class ChatManager(Base):
 
     added_by: Mapped[int] = mapped_column(BigInteger)
 
+    # Делегированные права. Для chat_kind='group' релевантны protection/broadcast/reports.
+    # Для chat_kind='channel' релевантны broadcast/first_post_settings.
+    can_protection: Mapped[bool] = mapped_column(Boolean, default=False)
+    can_broadcast: Mapped[bool] = mapped_column(Boolean, default=False)
+    can_reports: Mapped[bool] = mapped_column(Boolean, default=False)
+    can_first_post_settings: Mapped[bool] = mapped_column(Boolean, default=False)
+
     created_at: Mapped[str] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now()
@@ -775,6 +798,13 @@ class ChatManagerInvite(Base):
     target_username: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     connected_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(32), default="sent")  # sent|connecting|connected
+
+    # Делегированные права (зеркалят ChatManager).
+    can_protection: Mapped[bool] = mapped_column(Boolean, default=False)
+    can_broadcast: Mapped[bool] = mapped_column(Boolean, default=False)
+    can_reports: Mapped[bool] = mapped_column(Boolean, default=False)
+    can_first_post_settings: Mapped[bool] = mapped_column(Boolean, default=False)
+
     created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[str] = mapped_column(
         DateTime(timezone=True),
@@ -807,6 +837,44 @@ class NewMember(Base):
 
     __table_args__ = (
         UniqueConstraint("chat_id", "user_id", name="uq_new_member"),
+    )
+
+
+class MemberLeft(Base):
+    """Журнал выходов участников: каждая строка — событие leave/kick."""
+    __tablename__ = "member_left"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    left_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        Index("idx_member_left_chat_time", "chat_id", "left_at"),
+    )
+
+
+class ChatActivityEvent(Base):
+    """Журнал любой активности (сообщений) для аналитики.
+
+    Пишется в moderation handler по каждому входящему сообщению — независимо от того,
+    было ли оно удалено. Используется для подсчёта «всех сообщений» и активных юзеров.
+    """
+    __tablename__ = "chat_activity_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    created_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        Index("idx_chat_activity_chat_time", "chat_id", "created_at"),
     )
 
 

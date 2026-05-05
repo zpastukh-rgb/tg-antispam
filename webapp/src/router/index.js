@@ -1,30 +1,21 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import DashboardView from '../views/DashboardView.vue'
-import ChatsView from '../views/ChatsView.vue'
-import ProtectionView from '../views/ProtectionView.vue'
-import ReportsView from '../views/ReportsView.vue'
-import ConnectView from '../views/ConnectView.vue'
-import ReferralView from '../views/ReferralView.vue'
-import GiftsView from '../views/GiftsView.vue'
-import CommunityView from '../views/CommunityView.vue'
-import TokensView from '../views/TokensView.vue'
-import HistoryView from '../views/HistoryView.vue'
-import AdminView from '../views/AdminView.vue'
 import { useDashboardSection } from '../composables/useDashboardSection'
 
 const routes = [
   { path: '/', name: 'Dashboard', component: DashboardView, meta: { title: 'Главная' } },
-  { path: '/chats', name: 'Chats', component: ChatsView, meta: { title: 'Подключённые чаты' } },
-  { path: '/protection', name: 'Protection', component: ProtectionView, meta: { title: 'Защита' } },
-  { path: '/reports', name: 'Reports', component: ReportsView, meta: { title: 'Отчёты' } },
+  { path: '/chats', name: 'Chats', component: () => import('../views/ChatsView.vue'), meta: { title: 'Подключённые чаты' } },
+  { path: '/protection', name: 'Protection', component: () => import('../views/ProtectionView.vue'), meta: { title: 'Защита' } },
+  { path: '/reports', name: 'Reports', component: () => import('../views/ReportsView.vue'), meta: { title: 'Отчёты' } },
   { path: '/billing', name: 'Billing', redirect: '/' },
-  { path: '/tokens', name: 'Tokens', component: TokensView, meta: { title: 'Токены' } },
-  { path: '/history', name: 'History', component: HistoryView, meta: { title: 'История средств' } },
-  { path: '/referral', name: 'Referral', component: ReferralView, meta: { title: 'Реферальная программа' } },
-  { path: '/gifts', name: 'Gifts', component: GiftsView, meta: { title: 'Подарки' } },
-  { path: '/community', name: 'Community', component: CommunityView, meta: { title: 'Сообщество' } },
-  { path: '/connect', name: 'Connect', component: ConnectView, meta: { title: 'Подключить группу' } },
-  { path: '/admin', name: 'Admin', component: AdminView, meta: { title: 'Админка' } },
+  { path: '/tokens', name: 'Tokens', component: () => import('../views/TokensView.vue'), meta: { title: 'Токены' } },
+  { path: '/history', name: 'History', component: () => import('../views/HistoryView.vue'), meta: { title: 'История средств' } },
+  { path: '/referral', name: 'Referral', component: () => import('../views/ReferralView.vue'), meta: { title: 'Реферальная программа' } },
+  { path: '/gifts', name: 'Gifts', component: () => import('../views/GiftsView.vue'), meta: { title: 'Подарки' } },
+  { path: '/community', name: 'Community', component: () => import('../views/CommunityView.vue'), meta: { title: 'Сообщество' } },
+  { path: '/connect', name: 'Connect', component: () => import('../views/ConnectView.vue'), meta: { title: 'Подключить группу' } },
+  { path: '/settings', name: 'Settings', component: () => import('../views/SettingsView.vue'), meta: { title: 'Настройки' } },
+  { path: '/admin', name: 'Admin', component: () => import('../views/AdminView.vue'), meta: { title: 'Админка' } },
   { path: '/:pathMatch(.*)*', name: 'CatchAll', redirect: '/' },
 ]
 

@@ -24,7 +24,16 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import delete, select, func, desc, text
 
 from app.db.session import get_session
-from app.db.ensure_defaults import DEFAULT_CASINO_ROOTS, DEFAULT_JOBS_ROOTS, DEFAULT_PROFANITY_ROOTS
+from app.db.ensure_defaults import (
+    DEFAULT_ADS_ROOTS,
+    DEFAULT_CASINO_ROOTS,
+    DEFAULT_INSULT_ROOTS,
+    DEFAULT_JOBS_ROOTS,
+    DEFAULT_NAZI_ROOTS,
+    DEFAULT_PROFANITY_ROOTS,
+    DEFAULT_RACISM_ROOTS,
+    DEFAULT_VULGAR_ROOTS,
+)
 from app.moderation_lexicon import root_matches_token
 from app.db.models import (
     Chat,
@@ -38,6 +47,8 @@ from app.db.models import (
     ModerationLog,
     ProfanityWord,
     NewMember,
+    MemberLeft,
+    ChatActivityEvent,
     ChatSpikeAlert,
     ChatReputationWord,
     ChatReputationScore,
@@ -762,14 +773,19 @@ async def _reputation_target_user_id(session, message: Message) -> int | None:
         ordered.append(u)
     if not ordered:
         return None
-    q = await session.execute(
-        select(User.telegram_id, User.username).where(func.lower(User.username).in_(ordered))
-    )
-    by_username: dict[str, int] = {}
-    for tg_id, username in q.all():
-        k = str(username or "").strip().lower()
-        if k and int(tg_id or 0) > 0:
-            by_username[k] = int(tg_id)
+    from app.services.pii_user_store import pii_map_username_lowers_to_telegram_ids, pii_storage_enabled
+
+    if pii_storage_enabled():
+        by_username = await pii_map_username_lowers_to_telegram_ids(ordered)
+    else:
+        q = await session.execute(
+            select(User.telegram_id, User.username).where(func.lower(User.username).in_(ordered))
+        )
+        by_username = {}
+        for tg_id, username in q.all():
+            k = str(username or "").strip().lower()
+            if k and int(tg_id or 0) > 0:
+                by_username[k] = int(tg_id)
     for uname in ordered:
         uid = int(by_username.get(uname, 0) or 0)
         if uid > 0 and uid != actor_id:
@@ -1560,7 +1576,8 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
             if now_ts - last_ts >= _INACTIVE_CHAT_LOG_TTL_SEC:
                 _INACTIVE_CHAT_LOG_TS[chat_id] = now_ts
                 logger.warning(
-                    "moderation skip: chat_id=%s not active in DB (подключите группу в Mini App / панели — иначе фильтры не работают)",
+                    "moderation skip: chat_id=%s нет в таблице chats у этого бота — фильтры не применяются. "
+                    "Откройте Mini App → подключите группу или заново добавьте бота админом (это не про тумблер «Guard»).",
                     chat_id,
                 )
         except Exception:
@@ -1731,69 +1748,8 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
         )
 
     # -------------------------------------------------
-    # 1b) Словарь Guard: мат / мутные подработки / казино-ставки
-    # -------------------------------------------------
-    # Три независимых тумблера (Mini App). Нельзя трактовать «один ВКЛ» как отключение остальных —
-    # раньше из-за этого при ВКЛ только «Мат» переставали ловиться подработки/казино при ВЫКЛ в БД.
-    use_profanity = bool(getattr(rule, "filter_profanity_enabled", True))
-    use_jobs = bool(getattr(rule, "filter_jobs_enabled", True))
-    use_casino = bool(getattr(rule, "filter_casino_enabled", True))
-
-    if use_profanity:
-        # Всегда объединяем с встроенными корнями: если в БД есть хоть одно слово,
-        # раньше встроенный словарь полностью отключался — модерировались только стикеры/медиа и т.п.
-        mat_set = _builtin_words(DEFAULT_PROFANITY_ROOTS) | (await load_profanity_words(session))
-        mat_set = mat_set - _builtin_words(DEFAULT_JOBS_ROOTS) - _builtin_words(DEFAULT_CASINO_ROOTS)
-        hit_prof = profanity_hit(text_norm, mat_set, text_without_urls_norm=text_for_stopwords_norm)
-        if hit_prof:
-            return Verdict(
-                True, _with_newbie_reason("profanity", newbie_win), hit_prof, action,
-                mute_minutes=mute_min,
-                log_it=log_enabled,
-                log_extra=("anti-edit" if edited else ""),
-            )
-    if use_jobs:
-        jobs_set = _builtin_words(DEFAULT_JOBS_ROOTS)
-        hit_jobs = profanity_hit(text_norm, jobs_set, text_without_urls_norm=text_for_stopwords_norm)
-        if not hit_jobs:
-            hit_jobs = jobs_offer_hit(text_norm, text_without_urls_norm=text_for_stopwords_norm)
-        if hit_jobs:
-            return Verdict(
-                True, _with_newbie_reason("jobs", newbie_win), hit_jobs, action,
-                mute_minutes=mute_min,
-                log_it=log_enabled,
-                log_extra=("anti-edit" if edited else ""),
-            )
-    if use_casino:
-        casino_set = _builtin_words(DEFAULT_CASINO_ROOTS)
-        hit_casino = profanity_hit(text_norm, casino_set, text_without_urls_norm=text_for_stopwords_norm)
-        if hit_casino:
-            return Verdict(
-                True, _with_newbie_reason("casino", newbie_win), hit_casino, action,
-                mute_minutes=mute_min,
-                log_it=log_enabled,
-                log_extra=("anti-edit" if edited else ""),
-            )
-
-    # -------------------------------------------------
-    # 0) Режим тишины: после входа N минут — ограничение (после стоп-слов и встроенных словарей)
-    # -------------------------------------------------
-    if silence_minutes > 0 and user:
-        silence_rem = await _silence_remaining_restrict_minutes(session, chat_id, user_id, silence_minutes)
-        if silence_rem is not None:
-            return Verdict(
-                True,
-                "silence",
-                f"режим тишины ({silence_minutes} мин)",
-                "mute",
-                mute_minutes=silence_rem,
-                log_it=log_enabled,
-                log_extra=f"тишина, осталось ~{silence_rem} мин из {silence_minutes}",
-            )
-
-    # -------------------------------------------------
-    # 2) links (текст + entities: url, text_link). Режимы: allow / open_blacklist / delete_all /
-    # telegram_only / smart / forbid / captcha. filter_links_scope — только комменты канала (форум).
+    # 1a) Ссылки и упоминания — сразу после стоп-слов (до тяжёлых словарей и load_profanity_words):
+    # меньше задержка на типичный спам со ссылками / @everyone.
     # -------------------------------------------------
     links_filter_on = filter_links and (_links_mode != "allow")
     links = find_links_in_message(message)
@@ -1848,9 +1804,6 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
         if v_link:
             return v_link
 
-    # -------------------------------------------------
-    # 3) mentions
-    # -------------------------------------------------
     if filter_mentions:
         mentions = find_mentions_any(message)
         if mentions:
@@ -1859,6 +1812,135 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
                 mute_minutes=mute_min,
                 log_it=log_enabled,
                 log_extra=("anti-edit" if edited else ""),
+            )
+
+    # -------------------------------------------------
+    # 1b) Словарь Guard: мат / мутные подработки / казино-ставки
+    # -------------------------------------------------
+    # Три независимых тумблера (Mini App). Нельзя трактовать «один ВКЛ» как отключение остальных —
+    # раньше из-за этого при ВКЛ только «Мат» переставали ловиться подработки/казино при ВЫКЛ в БД.
+    use_profanity = bool(getattr(rule, "filter_profanity_enabled", True))
+    use_jobs = bool(getattr(rule, "filter_jobs_enabled", True))
+    use_casino = bool(getattr(rule, "filter_casino_enabled", True))
+    use_ads = bool(getattr(rule, "filter_ads_enabled", False))
+    use_insults = bool(getattr(rule, "filter_insults_enabled", False))
+    use_racism = bool(getattr(rule, "filter_racism_enabled", False))
+    use_nazi = bool(getattr(rule, "filter_nazi_enabled", False))
+    use_vulgar = bool(getattr(rule, "filter_vulgar_enabled", False))
+
+    # Узкие словари проверяем РАНЬШЕ profanity, чтобы конкретные категории
+    # (обзывательства/реклама/казино/подработки/расизм/нацизм/пошлость) попадали
+    # в свою корзину статистики, а не «съедались» общим матом.
+    if use_insults:
+        insult_set = _builtin_words(DEFAULT_INSULT_ROOTS)
+        hit_insult = profanity_hit(text_norm, insult_set, text_without_urls_norm=text_for_stopwords_norm)
+        if hit_insult:
+            return Verdict(
+                True, _with_newbie_reason("insult", newbie_win), hit_insult, action,
+                mute_minutes=mute_min,
+                log_it=log_enabled,
+                log_extra=("anti-edit" if edited else ""),
+            )
+    if use_racism:
+        racism_set = _builtin_words(DEFAULT_RACISM_ROOTS)
+        hit_racism = profanity_hit(text_norm, racism_set, text_without_urls_norm=text_for_stopwords_norm)
+        if hit_racism:
+            return Verdict(
+                True, _with_newbie_reason("racism", newbie_win), hit_racism, action,
+                mute_minutes=mute_min,
+                log_it=log_enabled,
+                log_extra=("anti-edit" if edited else ""),
+            )
+    if use_nazi:
+        nazi_set = _builtin_words(DEFAULT_NAZI_ROOTS)
+        hit_nazi = profanity_hit(text_norm, nazi_set, text_without_urls_norm=text_for_stopwords_norm)
+        if hit_nazi:
+            return Verdict(
+                True, _with_newbie_reason("nazi", newbie_win), hit_nazi, action,
+                mute_minutes=mute_min,
+                log_it=log_enabled,
+                log_extra=("anti-edit" if edited else ""),
+            )
+    if use_vulgar:
+        vulgar_set = _builtin_words(DEFAULT_VULGAR_ROOTS)
+        hit_vulgar = profanity_hit(text_norm, vulgar_set, text_without_urls_norm=text_for_stopwords_norm)
+        if hit_vulgar:
+            return Verdict(
+                True, _with_newbie_reason("vulgar", newbie_win), hit_vulgar, action,
+                mute_minutes=mute_min,
+                log_it=log_enabled,
+                log_extra=("anti-edit" if edited else ""),
+            )
+    if use_ads:
+        ads_set = _builtin_words(DEFAULT_ADS_ROOTS)
+        hit_ads = profanity_hit(text_norm, ads_set, text_without_urls_norm=text_for_stopwords_norm)
+        if hit_ads:
+            return Verdict(
+                True, _with_newbie_reason("ads", newbie_win), hit_ads, action,
+                mute_minutes=mute_min,
+                log_it=log_enabled,
+                log_extra=("anti-edit" if edited else ""),
+            )
+    if use_casino:
+        casino_set = _builtin_words(DEFAULT_CASINO_ROOTS)
+        hit_casino = profanity_hit(text_norm, casino_set, text_without_urls_norm=text_for_stopwords_norm)
+        if hit_casino:
+            return Verdict(
+                True, _with_newbie_reason("casino", newbie_win), hit_casino, action,
+                mute_minutes=mute_min,
+                log_it=log_enabled,
+                log_extra=("anti-edit" if edited else ""),
+            )
+    if use_jobs:
+        jobs_set = _builtin_words(DEFAULT_JOBS_ROOTS)
+        hit_jobs = profanity_hit(text_norm, jobs_set, text_without_urls_norm=text_for_stopwords_norm)
+        if not hit_jobs:
+            hit_jobs = jobs_offer_hit(text_norm, text_without_urls_norm=text_for_stopwords_norm)
+        if hit_jobs:
+            return Verdict(
+                True, _with_newbie_reason("jobs", newbie_win), hit_jobs, action,
+                mute_minutes=mute_min,
+                log_it=log_enabled,
+                log_extra=("anti-edit" if edited else ""),
+            )
+    if use_profanity:
+        # Общий «мат». Объединяем встроенные корни с пользовательским словарём,
+        # но обязательно вычитаем все узкие словари, чтобы их попадания шли
+        # в свои корзины статистики (insult/racism/nazi/vulgar/ads/casino/jobs).
+        mat_set = _builtin_words(DEFAULT_PROFANITY_ROOTS) | (await load_profanity_words(session))
+        mat_set = (
+            mat_set
+            - _builtin_words(DEFAULT_JOBS_ROOTS)
+            - _builtin_words(DEFAULT_CASINO_ROOTS)
+            - _builtin_words(DEFAULT_ADS_ROOTS)
+            - _builtin_words(DEFAULT_INSULT_ROOTS)
+            - _builtin_words(DEFAULT_RACISM_ROOTS)
+            - _builtin_words(DEFAULT_NAZI_ROOTS)
+            - _builtin_words(DEFAULT_VULGAR_ROOTS)
+        )
+        hit_prof = profanity_hit(text_norm, mat_set, text_without_urls_norm=text_for_stopwords_norm)
+        if hit_prof:
+            return Verdict(
+                True, _with_newbie_reason("profanity", newbie_win), hit_prof, action,
+                mute_minutes=mute_min,
+                log_it=log_enabled,
+                log_extra=("anti-edit" if edited else ""),
+            )
+
+    # -------------------------------------------------
+    # 0) Режим тишины: после входа N минут — ограничение (после стоп-слов и встроенных словарей)
+    # -------------------------------------------------
+    if silence_minutes > 0 and user:
+        silence_rem = await _silence_remaining_restrict_minutes(session, chat_id, user_id, silence_minutes)
+        if silence_rem is not None:
+            return Verdict(
+                True,
+                "silence",
+                f"режим тишины ({silence_minutes} мин)",
+                "mute",
+                mute_minutes=silence_rem,
+                log_it=log_enabled,
+                log_extra=f"тишина, осталось ~{silence_rem} мин из {silence_minutes}",
             )
 
     # -------------------------------------------------
@@ -1905,9 +1987,14 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
         prof_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_PROFANITY_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
         jobs_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_JOBS_ROOTS), text_without_urls_norm=text_for_stopwords_norm) or jobs_offer_hit(text_norm, text_without_urls_norm=text_for_stopwords_norm)
         casino_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_CASINO_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
-        if has_linkish or prof_probe or jobs_probe or casino_probe:
+        ads_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_ADS_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
+        insult_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_INSULT_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
+        racism_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_RACISM_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
+        nazi_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_NAZI_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
+        vulgar_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_VULGAR_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
+        if has_linkish or prof_probe or jobs_probe or casino_probe or ads_probe or insult_probe or racism_probe or nazi_probe or vulgar_probe:
             logger.warning(
-                "[moderation clean diag] chat=%s user=%s link_mode=%s filter_links=%s action=%s prof_on=%s jobs_on=%s casino_on=%s probes(link=%s,prof=%s,jobs=%s,casino=%s) text=%r",
+                "[moderation clean diag] chat=%s user=%s link_mode=%s filter_links=%s action=%s prof_on=%s jobs_on=%s casino_on=%s ads_on=%s insults_on=%s probes(link=%s,prof=%s,jobs=%s,casino=%s,ads=%s,insult=%s) text=%r",
                 chat_id,
                 user_id,
                 _links_mode,
@@ -1916,10 +2003,14 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
                 use_profanity,
                 use_jobs,
                 use_casino,
+                use_ads,
+                use_insults,
                 has_linkish,
                 bool(prof_probe),
                 bool(jobs_probe),
                 bool(casino_probe),
+                bool(ads_probe),
+                bool(insult_probe),
                 (text[:180] + "…") if len(text) > 180 else text,
             )
     except Exception:
@@ -2086,6 +2177,16 @@ _REASON_HUMAN = {
     "jobs_newbie": "🕵️ мутные подработки (новичок)",
     "casino": "🎰 казино/ставки",
     "casino_newbie": "🎰 казино/ставки (новичок)",
+    "ads": "📢 реклама",
+    "ads_newbie": "📢 реклама (новичок)",
+    "insult": "👎 обзывательство",
+    "insult_newbie": "👎 обзывательство (новичок)",
+    "racism": "🚫 расизм",
+    "racism_newbie": "🚫 расизм (новичок)",
+    "nazi": "⛔ нацизм/фашизм",
+    "nazi_newbie": "⛔ нацизм/фашизм (новичок)",
+    "vulgar": "🔞 пошлость",
+    "vulgar_newbie": "🔞 пошлость (новичок)",
     "link": "🔗 ссылка",
     "link_newbie": "🔗 ссылка (новичок)",
     "mention": "🏷 упоминание",
@@ -2513,9 +2614,10 @@ async def pipeline(message: Message, *, edited: bool = False) -> None:
                 await record_seen_member_cleanup(session, message.chat.id, message.from_user.id)
             v = await evaluate(session, message, edited=edited)
             try:
+                _suffix = "" if v.should_act else " (без модерации: сообщение не удаляем)"
                 print(
                     f"[GUARD TRACE] verdict chat={message.chat.id} user={getattr(message.from_user, 'id', None)} "
-                    f"act={v.should_act} reason={v.reason} action={v.action} mute={v.mute_minutes}",
+                    f"act={v.should_act} reason={v.reason} action={v.action} mute={v.mute_minutes}{_suffix}",
                     flush=True,
                 )
             except Exception:
@@ -2819,6 +2921,8 @@ async def on_chat_member(event: ChatMemberUpdated):
             try:
                 async with await get_session() as session:
                     await delete_member_join_marker(session, chat_id, leave_user.id)
+                    if not bool(getattr(leave_user, "is_bot", False)):
+                        session.add(MemberLeft(chat_id=chat_id, user_id=int(leave_user.id)))
                     await session.commit()
                 SILENCE_JOIN_LRU.pop((chat_id, leave_user.id), None)
             except Exception as e:
@@ -3110,9 +3214,30 @@ async def on_message(message: Message):
 
     if await active_join_text_captcha_row(message):
         return
+    await _record_activity_event(message)
     await _maybe_handle_channel_comment_rules(message)
     await pipeline(message, edited=False)
     await _try_apply_reputation(message)
+
+
+async def _record_activity_event(message: Message) -> None:
+    """Лёгкая регистрация события активности (любое сообщение в группе) для аналитики."""
+    try:
+        chat = getattr(message, "chat", None)
+        user = getattr(message, "from_user", None)
+        if not chat or not user:
+            return
+        chat_id = int(getattr(chat, "id", 0) or 0)
+        user_id = int(getattr(user, "id", 0) or 0)
+        if not chat_id or not user_id:
+            return
+        if bool(getattr(user, "is_bot", False)):
+            return
+        async with await get_session() as session:
+            session.add(ChatActivityEvent(chat_id=chat_id, user_id=user_id))
+            await session.commit()
+    except Exception as e:
+        logger.debug("activity_event: %s", e)
 
 @router.edited_message(
     F.chat.type.in_({"group", "supergroup"}),

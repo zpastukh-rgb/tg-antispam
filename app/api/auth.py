@@ -41,8 +41,8 @@ def _validate_init_data(init_data: str, bot_token: str) -> dict:
     return parsed
 
 
-def get_telegram_user_id(init_data: str) -> int | None:
-    """Из проверенных init_data извлекает user.id (telegram_id)."""
+def parse_init_data_user(init_data: str) -> tuple[int, str | None, str | None] | None:
+    """Из проверенных init_data: telegram id, username, first_name (для синка профиля в /api/me)."""
     bot_token = os.getenv("BOT_TOKEN")
     if not bot_token:
         return None
@@ -54,9 +54,36 @@ def get_telegram_user_id(init_data: str) -> int | None:
         return None
     try:
         user = json.loads(user_json)
-        return int(user.get("id"))
+        tid = int(user.get("id"))
+        un = (user.get("username") or "").strip() or None
+        fn = (user.get("first_name") or "").strip() or None
+        return tid, un, fn
     except (json.JSONDecodeError, TypeError, ValueError):
         return None
+
+
+def get_telegram_user_id(init_data: str) -> int | None:
+    """Из проверенных init_data извлекает user.id (telegram_id)."""
+    p = parse_init_data_user(init_data)
+    return p[0] if p else None
+
+
+async def require_init_data_with_profile(
+    x_telegram_init_data: str | None = Header(None, alias="X-Telegram-Init-Data"),
+) -> tuple[int, str | None, str | None]:
+    """Валидный init data → (telegram_id, username, first_name) из объекта user."""
+    if not x_telegram_init_data:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="X-Telegram-Init-Data required",
+        )
+    p = parse_init_data_user(x_telegram_init_data)
+    if not p:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid init data",
+        )
+    return p
 
 
 async def require_init_data(

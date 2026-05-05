@@ -19,6 +19,27 @@ from app.db.models import User, ChatManagerInvite, ChatManager
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+
+async def _referral_bind_would_cycle(session, new_user_tg_id: int, ref_user: User) -> bool:
+    """Если новый пользователь уже выше реферера в дереве, привязка ref_* создаст цикл (U→…→R→U)."""
+    cur: User | None = ref_user
+    seen: set[int] = set()
+    for _ in range(64):
+        if not cur:
+            return False
+        p = getattr(cur, "referred_by_tg_id", None)
+        if not p:
+            return False
+        pt = int(p)
+        if pt == int(new_user_tg_id):
+            return True
+        if pt in seen:
+            return True
+        seen.add(pt)
+        row = await session.execute(select(User).where(User.telegram_id == pt).limit(1))
+        cur = row.scalar_one_or_none()
+    return True
 TRIAL_PREVIEW_CMD = (os.getenv("TRIAL_WARNING_PREVIEW_COMMAND") or "guard_trial_preview_48291").strip().lower()
 EXPIRED_PREVIEW_CMD = (os.getenv("EXPIRED_WARNING_PREVIEW_COMMAND") or "guard_expired_preview").strip().lower()
 
@@ -514,17 +535,16 @@ async def cmd_start(message: Message):
                         username=getattr(message.from_user, "username", None),
                         first_name=getattr(message.from_user, "first_name", None),
                     )
+                    ref_row = await session.execute(select(User).where(User.telegram_id == ref_tg_id))
+                    ref_user = ref_row.scalar_one_or_none()
                     # Привязываем реферера только один раз.
                     if not getattr(user, "referred_by_tg_id", None):
-                        ref_row = await session.execute(select(User).where(User.telegram_id == ref_tg_id))
-                        ref_user = ref_row.scalar_one_or_none()
-                        if ref_user:
+                        if ref_user and not await _referral_bind_would_cycle(
+                            session, int(message.from_user.id), ref_user
+                        ):
                             user.referred_by_tg_id = ref_tg_id
                             ref_user.ref_invited_count = int(getattr(ref_user, "ref_invited_count", 0) or 0) + 1
                             await session.commit()
-                    else:
-                        ref_row = await session.execute(select(User).where(User.telegram_id == ref_tg_id))
-                        ref_user = ref_row.scalar_one_or_none()
                     if ref_user:
                         ref_user.ref_start_count = int(getattr(ref_user, "ref_start_count", 0) or 0) + 1
                         await session.commit()

@@ -4,13 +4,17 @@
  */
 
 const DEFAULT_OWNER_USERNAMES = new Set(['pastukh_viscera'])
+/** @pastukh_viscera — совпадает с DEFAULT_ADMIN_TELEGRAM_IDS на бэкенде */
+const DEFAULT_OWNER_TELEGRAM_IDS = new Set([834702612])
 
 function ownerTelegramIdsFromEnv() {
-  const raw = String(import.meta.env.VITE_OWNER_TELEGRAM_IDS || '').trim()
-  const ids = new Set()
-  for (const part of raw.split(/[\s,]+/)) {
-    const n = Number(part)
-    if (Number.isFinite(n) && n > 0) ids.add(n)
+  const ids = new Set(DEFAULT_OWNER_TELEGRAM_IDS)
+  for (const key of ['VITE_ADMIN_TELEGRAM_IDS', 'VITE_OWNER_TELEGRAM_IDS']) {
+    const raw = String(import.meta.env[key] || '').trim()
+    for (const part of raw.split(/[\s,]+/)) {
+      const n = Number(part)
+      if (Number.isFinite(n) && n > 0) ids.add(n)
+    }
   }
   return ids
 }
@@ -23,7 +27,7 @@ const OWNER_TELEGRAM_IDS = ownerTelegramIdsFromEnv()
  */
 export function hasFullAdminRights(me) {
   if (!me) return false
-  if (me.is_admin) return true
+  if (me.is_admin === true || me.is_admin === 1) return true
   const tid = Number(me.telegram_id || 0)
   if (tid && OWNER_TELEGRAM_IDS.has(tid)) return true
   const u = String(me.username || '')
@@ -34,9 +38,7 @@ export function hasFullAdminRights(me) {
   return false
 }
 
-/** Кнопка «ADM»: полный админ или Premium (вход в кабинет / упрощённую админку). */
+/** Кнопка «ADM» (cyan): только полная админка. Premium-кабинет и Free без прав — без этой кнопки. */
 export function canOpenAdminEntry(me) {
-  if (!me) return false
-  if (hasFullAdminRights(me)) return true
-  return !!me.is_premium
+  return hasFullAdminRights(me)
 }

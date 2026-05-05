@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import uuid
+from datetime import date
 from urllib.parse import urlencode
 from pathlib import Path
 from tempfile import gettempdir
@@ -27,7 +28,16 @@ from aiogram.types import (
 from sqlalchemy import delete, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import AdminBroadcast, AdminBroadcastDelivery, AdminBroadcastMedia, AdminBroadcastRun, Chat, User, ChatManager
+from app.db.models import (
+    AdminBroadcast,
+    AdminBroadcastDelivery,
+    AdminBroadcastMedia,
+    AdminBroadcastRun,
+    AutopostCampaign,
+    Chat,
+    User,
+    ChatManager,
+)
 
 log = logging.getLogger(__name__)
 
@@ -106,6 +116,34 @@ def keyboard_markup_from_json(s: str | None) -> InlineKeyboardMarkup | None:
     return InlineKeyboardMarkup(inline_keyboard=kb) if kb else None
 
 
+# Префикс трекинга callback-кнопок рассылки (до 64 байт: bcM:{id}:{idx})
+BROADCAST_TRACKED_CALLBACK_PREFIX = "bcM:"
+
+
+def list_broadcast_callback_payloads_for_layout(keyboard_json: str | None, *, layout_group: bool) -> list[str]:
+    """Тот же порядок callback-кнопок, что у keyboard_for_target → _track_keyboard_markup (только payload до обёртки)."""
+    kb = keyboard_markup_from_json(keyboard_json)
+    if not kb:
+        return []
+    kb2 = keyboard_for_target(kb, "group") if layout_group else kb
+    if not kb2:
+        return []
+    out: list[str] = []
+    for row in kb2.inline_keyboard or []:
+        for b in row:
+            txt = str(getattr(b, "text", "") or "").strip()
+            if not txt:
+                continue
+            if getattr(b, "web_app", None) and getattr(getattr(b, "web_app", None), "url", None):
+                continue
+            if getattr(b, "url", None):
+                continue
+            cb = getattr(b, "callback_data", None)
+            if cb:
+                out.append(str(cb)[:64])
+    return out
+
+
 def keyboard_for_target(base: InlineKeyboardMarkup | None, target_kind: str) -> InlineKeyboardMarkup | None:
     if not base:
         return None
@@ -146,6 +184,11 @@ def _broadcast_click_track_base() -> str:
     return str(raw or "").strip().rstrip("/")
 
 
+def broadcast_url_tracking_configured() -> bool:
+    """True, если URL-кнопки рассылки смогут вести через /api/public/broadcast/click (нужен публичный базовый URL API)."""
+    return bool(_broadcast_click_track_base())
+
+
 def _wrap_tracked_url(
     url: str,
     *,
@@ -182,6 +225,7 @@ def _track_keyboard_markup(
     if not base:
         return None
     rows: list[list[InlineKeyboardButton]] = []
+    cb_flat = 0
     for row in (base.inline_keyboard or []):
         line: list[InlineKeyboardButton] = []
         for b in row:
@@ -216,7 +260,14 @@ def _track_keyboard_markup(
                 )
                 continue
             if getattr(b, "callback_data", None):
-                line.append(InlineKeyboardButton(text=txt, callback_data=str(b.callback_data)[:64]))
+                idx = cb_flat
+                cb_flat += 1
+                token = f"{BROADCAST_TRACKED_CALLBACK_PREFIX}{int(broadcast_id)}:{idx}"
+                if len(token) > 64:
+                    log.warning("broadcast callback token > 64, tracking disabled for this button bid=%s", broadcast_id)
+                    line.append(InlineKeyboardButton(text=txt, callback_data=str(b.callback_data)[:64]))
+                else:
+                    line.append(InlineKeyboardButton(text=txt, callback_data=token))
                 continue
         if line:
             rows.append(line)
@@ -545,6 +596,13 @@ def normalize_autopost_payload(raw: Any) -> dict[str, Any] | None:
         tgt = "groups"
     ch_off = raw.get("autopost_channels_disabled")
     channels_disabled_b = bool(ch_off) if ch_off is not None else False
+    start_date = str(raw.get("startDate") or "").strip()[:10]
+    if start_date:
+        try:
+            y, m, d = start_date.split("-")
+            _ = date(int(y), int(m), int(d))
+        except Exception:
+            start_date = ""
     return {
         "runState": rs,
         "scheduleMode": mode,
@@ -563,6 +621,8 @@ def normalize_autopost_payload(raw: Any) -> dict[str, Any] | None:
         # Ротация постов: все черновики или явный список id (включая текущий при сохранении на сервере).
         "use_all_broadcasts": use_all_b,
         "broadcast_ids": [] if use_all_b else b_ids,
+        # Локальная дата старта в timezone кампании (YYYY-MM-DD). Пусто = старт сразу.
+        "startDate": start_date,
     }
 
 
@@ -736,6 +796,150 @@ def broadcast_row_to_dict(row: AdminBroadcast) -> dict[str, Any]:
         "sent_at": row.sent_at.isoformat() if row.sent_at else None,
         "autopost": autopost,
     }
+
+
+async def broadcast_ids_in_autopost_rotations(session: AsyncSession, owner_telegram_id: int) -> set[int]:
+    """ID постов (якорь + ротация), которые входят в хотя бы одну автокампанию владельца."""
+    cq = await session.execute(
+        select(AutopostCampaign).where(AutopostCampaign.admin_telegram_id == int(owner_telegram_id))
+    )
+    camps = list(cq.scalars().all())
+    linked: set[int] = set()
+    all_drafts_cache: set[int] | None = None
+
+    for camp in camps:
+        ap_dict = None
+        raw_ap = getattr(camp, "autopost_json", None) or ""
+        if raw_ap:
+            try:
+                parsed = json.loads(raw_ap) if isinstance(raw_ap, str) else None
+                if isinstance(parsed, dict):
+                    ap_dict = normalize_autopost_payload(parsed)
+            except Exception:
+                ap_dict = None
+        anchor = int(getattr(camp, "anchor_broadcast_id", 0) or 0)
+        rot: set[int] = set()
+        if anchor > 0:
+            rot.add(anchor)
+        if ap_dict:
+            if bool(ap_dict.get("use_all_broadcasts")):
+                if all_drafts_cache is None:
+                    dq = await session.execute(
+                        select(AdminBroadcast.id).where(
+                            AdminBroadcast.admin_telegram_id == int(owner_telegram_id),
+                            AdminBroadcast.status == "draft",
+                        )
+                    )
+                    all_drafts_cache = {int(x[0]) for x in dq.all()}
+                rot |= all_drafts_cache or set()
+            else:
+                for raw in ap_dict.get("broadcast_ids") or []:
+                    try:
+                        x = int(raw)
+                        if x > 0:
+                            rot.add(x)
+                    except (TypeError, ValueError):
+                        pass
+        linked |= rot
+    return linked
+
+
+async def _bid_in_autopost_rotation(
+    session: AsyncSession, owner_telegram_id: int, bid: int
+) -> bool:
+    """Проверка по одному id: входит ли пост в ротацию хотя бы одной автокампании.
+
+    Без сборки полного множества id — для GET одного поста вместо тяжёлого
+    ``broadcast_ids_in_autopost_rotations`` по всем постам.
+    """
+    bid = int(bid)
+    cq = await session.execute(
+        select(AutopostCampaign).where(AutopostCampaign.admin_telegram_id == int(owner_telegram_id))
+    )
+    camps = list(cq.scalars().all())
+    all_drafts_cache: set[int] | None = None
+
+    for camp in camps:
+        anchor = int(getattr(camp, "anchor_broadcast_id", 0) or 0)
+        if anchor == bid:
+            return True
+        ap_dict = None
+        raw_ap = getattr(camp, "autopost_json", None) or ""
+        if raw_ap:
+            try:
+                parsed = json.loads(raw_ap) if isinstance(raw_ap, str) else None
+                if isinstance(parsed, dict):
+                    ap_dict = normalize_autopost_payload(parsed)
+            except Exception:
+                ap_dict = None
+        if ap_dict:
+            if bool(ap_dict.get("use_all_broadcasts")):
+                if all_drafts_cache is None:
+                    dq = await session.execute(
+                        select(AdminBroadcast.id).where(
+                            AdminBroadcast.admin_telegram_id == int(owner_telegram_id),
+                            AdminBroadcast.status == "draft",
+                        )
+                    )
+                    all_drafts_cache = {int(x[0]) for x in dq.all()}
+                if bid in (all_drafts_cache or set()):
+                    return True
+            else:
+                for raw in ap_dict.get("broadcast_ids") or []:
+                    try:
+                        if int(raw) == bid:
+                            return True
+                    except (TypeError, ValueError):
+                        pass
+    return False
+
+
+async def broadcast_list_origins_for_rows(
+    session: AsyncSession,
+    owner_telegram_id: int,
+    rows: list[AdminBroadcast] | tuple[AdminBroadcast, ...],
+) -> dict[int, str]:
+    """Для списка постов: one_shot | autopost | mixed — по run_source и ротации автокампаний."""
+    row_list = list(rows)
+    ids = [int(r.id) for r in row_list]
+    if not ids:
+        return {}
+    rq = await session.execute(
+        select(AdminBroadcastRun.broadcast_id, AdminBroadcastRun.run_source).where(
+            AdminBroadcastRun.broadcast_id.in_(ids)
+        )
+    )
+    per: dict[int, set[str]] = {}
+    for bid, rs in rq.all():
+        raw = str(rs or "").strip().lower() or "manual"
+        cat = "autopost" if raw == "autopost" else "manual"
+        per.setdefault(int(bid), set()).add(cat)
+
+    # Один пост (GET /admin/broadcasts/:id): не тянем полный набор id из всех ротаций.
+    one_in_rot: bool | None = None
+    in_rot: set[int] = set()
+    if len(row_list) == 1:
+        one_in_rot = await _bid_in_autopost_rotation(session, int(owner_telegram_id), int(row_list[0].id))
+    else:
+        in_rot = await broadcast_ids_in_autopost_rotations(session, int(owner_telegram_id))
+    out: dict[int, str] = {}
+    for r in row_list:
+        bid = int(r.id)
+        srcs = per.get(bid, set())
+        has_ap = "autopost" in srcs
+        has_mn = "manual" in srcs
+        if has_ap and has_mn:
+            out[bid] = "mixed"
+        elif has_ap:
+            out[bid] = "autopost"
+        elif has_mn:
+            out[bid] = "one_shot"
+        else:
+            if one_in_rot is not None:
+                out[bid] = "autopost" if one_in_rot else "one_shot"
+            else:
+                out[bid] = "autopost" if bid in in_rot else "one_shot"
+    return out
 
 
 async def run_broadcast_job(

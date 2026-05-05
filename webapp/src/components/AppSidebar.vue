@@ -26,7 +26,8 @@ const isActive = (item) => {
       && (dashboardSection.value === 'account' || dashboardSection.value === 'subscription')
     )
   }
-  return route.path.startsWith(item.path)
+  const p = item.path || ''
+  return route.path === p || (p.length > 1 && route.path.startsWith(`${p}/`))
 }
 
 function onNavClick(item) {
@@ -42,22 +43,23 @@ function onNavClick(item) {
 
 <template>
   <div>
-    <!-- overlay на мобильных -->
+    <!-- затемнение + лёгкий blur под стекло -->
     <div
       v-if="open"
-      class="fixed inset-0 z-40 bg-black/50 md:hidden"
+      class="fixed inset-0 z-40 bg-black/45 backdrop-blur-[2px] md:hidden"
       aria-hidden="true"
       @click="emit('close')"
     />
     <aside
       :class="[
-        'fixed left-0 top-0 z-50 h-full w-64 transform border-r border-gray-200/90 bg-white pt-14 transition-transform duration-200 ease-out dark:border-guardian-elevated-hi dark:bg-guardian-elevated md:translate-x-0 md:pt-14',
+        'fixed left-0 top-0 z-50 flex h-full w-[17rem] transform flex-col border-r border-white/15 bg-white/[0.08] pt-11 shadow-[8px_0_48px_-12px_rgba(0,0,0,0.65)] backdrop-blur-2xl backdrop-saturate-150 transition-transform duration-300 ease-out dark:bg-zinc-950/35 md:translate-x-0 md:pt-12 md:shadow-none',
         open ? 'translate-x-0' : '-translate-x-full md:translate-x-0',
       ]"
+      style="box-shadow: inset 1px 0 0 rgba(255,255,255,0.06)"
     >
-      <nav class="flex flex-col gap-0.5 p-3">
+      <nav class="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto overscroll-contain p-3 pb-8">
         <div
-          class="mb-3 flex flex-col gap-2 rounded-xl border border-primary-500/25 bg-primary-500/8 px-2 py-3 ring-1 ring-primary-500/10 backdrop-blur-sm dark:border-sky-500/30 dark:bg-slate-950/45 dark:ring-sky-500/15"
+          class="mb-4 flex flex-col gap-2 rounded-2xl border border-white/18 bg-gradient-to-b from-white/[0.12] to-white/[0.04] px-3 py-4 shadow-inner ring-1 ring-white/10 backdrop-blur-xl dark:from-white/[0.08] dark:to-white/[0.02]"
         >
           <img
             :src="logoSrc"
@@ -65,27 +67,27 @@ function onNavClick(item) {
             width="160"
             height="120"
             draggable="false"
-            class="mx-auto h-16 w-auto max-w-full object-contain drop-shadow-[0_0_8px_rgba(143,212,26,0.3)] dark:drop-shadow-[0_0_10px_rgba(143,212,26,0.2)]"
+            class="mx-auto h-14 w-auto max-w-full object-contain drop-shadow-[0_0_12px_rgba(143,212,26,0.35)]"
             @dragstart.prevent
           />
-          <div class="min-w-0 border-t border-primary-200/50 pt-2 text-center leading-tight dark:border-primary-500/15">
-            <p class="text-xs font-semibold uppercase tracking-wide text-primary-800 dark:text-primary-300">Панель</p>
-            <p class="text-sm font-bold text-guardian-ink dark:text-white">AntiSpam Guard</p>
+          <div class="min-w-0 border-t border-white/15 pt-3 text-center leading-tight">
+            <p class="text-[11px] font-semibold uppercase tracking-[0.14em] text-lime-400/95">Панель</p>
+            <p class="mt-0.5 text-sm font-bold text-white">AntiSpam Guard</p>
           </div>
         </div>
         <button
           v-for="item in navItems"
-          :key="item.path"
+          :key="item.path + (item.section || '') + item.label"
           type="button"
-          class="flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors"
+          class="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200"
           :class="
             isActive(item)
-              ? 'bg-primary-100 text-primary-900 dark:bg-primary-500/15 dark:text-primary-300'
-              : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-guardian-elevated-hi dark:hover:text-gray-200'
+              ? 'border border-lime-400/35 bg-lime-400/14 text-white shadow-[0_0_24px_-8px_rgba(163,230,53,0.45)] dark:bg-lime-400/12'
+              : 'border border-transparent text-slate-300 hover:border-white/10 hover:bg-white/[0.06] hover:text-white'
           "
           @click="onNavClick(item)"
         >
-          <NavIcon :name="item.icon" class="w-5 h-5" />
+          <NavIcon :name="item.icon" class="h-5 w-5 shrink-0 opacity-95" />
           <span class="min-w-0 truncate">{{ item.label }}</span>
         </button>
       </nav>

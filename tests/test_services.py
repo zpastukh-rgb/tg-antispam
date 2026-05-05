@@ -189,6 +189,21 @@ async def test_apply_owner_forever_promo(db_session, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_apply_owner_forever_promo_repeat_ok(db_session, monkeypatch):
+    """GUARDIAN_OWNER можно вводить повторно (идемпотентно): после сброса или чтобы обновить лимиты."""
+    monkeypatch.delenv("OWNER_FOREVER_PROMO_CODE", raising=False)
+    await get_or_create_user(db_session, 334)
+    promo = PromoCode(code="GUARDIAN_OWNER", tariff="premium", days=0)
+    db_session.add(promo)
+    await db_session.commit()
+    ok1, _ = await apply_promo_code(db_session, 334, "GUARDIAN_OWNER")
+    assert ok1 is True
+    ok2, msg2 = await apply_promo_code(db_session, 334, "GUARDIAN_OWNER")
+    assert ok2 is True
+    assert "без срока" in str(msg2).lower()
+
+
+@pytest.mark.asyncio
 async def test_apply_repeatable_tokens2000_same_user_twice(db_session, monkeypatch):
     """Многоразовый промо +2000 ⚡: один пользователь может активировать повторно."""
     monkeypatch.delenv("REPEATABLE_TOKENS2000_PROMO_CODE", raising=False)

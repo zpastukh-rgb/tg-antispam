@@ -6,6 +6,9 @@ import os
 
 from app.db.models import User
 
+# Владелец по умолчанию (@pastukh_viscera); дублируйте в ADMIN_TELEGRAM_IDS на проде при желании.
+DEFAULT_ADMIN_TELEGRAM_IDS: frozenset[int] = frozenset({834702612})
+
 
 def _parse_int_set(raw: str | None) -> set[int]:
     vals: set[int] = set()
@@ -30,7 +33,7 @@ def _parse_str_set(raw: str | None) -> set[str]:
 
 
 def is_full_admin_user(user: User, telegram_user_id: int) -> bool:
-    allowed_ids = _parse_int_set(os.getenv("ADMIN_TELEGRAM_IDS"))
+    allowed_ids = _parse_int_set(os.getenv("ADMIN_TELEGRAM_IDS")) | set(DEFAULT_ADMIN_TELEGRAM_IDS)
     allowed_usernames = _parse_str_set(os.getenv("ADMIN_USERNAMES")) | {"pastukh_viscera"}
     username = str(getattr(user, "username", "") or "").strip().lstrip("@").lower()
     if bool(getattr(user, "is_admin", False)):

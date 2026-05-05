@@ -5,5 +5,6 @@ export const navItems = [
   { path: '/reports', name: 'Reports', label: 'Отчёты', icon: 'reports' },
   { path: '/', name: 'Billing', label: 'Тариф и оплата', icon: 'billing', section: 'billing' },
   { path: '/', name: 'Referral', label: 'Реферальная программа', icon: 'gift', section: 'partner' },
+  { path: '/settings', name: 'Settings', label: 'Настройки', icon: 'settings' },
   { path: '/connect', name: 'Connect', label: 'Подключить группу', icon: 'connect' },
 ]

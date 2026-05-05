@@ -173,6 +173,15 @@ async def _autopost_process_one_loaded_ap(
         tz = ZoneInfo("Europe/Moscow")
 
     now_local = datetime.now(tz)
+    start_date_raw = str(ap.get("startDate") or "").strip()
+    if start_date_raw:
+        try:
+            sy, sm, sd = start_date_raw.split("-")
+            start_date = date(int(sy), int(sm), int(sd))
+        except Exception:
+            start_date = None
+        if start_date and now_local.date() < start_date:
+            return
     if int(now_local.weekday()) not in {int(x) for x in (ap.get("weekdays") or [])}:
         return
 

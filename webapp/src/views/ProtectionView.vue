@@ -14,6 +14,12 @@ import {
   deleteChatRulesPhoto,
 } from '../api/client'
 import { normalizeHtmlForTelegram } from '../utils/telegramHtmlForTg'
+import {
+  isTwoFaPinRequiredForAction,
+  isConfirmRequiredForAction,
+  verifyPinDigits,
+  SECURITY_ACTION_MASTER_PROTECTION_OFF,
+} from '../composables/useSecurityTwoFa'
 
 const router = useRouter()
 const route = useRoute()
@@ -129,6 +135,49 @@ const copyLoading = ref(false)
 const cleanLaunchLoading = ref(false)
 const isPremium = ref(false)
 const pickerToggleBusyByChat = ref({})
+const showProtectionPinModal = ref(false)
+const protectionPinInput = ref('')
+const protectionPinError = ref('')
+let protectionPinResolver = null
+
+function requestProtectionPin() {
+  return new Promise((resolve) => {
+    protectionPinResolver = resolve
+    protectionPinInput.value = ''
+    protectionPinError.value = ''
+    showProtectionPinModal.value = true
+  })
+}
+function submitProtectionPin() {
+  if (!verifyPinDigits(protectionPinInput.value)) {
+    protectionPinError.value = 'Неверный PIN'
+    return
+  }
+  showProtectionPinModal.value = false
+  const r = protectionPinResolver
+  protectionPinResolver = null
+  r?.(true)
+}
+function cancelProtectionPin() {
+  showProtectionPinModal.value = false
+  const r = protectionPinResolver
+  protectionPinResolver = null
+  r?.(false)
+}
+
+function masterOffConfirmMessage(chatTitle) {
+  return `Выключить защиту только в чате «${chatTitle}»?\n\nНастройки сохранятся, но Guard перестанет модерировать этот чат, пока вы снова не включите защиту.`
+}
+
+async function ensureCanTurnMasterOff(chatTitle) {
+  if (isTwoFaPinRequiredForAction(SECURITY_ACTION_MASTER_PROTECTION_OFF)) {
+    return requestProtectionPin()
+  }
+  if (isConfirmRequiredForAction(SECURITY_ACTION_MASTER_PROTECTION_OFF)) {
+    return window.confirm(masterOffConfirmMessage(chatTitle))
+  }
+  return true
+}
 const welcomeForm = ref({
   enabled: false,
   text: '',
@@ -495,7 +544,9 @@ const pickerOwnChats = computed(() =>
   sortChatsByAvailability((chatsList.value || []).filter((c) => !c.is_shared && !isChannelListRow(c))),
 )
 const pickerTotalChats = computed(() => Number((chatsList.value || []).length || 0))
-const pickerActiveChats = computed(() => Number((chatsList.value || []).filter((c) => !c?.locked_by_limit && !!c?.is_active).length || 0))
+const pickerActiveChats = computed(() =>
+  Number((chatsList.value || []).filter((c) => !c?.locked_by_limit && !!c?.master_anti_spam).length || 0),
+)
 
 const silenceStatusLabel = computed(() => {
   const mins = Number(chat.value?.rule?.silence_minutes || 0)
@@ -674,7 +725,8 @@ function onAntispamListButtonClick() {
 }
 
 function pickerProtectionOn(c) {
-  return c?.locked_by_limit ? false : !!c?.is_active
+  if (c?.locked_by_limit) return false
+  return !!c?.master_anti_spam
 }
 
 async function toggleChatProtectionFromPicker(chatRow) {
@@ -682,19 +734,27 @@ async function toggleChatProtectionFromPicker(chatRow) {
   if (!cid || chatRow?.locked_by_limit) return
   if (pickerToggleBusyByChat.value[cid]) return
   const next = !pickerProtectionOn(chatRow)
+  const titleHint = String(chatRow?.title || '').trim() || `#${cid}`
+  if (!next) {
+    const allow = await ensureCanTurnMasterOff(titleHint)
+    if (!allow) return
+  }
   pickerToggleBusyByChat.value = { ...pickerToggleBusyByChat.value, [cid]: true }
   const prev = pickerProtectionOn(chatRow)
-  chatRow.is_active = next
+  chatRow.master_anti_spam = next
   if (Number(selectedChatId.value) === cid && chat.value?.rule) {
     chat.value.rule.master_anti_spam = next
   }
   try {
-    await fetchSilent(() => api.chatSetActive(cid, next))
+    const data = await fetchSilent(() => api.updateRule(cid, { master_anti_spam: next }))
+    if (data?.rule && Number(selectedChatId.value) === cid && chat.value?.id === cid) {
+      chat.value.rule = data.rule
+    }
     if (Number(selectedChatId.value) === cid && chat.value?.id === cid) {
       saveCurrentChatCache()
     }
   } catch (e) {
-    chatRow.is_active = prev
+    chatRow.master_anti_spam = prev
     if (Number(selectedChatId.value) === cid && chat.value?.rule) {
       chat.value.rule.master_anti_spam = prev
     }
@@ -795,9 +855,7 @@ async function toggleMasterProtection() {
   if (!chat.value?.rule) return
   const next = !chat.value.rule.master_anti_spam
   if (!next) {
-    const ok = window.confirm(
-      `Выключить защиту только в чате «${selectedChatTitle.value}»?\n\nНастройки сохранятся, но Guard перестанет модерировать этот чат, пока вы снова не включите защиту.`,
-    )
+    const ok = await ensureCanTurnMasterOff(String(selectedChatTitle.value || 'Чат'))
     if (!ok) return
   }
   await updateRule({ master_anti_spam: next })
@@ -3499,6 +3557,61 @@ const protCardIndigo =
                   {{ chat.rule.filter_casino_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
                 </button>
               </div>
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-xs text-rose-100/90">Реклама / акции / распродажи</span>
+                <button
+                  type="button"
+                  :class="boolToggleClass(chat.rule.filter_ads_enabled)"
+                  class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium"
+                  @click="updateRule({ filter_ads_enabled: !chat.rule.filter_ads_enabled })"
+                >
+                  {{ chat.rule.filter_ads_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+                </button>
+              </div>
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-xs text-rose-100/90">Обзывательства / оскорбления</span>
+                <button
+                  type="button"
+                  :class="boolToggleClass(chat.rule.filter_insults_enabled)"
+                  class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium"
+                  @click="updateRule({ filter_insults_enabled: !chat.rule.filter_insults_enabled })"
+                >
+                  {{ chat.rule.filter_insults_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+                </button>
+              </div>
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-xs text-rose-100/90">Антирасист (этнические оскорбления)</span>
+                <button
+                  type="button"
+                  :class="boolToggleClass(chat.rule.filter_racism_enabled)"
+                  class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium"
+                  @click="updateRule({ filter_racism_enabled: !chat.rule.filter_racism_enabled })"
+                >
+                  {{ chat.rule.filter_racism_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+                </button>
+              </div>
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-xs text-rose-100/90">Антифашист (нацизм / лозунги)</span>
+                <button
+                  type="button"
+                  :class="boolToggleClass(chat.rule.filter_nazi_enabled)"
+                  class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium"
+                  @click="updateRule({ filter_nazi_enabled: !chat.rule.filter_nazi_enabled })"
+                >
+                  {{ chat.rule.filter_nazi_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+                </button>
+              </div>
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-xs text-rose-100/90">Антипошлость (анатомия / половые)</span>
+                <button
+                  type="button"
+                  :class="boolToggleClass(chat.rule.filter_vulgar_enabled)"
+                  class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium"
+                  @click="updateRule({ filter_vulgar_enabled: !chat.rule.filter_vulgar_enabled })"
+                >
+                  {{ chat.rule.filter_vulgar_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -4700,6 +4813,44 @@ const protCardIndigo =
               </li>
             </ul>
             <p v-else class="py-8 text-center text-sm text-slate-500">Список пуст</p>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <div
+        v-if="showProtectionPinModal"
+        class="fixed inset-0 z-[305] flex items-end justify-center bg-black/75 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] backdrop-blur-md md:items-center md:pb-6"
+        role="dialog"
+        aria-modal="true"
+        @click.self="cancelProtectionPin"
+      >
+        <div
+          class="relative w-full max-w-sm overflow-hidden rounded-3xl bg-[radial-gradient(140%_100%_at_0%_0%,rgba(34,197,94,0.18)_0%,rgba(15,23,42,0.94)_55%,rgba(7,11,21,0.96)_100%)] p-4 text-slate-100 shadow-[0_30px_60px_-30px_rgba(34,197,94,0.45)]"
+          @click.stop
+        >
+          <span aria-hidden="true" class="pointer-events-none absolute -right-16 -top-16 h-44 w-44 rounded-full bg-emerald-400/20 blur-3xl" />
+          <div class="relative mb-2 flex items-center justify-between gap-2">
+            <h3 class="truncate text-base font-extrabold text-white">PIN-код</h3>
+            <button type="button" class="rounded-full bg-white/10 px-2 py-1 text-sm text-white/85 transition hover:bg-white/15" @click="cancelProtectionPin">✕</button>
+          </div>
+          <p class="relative mb-3 text-[12px] text-white/65">Введите PIN из настроек безопасности, чтобы поставить Guard на паузу.</p>
+          <input
+            v-model="protectionPinInput"
+            type="password"
+            inputmode="numeric"
+            pattern="[0-9]*"
+            maxlength="12"
+            autocomplete="one-time-code"
+            class="relative mb-2 w-full rounded-xl bg-white/10 px-3 py-2.5 text-center text-lg font-bold tracking-[0.5em] text-white outline-none ring-1 ring-white/10 focus:ring-emerald-400/50"
+            placeholder="••••"
+            @keyup.enter="submitProtectionPin"
+          />
+          <p v-if="protectionPinError" class="relative mb-2 text-[11px] font-semibold text-rose-200">{{ protectionPinError }}</p>
+          <div class="relative flex justify-end gap-2">
+            <button type="button" class="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold text-white/85 transition hover:bg-white/15" @click="cancelProtectionPin">Отмена</button>
+            <button type="button" class="rounded-lg bg-emerald-500/30 px-3 py-1.5 text-xs font-bold text-emerald-100 transition hover:bg-emerald-500/40" @click="submitProtectionPin">Продолжить</button>
           </div>
         </div>
       </div>

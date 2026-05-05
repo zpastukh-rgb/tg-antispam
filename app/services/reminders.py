@@ -40,9 +40,33 @@ from app.services.admin_roles import is_full_admin_user
 from app.services.spam_spike_notify import run_spam_spike_owner_manager_alerts
 from app.services.chat_supergroup_migrate import parse_migrate_to_supergroup_id, remap_group_chat_ids
 from app.texts.guardian_billing import PREMIUM_PLANS
+from app.services.payments_yookassa import (
+    autorenew_window_hours,
+    run_yookassa_autorenew_batch,
+    yookassa_autorenew_worker_enabled,
+)
 
 logger = logging.getLogger(__name__)
 _BOT_USERNAME_CACHE: str | None = None
+
+
+def _log_expected_telegram_user_block(log, prefix: str, telegram_id, exc: BaseException) -> None:
+    """Пользователь заблокировал бота / запретил писать — не пишем warning (шум в Railway)."""
+    msg = str(exc).lower()
+    if any(
+        x in msg
+        for x in (
+            "blocked",
+            "forbidden",
+            "deactivated",
+            "bot was blocked",
+            "user is deactivated",
+            "chat not found",
+        )
+    ):
+        log.debug("%s user=%s: %s", prefix, telegram_id, exc)
+        return
+    log.warning("%s user=%s: %s", prefix, telegram_id, exc)
 _TOPIC_CLOSED_LOG_TS: dict[int, float] = {}
 
 # Интервалы напоминаний (ТЗ)
@@ -81,6 +105,20 @@ TRIAL_PREVIEW_GUARD_TEXT = (
     "Примеры из [судебной практики](https://dzen.ru/a/Z4-D4Y6bG07j33Kc) уже есть.\n\n"
     "Продлите подписку и верните Guard в полный боевой режим."
 )
+# Истёк оплаченный период (не промо): без формулировок про «неудачное списание» — период просто закончился.
+GUARD_PAYMENT_SUB_EXPIRED_TEXT = (
+    "🛡 *Guard: оплаченный период Premium закончился*\n\n"
+    "Бот в чатах *остаётся*, но без активной подписки Guard держит только *базовый* режим: лимиты и часть правил будут уже не те, "
+    "что на полном Premium.\n\n"
+    "Автопродление с карты ЮKassa срабатывает только если вы сохраняли способ оплаты и на стороне сервиса включены попытки списания. "
+    "Если период просто истёк — это не обязательно «ошибка банка»: чаще всего достаточно *продлить вручную* в мини-приложении.\n\n"
+    "Без полной защиты в ленте чаще проскакивают\n"
+    "⛔ казино и мошенники\n"
+    "❌ запрещённые темы\n"
+    "👎 сомнительные ссылки\n\n"
+    "*По закону:* ст. 6.13 КоАП и ст. 228.1 УК РФ — модератору важно не оставлять опасный контент без реакции.\n\n"
+    "Верните Premium одним нажатием — кнопка ниже."
+)
 GUARD_25_DAYS_TEXT = (
     "🛡 *Guard рядом уже 25 дней* — и вот что мы сделали вместе:\n\n"
     "• Остановлено и удалено: *{moderation_count}*\n"
@@ -92,17 +130,27 @@ GUARD_25_DAYS_TEXT = (
 )
 SUB_END_5D_TEXT = (
     "Хай 👋\n\n"
-    "До продления подписки *Guard Premium* осталось *5 дней*.\n\n"
-    "Очень не хочется, чтобы защита ваших чатов прерывалась,\n"
-    "поэтому заранее напомним: проверьте, пожалуйста, что для оплаты достаточно средств.\n\n"
+    "До окончания периода *Guard Premium* осталось *5 дней*.\n\n"
+    "Если у вас привязана карта ЮKassa, автосписание мы *по очереди пытаемся провести* в течение "
+    "*последних {charge_window_hours} ч.* до конца периода (сервер обходит подписчиков по расписанию — не строго в последний час).\n\n"
+    "Проверьте, что на карте достаточно средств.\n\n"
     "💡 Если продлевать сразу на *12 месяцев*, экономия составляет примерно *{discount_percent}%*.\n\n"
-    "Все настройки подписки — в разделе «Тариф и оплата»."
+    "Все настройки — в разделе «Тариф и оплата»."
 )
-SUB_END_1H_TEXT = (
+# Менее чем за час до конца периода: совпадает с «последним шансом» попасть в окно реального автосписания
+SUB_END_1H_TEXT_AUTORENEW = (
     "Напомним бережно 💛\n\n"
-    "Через *1 час* запланировано продление *Guard Premium*.\n\n"
-    "Если всё в порядке — ничего делать не нужно.\n"
-    "Если хотите изменить подписку, это можно сделать в разделе «Тариф и оплата».\n\n"
+    "До окончания *Guard Premium* осталось *меньше часа*.\n\n"
+    "Если карта привязана, в ближайшее время сервис *попытается списать продление* "
+    "— это та же механика, что и фоновые попытки ЮKassa (окно до *{charge_window_hours} ч.* до срока уже могло начаться ранее).\n\n"
+    "Проверьте баланс карты. Отключить автосписание — в «Тариф и оплата».\n\n"
+    "Спасибо, что вы с Guard 🛡"
+)
+SUB_END_1H_TEXT_MANUAL = (
+    "Напомним бережно 💛\n\n"
+    "До окончания *Guard Premium* осталось *меньше часа*.\n\n"
+    "Автосписание по карте сейчас недоступно (нет сохранённого способа оплаты) — "
+    "продлите подписку вручную в разделе «Тариф и оплата», чтобы защита не прерывалась.\n\n"
     "Спасибо, что вы с Guard 🛡"
 )
 PROMO_ENDED_TEXT = (
@@ -115,14 +163,14 @@ PROMO_ENDED_TEXT = (
     "• подключение админов к управлению группой через своего бота."
 )
 AUTOPAY_FAIL_TEXT = (
-    "Платеж на продление Guard не прошёл.\n\n"
-    "Мы дали ещё *1 день* доступа и попробуем повторно завтра.\n\n"
-    "Если повторное списание тоже не пройдёт, расширенные функции Premium отключатся."
+    "Попытка автосписания за продление Guard через ЮKassa *не прошла* (ответ банка или ЮKassa).\n\n"
+    "Мы дали ещё *1 день* доступа и сможем повторить попытку позже (не чаще, чем раз в сутки по правилам сервиса).\n\n"
+    "Если и повторная попытка не удастся, расширенные функции Premium отключатся — можно продлить вручную."
 )
 AUTOPAY_RETRY_FAIL_TEXT = (
-    "К сожалению, повторное списание за Guard тоже не прошло 💛\n\n"
+    "К сожалению, повторная попытка автосписания за Guard тоже не удалась 💛\n\n"
     "Чтобы не потерять Premium-защиту,\n"
-    "пожалуйста, продлите подписку вручную — это можно сделать в один клик по кнопке ниже."
+    "продлите подписку вручную — по кнопке ниже."
 )
 
 
@@ -404,6 +452,76 @@ def _expired_warning_text_for(display_name: str | None = None) -> str:
     )
 
 
+def _guard_payment_sub_expired_text_for(display_name: str | None = None) -> str:
+    name = (display_name or "").strip()
+    if not name:
+        return GUARD_PAYMENT_SUB_EXPIRED_TEXT
+    return GUARD_PAYMENT_SUB_EXPIRED_TEXT.replace(
+        "🛡 *Guard: оплаченный период Premium закончился*\n\n",
+        f"🛡 *Guard: оплаченный период Premium закончился*\n\nЗдравствуйте, {name}.\n\n",
+        1,
+    )
+
+
+async def send_expired_guard_payment(bot, user_id: int) -> None:
+    """Окончание оплаченного Premium — в том же Guard-голосе, что предпросмотр trial, без «не прошло списание»."""
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    from aiogram.types import FSInputFile
+    from aiogram.exceptions import TelegramBadRequest
+
+    billing_link = await _startapp_link_for_bot(bot, "billing")
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="✅ Продлить Premium", url=billing_link)]]
+    )
+    text = _guard_payment_sub_expired_text_for(None)
+    try:
+        chat = await bot.get_chat(user_id)
+        text = _guard_payment_sub_expired_text_for(getattr(chat, "first_name", None))
+    except Exception:
+        pass
+    photo = None
+    if TRIAL_PREVIEW_GUARD_PHOTO_PATH.exists():
+        photo = FSInputFile(str(TRIAL_PREVIEW_GUARD_PHOTO_PATH))
+    elif EXPIRED_WARNING_PHOTO_PATH.exists():
+        photo = FSInputFile(str(EXPIRED_WARNING_PHOTO_PATH))
+    elif EXPIRED_WARNING_FALLBACK_PATH.exists():
+        photo = FSInputFile(str(EXPIRED_WARNING_FALLBACK_PATH))
+    try:
+        if photo is not None:
+            await bot.send_photo(
+                chat_id=user_id,
+                photo=photo,
+                caption=text,
+                parse_mode="Markdown",
+                reply_markup=kb,
+            )
+        else:
+            await bot.send_message(
+                chat_id=user_id,
+                text=text,
+                parse_mode="Markdown",
+                reply_markup=kb,
+                disable_web_page_preview=True,
+            )
+    except TelegramBadRequest:
+        if EXPIRED_WARNING_PHOTO_PATH.exists():
+            await bot.send_photo(
+                chat_id=user_id,
+                photo=FSInputFile(str(EXPIRED_WARNING_PHOTO_PATH)),
+                caption=text,
+                parse_mode="Markdown",
+                reply_markup=kb,
+            )
+        else:
+            await bot.send_message(
+                chat_id=user_id,
+                text=text,
+                parse_mode="Markdown",
+                reply_markup=kb,
+                disable_web_page_preview=True,
+            )
+
+
 async def send_expired_warning(bot, user_id: int) -> None:
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
     from aiogram.types import FSInputFile
@@ -567,7 +685,7 @@ async def _run_reminders_no_group(bot, session: AsyncSession, now: datetime, tpl
             )
             await session.commit()
         except Exception as e:
-            logger.warning("reminder no_group user=%s: %s", getattr(user, "telegram_id"), e)
+            _log_expected_telegram_user_block(logger, "reminder no_group", getattr(user, "telegram_id"), e)
             await session.rollback()
 
 
@@ -980,8 +1098,10 @@ async def _run_subscription_expired(bot, session: AsyncSession, now: datetime) -
                     InlineKeyboardButton(text="💳 Тариф и оплата", url=billing_link),
                 ]])
                 await bot.send_message(uid, PROMO_ENDED_TEXT, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
+            elif src == "payment":
+                await send_expired_guard_payment(bot, uid)
             else:
-                await send_expired_warning(bot, user.telegram_id)
+                await send_expired_warning(bot, uid)
         except Exception as e:
             logger.warning("subscription_expired user=%s: %s", getattr(user, "telegram_id"), e)
             await session.rollback()
@@ -989,8 +1109,15 @@ async def _run_subscription_expired(bot, session: AsyncSession, now: datetime) -
 
 async def _run_subscription_expired_followups(bot, session: AsyncSession, now: datetime) -> None:
     """Follow-up после истечения: 7 дней, 3 дня, 7 дней, 3 дня..."""
+    # Скаляры + update по id: после await на ORM-объекте User ленивая подгрузка даёт MissingGreenlet (asyncpg).
     res = await session.execute(
-        select(User).where(
+        select(
+            User.id,
+            User.telegram_id,
+            User.first_name,
+            User.subscription_until,
+            User.reminder_stage,
+        ).where(
             User.subscription_until.isnot(None),
             User.subscription_until < now,
             User.telegram_id.isnot(None),
@@ -998,28 +1125,28 @@ async def _run_subscription_expired_followups(bot, session: AsyncSession, now: d
             User.reminder_stage >= 100,
         )
     )
-    for user in res.scalars().all():
+    for user_id, telegram_id, first_name, expired_at, reminder_stage in res.all():
+        tid = int(telegram_id)
         try:
-            expired_at = user.subscription_until
             if not expired_at:
                 continue
             if expired_at.tzinfo is None:
                 expired_at = expired_at.replace(tzinfo=timezone.utc)
             elapsed_days = (now - expired_at).total_seconds() / 86400.0
-            stage = int(getattr(user, "reminder_stage", 100) or 100)
+            stage = int(reminder_stage or 100)
             followups_sent = max(0, stage - 100)
             next_threshold = _expired_reminder_threshold_days(followups_sent + 1)
             if elapsed_days < next_threshold:
                 continue
             await send_trial_warning_preview_guard(
                 bot,
-                user.telegram_id,
-                display_name=getattr(user, "first_name", None),
+                tid,
+                display_name=first_name,
             )
-            user.reminder_stage = stage + 1
+            await session.execute(update(User).where(User.id == int(user_id)).values(reminder_stage=stage + 1))
             await session.commit()
         except Exception as e:
-            logger.warning("subscription_expired_followup user=%s: %s", getattr(user, "telegram_id"), e)
+            _log_expected_telegram_user_block(logger, "subscription_expired_followup", tid, e)
             await session.rollback()
 
 
@@ -1217,7 +1344,10 @@ async def _run_subscription_renewal_reminders(bot, session: AsyncSession, now: d
                 if await _claim_dispatch_bucket(session, uid, bucket):
                     await bot.send_message(
                         uid,
-                        SUB_END_5D_TEXT.format(discount_percent=_annual_discount_percent()),
+                        SUB_END_5D_TEXT.format(
+                            discount_percent=_annual_discount_percent(),
+                            charge_window_hours=autorenew_window_hours(),
+                        ),
                         parse_mode="Markdown",
                         reply_markup=kb,
                         disable_web_page_preview=True,
@@ -1227,7 +1357,14 @@ async def _run_subscription_renewal_reminders(bot, session: AsyncSession, now: d
             if delta <= SUB_END_1H_WINDOW and delta > timedelta(minutes=5):
                 bucket = f"sub_end_1h:{uid}:{period_key}"
                 if await _claim_dispatch_bucket(session, uid, bucket):
-                    await bot.send_message(uid, SUB_END_1H_TEXT, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
+                    pm_stored = bool(str(getattr(u, "yookassa_payment_method_id", "") or "").strip())
+                    if yookassa_autorenew_worker_enabled() and pm_stored:
+                        body = SUB_END_1H_TEXT_AUTORENEW.format(
+                            charge_window_hours=autorenew_window_hours(),
+                        )
+                    else:
+                        body = SUB_END_1H_TEXT_MANUAL
+                    await bot.send_message(uid, body, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
                 else:
                     logger.info("renewal_reminder skip user=%s reason=duplicate_bucket bucket=%s", uid, bucket)
         except Exception as e:
@@ -1240,7 +1377,12 @@ async def _run_autorenew_retries(bot, session: AsyncSession, now: datetime) -> N
     Логика soft-ретрая после неуспешного продления:
     - 1-й день после окончания: даём grace 24ч + отправляем предупреждение.
     - после grace: переводим на FREE и отправляем сообщение о повторной неудаче.
+
+    Тексты про «списание не прошло» — только если фоновый воркер ЮKassa включён и была
+    реальная попытка API (autorenew_last_attempt_at) с сохранённым payment_method_id.
     """
+    if not yookassa_autorenew_worker_enabled():
+        return
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
     billing_link = await _startapp_link_for_bot(bot, "billing")
     kb = InlineKeyboardMarkup(
@@ -1270,12 +1412,19 @@ async def _run_autorenew_retries(bot, session: AsyncSession, now: datetime) -> N
             if not await _user_has_successful_subscription_payment(session, int(getattr(u, "id", 0) or 0)):
                 logger.info("autorenew_retries skip user=%s reason=no_success_payment", uid)
                 continue
+            if not str(getattr(u, "yookassa_payment_method_id", "") or "").strip():
+                logger.info("autorenew_retries skip user=%s reason=no_stored_payment_method", uid)
+                continue
+            last_att = getattr(u, "autorenew_last_attempt_at", None)
             sub_until = getattr(u, "subscription_until", None)
             if not sub_until:
                 continue
             if sub_until.tzinfo is None:
                 sub_until = sub_until.replace(tzinfo=timezone.utc)
             if now < sub_until:
+                continue
+            if last_att is None:
+                logger.info("autorenew_retries skip user=%s reason=no_autorenew_api_attempt", uid)
                 continue
             fail_bucket = f"autorenew_fail_1:{uid}:{sub_until.date().isoformat()}"
             retry_bucket = f"autorenew_fail_2:{uid}:{sub_until.date().isoformat()}"
@@ -1312,6 +1461,12 @@ async def run_reminders_and_guardian(bot) -> None:
     async with await get_session() as session:
         tpl = await _load_message_templates(session)
         await _run_reminders_reports_chat(bot, session, now, tpl)
+    try:
+        n_charged = await run_yookassa_autorenew_batch(bot=bot, limit=50)
+        if n_charged:
+            logger.info("yookassa autorenew: %s successful immediate charges", n_charged)
+    except Exception as e:
+        logger.warning("yookassa autorenew batch failed: %s", e)
     async with await get_session() as session:
         await _run_autorenew_retries(bot, session, now)
     async with await get_session() as session:

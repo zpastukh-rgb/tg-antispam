@@ -1,6 +1,6 @@
 <script setup>
 import { ref, shallowRef, onMounted, onBeforeUnmount, computed, watch, nextTick } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useApi, messageFromApiError } from '../composables/useApi'
 import {
   adminBroadcastUploadMedia,
@@ -12,15 +12,53 @@ import {
 import { hasFullAdminRights } from '../utils/adminAccess'
 import { useCabinetMode } from '../composables/useCabinetMode'
 import SubscriptionManagementPanel from '../components/SubscriptionManagementPanel.vue'
+import CabinetPremiumStatsHero from '../components/CabinetPremiumStatsHero.vue'
 
 const { api, fetch, fetchSilent, hasInitData } = useApi()
 const route = useRoute()
+const router = useRouter()
 const { cabinetMode, setCabinetMode } = useCabinetMode()
 /** С первого кадра при открытии из Telegram — не мелькает полная админка до загрузки /me */
 const loading = ref(!!getInitData())
 const error = ref('')
 const data = ref(null)
 const tab = ref('overview')
+/** Вкладки, перенесённые под карточки Обзора (полная админка). */
+const adminOverviewEmbed = ref('')
+function goAdminEmbed(name) {
+  adminOverviewEmbed.value = String(name || '')
+  tab.value = 'overview'
+}
+
+/** Синий ADM (Premium): hero как на главной + сетка разделов и вложенные экраны. */
+const premiumAdmSection = ref('')
+function openPremiumAdmCard(key) {
+  const k = String(key || '')
+  if (k === 'partner') {
+    premiumAdmSection.value = ''
+    tab.value = 'referrals'
+    return
+  }
+  if (k === 'broadcasts') {
+    premiumAdmSection.value = ''
+    tab.value = 'broadcasts'
+    return
+  }
+  if (k === 'settings') {
+    premiumAdmSection.value = ''
+    tab.value = 'subscription'
+    return
+  }
+  premiumAdmSection.value = k
+}
+function premiumExitToHome() {
+  premiumAdmSection.value = ''
+  tab.value = 'overview'
+}
+watch(tab, (v) => {
+  if (v !== 'overview') premiumAdmSection.value = ''
+})
+
 const payouts = ref([])
 const referralsTop = ref([])
 const referralInfo = ref(null)
@@ -610,6 +648,12 @@ const isPremiumCabinet = computed(() => {
   const m = meAdminProfile.value
   if (!m || hasFullAdminRights(m)) return false
   return !!m.is_premium
+})
+/** Личная «статистика защиты / партнёрка» как у Premium: у премиум-кабинета или у полного админа с Premium. */
+const showPersonalPartnerOverview = computed(() => {
+  if (isPremiumCabinet.value) return true
+  const m = meAdminProfile.value
+  return !!(showFullAdminShell.value && m && m.is_premium)
 })
 /** Free, делегированный менеджер: только рассылка/автопост по чужим чатам, без обзора Premium. */
 const isDelegatedFreeBroadcastCabinet = computed(() => {
@@ -3528,11 +3572,8 @@ async function goToAdminUserInList(telegramId) {
   const id = Number(telegramId || 0)
   if (!id) return
   usersScrollTargetTelegramId.value = id
-  if (tab.value === 'users') {
-    await loadUsers()
-  } else {
-    tab.value = 'users'
-  }
+  goAdminEmbed('users')
+  await loadUsers()
 }
 
 async function loadChats() {
@@ -3598,6 +3639,7 @@ function adminNavSnapshot() {
     tab: String(tab.value || 'overview'),
     chatsOwnerFilter: Number(chatsOwnerFilter.value || 0),
     usersPreset: String(usersPreset.value || 'all'),
+    adminOverviewEmbed: String(adminOverviewEmbed.value || ''),
   }
 }
 
@@ -3607,6 +3649,7 @@ function applyAdminNavState(state) {
   tab.value = String(state.tab || 'overview')
   chatsOwnerFilter.value = Number(state.chatsOwnerFilter || 0)
   usersPreset.value = String(state.usersPreset || 'all')
+  adminOverviewEmbed.value = String(state.adminOverviewEmbed || '')
   setTimeout(() => {
     navRestoring.value = false
   }, 0)
@@ -5014,6 +5057,11 @@ onMounted(async () => {
   try {
     meAdminProfile.value = await api.me()
     bcLastSendTargetByPost.value = bcLoadLastTargetsMap()
+    if (isPremiumCabinet.value) {
+      loading.value = false
+      router.replace('/')
+      return
+    }
     const bcDeepTab = String(route.query.tab || '').toLowerCase() === 'broadcasts'
     let bcDeepChannel = 0
     try {
@@ -5050,6 +5098,8 @@ onMounted(async () => {
         loadCommissions(),
         loadMyPartnerPayouts(),
         loadMyPartnerStats(),
+        loadPartnerLiteActivity(),
+        loadReferralLite(),
         loadOpsHealth(),
         loadInsights(),
         loadMessageTemplates(),
@@ -5131,24 +5181,8 @@ watch(
       await loadPayouts()
       return
     }
-    if (v === 'commissions') {
-      await loadCommissions()
-      return
-    }
-    if (v === 'users') {
-      await loadUsers()
-      return
-    }
-    if (v === 'chats') {
-      await loadChats()
-      return
-    }
-    if (v === 'revenue') {
-      await loadRevenueStats()
-      return
-    }
-    if (v === 'funnel') {
-      await loadReferralsFunnel()
+    if (v === 'referrals' && (isPremiumCabinet.value || showFullAdminShell.value)) {
+      await Promise.all([loadReferralLite(), loadMyPartnerStatsLite()])
       return
     }
     if (v === 'ops') {
@@ -5184,6 +5218,25 @@ watch(
       tryApplyOpenChannelPref()
     }
   }
+)
+
+watch(
+  () => [showFullAdminShell.value, tab.value, adminOverviewEmbed.value],
+  async ([full, t, emb]) => {
+    if (!full || t !== 'overview') return
+    const e = String(emb || '')
+    if (!e) return
+    try {
+      if (e === 'users') await loadUsers()
+      else if (e === 'chats') await loadChats()
+      else if (e === 'revenue') await loadRevenueStats()
+      else if (e === 'funnel') await loadReferralsFunnel()
+      else if (e === 'commissions') await loadCommissions()
+      else if (e === 'referrals') await loadReferralsTop()
+    } catch {
+      //
+    }
+  },
 )
 
 watch(() => bcTitle.value, () => {
@@ -5346,11 +5399,13 @@ watch(
     <template v-else>
     <h1 class="text-xl font-semibold text-gray-100 md:text-2xl">
       {{
-        isPremiumCabinet
+        isPremiumCabinet || (showFullAdminShell && meAdminProfile?.is_premium)
           ? '👑 Кабинет Premium'
           : isDelegatedFreeBroadcastCabinet
             ? 'Рассылка (делегированный чат)'
-            : 'Админка'
+            : showFullAdminShell
+              ? 'Сервисная админка'
+              : 'Админка'
       }}
     </h1>
     <div class="flex items-center gap-2">
@@ -5377,32 +5432,273 @@ watch(
     >
       Доступна только рассылка и автопост в группы, куда вас добавили как менеджера. Другие разделы админки недоступны.
     </p>
-    <div v-if="showFullAdminShell" class="grid grid-cols-3 gap-2">
-      <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'overview' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'overview'">Статистика</button>
-      <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'payouts' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'payouts'">Выплаты</button>
-      <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'referrals' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'referrals'">Рефералы</button>
-      <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'commissions' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'commissions'">Комиссии</button>
-      <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'test_payments' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'test_payments'">Тест оплаты</button>
-      <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'ops' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'ops'">Guard Pulse</button>
-      <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'bad_urls' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'bad_urls'">АнтиURL</button>
-      <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'insights' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'insights'">Сводка</button>
-      <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'messages' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'messages'">Сообщения</button>
-      <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'broadcasts' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'broadcasts'">Рассылка</button>
-      <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'subscription' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'subscription'">Подписка</button>
+    <div v-if="showFullAdminShell" class="space-y-2">
+      <div class="grid grid-cols-3 gap-2">
+        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'overview' && !adminOverviewEmbed ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'overview'; adminOverviewEmbed = ''">Статистика</button>
+        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'broadcasts' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'broadcasts'">Рассылка</button>
+        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'referrals' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'referrals'">Рефералы</button>
+        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'bad_urls' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'bad_urls'">АнтиURL</button>
+        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'subscription' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'subscription'">Подписка</button>
+      </div>
+      <div class="grid grid-cols-3 gap-2 border-t border-white/10 pt-2">
+        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'payouts' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'payouts'">Выплаты</button>
+        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'ops' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'ops'">Guard Pulse</button>
+        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'insights' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'insights'">Сводка</button>
+        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'messages' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'messages'">Сообщения</button>
+      </div>
     </div>
-    <div v-else-if="isPremiumCabinet" class="grid grid-cols-3 gap-2">
-      <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'overview' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'overview'">Статистика</button>
-      <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'broadcasts' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'broadcasts'">Рассылка</button>
-      <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'referrals' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'referrals'">Рефералы</button>
-      <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'bad_urls' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'bad_urls'">АнтиURL</button>
-      <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'subscription' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'subscription'">Подписка</button>
+    <div v-else-if="isPremiumCabinet && (tab !== 'overview' || premiumAdmSection)" class="flex justify-start">
+      <button
+        type="button"
+        class="rounded-lg border border-cyan-400/35 bg-cyan-500/10 px-3 py-1.5 text-xs font-semibold text-cyan-100 hover:bg-cyan-500/20"
+        @click="premiumExitToHome"
+      >
+        ← Все разделы
+      </button>
     </div>
 
     <div
-      v-if="tab === 'overview' && (isPremiumCabinet || data)"
+      v-if="tab === 'overview' && (isPremiumCabinet || showPersonalPartnerOverview || (showFullAdminShell && data))"
       class="grid grid-cols-2 gap-2"
     >
-      <template v-if="isPremiumCabinet">
+      <template v-if="isPremiumCabinet && !showFullAdminShell">
+        <template v-if="!premiumAdmSection">
+          <div class="col-span-2 overflow-hidden rounded-2xl border border-white/10 bg-slate-950/40 px-1 pb-2 pt-1">
+            <CabinetPremiumStatsHero
+              :summary="plActivitySummary"
+              :profile="meAdminProfile"
+            />
+          </div>
+          <div class="col-span-2 grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              class="rounded-xl border border-emerald-500/40 bg-emerald-950/35 p-3 text-left shadow-[0_0_20px_-12px_rgba(16,185,129,0.6)] transition hover:bg-emerald-950/55"
+              @click="openPremiumAdmCard('protection')"
+            >
+              <p class="text-[10px] font-bold uppercase tracking-wide text-emerald-200">Защита</p>
+              <p class="mt-1 text-[11px] text-slate-300">Удаления за 24ч, журнал событий Guard</p>
+              <p class="mt-2 text-2xl font-extrabold text-white">{{ Number(plActivitySummary?.today?.deleted || 0) }}</p>
+              <p class="text-[10px] text-emerald-200/80">сообщений удалено сегодня</p>
+            </button>
+            <button
+              type="button"
+              class="rounded-xl border border-cyan-500/40 bg-cyan-950/35 p-3 text-left shadow-[0_0_20px_-12px_rgba(34,211,238,0.55)] transition hover:bg-cyan-950/55"
+              @click="openPremiumAdmCard('stats')"
+            >
+              <p class="text-[10px] font-bold uppercase tracking-wide text-cyan-200">Статистика</p>
+              <p class="mt-1 text-[11px] text-slate-300">Группы, каналы, подключения за 24ч</p>
+              <p class="mt-2 text-lg font-extrabold text-cyan-100">
+                {{ Number((plActivitySummary?.groups_count ?? plActivitySummary?.chats_count) || 0) }} гр.
+                · {{ Number(plActivitySummary?.channels_count || 0) }} кан.
+              </p>
+              <p class="text-[10px] text-cyan-200/80">+{{ Number(plActivitySummary?.today?.joins || 0) }} за сутки</p>
+            </button>
+            <button
+              type="button"
+              class="rounded-xl border border-sky-500/40 bg-sky-950/30 p-3 text-left shadow-[0_0_20px_-12px_rgba(14,165,233,0.5)] transition hover:bg-sky-950/50"
+              @click="openPremiumAdmCard('updates')"
+            >
+              <p class="text-[10px] font-bold uppercase tracking-wide text-sky-200">Обновления</p>
+              <p class="mt-1 text-[11px] text-slate-300">Лента новостей и дорожная карта — на главной приложения</p>
+            </button>
+            <button
+              type="button"
+              class="rounded-xl border border-amber-500/40 bg-amber-950/30 p-3 text-left shadow-[0_0_20px_-12px_rgba(245,158,11,0.45)] transition hover:bg-amber-950/50"
+              @click="openPremiumAdmCard('partner')"
+            >
+              <p class="text-[10px] font-bold uppercase tracking-wide text-amber-200">Партнёрка</p>
+              <p class="mt-1 text-[11px] text-slate-300">Рефералы и выплаты</p>
+              <p v-if="referralInfo?.paid_count != null" class="mt-2 text-xl font-extrabold text-amber-100">{{ referralInfo.paid_count }} платящих</p>
+            </button>
+            <button
+              type="button"
+              class="rounded-xl border border-fuchsia-500/40 bg-fuchsia-950/30 p-3 text-left shadow-[0_0_20px_-12px_rgba(217,70,239,0.5)] transition hover:bg-fuchsia-950/50"
+              @click="openPremiumAdmCard('broadcasts')"
+            >
+              <p class="text-[10px] font-bold uppercase tracking-wide text-fuchsia-200">Рассылки</p>
+              <p class="mt-1 text-[11px] text-slate-300">Рассылка и автопост по вашим чатам</p>
+              <p class="mt-2 text-lg font-extrabold text-fuchsia-100">{{ Number(meAdminProfile?.broadcast_spend_tokens || 0) }} ⚡</p>
+              <p class="text-[10px] text-fuchsia-200/75">расход токенов</p>
+            </button>
+            <button
+              type="button"
+              class="rounded-xl border border-violet-500/40 bg-violet-950/35 p-3 text-left shadow-[0_0_20px_-12px_rgba(139,92,246,0.5)] transition hover:bg-violet-950/55"
+              @click="openPremiumAdmCard('settings')"
+            >
+              <p class="text-[10px] font-bold uppercase tracking-wide text-violet-200">Настройки</p>
+              <p class="mt-1 text-[11px] text-slate-300">Тариф, подписка и параметры кабинета</p>
+            </button>
+          </div>
+        </template>
+        <template v-else-if="premiumAdmSection === 'protection'">
+          <div class="col-span-2 rounded-xl border border-emerald-600/40 bg-slate-900/85 p-3 text-slate-100">
+            <p class="text-xs font-semibold text-emerald-300/90">Защита</p>
+            <p class="mt-1 text-[11px] text-slate-400">Удаления системой защиты, журнал последних действий по вашим группам и каналам.</p>
+          </div>
+          <div
+            role="button"
+            tabindex="0"
+            class="relative col-span-2 cursor-pointer select-none rounded-xl border border-emerald-500/45 bg-emerald-950/30 p-3 pt-9 text-left shadow-[0_0_18px_-8px_rgba(16,185,129,0.55)] outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/60"
+            @click="openPartnerEventsModal"
+            @keydown.enter.prevent="openPartnerEventsModal"
+            @keydown.space.prevent="openPartnerEventsModal"
+          >
+            <button
+              type="button"
+              v-bind="partnerHelpBind('journal')"
+              @click.stop.prevent="partnerShowHelp('journal')"
+              @mousedown.stop
+            >
+              i
+            </button>
+            <p class="text-[10px] font-semibold uppercase tracking-wide text-emerald-200/90">За 24ч удалений</p>
+            <p class="mt-1 text-lg font-extrabold text-emerald-100">{{ Number(plActivitySummary?.today?.deleted || 0) }}</p>
+            <p class="text-[10px] text-emerald-100/75">открыть журнал событий и действий</p>
+          </div>
+        </template>
+        <template v-else-if="premiumAdmSection === 'stats'">
+          <div class="col-span-2 rounded-xl border border-cyan-600/40 bg-slate-900/85 p-3 text-slate-100">
+            <p class="text-xs font-semibold text-cyan-300/90">Статистика</p>
+            <p class="mt-1 text-[11px] text-slate-400">Группы и каналы, подключения за 24ч, расходы на рассылки, отчёты владельца.</p>
+          </div>
+          <div
+            role="button"
+            tabindex="0"
+            class="relative cursor-pointer select-none rounded-xl border border-cyan-500/45 bg-cyan-950/30 p-3 pt-9 text-left shadow-[0_0_18px_-8px_rgba(34,211,238,0.55)] outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
+            @click="openPartnerGroupsModal"
+            @keydown.enter.prevent="openPartnerGroupsModal"
+            @keydown.space.prevent="openPartnerGroupsModal"
+          >
+            <button
+              type="button"
+              v-bind="partnerHelpBind('chatList')"
+              @click.stop.prevent="partnerShowHelp('chatList')"
+              @mousedown.stop
+            >
+              i
+            </button>
+            <p class="text-[10px] font-semibold uppercase tracking-wide text-cyan-200/90">Группы</p>
+            <p class="mt-1 text-lg font-extrabold text-cyan-100">
+              {{ Number((plActivitySummary?.groups_count ?? plActivitySummary?.chats_count) || 0) }} / {{ Number((plActivitySummary?.groups_limit ?? plActivitySummary?.chat_limit) || 0) }}
+            </p>
+            <p class="text-[10px] text-cyan-100/75">лимиты считаются отдельно</p>
+          </div>
+          <div
+            role="button"
+            tabindex="0"
+            class="relative cursor-pointer select-none rounded-xl border border-amber-500/45 bg-amber-950/30 p-3 pt-9 text-left shadow-[0_0_18px_-8px_rgba(251,191,36,0.45)] outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
+            @click="openPartnerGroupsModal"
+            @keydown.enter.prevent="openPartnerGroupsModal"
+            @keydown.space.prevent="openPartnerGroupsModal"
+          >
+            <button
+              type="button"
+              v-bind="partnerHelpBind('chatList')"
+              @click.stop.prevent="partnerShowHelp('chatList')"
+              @mousedown.stop
+            >
+              i
+            </button>
+            <p class="text-[10px] font-semibold uppercase tracking-wide text-amber-200/90">Каналы</p>
+            <p class="mt-1 text-lg font-extrabold text-amber-100">
+              {{ Number(plActivitySummary?.channels_count || 0) }} / {{ Number((plActivitySummary?.channels_limit ?? plActivitySummary?.channel_limit) || 0) }}
+            </p>
+            <p class="text-[10px] text-amber-100/75">лимиты считаются отдельно</p>
+          </div>
+          <div
+            role="button"
+            tabindex="0"
+            class="relative cursor-pointer select-none rounded-xl border border-violet-500/45 bg-violet-950/30 p-3 pt-9 text-left shadow-[0_0_18px_-8px_rgba(139,92,246,0.55)] outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60"
+            @click="openPartnerJoinsModal"
+            @keydown.enter.prevent="openPartnerJoinsModal"
+            @keydown.space.prevent="openPartnerJoinsModal"
+          >
+            <button
+              type="button"
+              v-bind="partnerHelpBind('dayCounter')"
+              @click.stop.prevent="partnerShowHelp('dayCounter')"
+              @mousedown.stop
+            >
+              i
+            </button>
+            <p class="text-[10px] font-semibold uppercase tracking-wide text-violet-200/90">Подключились</p>
+            <p class="mt-1 text-lg font-extrabold text-violet-100">{{ Number(plActivitySummary?.today?.joins || 0) }}</p>
+            <p class="text-[10px] text-violet-100/75">за 24ч (все группы/каналы)</p>
+            <p class="mt-0.5 text-[9px] text-violet-200/60">Период пресета: {{ partnerJoinsOverviewHint }}</p>
+          </div>
+          <div
+            role="button"
+            tabindex="0"
+            class="relative cursor-pointer select-none rounded-xl border border-fuchsia-400/45 bg-fuchsia-900/25 p-3 pt-9 text-left shadow-[0_0_18px_-8px_rgba(217,70,239,0.55)] outline-none focus-visible:ring-2 focus-visible:ring-fuchsia-400/60"
+            @click="showPartnerSpendModal = true"
+            @keydown.enter.prevent="showPartnerSpendModal = true"
+            @keydown.space.prevent="showPartnerSpendModal = true"
+          >
+            <button
+              type="button"
+              v-bind="partnerHelpBind('spend')"
+              @click.stop.prevent="partnerShowHelp('spend')"
+              @mousedown.stop
+            >
+              i
+            </button>
+            <p class="text-[10px] font-semibold uppercase tracking-wide text-fuchsia-200/90">Расходы</p>
+            <p class="mt-1 text-lg font-extrabold text-fuchsia-100">
+              {{ Number(meAdminProfile?.broadcast_spend_tokens || 0) }} ⚡
+            </p>
+            <p class="text-[10px] text-fuchsia-100/75">на рассылки и автопост</p>
+          </div>
+          <div class="col-span-2 rounded-xl border border-cyan-500/40 bg-slate-950/88 p-2.5 shadow-inner ring-1 ring-cyan-900/50 backdrop-blur-sm">
+            <p class="text-[10px] font-semibold uppercase tracking-wide text-cyan-200">Сводка владельца групп</p>
+            <p class="mt-0.5 text-[11px] text-slate-300">
+              Короткие отчёты в личку по всем вашим подключённым группам/каналам: сколько подключились и сколько сейчас участников.
+            </p>
+            <div class="mt-2 flex flex-wrap gap-1.5">
+              <button
+                v-for="p in OWNER_JOIN_REPORT_PRESETS"
+                :key="`owner-jr-${p.id}`"
+                type="button"
+                class="rounded-md px-2 py-1 text-[10px] font-semibold"
+                :class="(ownerJoinReportPeriods || []).includes(p.id) ? 'bg-cyan-600 text-white' : 'bg-slate-700 text-slate-200'"
+                @click="toggleOwnerJoinReportPreset(p.id)"
+              >
+                {{ p.label }}
+              </button>
+              <button
+                type="button"
+                class="rounded-md bg-emerald-700 px-2 py-1 text-[10px] font-semibold text-white disabled:opacity-60"
+                :disabled="ownerJoinReportSaving"
+                @click="saveOwnerJoinReportSettings"
+              >
+                Сохранить отчёты
+              </button>
+              <button
+                type="button"
+                class="rounded-md bg-indigo-700 px-2 py-1 text-[10px] font-semibold text-white"
+                @click="openPartnerHourlyModal"
+              >
+                Активность по часам
+              </button>
+            </div>
+          </div>
+        </template>
+        <template v-else-if="premiumAdmSection === 'updates'">
+          <div class="col-span-2 rounded-xl border border-sky-500/40 bg-slate-950/90 p-4 shadow-inner">
+            <p class="text-sm font-semibold text-sky-100">Обновления</p>
+            <p class="mt-2 text-[13px] leading-snug text-slate-400">
+              Полная лента новостей, изменений и дорожной карты открывается на главном экране приложения — без дублирования здесь.
+            </p>
+            <button
+              type="button"
+              class="mt-4 w-full rounded-lg bg-sky-600 py-2.5 text-sm font-semibold text-white shadow-[0_0_20px_-8px_rgba(2,132,199,0.6)] transition hover:bg-sky-500"
+              @click="router.push('/')"
+            >
+              Открыть главную
+            </button>
+          </div>
+        </template>
+      </template>
+      <template v-else-if="showPersonalPartnerOverview && showFullAdminShell">
         <div class="col-span-2 rounded-xl border border-slate-600 bg-slate-900/80 p-3 text-slate-100">
           <p class="text-xs font-semibold text-lime-300/90">Статистика защиты (ваши группы)</p>
           <p class="mt-1 text-[11px] text-slate-400">Управление по вашим подключённым группам/каналам: активность, подключения, удаления, расходы и отчёты в личку.</p>
@@ -5546,55 +5842,336 @@ watch(
               Активность по часам
             </button>
           </div>
-      </div>
+        </div>
       </template>
-      <template v-else>
-      <p class="col-span-2 text-center text-[11px] text-slate-500 dark:text-slate-400">
-        Всего пользователей в базе: <span class="font-semibold text-slate-700 dark:text-slate-200">{{ data.users_total }}</span>
+      <template v-if="showFullAdminShell && data">
+        <div class="col-span-2 rounded-xl border border-cyan-500/35 bg-slate-950/90 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
+          <p class="text-[10px] font-semibold uppercase tracking-wide text-cyan-200/90">База и финансы (сервис)</p>
+          <p class="mt-0.5 text-[11px] text-slate-400">В базе <b class="text-slate-200">{{ data.users_total }}</b> пользователей · откройте раздел под карточками.</p>
+          <div class="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
+            <button type="button" class="rounded-lg border border-cyan-500/40 bg-cyan-950/50 px-2 py-2 text-left text-[11px] font-semibold text-cyan-100 shadow-[0_0_16px_-8px_rgba(34,211,238,0.5)] transition hover:bg-cyan-950/80" @click="goAdminEmbed('users')">
+              Пользователи <span class="block text-lg font-bold text-white">{{ data.users_total }}</span>
+            </button>
+            <button type="button" class="rounded-lg border border-cyan-500/40 bg-cyan-950/50 px-2 py-2 text-left text-[11px] font-semibold text-cyan-100 shadow-[0_0_16px_-8px_rgba(34,211,238,0.5)] transition hover:bg-cyan-950/80" @click="goAdminEmbed('chats')">
+              Чаты <span class="block text-lg font-bold text-white">{{ data.chats_total }}</span>
+            </button>
+            <button type="button" class="rounded-lg border border-emerald-500/35 bg-emerald-950/40 px-2 py-2 text-left text-[11px] font-semibold text-emerald-100" @click="goAdminEmbed('revenue')">
+              Выручка ₽ <span class="block text-lg font-bold text-white">{{ data.revenue_total_rub }}</span>
+            </button>
+            <button type="button" class="rounded-lg border border-violet-500/35 bg-violet-950/40 px-2 py-2 text-left text-[11px] font-semibold text-violet-100" @click="goAdminEmbed('funnel')">
+              Платящих реф. <span class="block text-lg font-bold text-white">{{ data.referral_paid_users }}</span>
+            </button>
+            <button type="button" class="rounded-lg border border-lime-500/35 bg-lime-950/35 px-2 py-2 text-left text-[11px] font-semibold text-lime-100" @click="goAdminEmbed('commissions')">
+              Резерв комиссий <span class="block text-lg font-bold text-white">{{ commissionsSummary.reserve_for_next_payout_rub ?? 0 }} ₽</span>
+            </button>
+            <div class="rounded-lg border border-white/10 bg-white/5 px-2 py-2 text-[11px] text-slate-300">
+              Оплат успешно: <b class="text-white">{{ data.payments_succeeded }}</b>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+    <div v-if="tab === 'overview' && showFullAdminShell && adminOverviewEmbed === 'users'" class="space-y-2">
+      <p v-if="data" class="text-center text-xs text-slate-600 dark:text-slate-400">
+        В базе: <b>{{ data.users_total }}</b> · в списке ниже: <b>{{ filteredAdminUsers.length }}</b> (до 1000 записей)
       </p>
-      <button type="button" class="rounded-xl border border-slate-200 bg-white p-3 text-left dark:border-slate-700 dark:bg-slate-800" @click="tab = 'users'">
-        <p class="text-xs text-slate-500 dark:text-slate-400">Пользователей</p>
-        <p class="mt-1 text-xl font-bold text-slate-900 dark:text-white">{{ data.users_total }}</p>
-      </button>
-      <button type="button" class="rounded-xl border border-slate-200 bg-white p-3 text-left dark:border-slate-700 dark:bg-slate-800" @click="tab = 'chats'">
-        <p class="text-xs text-slate-500 dark:text-slate-400">Чатов</p>
-        <p class="mt-1 text-xl font-bold text-slate-900 dark:text-white">{{ data.chats_total }}</p>
-      </button>
-      <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
-        <p class="text-xs text-slate-500 dark:text-slate-400">Успешных оплат</p>
-        <p class="mt-1 text-xl font-bold text-slate-900 dark:text-white">{{ data.payments_succeeded }}</p>
+      <div class="flex flex-wrap gap-1.5">
+        <button type="button" class="rounded-md px-2 py-1 text-[11px] font-semibold" :class="usersPreset === 'all' ? 'bg-cyan-600 text-white' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="usersPreset = 'all'">Все</button>
+        <button type="button" class="rounded-md px-2 py-1 text-[11px] font-semibold" :class="usersPreset === 'today' ? 'bg-cyan-600 text-white' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="usersPreset = 'today'">Сегодня подключились</button>
+        <button type="button" class="rounded-md px-2 py-1 text-[11px] font-semibold" :class="usersPreset === 'joins24' ? 'bg-cyan-600 text-white' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="usersPreset = 'joins24'">Есть входы 24ч</button>
+        <button type="button" class="rounded-md px-2 py-1 text-[11px] font-semibold" :class="usersPreset === 'promo' ? 'bg-cyan-600 text-white' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="usersPreset = 'promo'">С промокодом</button>
+        <button type="button" class="rounded-md px-2 py-1 text-[11px] font-semibold" :class="usersPreset === 'antiurl' ? 'bg-cyan-600 text-white' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="usersPreset = 'antiurl'">АнтиURL включен</button>
+        <button type="button" class="rounded-md px-2 py-1 text-[11px] font-semibold" :class="usersPreset === 'online' ? 'bg-cyan-600 text-white' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="usersPreset = 'online'">Онлайн в панели</button>
+        <button type="button" class="rounded-md px-2 py-1 text-[11px] font-semibold" :class="usersPreset === 'blocked' ? 'bg-cyan-600 text-white' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="usersPreset = 'blocked'">Заблокированные</button>
       </div>
-      <button type="button" class="rounded-xl border border-slate-200 bg-white p-3 text-left dark:border-slate-700 dark:bg-slate-800" @click="tab = 'revenue'">
-        <p class="text-xs text-slate-500 dark:text-slate-400">Выручка (RUB)</p>
-        <p class="mt-1 text-xl font-bold text-slate-900 dark:text-white">{{ data.revenue_total_rub }}</p>
-      </button>
-      <button type="button" class="col-span-2 rounded-xl border border-slate-200 bg-white p-3 text-left dark:border-slate-700 dark:bg-slate-800" @click="tab = 'funnel'">
-        <p class="text-xs text-slate-500 dark:text-slate-400">Платящих рефералов</p>
-        <p class="mt-1 text-xl font-bold text-slate-900 dark:text-white">{{ data.referral_paid_users }}</p>
-      </button>
-      <div class="col-span-2 rounded-xl border border-fuchsia-400/40 bg-fuchsia-500/10 p-3">
-        <p class="text-xs font-semibold text-fuchsia-700 dark:text-fuchsia-300">Мой заработок по партнерке</p>
-        <p class="mt-1 text-xl font-extrabold text-fuchsia-800 dark:text-fuchsia-200">{{ myPartnerStats.total_rub || 0 }} ₽</p>
+      <div v-if="filteredAdminUsers.length === 0" class="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
+        Пользователей пока нет.
+      </div>
+      <div
+        v-for="u in filteredAdminUsers"
+        :id="'admin-user-card-' + u.telegram_id"
+        :key="`u-${u.telegram_id}`"
+        class="rounded-2xl border border-cyan-400/22 bg-gradient-to-b from-slate-900/90 via-slate-950/92 to-black/90 p-3 text-slate-100 shadow-[0_18px_60px_-28px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,255,255,0.1)] ring-1 ring-cyan-300/20 backdrop-blur-xl transition-shadow"
+        :class="Number(usersHighlightTelegramId) === Number(u.telegram_id) ? 'ring-2 ring-cyan-500/70 shadow-md dark:ring-cyan-400/50' : ''"
+      >
+        <p class="text-sm font-semibold text-white">
+          {{ u.first_name || 'Пользователь' }}
+          <a
+            v-if="u.username"
+            :href="profileLinkForUser(u)"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="ml-1 text-xs font-semibold text-cyan-300 underline decoration-cyan-400/50 underline-offset-2 hover:text-cyan-200"
+            @click="openExternalFromAnchor($event, profileLinkForUser(u))"
+          >@{{ String(u.username).replace(/^@+/, '') }}</a>
+          <span class="ml-1 text-xs text-slate-400">ID {{ u.telegram_id }}</span>
+          <span
+            v-if="u.status === 'blocked'"
+            class="ml-1 rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-bold uppercase text-red-300"
+          >заблокирован</span>
+          <span
+            v-else-if="u.in_global_antispam"
+            class="ml-1 rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-bold uppercase text-amber-200"
+          >глоб. антиспам</span>
+        </p>
+        <div class="mt-1 flex flex-wrap items-center gap-1.5 text-[10px]">
+          <span class="rounded-full border border-cyan-300/30 bg-cyan-500/12 px-2 py-0.5 text-cyan-100">Тариф: {{ u.tariff }}</span>
+          <span class="rounded-full border border-emerald-300/30 bg-emerald-500/12 px-2 py-0.5 text-emerald-100">Свои: {{ u.chat_count ?? 0 }}</span>
+          <span class="rounded-full border border-violet-300/30 bg-violet-500/12 px-2 py-0.5 text-violet-100">Делег.: {{ u.delegated_chat_count ?? 0 }}</span>
+          <span class="rounded-full border border-white/20 bg-white/10 px-2 py-0.5 text-slate-200">{{ userOnlineState(u.last_webapp_seen_at).label }}</span>
+        </div>
+        <p class="mt-1 text-[9px] text-slate-500">
+          Согласия: док. {{ u.legal_bundle_accepted_at ? '✓' : '—' }} · ПД {{ u.legal_pd_accepted_at ? '✓' : '—' }} · марк. {{ u.legal_marketing_opt_in ? 'да' : 'нет' }}
+        </p>
+        <div class="mt-2">
+          <div class="flex flex-wrap gap-2">
+            <button type="button" class="rounded-lg border border-cyan-300/35 bg-cyan-500/15 px-3 py-1.5 text-xs font-semibold text-cyan-100 hover:bg-cyan-500/25" @click="openAdminUserInfo(u)">Инфо</button>
+            <a :href="profileLinkForUser(u) || '#'" target="_blank" rel="noopener noreferrer" class="rounded-lg bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white" :class="!profileLinkForUser(u) ? 'pointer-events-none opacity-60' : ''" @click="openExternalFromAnchor($event, profileLinkForUser(u))">Профиль</a>
+            <button type="button" class="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white" @click="chatsOwnerFilter = Number(u.telegram_id || 0); goAdminEmbed('chats')">Чаты</button>
+            <button type="button" class="rounded-lg bg-amber-700 px-3 py-1.5 text-xs font-semibold text-white" @click="resetUserDelegation(u)">Сброс делегирования</button>
+            <button type="button" class="rounded-lg bg-orange-700 px-3 py-1.5 text-xs font-semibold text-white" @click="resetUserConnectedChats(u)">Сброс своих групп</button>
+            <button type="button" class="rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white" @click="resetUserFinance(u)">Сброс тарифа/токенов</button>
+            <button
+              v-if="u.status === 'blocked' || u.in_global_antispam"
+              type="button"
+              class="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white"
+              @click="unblockUser(u)"
+            >
+              Разбанить
+            </button>
+            <button
+              v-else
+              type="button"
+              class="rounded-lg bg-red-700 px-3 py-1.5 text-xs font-semibold text-white"
+              @click="deleteBlockUser(u)"
+            >
+              Удалить+Блок
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div
+      v-if="showFullAdminShell && tab === 'overview' && showUserInfoModal && selectedAdminUser"
+      class="fixed inset-0 z-[270] flex items-center justify-center bg-black/70 p-3"
+      @click.self="showUserInfoModal = false"
+    >
+      <div class="w-full max-w-2xl rounded-2xl border border-cyan-400/22 bg-gradient-to-b from-slate-900/95 via-slate-950/95 to-black/95 p-4 text-slate-100 shadow-[0_28px_96px_-30px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,255,255,0.1)] ring-1 ring-cyan-300/20 backdrop-blur-2xl">
+        <div class="mb-3 flex items-center justify-between gap-2">
+          <h3 class="text-xs font-semibold uppercase tracking-wide text-cyan-100">Пользователь — подробная информация</h3>
+          <button type="button" class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="showUserInfoModal = false">✕</button>
+        </div>
+        <p class="text-sm font-semibold text-white">
+          {{ selectedAdminUser.first_name || 'Пользователь' }}
+          <span v-if="selectedAdminUser.username" class="ml-1 text-cyan-300">@{{ selectedAdminUser.username }}</span>
+          <span class="ml-1 text-xs text-slate-400">ID {{ selectedAdminUser.telegram_id }}</span>
+        </p>
+        <p v-if="selectedUserSubscriptionLoading" class="mt-2 text-xs text-slate-400">Загрузка подписки…</p>
+        <div v-else-if="selectedUserSubscriptionProfile" class="mt-3 -mx-1 max-h-[min(70vh,480px)] overflow-y-auto">
+          <SubscriptionManagementPanel
+            :profile="selectedUserSubscriptionProfile"
+            variant="embedded"
+            :read-only="true"
+            :hide-embedded-hint="true"
+          />
+        </div>
+        <div class="mt-2 space-y-1 text-[11px] text-slate-300">
+          <p>AURUM: <b>{{ selectedAdminUser.aurum_tokens || 0 }} ✨</b> · Партнёрские: <b>{{ selectedAdminUser.partner_tokens }} ⚡</b></p>
+          <p>Первый /start: <b>{{ fmtUserSeenAt(selectedAdminUser.first_start_at) }}</b> · Регистрация: <b>{{ fmtUserSeenAt(selectedAdminUser.created_at) }}</b></p>
+          <p>В панели: <b>{{ fmtUserSeenAt(selectedAdminUser.last_webapp_seen_at) }}</b> · Статус: <b>{{ userOnlineState(selectedAdminUser.last_webapp_seen_at).label }}</b></p>
+          <p>Свои группы: <b>{{ selectedAdminUser.chat_count ?? 0 }}</b> · Делегированные: <b>{{ selectedAdminUser.delegated_chat_count ?? 0 }}</b></p>
+          <p>Подключились в группы: <b>{{ selectedAdminUser.joins_24h ?? 0 }}</b> за 24ч · <b>{{ selectedAdminUser.joins_30d ?? 0 }}</b> за 30д</p>
+          <p>
+            АнтиURL: <b>{{ selectedAdminUser.anti_url_enabled ? 'включён' : 'выключен' }}</b>
+            <span v-if="Number(selectedAdminUser.anti_url_enabled_chats || 0) > 0"> · чатов с АнтиURL: {{ Number(selectedAdminUser.anti_url_enabled_chats) }}</span>
+          </p>
+          <p v-if="selectedAdminUser.promo_applied_code">
+            Промокод: <b>{{ selectedAdminUser.promo_applied_code }}</b>
+            · статус: <b>{{ selectedAdminUser.promo_is_active ? 'активен' : 'не активен' }}</b>
+            <span v-if="selectedAdminUser.promo_applied_at"> · активирован: {{ fmtUserSeenAt(selectedAdminUser.promo_applied_at) }}</span>
+            <span v-if="selectedAdminUser.promo_expires_at"> · действует до: {{ fmtUserSeenAt(selectedAdminUser.promo_expires_at) }}</span>
+            <span v-if="Number(selectedAdminUser.promo_days_left || 0) > 0"> · осталось: {{ Number(selectedAdminUser.promo_days_left) }} дн</span>
+          </p>
+          <p v-else>Промокод не активирован.</p>
+          <p class="mt-2 border-t border-white/10 pt-2">
+            Согласия:
+            <b class="text-emerald-300">{{ selectedAdminUser.legal_bundle_accepted_at ? '✓ пакет ' + fmtUserSeenAt(selectedAdminUser.legal_bundle_accepted_at) : '— пакет' }}</b>
+            ·
+            <b class="text-emerald-300">{{ selectedAdminUser.legal_pd_accepted_at ? '✓ ПД ' + fmtUserSeenAt(selectedAdminUser.legal_pd_accepted_at) : '— ПД' }}</b>
+            ·
+            <b class="text-sky-300">маркетинг: {{ selectedAdminUser.legal_marketing_opt_in ? 'да' : 'нет' }}</b>
+          </p>
+        </div>
+      </div>
+    </div>
+    <div v-if="tab === 'overview' && showFullAdminShell && adminOverviewEmbed === 'referrals'" class="space-y-2">
+      <div class="grid grid-cols-3 gap-2">
+        <div class="rounded-xl border border-cyan-400/40 bg-cyan-500/10 px-2 py-1.5 text-center text-[11px] font-semibold text-cyan-700 dark:text-cyan-200">
+          Переслали: {{ referralInfo?.share_count || 0 }}
+        </div>
+        <div class="rounded-xl border border-indigo-400/35 bg-indigo-500/10 px-2 py-1.5 text-center text-[11px] font-semibold text-indigo-700 dark:text-indigo-200">
+          Старт: {{ referralInfo?.start_count || 0 }}
+        </div>
+        <div class="rounded-xl border border-lime-400/45 bg-lime-500/15 px-2 py-1.5 text-center text-[11px] font-bold text-lime-700 dark:text-lime-200">
+          Оплатили: {{ referralInfo?.paid_count || 0 }}
+        </div>
+      </div>
+      <div v-if="referralsTop.length === 0" class="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
+        Оплативших рефералов пока нет.
+      </div>
+      <div v-for="(item, idx) in referralsTop" :key="`rt-adm-${idx}-${item.telegram_id}`" class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
+        <p class="text-sm font-semibold text-slate-900 dark:text-white">
+          {{ item.first_name || 'Пользователь' }}
+          <span v-if="item.username" class="ml-1 text-xs font-medium text-cyan-600 dark:text-cyan-300">@{{ item.username }}</span>
+        </p>
+        <p class="text-xs text-slate-600 dark:text-slate-300">
+          Оплат: {{ item.payments_count || 0 }} · Продаж: {{ item.sales_rub || 0 }} ₽ · Начисление: {{ item.partner_reward_rub || 0 }} ₽
+        </p>
+      </div>
+    </div>
+    <div v-if="tab === 'overview' && showFullAdminShell && adminOverviewEmbed === 'funnel'" class="space-y-2">
+      <div v-if="referralsFunnel.length === 0" class="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
+        Платящих рефералов пока нет.
+      </div>
+      <div v-for="item in referralsFunnel" :key="`rf-${item.telegram_id}`" class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
+        <div class="flex items-center justify-between gap-2">
+          <p class="text-sm font-semibold text-slate-900 dark:text-white">
+            {{ item.first_name || 'Пользователь' }}
+            <span v-if="item.username" class="ml-1 text-xs text-cyan-600 dark:text-cyan-300">@{{ item.username }}</span>
+          </p>
+          <button type="button" class="rounded-lg bg-cyan-600 px-2 py-1 text-xs font-semibold text-white disabled:opacity-60" :disabled="!item.dm_link" @click="openExternalLink(item.dm_link)">
+            В личку
+          </button>
+        </div>
         <p class="mt-1 text-xs text-slate-600 dark:text-slate-300">
-          Доступно: {{ myPartnerStats.available_rub || 0 }} ₽ · Уже выплачено: {{ myPartnerStats.paid_rub || 0 }} ₽
+          Шаринг: {{ item.share_count }} · Старт: {{ item.start_count }} · Оплатили: {{ item.paid_count }} · Продажи: {{ item.sales_total_rub }} ₽
         </p>
-        <p class="mt-1 text-[11px] text-slate-600 dark:text-slate-300">
-          1д: {{ myPartnerStats.periods_rub?.['1d'] || 0 }} ₽ · 7д: {{ myPartnerStats.periods_rub?.['7d'] || 0 }} ₽ · 14д: {{ myPartnerStats.periods_rub?.['14d'] || 0 }} ₽
+        <p class="mt-1 text-xs text-slate-600 dark:text-slate-300">
+          Воронка по уровням: L1 {{ item.downline_level_1 }} · L2 {{ item.downline_level_2 }} · L3 {{ item.downline_level_3 }}
         </p>
-        <p class="mt-0.5 text-[11px] text-slate-600 dark:text-slate-300">
-          30д: {{ myPartnerStats.periods_rub?.['30d'] || 0 }} ₽ · 6м: {{ myPartnerStats.periods_rub?.['180d'] || 0 }} ₽ · 1г: {{ myPartnerStats.periods_rub?.['365d'] || 0 }} ₽
-        </p>
-        <div v-if="(myPartnerStats.by_month || []).length" class="mt-2 rounded-lg border border-fuchsia-300/30 bg-fuchsia-500/5 p-2">
-          <p class="text-[11px] font-semibold text-fuchsia-700 dark:text-fuchsia-300">Помесячно (12 мес):</p>
-          <div class="mt-1 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-slate-700 dark:text-slate-300">
-            <div v-for="m in myPartnerStats.by_month" :key="`mypm-${m.month}`" class="flex items-center justify-between gap-2">
-              <span>{{ m.month }}</span>
-              <span class="font-semibold">{{ m.amount_rub }} ₽</span>
+      </div>
+    </div>
+    <div v-if="tab === 'overview' && showFullAdminShell && adminOverviewEmbed === 'revenue'" class="space-y-2">
+      <div class="flex flex-wrap items-center gap-2">
+        <button v-for="p in ['7d', '30d', '90d', '12m']" :key="`rp-${p}`" type="button" class="rounded-lg px-2.5 py-1.5 text-xs font-semibold" :class="revenuePeriod === p ? 'bg-emerald-500 text-white' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="revenuePeriod = p; loadRevenueStats()">
+          {{ revenuePeriodLabel(p) }}
+        </button>
+      </div>
+      <div class="grid grid-cols-2 gap-2">
+        <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
+          <p class="text-xs text-slate-500 dark:text-slate-400">За сегодня</p>
+          <p class="mt-1 text-xl font-bold text-slate-900 dark:text-white">{{ revenueStats.today_rub }} ₽</p>
+        </div>
+        <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
+          <p class="text-xs text-slate-500 dark:text-slate-400">За месяц</p>
+          <p class="mt-1 text-xl font-bold text-slate-900 dark:text-white">{{ revenueStats.month_rub }} ₽</p>
+        </div>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
+        <p class="text-xs text-slate-500 dark:text-slate-400">Всего выручка (реально оплачено)</p>
+        <p class="mt-1 text-xl font-bold text-slate-900 dark:text-white">{{ data?.revenue_total_rub || 0 }} ₽</p>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
+        <p class="text-xs font-semibold text-slate-600 dark:text-slate-300">Диаграмма по дням (30 дней)</p>
+        <div class="mt-2 h-40 overflow-hidden rounded-lg bg-slate-50 p-2 dark:bg-slate-900/50">
+          <div class="flex h-full items-end gap-1">
+            <div
+              v-for="d in revenueStats.by_day"
+              :key="`day-${d.date}`"
+              class="group relative min-w-0 flex-1 rounded-t bg-emerald-500/70"
+              :style="{ height: `${Math.max(4, (Number(d.amount_rub || 0) / Math.max(1, ...revenueStats.by_day.map(x => Number(x.amount_rub || 0)))) * 100)}%` }"
+            >
+              <span class="pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 whitespace-nowrap rounded bg-slate-900 px-1.5 py-0.5 text-[10px] text-white opacity-0 transition group-hover:opacity-100">
+                {{ d.amount_rub }} ₽
+              </span>
             </div>
           </div>
         </div>
       </div>
-      </template>
+      <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
+        <p class="text-xs font-semibold text-slate-600 dark:text-slate-300">По месяцам</p>
+        <div class="mt-2 space-y-1">
+          <div v-for="m in revenueStats.by_month" :key="`month-${m.month}`" class="flex items-center justify-between text-xs">
+            <span class="text-slate-500 dark:text-slate-400">{{ m.month }}</span>
+            <span class="font-semibold text-slate-900 dark:text-slate-100">{{ m.amount_rub }} ₽ · {{ m.payments_count }} оплат</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div v-if="tab === 'overview' && showFullAdminShell && adminOverviewEmbed === 'commissions'" class="space-y-2">
+      <div class="rounded-xl border border-lime-400/40 bg-lime-500/10 p-3">
+        <p class="text-xs font-semibold text-lime-700 dark:text-lime-300">К следующему понедельнику ({{ nextMondayLabel() }}) отложить:</p>
+        <p class="mt-1 text-2xl font-extrabold text-lime-800 dark:text-lime-200">{{ commissionsSummary.reserve_for_next_payout_rub }} ₽</p>
+        <p class="mt-1 text-xs text-slate-600 dark:text-slate-300">
+          Ожидает разблокировки: {{ commissionsSummary.pending_rub }} ₽ · Доступно: {{ commissionsSummary.available_rub }} ₽ · Уже выплачено: {{ commissionsSummary.paid_rub }} ₽
+        </p>
+      </div>
+      <div v-if="commissions.length === 0" class="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
+        Начислений пока нет.
+      </div>
+      <div v-for="item in commissions" :key="`cm-${item.id}`" class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
+        <p class="text-xs text-slate-500 dark:text-slate-400">{{ item.created_at }} · L{{ item.level }} · {{ item.status }}</p>
+        <p class="mt-1 text-sm font-semibold text-slate-900 dark:text-white">
+          +{{ item.reward_amount_rub }} ₽ ({{ Math.round((item.rate || 0) * 100) }}%) · продажа {{ item.sales_amount_rub }} ₽
+        </p>
+        <p class="text-xs text-cyan-700 dark:text-cyan-300">
+          <a
+            v-if="item.owner_username"
+            :href="`https://t.me/${String(item.owner_username).replace(/^@+/, '')}`"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="underline decoration-cyan-500/40 hover:text-cyan-500"
+            @click="openExternalFromAnchor($event, `https://t.me/${String(item.owner_username).replace(/^@+/, '')}`)"
+          >@{{ String(item.owner_username).replace(/^@+/, '') }}</a>
+          <span v-else>{{ item.owner_name || '—' }}</span>
+        </p>
+      </div>
+    </div>
+    <div v-if="tab === 'overview' && showFullAdminShell && adminOverviewEmbed === 'chats'" class="space-y-2">
+      <div class="flex items-center justify-between gap-2">
+        <p class="text-xs text-slate-500 dark:text-slate-400">
+          {{ chatsOwnerFilter ? `Показаны чаты пользователя ID ${chatsOwnerFilter}` : 'Показаны все чаты' }}
+        </p>
+        <button v-if="chatsOwnerFilter" type="button" class="rounded-lg bg-slate-700 px-2 py-1 text-xs font-semibold text-white" @click="chatsOwnerFilter = 0">
+          Сброс фильтра
+        </button>
+      </div>
+      <div v-if="filteredChats.length === 0" class="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
+        Подключенных чатов пока нет.
+      </div>
+      <div v-for="c in filteredChats" :key="`chat-${c.chat_id}`" class="rounded-2xl border border-cyan-400/22 bg-gradient-to-b from-slate-900/90 via-slate-950/92 to-black/90 p-3 text-slate-100 shadow-[0_18px_60px_-28px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,255,255,0.1)] ring-1 ring-cyan-300/20 backdrop-blur-xl">
+        <p class="text-sm font-semibold text-white">
+          {{ c.title || ('Чат ' + c.chat_id) }}
+          <span
+            v-if="c.is_log_chat"
+            class="ml-1 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-bold uppercase text-amber-800 dark:text-amber-200"
+          >чат отчётов</span>
+        </p>
+        <p class="mt-1 text-xs text-slate-300">
+          ID {{ c.chat_id }} · owner:
+          <a
+            v-if="c.owner_username"
+            :href="`https://t.me/${String(c.owner_username).replace(/^@+/, '')}`"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="font-medium text-cyan-300 underline decoration-cyan-500/40 hover:text-cyan-200"
+            @click="openExternalFromAnchor($event, `https://t.me/${String(c.owner_username).replace(/^@+/, '')}`)"
+          >@{{ String(c.owner_username).replace(/^@+/, '') }}</a>
+          <span v-else class="font-mono">{{ c.owner_telegram_id }}</span>
+        </p>
+        <div class="mt-2 flex gap-2">
+          <a
+            :href="c.open_link || '#'"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="rounded-lg bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-60"
+            :class="!c.open_link ? 'pointer-events-none opacity-60' : ''"
+            @click="openExternalFromAnchor($event, c.open_link)"
+          >
+            Открыть чат
+          </a>
+        </div>
+      </div>
     </div>
     <div v-else-if="showFullAdminShell && tab === 'payouts'" class="space-y-2">
       <div class="sticky top-0 z-10 space-y-2 rounded-xl bg-slate-950/90 p-1.5 backdrop-blur">
@@ -5683,8 +6260,8 @@ watch(
         </div>
       </div>
     </div>
-    <div v-else-if="tab === 'referrals' && isPremiumCabinet" class="space-y-2">
-      <div v-if="isPremiumCabinet" class="grid grid-cols-2 gap-2 sm:grid-cols-3">
+    <div v-else-if="tab === 'referrals' && (isPremiumCabinet || showFullAdminShell)" class="space-y-2">
+      <div v-if="isPremiumCabinet || showFullAdminShell" class="grid grid-cols-2 gap-2 sm:grid-cols-3">
         <div class="rounded-xl border border-fuchsia-500/45 bg-gradient-to-br from-fuchsia-950/80 to-purple-900/50 p-3 text-center shadow-[0_0_20px_-8px_rgba(217,70,239,0.45)]">
           <p class="text-[10px] font-semibold uppercase tracking-wide text-fuchsia-200/90">Всего с партнёрки</p>
           <p class="mt-1 text-lg font-extrabold text-fuchsia-100">{{ myPartnerStats.total_rub || 0 }} ₽</p>
@@ -5733,346 +6310,6 @@ watch(
         <p class="text-xs text-slate-600 dark:text-slate-300">
           Оплат: {{ item.payments_count || 0 }} · Продаж: {{ item.sales_rub || 0 }} ₽ · Начисление: {{ item.partner_reward_rub || 0 }} ₽
         </p>
-      </div>
-    </div>
-    <div v-else-if="showFullAdminShell && tab === 'commissions'" class="space-y-2">
-      <div class="rounded-xl border border-lime-400/40 bg-lime-500/10 p-3">
-        <p class="text-xs font-semibold text-lime-700 dark:text-lime-300">К следующему понедельнику ({{ nextMondayLabel() }}) отложить:</p>
-        <p class="mt-1 text-2xl font-extrabold text-lime-800 dark:text-lime-200">{{ commissionsSummary.reserve_for_next_payout_rub }} ₽</p>
-        <p class="mt-1 text-xs text-slate-600 dark:text-slate-300">
-          Ожидает разблокировки: {{ commissionsSummary.pending_rub }} ₽ · Доступно: {{ commissionsSummary.available_rub }} ₽ · Уже выплачено: {{ commissionsSummary.paid_rub }} ₽
-        </p>
-      </div>
-      <div v-if="commissions.length === 0" class="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
-        Начислений пока нет.
-      </div>
-      <div v-for="item in commissions" :key="`cm-${item.id}`" class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
-        <p class="text-xs text-slate-500 dark:text-slate-400">{{ item.created_at }} · L{{ item.level }} · {{ item.status }}</p>
-        <p class="mt-1 text-sm font-semibold text-slate-900 dark:text-white">
-          +{{ item.reward_amount_rub }} ₽ ({{ Math.round((item.rate || 0) * 100) }}%) · продажа {{ item.sales_amount_rub }} ₽
-        </p>
-        <p class="text-xs text-cyan-700 dark:text-cyan-300">
-          <a
-            v-if="item.owner_username"
-            :href="`https://t.me/${String(item.owner_username).replace(/^@+/, '')}`"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="underline decoration-cyan-500/40 hover:text-cyan-500"
-            @click="openExternalFromAnchor($event, `https://t.me/${String(item.owner_username).replace(/^@+/, '')}`)"
-          >@{{ String(item.owner_username).replace(/^@+/, '') }}</a>
-          <span v-else>{{ item.owner_name || '—' }}</span>
-        </p>
-      </div>
-    </div>
-    <div v-else-if="showFullAdminShell && tab === 'users'" class="space-y-2">
-      <p v-if="data" class="text-center text-xs text-slate-600 dark:text-slate-400">
-        В базе: <b>{{ data.users_total }}</b> · в списке ниже: <b>{{ filteredAdminUsers.length }}</b> (до 1000 записей)
-      </p>
-      <div class="flex flex-wrap gap-1.5">
-        <button type="button" class="rounded-md px-2 py-1 text-[11px] font-semibold" :class="usersPreset === 'all' ? 'bg-cyan-600 text-white' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="usersPreset = 'all'">Все</button>
-        <button type="button" class="rounded-md px-2 py-1 text-[11px] font-semibold" :class="usersPreset === 'today' ? 'bg-cyan-600 text-white' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="usersPreset = 'today'">Сегодня подключились</button>
-        <button type="button" class="rounded-md px-2 py-1 text-[11px] font-semibold" :class="usersPreset === 'joins24' ? 'bg-cyan-600 text-white' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="usersPreset = 'joins24'">Есть входы 24ч</button>
-        <button type="button" class="rounded-md px-2 py-1 text-[11px] font-semibold" :class="usersPreset === 'promo' ? 'bg-cyan-600 text-white' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="usersPreset = 'promo'">С промокодом</button>
-        <button type="button" class="rounded-md px-2 py-1 text-[11px] font-semibold" :class="usersPreset === 'antiurl' ? 'bg-cyan-600 text-white' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="usersPreset = 'antiurl'">АнтиURL включен</button>
-        <button type="button" class="rounded-md px-2 py-1 text-[11px] font-semibold" :class="usersPreset === 'online' ? 'bg-cyan-600 text-white' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="usersPreset = 'online'">Онлайн в панели</button>
-        <button type="button" class="rounded-md px-2 py-1 text-[11px] font-semibold" :class="usersPreset === 'blocked' ? 'bg-cyan-600 text-white' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="usersPreset = 'blocked'">Заблокированные</button>
-      </div>
-      <div v-if="filteredAdminUsers.length === 0" class="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
-        Пользователей пока нет.
-      </div>
-      <div
-        v-for="u in filteredAdminUsers"
-        :id="'admin-user-card-' + u.telegram_id"
-        :key="`u-${u.telegram_id}`"
-        class="rounded-2xl border border-cyan-400/22 bg-gradient-to-b from-slate-900/90 via-slate-950/92 to-black/90 p-3 text-slate-100 shadow-[0_18px_60px_-28px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,255,255,0.1)] ring-1 ring-cyan-300/20 backdrop-blur-xl transition-shadow"
-        :class="Number(usersHighlightTelegramId) === Number(u.telegram_id) ? 'ring-2 ring-cyan-500/70 shadow-md dark:ring-cyan-400/50' : ''"
-      >
-        <p class="text-sm font-semibold text-white">
-          {{ u.first_name || 'Пользователь' }}
-          <a
-            v-if="u.username"
-            :href="profileLinkForUser(u)"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="ml-1 text-xs font-semibold text-cyan-300 underline decoration-cyan-400/50 underline-offset-2 hover:text-cyan-200"
-            @click="openExternalFromAnchor($event, profileLinkForUser(u))"
-          >@{{ String(u.username).replace(/^@+/, '') }}</a>
-          <span class="ml-1 text-xs text-slate-400">ID {{ u.telegram_id }}</span>
-          <span
-            v-if="u.status === 'blocked'"
-            class="ml-1 rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-bold uppercase text-red-300"
-          >заблокирован</span>
-          <span
-            v-else-if="u.in_global_antispam"
-            class="ml-1 rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-bold uppercase text-amber-200"
-          >глоб. антиспам</span>
-        </p>
-        <div class="mt-1 flex flex-wrap items-center gap-1.5 text-[10px]">
-          <span class="rounded-full border border-cyan-300/30 bg-cyan-500/12 px-2 py-0.5 text-cyan-100">Тариф: {{ u.tariff }}</span>
-          <span class="rounded-full border border-emerald-300/30 bg-emerald-500/12 px-2 py-0.5 text-emerald-100">Свои: {{ u.chat_count ?? 0 }}</span>
-          <span class="rounded-full border border-violet-300/30 bg-violet-500/12 px-2 py-0.5 text-violet-100">Делег.: {{ u.delegated_chat_count ?? 0 }}</span>
-          <span class="rounded-full border border-white/20 bg-white/10 px-2 py-0.5 text-slate-200">{{ userOnlineState(u.last_webapp_seen_at).label }}</span>
-        </div>
-        <div class="mt-2">
-          <div class="flex flex-wrap gap-2">
-            <button type="button" class="rounded-lg border border-cyan-300/35 bg-cyan-500/15 px-3 py-1.5 text-xs font-semibold text-cyan-100 hover:bg-cyan-500/25" @click="openAdminUserInfo(u)">Инфо</button>
-            <a :href="profileLinkForUser(u) || '#'" target="_blank" rel="noopener noreferrer" class="rounded-lg bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white" :class="!profileLinkForUser(u) ? 'pointer-events-none opacity-60' : ''" @click="openExternalFromAnchor($event, profileLinkForUser(u))">Профиль</a>
-            <button type="button" class="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white" @click="chatsOwnerFilter = Number(u.telegram_id || 0); tab = 'chats'">Чаты</button>
-            <button type="button" class="rounded-lg bg-amber-700 px-3 py-1.5 text-xs font-semibold text-white" @click="resetUserDelegation(u)">Сброс делегирования</button>
-            <button type="button" class="rounded-lg bg-orange-700 px-3 py-1.5 text-xs font-semibold text-white" @click="resetUserConnectedChats(u)">Сброс своих групп</button>
-            <button type="button" class="rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white" @click="resetUserFinance(u)">Сброс тарифа/токенов</button>
-            <button
-              v-if="u.status === 'blocked' || u.in_global_antispam"
-              type="button"
-              class="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white"
-              @click="unblockUser(u)"
-            >
-              Разбанить
-            </button>
-            <button
-              v-else
-              type="button"
-              class="rounded-lg bg-red-700 px-3 py-1.5 text-xs font-semibold text-white"
-              @click="deleteBlockUser(u)"
-            >
-              Удалить+Блок
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-    <div
-      v-if="showFullAdminShell && tab === 'users' && showUserInfoModal && selectedAdminUser"
-      class="fixed inset-0 z-[270] flex items-center justify-center bg-black/70 p-3"
-      @click.self="showUserInfoModal = false"
-    >
-      <div class="w-full max-w-2xl rounded-2xl border border-cyan-400/22 bg-gradient-to-b from-slate-900/95 via-slate-950/95 to-black/95 p-4 text-slate-100 shadow-[0_28px_96px_-30px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,255,255,0.1)] ring-1 ring-cyan-300/20 backdrop-blur-2xl">
-        <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold uppercase tracking-wide text-cyan-100">Пользователь — подробная информация</h3>
-          <button type="button" class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="showUserInfoModal = false">✕</button>
-        </div>
-        <p class="text-sm font-semibold text-white">
-          {{ selectedAdminUser.first_name || 'Пользователь' }}
-          <span v-if="selectedAdminUser.username" class="ml-1 text-cyan-300">@{{ selectedAdminUser.username }}</span>
-          <span class="ml-1 text-xs text-slate-400">ID {{ selectedAdminUser.telegram_id }}</span>
-        </p>
-        <p v-if="selectedUserSubscriptionLoading" class="mt-2 text-xs text-slate-400">Загрузка подписки…</p>
-        <div v-else-if="selectedUserSubscriptionProfile" class="mt-3 -mx-1 max-h-[min(70vh,480px)] overflow-y-auto">
-          <SubscriptionManagementPanel
-            :profile="selectedUserSubscriptionProfile"
-            variant="embedded"
-            :read-only="true"
-            :hide-embedded-hint="true"
-          />
-        </div>
-        <div class="mt-2 space-y-1 text-[11px] text-slate-300">
-          <p>AURUM: <b>{{ selectedAdminUser.aurum_tokens || 0 }} ✨</b> · Партнёрские: <b>{{ selectedAdminUser.partner_tokens }} ⚡</b></p>
-          <p>Первый /start: <b>{{ fmtUserSeenAt(selectedAdminUser.first_start_at) }}</b> · Регистрация: <b>{{ fmtUserSeenAt(selectedAdminUser.created_at) }}</b></p>
-          <p>В панели: <b>{{ fmtUserSeenAt(selectedAdminUser.last_webapp_seen_at) }}</b> · Статус: <b>{{ userOnlineState(selectedAdminUser.last_webapp_seen_at).label }}</b></p>
-          <p>Свои группы: <b>{{ selectedAdminUser.chat_count ?? 0 }}</b> · Делегированные: <b>{{ selectedAdminUser.delegated_chat_count ?? 0 }}</b></p>
-          <p>Подключились в группы: <b>{{ selectedAdminUser.joins_24h ?? 0 }}</b> за 24ч · <b>{{ selectedAdminUser.joins_30d ?? 0 }}</b> за 30д</p>
-          <p>
-            АнтиURL: <b>{{ selectedAdminUser.anti_url_enabled ? 'включён' : 'выключен' }}</b>
-            <span v-if="Number(selectedAdminUser.anti_url_enabled_chats || 0) > 0"> · чатов с АнтиURL: {{ Number(selectedAdminUser.anti_url_enabled_chats) }}</span>
-          </p>
-          <p v-if="selectedAdminUser.promo_applied_code">
-            Промокод: <b>{{ selectedAdminUser.promo_applied_code }}</b>
-            · статус: <b>{{ selectedAdminUser.promo_is_active ? 'активен' : 'не активен' }}</b>
-            <span v-if="selectedAdminUser.promo_applied_at"> · активирован: {{ fmtUserSeenAt(selectedAdminUser.promo_applied_at) }}</span>
-            <span v-if="selectedAdminUser.promo_expires_at"> · действует до: {{ fmtUserSeenAt(selectedAdminUser.promo_expires_at) }}</span>
-            <span v-if="Number(selectedAdminUser.promo_days_left || 0) > 0"> · осталось: {{ Number(selectedAdminUser.promo_days_left) }} дн</span>
-          </p>
-          <p v-else>Промокод не активирован.</p>
-        </div>
-      </div>
-    </div>
-    <div v-else-if="showFullAdminShell && tab === 'chats'" class="space-y-2">
-      <div class="flex items-center justify-between gap-2">
-        <p class="text-xs text-slate-500 dark:text-slate-400">
-          {{ chatsOwnerFilter ? `Показаны чаты пользователя ID ${chatsOwnerFilter}` : 'Показаны все чаты' }}
-        </p>
-        <button v-if="chatsOwnerFilter" type="button" class="rounded-lg bg-slate-700 px-2 py-1 text-xs font-semibold text-white" @click="chatsOwnerFilter = 0">
-          Сброс фильтра
-        </button>
-      </div>
-      <div v-if="filteredChats.length === 0" class="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
-        Подключенных чатов пока нет.
-      </div>
-      <div v-for="c in filteredChats" :key="`chat-${c.chat_id}`" class="rounded-2xl border border-cyan-400/22 bg-gradient-to-b from-slate-900/90 via-slate-950/92 to-black/90 p-3 text-slate-100 shadow-[0_18px_60px_-28px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,255,255,0.1)] ring-1 ring-cyan-300/20 backdrop-blur-xl">
-        <p class="text-sm font-semibold text-white">
-          {{ c.title || ('Чат ' + c.chat_id) }}
-          <span
-            v-if="c.is_log_chat"
-            class="ml-1 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-bold uppercase text-amber-800 dark:text-amber-200"
-          >чат отчётов</span>
-        </p>
-        <p class="mt-1 text-xs text-slate-300">
-          ID {{ c.chat_id }} · owner:
-          <a
-            v-if="c.owner_username"
-            :href="`https://t.me/${String(c.owner_username).replace(/^@+/, '')}`"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="font-medium text-cyan-300 underline decoration-cyan-500/40 hover:text-cyan-200"
-            @click="openExternalFromAnchor($event, `https://t.me/${String(c.owner_username).replace(/^@+/, '')}`)"
-          >@{{ String(c.owner_username).replace(/^@+/, '') }}</a>
-          <span v-else class="font-mono">{{ c.owner_telegram_id }}</span>
-        </p>
-        <div class="mt-2 flex gap-2">
-          <a
-            :href="c.open_link || '#'"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="rounded-lg bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-60"
-            :class="!c.open_link ? 'pointer-events-none opacity-60' : ''"
-            @click="openExternalFromAnchor($event, c.open_link)"
-          >
-            Открыть чат
-          </a>
-        </div>
-      </div>
-    </div>
-    <div v-else-if="showFullAdminShell && tab === 'revenue'" class="space-y-2">
-      <div class="flex flex-wrap items-center gap-2">
-        <button v-for="p in ['7d', '30d', '90d', '12m']" :key="`rp-${p}`" type="button" class="rounded-lg px-2.5 py-1.5 text-xs font-semibold" :class="revenuePeriod === p ? 'bg-emerald-500 text-white' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="revenuePeriod = p; loadRevenueStats()">
-          {{ revenuePeriodLabel(p) }}
-        </button>
-      </div>
-      <div class="grid grid-cols-2 gap-2">
-        <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
-          <p class="text-xs text-slate-500 dark:text-slate-400">За сегодня</p>
-          <p class="mt-1 text-xl font-bold text-slate-900 dark:text-white">{{ revenueStats.today_rub }} ₽</p>
-        </div>
-        <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
-          <p class="text-xs text-slate-500 dark:text-slate-400">За месяц</p>
-          <p class="mt-1 text-xl font-bold text-slate-900 dark:text-white">{{ revenueStats.month_rub }} ₽</p>
-        </div>
-      </div>
-      <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
-        <p class="text-xs text-slate-500 dark:text-slate-400">Всего выручка (реально оплачено)</p>
-        <p class="mt-1 text-xl font-bold text-slate-900 dark:text-white">{{ data?.revenue_total_rub || 0 }} ₽</p>
-      </div>
-      <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
-        <p class="text-xs font-semibold text-slate-600 dark:text-slate-300">Диаграмма по дням (30 дней)</p>
-        <div class="mt-2 h-40 overflow-hidden rounded-lg bg-slate-50 p-2 dark:bg-slate-900/50">
-          <div class="flex h-full items-end gap-1">
-            <div
-              v-for="d in revenueStats.by_day"
-              :key="`day-${d.date}`"
-              class="group relative min-w-0 flex-1 rounded-t bg-emerald-500/70"
-              :style="{ height: `${Math.max(4, (Number(d.amount_rub || 0) / Math.max(1, ...revenueStats.by_day.map(x => Number(x.amount_rub || 0)))) * 100)}%` }"
-            >
-              <span class="pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 whitespace-nowrap rounded bg-slate-900 px-1.5 py-0.5 text-[10px] text-white opacity-0 transition group-hover:opacity-100">
-                {{ d.amount_rub }} ₽
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
-        <p class="text-xs font-semibold text-slate-600 dark:text-slate-300">По месяцам</p>
-        <div class="mt-2 space-y-1">
-          <div v-for="m in revenueStats.by_month" :key="`month-${m.month}`" class="flex items-center justify-between text-xs">
-            <span class="text-slate-500 dark:text-slate-400">{{ m.month }}</span>
-            <span class="font-semibold text-slate-900 dark:text-slate-100">{{ m.amount_rub }} ₽ · {{ m.payments_count }} оплат</span>
-          </div>
-        </div>
-      </div>
-    </div>
-    <div v-else-if="showFullAdminShell && tab === 'funnel'" class="space-y-2">
-      <div v-if="referralsFunnel.length === 0" class="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
-        Платящих рефералов пока нет.
-      </div>
-      <div v-for="item in referralsFunnel" :key="`rf-${item.telegram_id}`" class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
-        <div class="flex items-center justify-between gap-2">
-          <p class="text-sm font-semibold text-slate-900 dark:text-white">
-            {{ item.first_name || 'Пользователь' }}
-            <span v-if="item.username" class="ml-1 text-xs text-cyan-600 dark:text-cyan-300">@{{ item.username }}</span>
-          </p>
-          <button type="button" class="rounded-lg bg-cyan-600 px-2 py-1 text-xs font-semibold text-white disabled:opacity-60" :disabled="!item.dm_link" @click="openExternalLink(item.dm_link)">
-            В личку
-          </button>
-        </div>
-        <p class="mt-1 text-xs text-slate-600 dark:text-slate-300">
-          Шаринг: {{ item.share_count }} · Старт: {{ item.start_count }} · Оплатили: {{ item.paid_count }} · Продажи: {{ item.sales_total_rub }} ₽
-        </p>
-        <p class="mt-1 text-xs text-slate-600 dark:text-slate-300">
-          Воронка по уровням: L1 {{ item.downline_level_1 }} · L2 {{ item.downline_level_2 }} · L3 {{ item.downline_level_3 }}
-        </p>
-      </div>
-    </div>
-    <div v-else-if="showFullAdminShell && tab === 'test_payments'" class="space-y-3">
-      <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
-        <p class="text-xs font-semibold text-slate-700 dark:text-slate-200">Тестовый магазин (админ)</p>
-        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
-          Эти кнопки создают тестовые ссылки YooKassa прямо из админки.
-        </p>
-        <p class="mt-2 rounded-lg border border-slate-600/45 bg-slate-900/35 px-2.5 py-2 text-[11px] text-slate-300">
-          По умолчанию реальные оплаты пытаются привязать карту для автосписаний.
-          Если у LIVE-магазина ЮKassa recurring пока не активирован, платёж пройдет как обычный и не заблокируется.
-        </p>
-        <input
-          v-model="testTargetTelegramId"
-          type="number"
-          min="1"
-          step="1"
-          placeholder="Telegram ID получателя (пусто = вы)"
-          class="mt-2 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
-        >
-      </div>
-      <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
-        <p class="text-xs font-semibold text-slate-700 dark:text-slate-200">Тест подписки (основные тарифы)</p>
-        <div class="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
-          <button
-            v-for="m in testSubscriptionPlans"
-            :key="`sub-${m}`"
-            type="button"
-            class="rounded-lg bg-cyan-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-60"
-            :disabled="testPayLoading"
-            @click="createAdminTestSubscription(m)"
-          >
-            {{ m }} мес.
-          </button>
-        </div>
-      </div>
-      <div class="rounded-xl border border-amber-200 bg-amber-50 p-3 dark:border-amber-700/40 dark:bg-amber-950/20">
-        <p class="text-xs font-semibold text-amber-900 dark:text-amber-200">Тест привязки карты: 2 дня / 1 ₽</p>
-        <p class="mt-1 text-[11px] text-amber-800/90 dark:text-amber-200/80">
-          Создаёт платёж с сохранением payment method. Используйте для проверки флага привязки карты и напоминаний о списании.
-        </p>
-        <div class="mt-2 flex flex-wrap gap-2">
-          <button
-            type="button"
-            class="rounded-lg bg-amber-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-60"
-            :disabled="testPayLoading"
-            @click="createAdminBindingProbe('live')"
-          >
-            Запустить 2д / 1₽ (LIVE)
-          </button>
-          <button
-            type="button"
-            class="rounded-lg bg-slate-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-60"
-            :disabled="testPayLoading"
-            @click="createAdminBindingProbe('test')"
-          >
-            Запустить 2д / 1₽ (TEST)
-          </button>
-        </div>
-      </div>
-      <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
-        <p class="text-xs font-semibold text-slate-700 dark:text-slate-200">Тест токенов</p>
-        <div class="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
-          <button
-            v-for="pack in testTokenPacks"
-            :key="`tok-${pack}`"
-            type="button"
-            class="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-60"
-            :disabled="testPayLoading"
-            @click="createAdminTestTokens(pack)"
-          >
-            {{ pack }} ⚡
-          </button>
-        </div>
       </div>
     </div>
     <div v-else-if="showFullAdminShell && tab === 'ops'" class="space-y-3">

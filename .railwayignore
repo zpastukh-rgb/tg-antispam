@@ -1,12 +1,18 @@
 # Local envs & deps (never needed in Railway build context from CLI snapshot)
 .git
 venv/
+venv
 .venv/
 .venv-debug/
 **/__pycache__/
 **/*.pyc
 webapp/node_modules/
 webapp/dist/
+
+# Тяжёлые файлы в корне репо (ТЗ PDF и т.п.) — не участвуют в Dockerfile.webapp, но раздувают CLI snapshot
+*.pdf
+**/*.pdf
+avatar.PNG
 
 # IDE / OS
 .idea/

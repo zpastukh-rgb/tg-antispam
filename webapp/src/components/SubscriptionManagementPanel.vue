@@ -16,7 +16,7 @@ const props = defineProps({
   hideEmbeddedHint: { type: Boolean, default: false },
 })
 
-const useDarkShell = computed(() => props.variant === 'page' || props.variant === 'embedded')
+const useDarkShell = computed(() => props.variant === 'page')
 
 const emit = defineEmits(['update:profile', 'open-tariff'])
 
@@ -205,7 +205,7 @@ watch(
 <template>
   <div
     class="text-white"
-    :class="variant === 'page' ? '-mx-4 min-h-[calc(100dvh-7.5rem)] px-4 pb-6 pt-1 md:-mx-6 md:px-6' : 'py-2'"
+    :class="variant === 'page' ? '-mx-4 min-h-[calc(100dvh-7.5rem)] px-4 pb-6 pt-1 md:-mx-6 md:px-6' : 'py-0'"
   >
     <div
       v-if="variant === 'embedded' && !hideEmbeddedHint"
@@ -223,7 +223,7 @@ watch(
       "
     >
     <!-- Карточка статуса: тонкая рамка; общая тёмная подложка — родитель с page -->
-    <div class="rounded-2xl bg-zinc-900/50 p-1.5 ring-1 ring-zinc-800/60">
+    <div :class="variant === 'embedded' ? '' : 'rounded-2xl bg-zinc-900/50 p-1.5 ring-1 ring-zinc-800/60'">
       <div
         class="relative overflow-hidden rounded-[0.8rem] border border-lime-500/35 bg-gradient-to-b from-zinc-900/95 via-zinc-950/98 to-black/95 p-4 shadow-inner shadow-black/40"
         :class="isPremium ? 'pb-11' : 'pb-4'"
@@ -250,7 +250,7 @@ watch(
 
     <div>
       <p class="px-0.5 pb-2 text-[12px] font-semibold uppercase tracking-wide text-white/55">Детали подписки</p>
-      <div class="divide-y divide-white/[0.08] rounded-2xl border border-lime-500/10 bg-zinc-900/45">
+      <div :class="variant === 'embedded' ? 'divide-y divide-white/[0.07] rounded-2xl bg-zinc-900/40' : 'divide-y divide-white/[0.08] rounded-2xl border border-lime-500/10 bg-zinc-900/45'">
         <div class="flex items-center justify-between gap-2 px-3 py-3">
           <span class="text-sm text-white/70">Тариф</span>
           <div class="flex min-w-0 items-center gap-1">
@@ -311,17 +311,14 @@ watch(
     <div>
       <button
         type="button"
-        class="flex w-full items-center justify-between gap-2 rounded-2xl border border-lime-500/20 bg-zinc-900/55 px-3 py-3 text-left text-[13px] font-semibold text-lime-100/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] transition hover:border-lime-400/35 hover:bg-zinc-900/80 active:scale-[0.99]"
+        :class="variant === 'embedded' ? 'flex w-full items-center justify-between gap-2 rounded-2xl bg-zinc-900/45 px-3 py-3 text-left text-[13px] font-semibold text-lime-100/95 transition hover:bg-zinc-900/70 active:scale-[0.99]' : 'flex w-full items-center justify-between gap-2 rounded-2xl border border-lime-500/20 bg-zinc-900/55 px-3 py-3 text-left text-[13px] font-semibold text-lime-100/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] transition hover:border-lime-400/35 hover:bg-zinc-900/80 active:scale-[0.99]'"
         :aria-expanded="subscriptionHistoryOpen ? 'true' : 'false'"
         @click="toggleSubscriptionHistory"
       >
         <span>История подписки</span>
         <span class="shrink-0 text-[11px] font-bold text-lime-300/80 tabular-nums">{{ subscriptionHistoryOpen ? '▲' : '▼' }}</span>
       </button>
-      <div
-        v-show="subscriptionHistoryOpen"
-        class="mt-2 rounded-2xl border border-lime-500/10 bg-zinc-900/45 p-2"
-      >
+      <div v-show="subscriptionHistoryOpen" :class="variant === 'embedded' ? 'mt-2 rounded-2xl bg-zinc-900/40 p-2' : 'mt-2 rounded-2xl border border-lime-500/10 bg-zinc-900/45 p-2'">
         <p v-if="subscriptionHistoryLoading" class="px-2 py-2 text-[12px] text-white/55">Загружаем историю…</p>
         <p v-else-if="!subscriptionHistoryView.length" class="px-2 py-2 text-[12px] text-white/50">Пока нет операций.</p>
         <div v-else class="space-y-1.5">

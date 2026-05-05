@@ -30,6 +30,7 @@ from app.db.ensure_defaults import (
     ensure_default_profanity_roots,
     ensure_default_comeback_promo,
     ensure_referral_credits_schema,
+    ensure_users_legal_consent_columns,
     ensure_promo_codes_grant_schema,
     ensure_credit_ledger_schema,
     ensure_partner_payouts_schema,
@@ -56,6 +57,7 @@ from app.db.ensure_defaults import (
     ensure_users_subscription_source_schema,
     ensure_users_subscription_activated_at_schema,
     ensure_users_payment_binding_schema,
+    ensure_users_yookassa_autorenew_columns,
     ensure_users_group_channel_limits_schema,
     ensure_chat_spike_alerts_schema,
     ensure_rules_spam_spike_columns,
@@ -126,10 +128,20 @@ class _StartupGateMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+async def _pii_schema_background() -> None:
+    """PII на ВДС не должен блокировать готовность API (503 у Mini App → нули на главной)."""
+    try:
+        from app.services.pii_user_store import ensure_pii_schema
+
+        await ensure_pii_schema()
+    except Exception:
+        log.warning("ensure_pii_schema failed (опционально PII_DATABASE_URL)", exc_info=True)
+
+
 async def _run_api_startup_ensures(app: FastAPI) -> None:
     if engine is None:
-        app.state.api_ready = True
         return
+    asyncio.create_task(_pii_schema_background())
     try:
         await ensure_rules_public_alerts_columns(engine)
         await ensure_rules_guardian_periodic_columns(engine)
@@ -143,10 +155,11 @@ async def _run_api_startup_ensures(app: FastAPI) -> None:
         await ensure_chats_chat_kind_column(engine)
         await ensure_chats_linked_discussion_chat_id_column(engine)
         await ensure_chats_linked_channel_chat_id_column(engine)
+        await ensure_promo_codes_grant_schema(engine)
         await ensure_default_trial_promo(engine)
         await ensure_default_admin_promo_codes(engine)
         await ensure_referral_credits_schema(engine)
-        await ensure_promo_codes_grant_schema(engine)
+        await ensure_users_legal_consent_columns(engine)
         await ensure_default_token_aurum_promo_codes(engine)
         await ensure_disable_legacy_simple_promo_codes(engine)
         await ensure_default_comeback_promo(engine)
@@ -168,6 +181,7 @@ async def _run_api_startup_ensures(app: FastAPI) -> None:
         await ensure_users_subscription_source_schema(engine)
         await ensure_users_subscription_activated_at_schema(engine)
         await ensure_users_payment_binding_schema(engine)
+        await ensure_users_yookassa_autorenew_columns(engine)
         await ensure_users_group_channel_limits_schema(engine)
         await ensure_chat_spike_alerts_schema(engine)
         await ensure_rules_spam_spike_columns(engine)
@@ -195,15 +209,14 @@ async def _run_api_startup_ensures(app: FastAPI) -> None:
             log.warning(
                 "autopost_loop not started on API: BOT_TOKEN unset. Add BOT_TOKEN to this service or rely on bot process (python -m app.main)."
             )
-    finally:
-        app.state.api_ready = True
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Время старта этого воркера API (Guard Pulse / ops health). Не локальный терминал — тот процесс, что отвечает на HTTP.
     app.state.api_boot_at = datetime.now(timezone.utc)
-    app.state.api_ready = False
+    # Раньше api_ready=False до конца долгих миграций → Mini App ловил 503 на /api/me и оставался с нулями на главной.
+    app.state.api_ready = True
     asyncio.create_task(_run_api_startup_ensures(app))
     yield
 

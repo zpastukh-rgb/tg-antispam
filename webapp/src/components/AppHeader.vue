@@ -5,10 +5,13 @@ import NavIcon from './NavIcon.vue'
 import { useApi } from '../composables/useApi'
 import { canOpenAdminEntry } from '../utils/adminAccess'
 import { useCabinetMode } from '../composables/useCabinetMode'
+import { useDashboardSection } from '../composables/useDashboardSection'
 
 const router = useRouter()
 const route = useRoute()
 const { api, fetchSilent, hasInitData } = useApi()
+const { dashboardSection } = useDashboardSection()
+const PREMIUM_CACHE_KEY = 'guard.me.is_premium.v1'
 const me = ref(null)
 const hasDelegated = ref(false)
 const { cabinetMode, setCabinetMode } = useCabinetMode()
@@ -34,12 +37,27 @@ const isPurpleAdmActive = computed(() => {
   return false
 })
 
+/** Малая аватарка в шапке: скрыта на главном аккаунте, партнёрке, оплате токенов и подписки — чтобы не дублировать герой-блоки */
+const hideHeaderLogo = computed(() => {
+  const name = String(route.name || '')
+  if (name === 'Tokens') return true
+  if (name === 'Referral') return true
+  if (name !== 'Dashboard') return false
+  const sec = String(dashboardSection.value || 'account')
+  return ['account', 'partner', 'tokens', 'subscription'].includes(sec)
+})
+
 async function loadMeProfile() {
   if (!hasInitData.value) return
   try {
     const meData = await fetchSilent(() => api.me())
     me.value = meData
     hasDelegated.value = !!meData?.has_managed_shared_chat
+    try {
+      localStorage.setItem(PREMIUM_CACHE_KEY, meData?.is_premium ? '1' : '0')
+    } catch {
+      //
+    }
   } catch {
     //
   }
@@ -85,56 +103,69 @@ function goBack() {
     emit('subscription-back')
     return
   }
-  if (window.history.length > 1) {
-    router.back()
-  } else {
-    router.push('/')
-  }
+  // Дать активному вью шанс «снять» внутренний шаг (например, AdminView
+  // перехватит чтобы сначала свернуть внутренний экран статистики/защиты).
+  try {
+    const ev = new CustomEvent('guard:header-back', { cancelable: true })
+    const accepted = window.dispatchEvent(ev)
+    if (accepted === false || ev.defaultPrevented) return
+  } catch { /* */ }
+  // Иначе — настоящий шаг по истории; на главную уводим только если истории нет.
+  try {
+    if (window.history && window.history.length > 1) {
+      router.back()
+      return
+    }
+  } catch { /* */ }
+  router.push('/').catch(() => {})
 }
 </script>
 
 <template>
   <header
-    class="sticky top-0 z-30 flex h-14 items-center justify-between border-b border-white/10 bg-zinc-950/55 px-4 shadow-[0_8px_28px_-6px_rgba(0,0,0,0.55)] backdrop-blur-xl md:px-6"
+    class="sticky top-0 z-30 flex h-11 items-center justify-between border-b border-white/10 bg-zinc-950/55 px-3 shadow-[0_6px_22px_-6px_rgba(0,0,0,0.5)] backdrop-blur-xl md:h-12 md:px-5"
   >
-    <div class="flex items-center gap-3">
+    <div class="flex items-center gap-2 md:gap-2.5">
       <button
         v-if="showBack"
         type="button"
-        class="flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/[0.06] text-slate-200 hover:bg-white/[0.12] hover:text-white"
+        class="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/[0.06] text-slate-200 hover:bg-white/[0.12] hover:text-white md:h-9 md:w-9"
         aria-label="Назад"
         @click="goBack"
       >
-        <NavIcon name="back" class="w-5 h-5" />
+        <NavIcon name="back" class="h-4 w-4 md:h-5 md:w-5" />
       </button>
       <button
         v-else
         type="button"
-        class="flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/[0.06] text-slate-200 hover:bg-white/[0.12] hover:text-white"
+        class="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/[0.06] text-slate-200 hover:bg-white/[0.12] hover:text-white md:h-9 md:w-9"
         aria-label="Меню"
         @click="emit('menu-click')"
       >
-        <NavIcon name="menu" class="w-5 h-5" />
+        <NavIcon name="menu" class="h-4 w-4 md:h-5 md:w-5" />
       </button>
-      <a href="#" class="flex min-w-0 items-center gap-2.5" @click.prevent="router.push('/')">
+      <a href="#" class="flex min-w-0 items-center gap-2" @click.prevent="router.push('/')">
         <img
+          v-show="!hideHeaderLogo"
           :src="logoSrc"
           alt="AntiSpam Guard"
           width="40"
           height="40"
           draggable="false"
-          class="h-9 w-9 shrink-0 object-contain object-center drop-shadow-[0_0_10px_rgba(143,212,26,0.35)] dark:drop-shadow-[0_0_12px_rgba(143,212,26,0.25)]"
+          class="h-8 w-8 shrink-0 object-contain object-center drop-shadow-[0_0_10px_rgba(143,212,26,0.35)] dark:drop-shadow-[0_0_12px_rgba(143,212,26,0.25)]"
           @dragstart.prevent
         />
-        <span class="truncate text-base font-bold tracking-tight text-white">AntiSpam Guard</span>
+        <span class="truncate text-sm font-bold leading-tight tracking-tight md:text-[0.95rem]">
+          <span class="text-white">AntiSpam </span><span class="text-lime-400">Guard</span>
+        </span>
       </a>
     </div>
     <div class="flex items-center gap-1">
       <button
         v-if="canSeeAdmin && !subscriptionScreen"
         type="button"
-        class="inline-flex h-6 shrink-0 items-center justify-center rounded-md border border-cyan-400/45 px-2.5 text-[10px] font-bold leading-none tracking-wide text-cyan-600 transition-colors hover:bg-cyan-500/10 dark:text-cyan-300 dark:hover:bg-cyan-500/15"
-        :class="isBlueAdmActive ? 'bg-cyan-500/15 shadow-[0_0_14px_rgba(34,211,238,0.55)] ring-1 ring-cyan-300/40' : ''"
+        class="inline-flex h-[22px] shrink-0 items-center justify-center rounded border border-cyan-400/45 px-1.5 text-[9px] font-bold leading-none tracking-wide text-cyan-600 transition-colors hover:bg-cyan-500/10 dark:text-cyan-300 dark:hover:bg-cyan-500/15"
+        :class="isBlueAdmActive ? 'bg-cyan-500/15 shadow-[0_0_12px_rgba(34,211,238,0.45)] ring-1 ring-cyan-300/35' : ''"
         aria-label="Открыть админку"
         @click="openBlueAdm"
       >
@@ -143,8 +174,8 @@ function goBack() {
       <button
         v-if="hasDelegated && !subscriptionScreen"
         type="button"
-        class="inline-flex h-6 shrink-0 items-center justify-center rounded-md border border-violet-400/45 px-2.5 text-[10px] font-bold leading-none tracking-wide text-violet-300 transition-colors hover:bg-violet-500/10"
-        :class="isPurpleAdmActive ? 'bg-violet-500/15 shadow-[0_0_14px_rgba(167,139,250,0.6)] ring-1 ring-violet-300/45' : ''"
+        class="inline-flex h-[22px] shrink-0 items-center justify-center rounded border border-violet-400/45 px-1.5 text-[9px] font-bold leading-none tracking-wide text-violet-300 transition-colors hover:bg-violet-500/10"
+        :class="isPurpleAdmActive ? 'bg-violet-500/15 shadow-[0_0_12px_rgba(167,139,250,0.5)] ring-1 ring-violet-300/45' : ''"
         aria-label="Делегированные чаты"
         @click="openPurpleAdm"
       >

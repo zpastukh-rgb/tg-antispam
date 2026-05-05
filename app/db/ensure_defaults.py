@@ -32,13 +32,130 @@ LEGACY_SIMPLE_PROMO_CODES = ("TRIAL3", "PREM7", "PREM14", "GUARDPLUS3")
 # Лимит чатов при активации: OWNER_FOREVER_CHAT_LIMIT (по умолчанию 500)
 DEFAULT_OWNER_FOREVER_CODE = "GUARDIAN_OWNER"
 DEFAULT_PROFANITY_ROOTS = (
-    # Мат (корни/формы, чтобы ловить искажения и составные токены)
+    # Мат (корни/формы, чтобы ловить искажения и составные токены).
+    # Сюда — только настоящий мат. Обзывательства без мата (чмо/урод/ублюд/гнида)
+    # вынесены в DEFAULT_INSULT_ROOTS, чтобы корректно учитывались в статистике.
     "бля", "бляд", "блят", "еб", "еба", "ебан", "ебуч", "ебл", "заеб", "наеб", "поеб", "подъеб",
-    "разъеб", "проеб", "уеб", "выеб", "пизд", "пезд", "пидор", "пидар", "пидр", "педик", "гондон",
+    "разъеб", "проеб", "уеб", "выеб", "пизд", "пезд", "пидор", "пидар", "пидр", "педик",
+    # Гондон / гандон + распространённые искажения
+    "гондон", "гандон", "гондош", "гандош",
     "хуй", "хуе", "хуйл", "хуйн", "хуяр", "хуяч", "хер", "муд", "мудак", "сук", "суч", "шлюх",
-    "манда", "манд", "залуп", "гнид", "чмо", "урод", "ублюд", "долбоеб", "долбоеб",
+    "манда", "манд", "залуп", "долбоеб", "долбоеб",
     # Частые формы в фразах
     "иди нах", "пошел нах", "пошла нах", "похуй", "нихуя", "хуесос", "хуеплет",
+)
+
+# Расистские оскорбления и лозунги (отдельный фильтр "Антирасист").
+# Только заведомо-оскорбительные ярлыки и расистские лозунги, без нейтральных
+# названий национальностей.
+DEFAULT_RACISM_ROOTS = (
+    # Этнические оскорбления (русский)
+    "негр", "негритос", "негрит", "ниггер", "ниггор",
+    "нига", "ниги", "нигер",
+    "жид", "жидов", "жидк",
+    "хач", "хачи", "хачик", "хачей",
+    "чурк", "чурбан", "чуркабес",
+    "узкоглаз", "узкопл",
+    "косоглаз",
+    "черножоп", "черножёп",
+    "пиндос", "америкос",
+    "хохол", "хохлы", "хохлуш",
+    "москал", "московит", "кацап",
+    "бульбаш",
+    "монголоид", "негроид",
+    # Английский
+    "nigger", "nigga", "kike", "spic", "chink", "wetback", "gook",
+    # Расистские лозунги
+    "белая раса", "белые превыше", "арийск", "славянск превосход",
+    "слава белым", "white power",
+)
+
+# Фашистские / нацистские лозунги и символика (отдельный фильтр "Антифашист").
+DEFAULT_NAZI_ROOTS = (
+    "хайль", "зиг хайль", "зиг ха", "хайль гитл",
+    "1488", "14/88", "14-88",
+    "хх ", "ss88",
+    "адольф гитл", "гитлер жив",
+    "наци ", "нацист", "наци-",
+    "фашист", "фашизм",
+    "свастик",
+    "третий рейх", "рейх жив",
+    "сс ", "ваффен",
+    "мы будем убивать", "арийская чистота",
+    "русский рейх",
+    "русская сила превыше",
+    "rwds",
+    "белый легион",
+    "холокост-фейк", "холокост это миф",
+    "heil hitler", "sieg heil",
+)
+
+# Анатомические/половые оскорбления и пошлости (отдельный фильтр "Антипошлость").
+DEFAULT_VULGAR_ROOTS = (
+    "писька", "писю", "писек", "пипиську", "пиписьк",
+    "член", "членом", "членов",
+    "сиська", "сиськ", "сися", "сиси", "сисяст", "сисек", "сисят",
+    "сосок", "соски",
+    "жопа", "жоп", "попа", "попк",
+    "вагина", "вагин",
+    "пенис",
+    "очко", "очк",
+    "анус", "анальн",
+    "влагалищ",
+    "ягодиц",
+    "елда", "елд",
+    "трах", "трахн", "поебыв",
+    "сперм",
+    "сосат",
+    "оргазм",
+    "минет", "миньет",
+    "куннил",
+    "мастурб", "дрочи", "дрочк",
+    "лизн", "вылизыва",
+    "проститутк", "путан",
+)
+
+# Обзывательства / оскорбления без мата (отдельный фильтр).
+# Используется поиск по корню, поэтому одна запись ловит словоформы:
+# "дурак" → "дурак/дурака/дураков/дурачьё/дурацкий" и т.д.
+DEFAULT_INSULT_ROOTS = (
+    # Базовые ярлыки и оскорбления
+    "дурак", "дура", "дурач", "дурын",
+    "идиот", "идиотк",
+    "тупой", "туп", "тупиц", "тупорыл", "тупар",
+    "дебил", "дебильн",
+    "придурок", "придурк",
+    "баран", "овца", "осел", "ослиц",
+    "кретин", "дегенерат",
+    "лох", "лошар", "лохушк",
+    "лузер", "неудачник",
+    "быдло", "ничтожеств",
+    "тварь", "тварин",
+    "сволоч", "сволот",
+    "паскуд", "мерзав", "негодяй", "подлец",
+    "хам", "хамло",
+    "наглец", "наглюк",
+    "бестолоч", "бестолков",
+    "слабак", "слабач",
+    "задрот", "задроч",
+    "даун", "дауниш",
+    "крыса", "крысёныш",
+    "клоун", "клоунесс", "паяц",
+    "свин", "свинота", "свинш",
+    "малолетк", "сопляк", "сопляч",
+    "ушлепок", "ушлеп",
+    "выскочк", "пустозвон",
+    "чмо", "чмош", "чмышк",
+    "урод", "уродин", "уродц",
+    "ублюд", "ублюдок",
+    "гнид", "гнида",
+    "тупица",
+    "имбецил",
+    "обормот",
+    # Часто встречающиеся в чатах
+    "идитнах", "иди отсюда", "пошёл вон", "пошел вон",
+    "ты дурак", "ты идиот", "ты тупой", "ты дебил",
+    "сам дурак", "сам идиот",
 )
 
 DEFAULT_CASINO_ROOTS = (
@@ -59,6 +176,26 @@ DEFAULT_JOBS_ROOTS = (
     "пару людей", "кто бы смог", "кто интересно", "хочешь зарабатывать", "вариант неплохо заработать",
     "выплаты каждый день", "оплата на руки", "безнал", "давай ко мне за деталями",
     "есть свободные", "время менять жизнь", "узнай в био", "смотри описание", "схема приносит",
+)
+
+DEFAULT_ADS_ROOTS = (
+    # Прямые ключевые слова рекламы и продаж
+    "реклам", "рекламн", "рекламировать", "акци", "акция", "акций", "акционн",
+    "скидк", "скидка", "скидки", "распродаж", "распродажа", "распродажи",
+    "купить", "купи", "куплю", "покупк", "покупай", "покупайт",
+    "услуг", "услуги", "услугу", "услугами", "оказыва", "оказываем",
+    "цена", "цены", "ценам", "стоимост", "стоит", "со скидкой",
+    "заказ", "заказать", "заказы", "заказывайт", "оформи заказ",
+    "доставк", "доставка", "доставкой",
+    "промокод", "промокоды", "промо",
+    "выгодно", "выгодная", "выгодное", "выгодные",
+    "оффер", "офферы", "спецпредложен", "специальное предложение",
+    "горящ", "горячее предложение", "лимитированн",
+    "предложение дня", "только сегодня", "успей купить", "успейте купить",
+    "только сейчас", "до конца дня", "не упусти",
+    "франшиз", "продам", "продаю", "продаются", "распродажа",
+    "опт", "оптом", "розница", "розницу",
+    "интернет-магазин", "магазин", "shop", "shopping", "sale", "discount", "promo",
 )
 
 
@@ -86,11 +223,13 @@ async def ensure_default_trial_promo(engine: AsyncEngine) -> None:
     """Гарантирует строку промокода TRIAL3 (3 дня premium), не трогая used_at / redemptions."""
     stmt = text(
         """
-        INSERT INTO promo_codes (code, tariff, days)
-        VALUES (:code, 'premium', :days)
+        INSERT INTO promo_codes (code, tariff, days, grant_tokens, grant_aurum)
+        VALUES (:code, 'premium', :days, 0.0, 0.0)
         ON CONFLICT (code) DO UPDATE
         SET tariff = EXCLUDED.tariff,
-            days = EXCLUDED.days
+            days = EXCLUDED.days,
+            grant_tokens = EXCLUDED.grant_tokens,
+            grant_aurum = EXCLUDED.grant_aurum
         """
     )
     try:
@@ -118,11 +257,13 @@ async def ensure_default_admin_promo_codes(engine: AsyncEngine) -> None:
                 await conn.execute(
                     text(
                         """
-                        INSERT INTO promo_codes (code, tariff, days)
-                        VALUES (:code, 'premium', :days)
+                        INSERT INTO promo_codes (code, tariff, days, grant_tokens, grant_aurum)
+                        VALUES (:code, 'premium', :days, 0.0, 0.0)
                         ON CONFLICT (code) DO UPDATE
                         SET tariff = EXCLUDED.tariff,
-                            days = EXCLUDED.days
+                            days = EXCLUDED.days,
+                            grant_tokens = EXCLUDED.grant_tokens,
+                            grant_aurum = EXCLUDED.grant_aurum
                         """
                     ),
                     {"code": code, "days": int(days)},
@@ -184,11 +325,13 @@ async def ensure_owner_forever_promo(engine: AsyncEngine) -> None:
         return
     stmt = text(
         """
-        INSERT INTO promo_codes (code, tariff, days)
-        VALUES (:code, 'premium', 0)
+        INSERT INTO promo_codes (code, tariff, days, grant_tokens, grant_aurum)
+        VALUES (:code, 'premium', 0, 0.0, 0.0)
         ON CONFLICT (code) DO UPDATE
         SET tariff = EXCLUDED.tariff,
-            days = EXCLUDED.days
+            days = EXCLUDED.days,
+            grant_tokens = EXCLUDED.grant_tokens,
+            grant_aurum = EXCLUDED.grant_aurum
         """
     )
     try:
@@ -219,11 +362,13 @@ async def ensure_default_comeback_promo(engine: AsyncEngine) -> None:
         return
     stmt = text(
         """
-        INSERT INTO promo_codes (code, tariff, days)
-        VALUES (:code, 'premium', :days)
+        INSERT INTO promo_codes (code, tariff, days, grant_tokens, grant_aurum)
+        VALUES (:code, 'premium', :days, 0.0, 0.0)
         ON CONFLICT (code) DO UPDATE
         SET tariff = EXCLUDED.tariff,
-            days = EXCLUDED.days
+            days = EXCLUDED.days,
+            grant_tokens = EXCLUDED.grant_tokens,
+            grant_aurum = EXCLUDED.grant_aurum
         """
     )
     try:
@@ -275,6 +420,21 @@ async def ensure_chats_linked_channel_chat_id_column(engine: AsyncEngine) -> Non
         log.warning("ensure_chats_linked_channel_chat_id_column skipped: %s", e)
 
 
+async def ensure_users_legal_consent_columns(engine: AsyncEngine) -> None:
+    """Колонки фиксации согласий LegalConsentGate для отображения в админке."""
+    sql_blocks = (
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS legal_bundle_accepted_at TIMESTAMPTZ",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS legal_pd_accepted_at TIMESTAMPTZ",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS legal_marketing_opt_in BOOLEAN NOT NULL DEFAULT FALSE",
+    )
+    try:
+        async with engine.begin() as conn:
+            for sql in sql_blocks:
+                await conn.execute(text(sql))
+    except Exception as e:
+        log.warning("ensure_users_legal_consent_columns skipped: %s", e)
+
+
 async def ensure_referral_credits_schema(engine: AsyncEngine) -> None:
     """Идемпотентно добавляет поля рефералки/кредитов в users для старых БД."""
     sql_blocks = (
@@ -302,9 +462,12 @@ async def ensure_referral_credits_schema(engine: AsyncEngine) -> None:
 
 async def ensure_promo_codes_grant_schema(engine: AsyncEngine) -> None:
     """Идемпотентно добавляет поля начислений в promo_codes для токенов и AURUM."""
+    # Должно выполняться до INSERT промокодов: иначе колонки от create_all без SERVER DEFAULT → NOT NULL violation.
     sql_blocks = (
         "ALTER TABLE promo_codes ADD COLUMN IF NOT EXISTS grant_tokens DOUBLE PRECISION DEFAULT 0.0",
         "ALTER TABLE promo_codes ADD COLUMN IF NOT EXISTS grant_aurum DOUBLE PRECISION DEFAULT 0.0",
+        "ALTER TABLE promo_codes ALTER COLUMN grant_tokens SET DEFAULT 0",
+        "ALTER TABLE promo_codes ALTER COLUMN grant_aurum SET DEFAULT 0",
     )
     try:
         async with engine.begin() as conn:
@@ -344,6 +507,76 @@ async def ensure_chat_manager_invites_schema(engine: AsyncEngine) -> None:
                 await conn.execute(text(sql))
     except Exception as e:
         log.warning("ensure_chat_manager_invites_schema skipped: %s", e)
+
+
+async def ensure_chat_manager_permissions_columns(engine: AsyncEngine) -> None:
+    """
+    Делегированные права в ChatManager / ChatManagerInvite.
+    Для существующих legacy-записей выдаём «полный» набор прав по типу чата,
+    чтобы не сломать ранее добавленных делегатов.
+    """
+    sql_blocks = (
+        "ALTER TABLE chat_managers ADD COLUMN IF NOT EXISTS can_protection BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE chat_managers ADD COLUMN IF NOT EXISTS can_broadcast BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE chat_managers ADD COLUMN IF NOT EXISTS can_reports BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE chat_managers ADD COLUMN IF NOT EXISTS can_first_post_settings BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE chat_manager_invites ADD COLUMN IF NOT EXISTS can_protection BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE chat_manager_invites ADD COLUMN IF NOT EXISTS can_broadcast BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE chat_manager_invites ADD COLUMN IF NOT EXISTS can_reports BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE chat_manager_invites ADD COLUMN IF NOT EXISTS can_first_post_settings BOOLEAN NOT NULL DEFAULT FALSE",
+        # Legacy backfill: всем уже добавленным менеджерам выставляем актуальный набор прав.
+        """
+        UPDATE chat_managers cm
+           SET can_protection = TRUE, can_broadcast = TRUE, can_reports = TRUE
+          FROM chats c
+         WHERE c.id = cm.chat_id
+           AND COALESCE(c.chat_kind, 'group') = 'group'
+           AND cm.can_protection = FALSE
+           AND cm.can_broadcast = FALSE
+           AND cm.can_reports = FALSE
+           AND cm.can_first_post_settings = FALSE
+        """,
+        """
+        UPDATE chat_managers cm
+           SET can_broadcast = TRUE, can_first_post_settings = TRUE
+          FROM chats c
+         WHERE c.id = cm.chat_id
+           AND COALESCE(c.chat_kind, 'group') = 'channel'
+           AND cm.can_protection = FALSE
+           AND cm.can_broadcast = FALSE
+           AND cm.can_reports = FALSE
+           AND cm.can_first_post_settings = FALSE
+        """,
+        """
+        UPDATE chat_manager_invites ci
+           SET can_protection = TRUE, can_broadcast = TRUE, can_reports = TRUE
+          FROM chats c
+         WHERE c.id = ci.chat_id
+           AND COALESCE(c.chat_kind, 'group') = 'group'
+           AND ci.can_protection = FALSE
+           AND ci.can_broadcast = FALSE
+           AND ci.can_reports = FALSE
+           AND ci.can_first_post_settings = FALSE
+        """,
+        """
+        UPDATE chat_manager_invites ci
+           SET can_broadcast = TRUE, can_first_post_settings = TRUE
+          FROM chats c
+         WHERE c.id = ci.chat_id
+           AND COALESCE(c.chat_kind, 'group') = 'channel'
+           AND ci.can_protection = FALSE
+           AND ci.can_broadcast = FALSE
+           AND ci.can_reports = FALSE
+           AND ci.can_first_post_settings = FALSE
+        """,
+    )
+    try:
+        async with engine.begin() as conn:
+            for sql in sql_blocks:
+                await conn.execute(text(sql))
+        log.info("ensure_chat_manager_permissions_columns: ok")
+    except Exception as e:
+        log.warning("ensure_chat_manager_permissions_columns skipped: %s", e)
 
 
 async def ensure_admin_insights_schema(engine: AsyncEngine) -> None:
@@ -1121,6 +1354,23 @@ async def ensure_users_payment_binding_schema(engine: AsyncEngine) -> None:
                 await conn.execute(text(sql))
     except Exception as e:
         log.warning("ensure_users_payment_binding_schema skipped: %s", e)
+
+
+async def ensure_users_yookassa_autorenew_columns(engine: AsyncEngine) -> None:
+    """Хранение payment_method.id и параметров фонового продления ЮKassa."""
+    stmts = (
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS yookassa_payment_method_id VARCHAR(64)",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS yookassa_last_mode VARCHAR(8)",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_autorenew_months INTEGER",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS autorenew_last_attempt_at TIMESTAMPTZ",
+    )
+    try:
+        async with engine.begin() as conn:
+            for sql in stmts:
+                await conn.execute(text(sql))
+        log.info("ensure_users_yookassa_autorenew_columns: ok")
+    except Exception as e:
+        log.warning("ensure_users_yookassa_autorenew_columns skipped: %s", e)
 
 
 async def ensure_users_group_channel_limits_schema(engine: AsyncEngine) -> None:

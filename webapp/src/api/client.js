@@ -113,14 +113,22 @@ async function request(method, path, body = null) {
   }
 
   let res
-  try {
-    res = await fetch(url, options)
-  } catch (netErr) {
-    const err = new Error(netErr?.message || 'fetch failed')
-    err.status = 0
-    err.body = { detail: netErr?.message || 'fetch failed' }
-    err.cause = netErr
-    throw err
+  const maxAttempts = method === 'GET' ? 6 : 1
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      res = await fetch(url, options)
+    } catch (netErr) {
+      const err = new Error(netErr?.message || 'fetch failed')
+      err.status = 0
+      err.body = { detail: netErr?.message || 'fetch failed' }
+      err.cause = netErr
+      throw err
+    }
+    if (res.status === 503 && method === 'GET' && attempt < maxAttempts) {
+      await new Promise((r) => setTimeout(r, 280 + attempt * 120))
+      continue
+    }
+    break
   }
   if (!res.ok) {
     const err = new Error(res.statusText || `HTTP ${res.status}`)
@@ -158,6 +166,7 @@ export const api = {
   delete: (path) => request('DELETE', path),
 
   me: () => api.get('/api/me'),
+  postLegalConsent: (body) => api.post('/api/me/legal-consent', body),
   presencePing: () => api.post('/api/presence/ping', {}),
   chats: (mode = 'all', opts = {}) => {
     const q = new URLSearchParams()
@@ -203,7 +212,27 @@ export const api = {
   connectCleanupPending: (hours = 24) => api.post('/api/connect/pending/cleanup', { hours }),
   connectClearAllPending: () => api.post('/api/connect/pending/clear-all', {}),
   billing: () => api.get('/api/billing'),
-  activitySummary: () => api.get('/api/activity/summary'),
+  activitySummary: () => {
+    let tzOff = 0
+    try { tzOff = -new Date().getTimezoneOffset() } catch (_) { tzOff = 0 }
+    const q = new URLSearchParams()
+    q.set('tz_offset_min', String(tzOff))
+    return api.get(`/api/activity/summary?${q.toString()}`)
+  },
+  activityBreakdown: (period = 'today', scope = 'all', chatId = null) => {
+    const q = new URLSearchParams()
+    q.set('period', String(period || 'today'))
+    const allowedScope = ['all', 'own', 'delegated']
+    q.set('scope', allowedScope.includes(String(scope)) ? String(scope) : 'all')
+    if (chatId != null && chatId !== '' && Number.isFinite(Number(chatId))) {
+      q.set('chat_id', String(Number(chatId)))
+    }
+    try {
+      const tz = -new Date().getTimezoneOffset()
+      if (Number.isFinite(tz)) q.set('tz_offset_min', String(tz))
+    } catch (_) {}
+    return api.get(`/api/activity/breakdown?${q.toString()}`)
+  },
   ownerJoinReportSettings: () => api.get('/api/owner/join-report-settings'),
   ownerSetJoinReportSettings: (periods = []) => api.post('/api/owner/join-report-settings', { periods }),
   activityHours: (chatId = null, hours = 24, fromTs = '', toTs = '') => {

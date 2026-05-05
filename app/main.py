@@ -33,6 +33,7 @@ from app.db.ensure_defaults import (
     ensure_owner_forever_promo,
     ensure_default_profanity_roots,
     ensure_referral_credits_schema,
+    ensure_users_legal_consent_columns,
     ensure_promo_codes_grant_schema,
     ensure_credit_ledger_schema,
     ensure_subscription_credits_merged_to_aurum_v1,
@@ -51,11 +52,13 @@ from app.db.ensure_defaults import (
     ensure_rules_hard_dictionary_independent_v1,
     ensure_admin_insights_schema,
     ensure_chat_manager_invites_schema,
+    ensure_chat_manager_permissions_columns,
     ensure_spam_spike_notify_schema,
     ensure_payments_receipt_url_schema,
     ensure_users_subscription_source_schema,
     ensure_users_subscription_activated_at_schema,
     ensure_users_payment_binding_schema,
+    ensure_users_yookassa_autorenew_columns,
     ensure_users_group_channel_limits_schema,
     ensure_chat_spike_alerts_schema,
     ensure_rules_spam_spike_columns,
@@ -75,6 +78,7 @@ from app.db.models import Base
 
 from app.handlers.health import router as health_router
 from app.handlers.start import router as start_router
+from app.handlers.broadcast_clicks import router as broadcast_clicks_router
 from app.handlers.onboarding import router as onboarding_router
 from app.handlers.panel_dm import router as panel_router
 from app.handlers.log_setup import router as log_setup_router
@@ -168,6 +172,11 @@ _RULES_COLUMNS_008 = (
     ("filter_profanity_enabled", "BOOLEAN", "FALSE"),
     ("filter_jobs_enabled", "BOOLEAN", "FALSE"),
     ("filter_casino_enabled", "BOOLEAN", "FALSE"),
+    ("filter_ads_enabled", "BOOLEAN", "FALSE"),
+    ("filter_insults_enabled", "BOOLEAN", "FALSE"),
+    ("filter_racism_enabled", "BOOLEAN", "FALSE"),
+    ("filter_nazi_enabled", "BOOLEAN", "FALSE"),
+    ("filter_vulgar_enabled", "BOOLEAN", "FALSE"),
     ("delete_left_messages", "BOOLEAN", "TRUE"),
 )
 
@@ -283,10 +292,11 @@ async def on_startup() -> None:
     await ensure_chats_chat_kind_column(engine)
     await ensure_chats_linked_discussion_chat_id_column(engine)
     await ensure_chats_linked_channel_chat_id_column(engine)
+    await ensure_promo_codes_grant_schema(engine)
     await ensure_default_trial_promo(engine)
     await ensure_default_admin_promo_codes(engine)
     await ensure_referral_credits_schema(engine)
-    await ensure_promo_codes_grant_schema(engine)
+    await ensure_users_legal_consent_columns(engine)
     await ensure_default_token_aurum_promo_codes(engine)
     await ensure_disable_legacy_simple_promo_codes(engine)
     await ensure_default_comeback_promo(engine)
@@ -297,11 +307,13 @@ async def on_startup() -> None:
     await ensure_rules_hard_dictionary_independent_v1(engine)
     await ensure_admin_insights_schema(engine)
     await ensure_chat_manager_invites_schema(engine)
+    await ensure_chat_manager_permissions_columns(engine)
     await ensure_spam_spike_notify_schema(engine)
     await ensure_payments_receipt_url_schema(engine)
     await ensure_users_subscription_source_schema(engine)
     await ensure_users_subscription_activated_at_schema(engine)
     await ensure_users_payment_binding_schema(engine)
+    await ensure_users_yookassa_autorenew_columns(engine)
     await ensure_users_group_channel_limits_schema(engine)
     await ensure_chat_spike_alerts_schema(engine)
     await ensure_rules_spam_spike_columns(engine)
@@ -315,6 +327,12 @@ async def on_startup() -> None:
     await ensure_user_post_rules_drafts_json_column(engine)
     await ensure_users_delegate_broadcast_payer_column(engine)
     await ensure_admin_incident_feed_schema(engine)
+    try:
+        from app.services.pii_user_store import ensure_pii_schema
+
+        await ensure_pii_schema()
+    except Exception:
+        logging.getLogger(__name__).exception("ensure_pii_schema: пропуск (опциональная БД ПДн)")
     # Меню команд:
     # - ЛС: основной список (default).
     # - Обычные участники групп: пустое меню (не видят /addantispam и прочее).
@@ -399,6 +417,7 @@ async def main() -> None:
     # и my_chat_member в log_setup не срабатывает — группа не подключается, приветствие не уходит
     dp.include_router(health_router)
     dp.include_router(start_router)
+    dp.include_router(broadcast_clicks_router)
     dp.include_router(onboarding_router)
     # dp.include_router(first_message_captcha_router)  # капча на паузе
     dp.include_router(log_setup_router)

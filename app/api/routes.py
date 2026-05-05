@@ -18,9 +18,11 @@ from time import perf_counter
 
 import aiohttp
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from aiogram import Bot
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, BufferedInputFile
+from typing import Any
+
 from sqlalchemy import select, func, delete, text, case, or_, literal_column
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
@@ -28,9 +30,11 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from app.api.auth import require_init_data
+from app.api.auth import require_init_data, require_init_data_with_profile
 from app.api.deps import get_db
 from app.api.service import (
+    get_activity_summary_chat_ids,
+    get_accessible_chats_any_active,
     get_managed_chats,
     get_pending_chats,
     get_or_create_rule,
@@ -64,6 +68,8 @@ from app.db.models import (
     UserGlobalBadUrlPattern,
     ModerationLog,
     NewMember,
+    MemberLeft,
+    ChatActivityEvent,
     ReferralShareHit,
     AdminMessageTemplate,
     ChatManager,
@@ -79,6 +85,7 @@ from app.db.models import (
     WhitelistSenderChat,
     LinkBlacklist,
 )
+from app.db.pii_session import PiiAsyncSessionLocal
 from app.services.user_service import (
     get_or_create_user,
     can_add_chat,
@@ -88,6 +95,11 @@ from app.services.user_service import (
     effective_channel_limit,
     TARIFF_CHAT_LIMITS,
     Tariff,
+)
+from app.services.pii_user_store import (
+    pii_find_telegram_id_by_username_lower,
+    pii_storage_enabled,
+    resolve_username_lookup,
 )
 from app.services.telegram_notify import send_user_dm, send_user_dm_with_result, delete_user_dm_message
 from app.services.telegram_bot_api import (
@@ -250,6 +262,12 @@ async def _chat_managers_payload(session: AsyncSession, chat_id: int) -> list[di
                 "last_seen_at": _format_dt(seen),
                 "added_by": int(getattr(r, "added_by", 0) or 0),
                 "created_at": _format_dt(getattr(r, "created_at", None)),
+                "permissions": {
+                    "protection": bool(getattr(r, "can_protection", False)),
+                    "broadcast": bool(getattr(r, "can_broadcast", False)),
+                    "reports": bool(getattr(r, "can_reports", False)),
+                    "first_post_settings": bool(getattr(r, "can_first_post_settings", False)),
+                },
             }
         )
     return out
@@ -277,6 +295,12 @@ async def _chat_manager_invites_payload(session: AsyncSession, chat_id: int, own
                 "status": status,
                 "created_at": _format_dt(getattr(r, "created_at", None)),
                 "updated_at": _format_dt(getattr(r, "updated_at", None)),
+                "permissions": {
+                    "protection": bool(getattr(r, "can_protection", False)),
+                    "broadcast": bool(getattr(r, "can_broadcast", False)),
+                    "reports": bool(getattr(r, "can_reports", False)),
+                    "first_post_settings": bool(getattr(r, "can_first_post_settings", False)),
+                },
             }
         )
     return out
@@ -614,6 +638,27 @@ def _is_suspicious_payout(amount_rub: float, requisites: str) -> tuple[bool, str
     return False, ""
 
 
+async def _partner_payout_duplicate_requisites(
+    session: AsyncSession, user_internal_id: int, requisites: str
+) -> tuple[bool, str]:
+    """Те же реквизиты у другого user_id — сигнал мультиаккаунтов / общий кошелёк."""
+    req = (requisites or "").strip()
+    if len(req) < 6:
+        return False, ""
+    dup_q = await session.execute(
+        select(func.count())
+        .select_from(PartnerPayoutRequest)
+        .where(
+            PartnerPayoutRequest.user_id != int(user_internal_id),
+            PartnerPayoutRequest.requisites == req,
+            PartnerPayoutRequest.status.in_(("new", "approved", "paid", "frozen")),
+        )
+    )
+    if int(dup_q.scalar() or 0) > 0:
+        return True, "Реквизиты уже использовались другим аккаунтом"
+    return False, ""
+
+
 async def _partner_financials(session: AsyncSession, user: User) -> dict:
     now_utc = datetime.now(timezone.utc)
     is_owner_fast = str(getattr(user, "username", "") or "").lower() == "pastukh_viscera"
@@ -686,9 +731,9 @@ async def _partner_financials(session: AsyncSession, user: User) -> dict:
     paid_total_rub = float(paid_total_q.scalar() or 0.0)
     token_balance = float(getattr(user, "bonus_credits", 0.0) or 0.0)
     token_balance_rub = round(token_balance * PARTNER_TOKEN_RUB_RATE, 2)
-    # Доступно к выводу: текущий токен-баланс (в RUB) минус суммы активных заявок.
-    # Выплаченные суммы уже списаны из токенов в момент статуса paid.
-    available_rub = round(max(0.0, token_balance_rub - reserved_rub), 2)
+    # Доступно к выводу: баланс минус активные заявки и минус комиссии в холде (pending).
+    # Иначе токены уже на счёте с момента оплаты, а вывод был бы возможен до понедельника.
+    available_rub = round(max(0.0, token_balance_rub - reserved_rub - pending_rub), 2)
     # Всего комиссий (для UI): то, что сейчас на балансе + уже выплачено.
     commission_total_rub = round(token_balance_rub + paid_total_rub, 2)
     return {
@@ -826,6 +871,11 @@ def _rule_to_dict(rule: Rule, stopwords_count: int = 0) -> dict:
         "filter_profanity_enabled": bool(getattr(rule, "filter_profanity_enabled", True)),
         "filter_jobs_enabled": bool(getattr(rule, "filter_jobs_enabled", True)),
         "filter_casino_enabled": bool(getattr(rule, "filter_casino_enabled", True)),
+        "filter_ads_enabled": bool(getattr(rule, "filter_ads_enabled", False)),
+        "filter_insults_enabled": bool(getattr(rule, "filter_insults_enabled", False)),
+        "filter_racism_enabled": bool(getattr(rule, "filter_racism_enabled", False)),
+        "filter_nazi_enabled": bool(getattr(rule, "filter_nazi_enabled", False)),
+        "filter_vulgar_enabled": bool(getattr(rule, "filter_vulgar_enabled", False)),
         "reputation_enabled": bool(getattr(rule, "reputation_enabled", False)),
         "log_enabled": bool(rule.log_enabled),
         "guardian_messages_enabled": bool(getattr(rule, "guardian_messages_enabled", True)),
@@ -863,15 +913,17 @@ async def api_bot_info(
 # ---------- GET /api/me ----------
 @router.get("/me")
 async def api_me(
-    user_id: int = Depends(require_init_data),
+    init_profile: tuple[int, str | None, str | None] = Depends(require_init_data_with_profile),
     session: AsyncSession = Depends(get_db),
 ):
     """Текущий пользователь: тариф, лимиты, кол-во чатов."""
-    user = await get_or_create_user(session, user_id)
+    user_id, init_username, init_first_name = init_profile
+    # Подмешиваем username из init_data, иначе allowlist владельца (ADMIN_USERNAMES / pastukh_viscera) не сработает.
+    user = await get_or_create_user(
+        session, user_id, username=init_username, first_name=init_first_name
+    )
     chats = await get_managed_chats(session, user_id)
     can_add, current_count, limit = await can_add_chat(session, user_id)
-    can_add_channel_more, _channels_cur, _channels_limit = await can_add_channel(session, user_id)
-    groups_count, channels_count = await count_managed_chats_by_kind(session, user_id)
     can_add_channel_more, _current_channels_count, _channel_limit = await can_add_channel(session, user_id)
     groups_count, channels_count = await count_managed_chats_by_kind(session, user_id)
     effective_limit = int(limit)
@@ -912,6 +964,14 @@ async def api_me(
     managed_shared_count = sum(
         1 for c in chats if int(getattr(c, "owner_user_id", 0) or 0) != int(user_id)
     )
+    # Флаг: есть ли хотя бы один делегированный чат, где у пользователя выдано право на рассылку.
+    delegated_bc_q = await session.execute(
+        select(func.count(ChatManager.id)).where(
+            ChatManager.user_id == int(user_id),
+            ChatManager.can_broadcast.is_(True),
+        )
+    )
+    has_delegated_broadcast = int(delegated_bc_q.scalar() or 0) > 0
     sub_panel = await _user_subscription_panel_dict(session, user)
     return {
         "telegram_id": user_id,
@@ -920,6 +980,7 @@ async def api_me(
         # В БД флаг может быть false; полный доступ задаётся ADMIN_TELEGRAM_IDS / ADMIN_USERNAMES (см. _is_full_admin_user).
         "is_admin": bool(_is_full_admin_user(user, int(user_id))),
         "has_managed_shared_chat": managed_shared_count > 0,
+        "has_delegated_broadcast": has_delegated_broadcast,
         "tariff": user.tariff or "free",
         "is_premium": sub_panel["is_premium"],
         "chat_limit": effective_limit,
@@ -965,6 +1026,33 @@ async def api_me(
             getattr(user, "delegate_broadcast_payer", None) or "delegate_first"
         ).strip().lower(),
     }
+
+
+@router.post("/me/legal-consent")
+async def api_me_legal_consent(
+    body: dict,
+    init_profile: tuple[int, str | None, str | None] = Depends(require_init_data_with_profile),
+    session: AsyncSession = Depends(get_db),
+):
+    """Фиксация галочек LegalConsentGate — видно в карточке пользователя в админке."""
+    user_id, init_username, init_first_name = init_profile
+    accept_bundle = bool((body or {}).get("accept_bundle"))
+    accept_pd = bool((body or {}).get("accept_pd"))
+    marketing = bool((body or {}).get("marketing"))
+    if not accept_bundle or not accept_pd:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Требуются accept_bundle и accept_pd",
+        )
+    user = await get_or_create_user(
+        session, user_id, username=init_username, first_name=init_first_name
+    )
+    now = datetime.now(timezone.utc)
+    user.legal_bundle_accepted_at = now
+    user.legal_pd_accepted_at = now
+    user.legal_marketing_opt_in = marketing
+    await session.commit()
+    return {"ok": True}
 
 
 @router.patch("/me/delegate-broadcast-payer")
@@ -1343,6 +1431,7 @@ async def api_chats(
             rules_by_chat[int(rule.chat_id)] = rule
 
     managers_count_by_chat: dict[int, int] = {}
+    delegated_perms_by_chat: dict[int, dict] = {}
     if chat_ids:
         mcnt = await session.execute(
             select(ChatManager.chat_id, func.count(ChatManager.id))
@@ -1351,13 +1440,27 @@ async def api_chats(
         )
         for row in mcnt.all():
             managers_count_by_chat[int(row[0])] = int(row[1] or 0)
+        # Права самого пользователя как делегата (для отображения чипов в списке чатов).
+        my_mgr_rows = (
+            await session.execute(
+                select(ChatManager).where(
+                    ChatManager.chat_id.in_(chat_ids),
+                    ChatManager.user_id == int(user_id),
+                )
+            )
+        ).scalars().all()
+        for r in my_mgr_rows:
+            delegated_perms_by_chat[int(r.chat_id)] = {
+                "protection": bool(getattr(r, "can_protection", False)),
+                "broadcast": bool(getattr(r, "can_broadcast", False)),
+                "reports": bool(getattr(r, "can_reports", False)),
+                "first_post_settings": bool(getattr(r, "can_first_post_settings", False)),
+            }
 
     def master_anti_spam_for(cid: int) -> bool:
         if int(cid) in over_limit_ids:
             return False
-        ch = next((x for x in chats if int(getattr(x, "id", 0) or 0) == int(cid)), None)
-        if ch is not None and not bool(getattr(ch, "is_active", True)):
-            return False
+        # Только правило: пауза Guard = master_anti_spam в Rule. Не смешиваем с is_active (подключение к списку).
         ru = rules_by_chat.get(int(cid))
         return bool(ru.master_anti_spam) if ru else True
 
@@ -1433,6 +1536,7 @@ async def api_chats(
             "chat_kind": kind,
             "linked_discussion_chat_id": linked_id_int,
             "linked_discussion_title": linked_title,
+            "delegated_permissions": delegated_perms_by_chat.get(int(c.id)),
         }
 
     chat_payloads = [_chat_payload(c) for c in chats]
@@ -1543,6 +1647,7 @@ async def api_chat_managers(
     return {
         "chat_id": int(chat_id),
         "owner_user_id": owner_uid,
+        "chat_kind": str(getattr(chat, "chat_kind", "group") or "group"),
         "can_manage_access": can_manage,
         "premium_enabled": premium_enabled,
         "limit": 3,
@@ -1573,6 +1678,31 @@ async def api_chat_managers_add(
     if target_id <= 0 and not str(username_raw or "").strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Need telegram_id or username")
 
+    # Права делегата (нормализуем по типу чата).
+    perms_raw = body.get("permissions") or {}
+    if not isinstance(perms_raw, dict):
+        perms_raw = {}
+    chat_kind = str(getattr(chat, "chat_kind", "group") or "group").lower()
+    if chat_kind == "channel":
+        perms = {
+            "protection": False,
+            "broadcast": bool(perms_raw.get("broadcast")),
+            "reports": False,
+            "first_post_settings": bool(perms_raw.get("first_post_settings")),
+        }
+    else:
+        perms = {
+            "protection": bool(perms_raw.get("protection")),
+            "broadcast": bool(perms_raw.get("broadcast")),
+            "reports": bool(perms_raw.get("reports")),
+            "first_post_settings": False,
+        }
+    if not any(perms.values()):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Выберите хотя бы одно право для админа.",
+        )
+
     target_user: User | None = None
     resolved_username = ""
     if target_id > 0:
@@ -1581,11 +1711,7 @@ async def api_chat_managers_add(
             resolved_username = str(getattr(target_user, "username", "") or "")
     else:
         uname = _norm_username(username_raw)
-        target_user = (
-            await session.execute(
-                select(User).where(func.lower(User.username) == uname).limit(1)
-            )
-        ).scalar_one_or_none()
+        target_user = await resolve_username_lookup(session, uname)
         if target_user:
             target_id = int(getattr(target_user, "telegram_id", 0) or 0)
             resolved_username = str(getattr(target_user, "username", "") or uname)
@@ -1618,7 +1744,20 @@ async def api_chat_managers_add(
             )
         ).scalar_one_or_none()
         if not existing:
-            session.add(ChatManager(chat_id=int(chat_id), user_id=int(target_id), added_by=int(user_id)))
+            session.add(ChatManager(
+                chat_id=int(chat_id),
+                user_id=int(target_id),
+                added_by=int(user_id),
+                can_protection=perms["protection"],
+                can_broadcast=perms["broadcast"],
+                can_reports=perms["reports"],
+                can_first_post_settings=perms["first_post_settings"],
+            ))
+        else:
+            existing.can_protection = perms["protection"]
+            existing.can_broadcast = perms["broadcast"]
+            existing.can_reports = perms["reports"]
+            existing.can_first_post_settings = perms["first_post_settings"]
         inv = (
             await session.execute(
                 select(ChatManagerInvite)
@@ -1634,12 +1773,20 @@ async def api_chat_managers_add(
                 target_username=resolved_username or None,
                 connected_user_id=int(target_id),
                 status="connected",
+                can_protection=perms["protection"],
+                can_broadcast=perms["broadcast"],
+                can_reports=perms["reports"],
+                can_first_post_settings=perms["first_post_settings"],
             )
             session.add(inv)
         else:
             inv.target_username = resolved_username or inv.target_username
             inv.connected_user_id = int(target_id)
             inv.status = "connected"
+            inv.can_protection = perms["protection"]
+            inv.can_broadcast = perms["broadcast"]
+            inv.can_reports = perms["reports"]
+            inv.can_first_post_settings = perms["first_post_settings"]
         created_status = "connected"
     else:
         raise HTTPException(
@@ -2634,6 +2781,8 @@ async def api_chat_rule(
         "use_global_antispam_db",
         "use_global_bad_urls",
         "filter_profanity_enabled", "filter_jobs_enabled", "filter_casino_enabled",
+        "filter_ads_enabled", "filter_insults_enabled",
+        "filter_racism_enabled", "filter_nazi_enabled", "filter_vulgar_enabled",
         "reputation_enabled",
         "log_enabled",
         "guardian_messages_enabled",
@@ -3363,10 +3512,15 @@ async def api_whitelist_user_add(
         else:
             uname = _norm_username(ref)
             if uname:
-                urow = (
-                    await session.execute(select(User.telegram_id).where(func.lower(User.username) == uname).limit(1))
-                ).first()
-                target_uid = int(urow[0] or 0) if urow else 0
+                if pii_storage_enabled():
+                    async with PiiAsyncSessionLocal() as pii_sess:
+                        tid = await pii_find_telegram_id_by_username_lower(pii_sess, uname)
+                    target_uid = int(tid or 0)
+                else:
+                    urow = (
+                        await session.execute(select(User.telegram_id).where(func.lower(User.username) == uname).limit(1))
+                    ).first()
+                    target_uid = int(urow[0] or 0) if urow else 0
     if target_uid <= 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -3866,6 +4020,10 @@ async def api_referral_payouts_request(
     if amount_rub > fin["available_rub"]:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Недостаточно доступного баланса")
     risk_flag, risk_note = _is_suspicious_payout(amount_rub, requisites)
+    dup_flag, dup_note = await _partner_payout_duplicate_requisites(session, int(user.id), requisites)
+    if dup_flag:
+        risk_flag = True
+        risk_note = ((risk_note + " · ") if risk_note else "") + dup_note
     status_value = "frozen" if risk_flag else "new"
     req = PartnerPayoutRequest(
         user_id=int(user.id),
@@ -4574,6 +4732,9 @@ async def api_admin_users(
             "joins_24h": int(joins_24h_by_owner.get(tg_id, 0)),
             "joins_30d": int(joins_30d_by_owner.get(tg_id, 0)),
             "join_report_periods": join_report_periods_by_owner.get(tg_id, []),
+            "legal_bundle_accepted_at": _format_dt(getattr(u, "legal_bundle_accepted_at", None)),
+            "legal_pd_accepted_at": _format_dt(getattr(u, "legal_pd_accepted_at", None)),
+            "legal_marketing_opt_in": bool(getattr(u, "legal_marketing_opt_in", False)),
         })
     return {"items": items}
 
@@ -5604,26 +5765,44 @@ async def api_history_subscription(
 
 @router.get("/activity/summary")
 async def api_activity_summary(
+    tz_offset_min: int = Query(0, ge=-840, le=840),
     user_id: int = Depends(require_init_data),
     session: AsyncSession = Depends(get_db),
 ):
-    """Сводка активности защиты по всем подключенным чатам пользователя."""
-    user = await get_or_create_user(session, user_id)
-    chats = await get_managed_chats(session, user_id)
-    active_chats = [c for c in chats if not bool(getattr(c, "is_log_chat", False)) and bool(getattr(c, "is_active", True))]
-    chat_ids = [int(c.id) for c in active_chats]
+    """Сводка активности защиты по всем подключенным чатам пользователя.
+
+    Поле "today" агрегируется с 00:00 локального времени пользователя
+    (TZ передаёт фронт через `tz_offset_min`), чтобы счётчик
+    обнулялся ровно в полночь, как ожидает пользователь.
+    """
+    # Тариф в основной БД; не тянуть ПДн на ВДС (get_or_create_user) при каждом summary — главный экран
+    # параллелит /api/me + этот запрос; двойной round-trip на РФ сильно тормозил после split PII.
+    res_u = await session.execute(select(User).where(User.telegram_id == user_id))
+    user = res_u.scalar_one_or_none()
+    if user is None:
+        user = await get_or_create_user(session, user_id)
+    chat_ids = await get_activity_summary_chat_ids(session, user_id)
     now_utc = datetime.now(timezone.utc)
+    tz_offset = timedelta(minutes=int(tz_offset_min or 0))
+    today_local_start = (now_utc + tz_offset).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start_utc = today_local_start - tz_offset
+    yesterday_start_utc = today_start_utc - timedelta(days=1)
     deleted = 0
     muted = 0
     banned = 0
     observed = 0
     joins_24h = 0
+    deleted_y = 0
+    muted_y = 0
+    banned_y = 0
+    observed_y = 0
+    joins_y = 0
     enabled = {"delete": True, "mute": False, "ban": False, "observe": False}
     if chat_ids:
         logs_q = await session.execute(
             select(ModerationLog.action, func.count(ModerationLog.id)).where(
                 ModerationLog.chat_id.in_(chat_ids),
-                ModerationLog.created_at >= now_utc - timedelta(hours=24),
+                ModerationLog.created_at >= today_start_utc,
             ).group_by(ModerationLog.action)
         )
         for row in logs_q.all():
@@ -5650,15 +5829,72 @@ async def api_activity_summary(
         joins_q = await session.execute(
             select(func.count(NewMember.id)).where(
                 NewMember.chat_id.in_(chat_ids),
-                NewMember.joined_at >= now_utc - timedelta(hours=24),
+                NewMember.joined_at >= today_start_utc,
             )
         )
         joins_24h = int(joins_q.scalar() or 0)
-    groups_count, channels_count = await count_managed_chats_by_kind(session, user_id)
+
+        logs_y = await session.execute(
+            select(ModerationLog.action, func.count(ModerationLog.id)).where(
+                ModerationLog.chat_id.in_(chat_ids),
+                ModerationLog.created_at >= yesterday_start_utc,
+                ModerationLog.created_at < today_start_utc,
+            ).group_by(ModerationLog.action)
+        )
+        for row in logs_y.all():
+            action = str(row[0] or "").lower()
+            cnt = int(row[1] or 0)
+            if "observe" in action:
+                observed_y += cnt
+            elif "ban" in action:
+                banned_y += cnt
+            elif "mute" in action or "restrict" in action:
+                muted_y += cnt
+            else:
+                deleted_y += cnt
+        joins_y_q = await session.execute(
+            select(func.count(NewMember.id)).where(
+                NewMember.chat_id.in_(chat_ids),
+                NewMember.joined_at >= yesterday_start_utc,
+                NewMember.joined_at < today_start_utc,
+            )
+        )
+        joins_y = int(joins_y_q.scalar() or 0)
+    groups_count = 0
+    channels_count = 0
+    if chat_ids:
+        kinds_q = await session.execute(select(Chat.chat_kind).where(Chat.id.in_(chat_ids)))
+        for (kind,) in kinds_q.all():
+            k = str(kind or "group").strip().lower()
+            if k == "channel":
+                channels_count += 1
+            else:
+                groups_count += 1
     _, _, group_limit = await can_add_chat(session, user_id)
     _, _, channel_limit = await can_add_channel(session, user_id)
+    # Уровень защиты: есть хотя бы один чат с Guard не на паузе (включая каналы).
+    # «Защищено» — только группы; считаем все доступные чаты, в т.ч. is_active=False (иначе занижали счёт).
+    managed = await get_accessible_chats_any_active(session, user_id)
+    protection_active = False
+    protected_groups_count = 0
+    if managed:
+        mid = [int(c.id) for c in managed]
+        res_m = await session.execute(
+            select(Chat.chat_kind, Rule.master_anti_spam, Rule.chat_id)
+            .select_from(Chat)
+            .outerjoin(Rule, Rule.chat_id == Chat.id)
+            .where(Chat.id.in_(mid)),
+        )
+        for kind, mas, rule_chat_id in res_m.all():
+            # PK rules — chat_id; при отсутствии строки правила outerjoin даёт rule_chat_id IS NULL.
+            eff = rule_chat_id is None or bool(mas)
+            if eff:
+                protection_active = True
+                if str(kind or "group").strip().lower() != "channel":
+                    protected_groups_count += 1
     return {
-        "protection_active": len(chat_ids) > 0,
+        "protection_active": protection_active,
+        "protected_groups_count": int(protected_groups_count),
         "tariff": str(getattr(user, "tariff", "free") or "free"),
         "chats_count": len(chat_ids),
         "chats_count_total": len(chat_ids),
@@ -5680,6 +5916,371 @@ async def api_activity_summary(
             "joins": joins_24h,
             "enabled_metrics": enabled,
         },
+        "yesterday": {
+            "deleted": deleted_y,
+            "muted": muted_y,
+            "banned": banned_y,
+            "observed": observed_y,
+            "joins": joins_y,
+        },
+    }
+
+
+@router.get("/activity/breakdown")
+async def api_activity_breakdown(
+    period: str = Query("today", regex="^(today|7d|14d|30d|180d|365d)$"),
+    scope: str = Query("all", regex="^(all|own|delegated)$"),
+    chat_id: int | None = Query(None, description="Опционально: одна группа/канал по id (должен быть в списке доступных)."),
+    tz_offset_min: int = Query(0, ge=-840, le=840),
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Агрегированная статистика удалений: по типам/часам/дням недели + список чатов.
+
+    Источник правды — `moderation_logs`. Часовой пояс задаётся клиентом
+    (`tz_offset_min` = -new Date().getTimezoneOffset()), чтобы графики
+    «по часам» соответствовали локальному времени пользователя.
+    """
+    chats = await get_managed_chats(session, user_id)
+    active_chats = [c for c in chats if not bool(getattr(c, "is_log_chat", False)) and bool(getattr(c, "is_active", True))]
+    if scope == "own":
+        active_chats = [c for c in active_chats if int(getattr(c, "owner_user_id", 0) or 0) == int(user_id)]
+    elif scope == "delegated":
+        active_chats = [c for c in active_chats if int(getattr(c, "owner_user_id", 0) or 0) != int(user_id)]
+    allowed_ids = [int(c.id) for c in active_chats]
+    if chat_id is not None:
+        cid = int(chat_id)
+        if cid not in allowed_ids:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к чату")
+        active_chats = [c for c in active_chats if int(c.id) == cid]
+    chat_ids = [int(c.id) for c in active_chats]
+
+    # Физические chat_id для событий (группа обсуждения канала и т.д.) → логический id в списке чатов.
+    # Иначе ChatActivityEvent / журнал модерации ищутся по id канала, а в БД лежит id группы — «Сообщений: 0».
+    chn_by_id: dict[int, Channel] = {}
+    phys_to_logical: dict[int, int] = {}
+    if active_chats:
+        chn_ids = [int(c.id) for c in active_chats if str(getattr(c, "chat_kind", "") or "group").lower() == "channel"]
+        if chn_ids:
+            chn_rows = (await session.execute(select(Channel).where(Channel.id.in_(chn_ids)))).scalars().all()
+            chn_by_id = {int(r.id): r for r in chn_rows}
+        for c in active_chats:
+            lg = int(c.id)
+            for p in _activity_effective_ids_for_chat(c, chn_by_id):
+                phys_to_logical[int(p)] = lg
+    scope_ids = sorted(set(phys_to_logical.keys()) | set(chat_ids)) if chat_ids else []
+    event_scope_ids = scope_ids if scope_ids else chat_ids
+
+    now_utc = datetime.now(timezone.utc)
+    tz_offset = timedelta(minutes=int(tz_offset_min or 0))
+    now_local = now_utc + tz_offset
+    today_local_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start_utc = today_local_start - tz_offset
+
+    if period == "365d":
+        since_utc = now_utc - timedelta(days=365)
+    elif period == "180d":
+        since_utc = now_utc - timedelta(days=180)
+    elif period == "30d":
+        since_utc = now_utc - timedelta(days=30)
+    elif period == "14d":
+        since_utc = now_utc - timedelta(days=14)
+    elif period == "7d":
+        since_utc = now_utc - timedelta(days=7)
+    else:
+        # "today" = с 00:00 локального времени пользователя (TZ через tz_offset_min).
+        since_utc = today_start_utc
+
+    by_reason: dict[str, int] = {}
+    by_hour_period = [0] * 24
+    by_hour_today = [0] * 24
+    by_hour_by_reason: dict[str, list[int]] = {}
+    by_weekday = [0] * 7
+    heatmap_24x7 = [[0] * 24 for _ in range(7)]
+    chat_deleted: dict[int, int] = {cid: 0 for cid in chat_ids}
+    chat_last_at: dict[int, datetime] = {}
+    total_deleted = 0
+    total_today = 0
+    examples_by_reason: dict[str, dict[str, int]] = {}
+    # Если нет chat_activity_events, оценка активности по часам из журнала модерации (не «удаления отдельно»).
+    mod_fallback_hour = [0] * 24
+    # Те же события, что mod_fallback_hour, но с разбивкой день×час — для activity_heatmap при отсутствии ChatActivityEvent.
+    mod_activity_heatmap = [[0] * 24 for _ in range(7)]
+
+    def _normalize_example(reason: str, raw: str) -> str | None:
+        """Превращает detail/message_text в короткий пример ключевого слова или префикса URL."""
+        s = str(raw or "").strip()
+        if not s:
+            return None
+        if reason == "link":
+            # Пример вида http://, https://, t.me/, bit.ly, goo.gl
+            low = s.lower()
+            for marker in ("https://", "http://", "tg://"):
+                if low.startswith(marker):
+                    return marker
+            # Для произвольной ссылки — отрезаем по первому "/"
+            for marker in ("https://", "http://", "tg://"):
+                idx = low.find(marker)
+                if idx >= 0:
+                    rest = low[idx + len(marker):]
+                    host = rest.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+                    if host:
+                        return host[:40]
+                    return marker
+            host = low.split("/", 1)[0]
+            return host[:40] if host else None
+        # Слова: берём первое слово/ngramm длиной до 24
+        token = s.lower().split("\n", 1)[0].strip()
+        token = token.split(",", 1)[0].split(";", 1)[0].strip()
+        if len(token) > 32:
+            token = token[:32].rstrip() + "…"
+        return token or None
+
+    if chat_ids:
+        rows_q = await session.execute(
+            select(
+                ModerationLog.chat_id,
+                ModerationLog.reason,
+                ModerationLog.action,
+                ModerationLog.created_at,
+                ModerationLog.detail,
+                ModerationLog.message_text,
+            ).where(
+                ModerationLog.chat_id.in_(scope_ids if scope_ids else chat_ids),
+                ModerationLog.created_at >= since_utc,
+            )
+        )
+        for cid, reason, action, created_at, detail, message_text in rows_q.all():
+            act = str(action or "").lower()
+            if created_at is not None:
+                if created_at.tzinfo is None:
+                    _ca = created_at.replace(tzinfo=timezone.utc)
+                else:
+                    _ca = created_at
+                _local_dt = _ca.astimezone(timezone.utc) + tz_offset
+                _fh = max(0, min(23, int(_local_dt.hour)))
+                if "observe" not in act:
+                    mod_fallback_hour[_fh] += 1
+                    _wd = max(0, min(6, int(_local_dt.weekday())))
+                    mod_activity_heatmap[_wd][_fh] += 1
+            if "observe" in act:
+                continue
+            base = (str(reason or "").strip() or "other").lower()
+            if base.endswith("_newbie"):
+                base = base[: -len("_newbie")]
+            if base in ("link_blacklist", "global_bad_url"):
+                base = "link"
+            by_reason[base] = by_reason.get(base, 0) + 1
+            total_deleted += 1
+            cid_phys = int(cid or 0)
+            cid_log = phys_to_logical.get(cid_phys, cid_phys)
+            if cid_log in chat_deleted:
+                chat_deleted[cid_log] = chat_deleted.get(cid_log, 0) + 1
+            example = _normalize_example(base, detail or message_text)
+            if example:
+                bucket_e = examples_by_reason.setdefault(base, {})
+                bucket_e[example] = bucket_e.get(example, 0) + 1
+            if created_at is not None:
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                local_dt = created_at.astimezone(timezone.utc) + tz_offset
+                hour = max(0, min(23, int(local_dt.hour)))
+                by_hour_period[hour] += 1
+                bucket = by_hour_by_reason.setdefault(base, [0] * 24)
+                bucket[hour] += 1
+                if created_at >= today_start_utc:
+                    by_hour_today[hour] += 1
+                    total_today += 1
+                wd = max(0, min(6, int(local_dt.weekday())))
+                heatmap_24x7[wd][hour] += 1
+                by_weekday[wd] += 1
+                prev = chat_last_at.get(cid_log)
+                if prev is None or created_at > prev:
+                    chat_last_at[cid_log] = created_at
+
+    rules_q = await session.execute(select(Rule).where(Rule.chat_id.in_(chat_ids))) if chat_ids else None
+    rules_list = list(rules_q.scalars().all()) if rules_q is not None else []
+
+    def _filter_enabled(attr: str, default: bool) -> bool:
+        if not rules_list:
+            return default
+        return any(bool(getattr(r, attr, default)) for r in rules_list)
+
+    enabled_filters = {
+        "profanity": _filter_enabled("filter_profanity_enabled", True),
+        "jobs": _filter_enabled("filter_jobs_enabled", True),
+        "casino": _filter_enabled("filter_casino_enabled", True),
+        "ads": _filter_enabled("filter_ads_enabled", False),
+        "insult": _filter_enabled("filter_insults_enabled", False),
+        "racism": _filter_enabled("filter_racism_enabled", False),
+        "nazi": _filter_enabled("filter_nazi_enabled", False),
+        "vulgar": _filter_enabled("filter_vulgar_enabled", False),
+        "link": (
+            _filter_enabled("filter_links", True)
+            and any(str(getattr(r, "filter_links_mode", "forbid") or "forbid").lower() != "allow" for r in rules_list)
+        ) if rules_list else True,
+        "stopword": True,
+        "mention": _filter_enabled("filter_mentions", False),
+        "media": (
+            _filter_enabled("filter_media_mode", "allow") if False else any(
+                str(getattr(r, "filter_media_mode", "allow") or "allow").lower() != "allow" for r in rules_list
+            )
+        ),
+        "buttons": any(
+            str(getattr(r, "filter_buttons_mode", "allow") or "allow").lower() != "allow" for r in rules_list
+        ),
+    }
+
+    examples_out: dict[str, list[str]] = {}
+    for reason, bucket in examples_by_reason.items():
+        ranked = sorted(bucket.items(), key=lambda x: (-x[1], x[0]))[:6]
+        examples_out[reason] = [w for w, _ in ranked]
+
+    # === Подписки / отписки / сообщения / активные ============================================
+    by_hour_joins = [0] * 24
+    by_hour_leaves = [0] * 24
+    by_hour_messages = [0] * 24
+    activity_heatmap = [[0] * 24 for _ in range(7)]
+    chat_joined: dict[int, int] = {cid: 0 for cid in chat_ids}
+    chat_left: dict[int, int] = {cid: 0 for cid in chat_ids}
+    chat_messages: dict[int, int] = {cid: 0 for cid in chat_ids}
+    total_joined = 0
+    total_left = 0
+    total_messages = 0
+    active_user_ids: set[int] = set()
+
+    if chat_ids:
+        joins_q = await session.execute(
+            select(NewMember.chat_id, NewMember.joined_at).where(
+                NewMember.chat_id.in_(event_scope_ids),
+                NewMember.joined_at >= since_utc,
+            )
+        )
+        for cid, joined_at in joins_q.all():
+            if joined_at is None:
+                continue
+            if joined_at.tzinfo is None:
+                joined_at = joined_at.replace(tzinfo=timezone.utc)
+            local_dt = joined_at.astimezone(timezone.utc) + tz_offset
+            hour = max(0, min(23, int(local_dt.hour)))
+            by_hour_joins[hour] += 1
+            total_joined += 1
+            ci_phys = int(cid or 0)
+            ci_log = phys_to_logical.get(ci_phys, ci_phys)
+            if ci_log in chat_joined:
+                chat_joined[ci_log] = chat_joined.get(ci_log, 0) + 1
+
+        leaves_q = await session.execute(
+            select(MemberLeft.chat_id, MemberLeft.left_at).where(
+                MemberLeft.chat_id.in_(event_scope_ids),
+                MemberLeft.left_at >= since_utc,
+            )
+        )
+        for cid, left_at in leaves_q.all():
+            if left_at is None:
+                continue
+            if left_at.tzinfo is None:
+                left_at = left_at.replace(tzinfo=timezone.utc)
+            local_dt = left_at.astimezone(timezone.utc) + tz_offset
+            hour = max(0, min(23, int(local_dt.hour)))
+            by_hour_leaves[hour] += 1
+            total_left += 1
+            ci_phys = int(cid or 0)
+            ci_log = phys_to_logical.get(ci_phys, ci_phys)
+            if ci_log in chat_left:
+                chat_left[ci_log] = chat_left.get(ci_log, 0) + 1
+
+        msg_q = await session.execute(
+            select(ChatActivityEvent.chat_id, ChatActivityEvent.user_id, ChatActivityEvent.created_at).where(
+                ChatActivityEvent.chat_id.in_(event_scope_ids),
+                ChatActivityEvent.created_at >= since_utc,
+            )
+        )
+        for cid, uid, created_at in msg_q.all():
+            if created_at is None:
+                continue
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            local_dt = created_at.astimezone(timezone.utc) + tz_offset
+            hour = max(0, min(23, int(local_dt.hour)))
+            wd = max(0, min(6, int(local_dt.weekday())))
+            by_hour_messages[hour] += 1
+            activity_heatmap[wd][hour] += 1
+            total_messages += 1
+            ci_phys = int(cid or 0)
+            ci_log = phys_to_logical.get(ci_phys, ci_phys)
+            if ci_log in chat_messages:
+                chat_messages[ci_log] = chat_messages.get(ci_log, 0) + 1
+            if uid:
+                active_user_ids.add(int(uid))
+
+        # Нет строк в chat_activity_events (старые деплои / только канал без маппинга): часовая активность из журнала модерации.
+        if total_messages == 0 and any(mod_fallback_hour):
+            by_hour_messages = list(mod_fallback_hour)
+            total_messages = int(sum(mod_fallback_hour))
+            activity_heatmap = [list(row) for row in mod_activity_heatmap]
+
+    # Пик активности (по сообщениям)
+    peak_idx = 0
+    peak_val = 0
+    for i, v in enumerate(by_hour_messages):
+        if v > peak_val:
+            peak_val = int(v)
+            peak_idx = int(i)
+    peak_hour = {
+        "hour": peak_idx,
+        "value": peak_val,
+        "label": f"{peak_idx:02d}:00",
+    } if peak_val > 0 else None
+
+    chats_meta = []
+    for c in active_chats:
+        cid = int(c.id)
+        username = (str(getattr(c, "username", "") or "").strip().lstrip("@") or None)
+        kind = str(getattr(c, "chat_kind", "") or "group").lower()
+        last_at = chat_last_at.get(cid)
+        is_delegated = int(getattr(c, "owner_user_id", 0) or 0) != int(user_id)
+        chats_meta.append({
+            "id": cid,
+            "title": (c.title or "").strip() or str(cid),
+            "username": username,
+            "kind": "channel" if kind == "channel" else "group",
+            "is_active": bool(getattr(c, "is_active", True)),
+            "is_delegated": is_delegated,
+            "deleted": int(chat_deleted.get(cid, 0)),
+            "joined": int(chat_joined.get(cid, 0)),
+            "left": int(chat_left.get(cid, 0)),
+            "messages": int(chat_messages.get(cid, 0)),
+            "growth": int(chat_joined.get(cid, 0)) - int(chat_left.get(cid, 0)),
+            "last_action_at": _format_dt(last_at) if last_at else None,
+        })
+    chats_meta.sort(key=lambda x: (-(int(x.get("messages") or 0)), -(int(x.get("deleted") or 0)), str(x.get("title") or "")))
+
+    return {
+        "period": period,
+        "tz_offset_min": int(tz_offset_min or 0),
+        "since": since_utc.isoformat(),
+        "total_deleted": int(total_deleted),
+        "total_today": int(total_today),
+        "total_joined": int(total_joined),
+        "total_left": int(total_left),
+        "total_messages": int(total_messages),
+        "active_users": int(len(active_user_ids)),
+        "peak_hour": peak_hour,
+        "by_reason": [{"reason": k, "count": int(v)} for k, v in sorted(by_reason.items(), key=lambda x: -x[1])],
+        "by_hour": list(by_hour_period),
+        "by_hour_today": list(by_hour_today),
+        "by_hour_by_reason": {k: list(v) for k, v in by_hour_by_reason.items()},
+        "by_hour_joins": list(by_hour_joins),
+        "by_hour_leaves": list(by_hour_leaves),
+        "by_hour_messages": list(by_hour_messages),
+        "activity_heatmap_24x7": activity_heatmap,
+        "by_weekday": list(by_weekday),
+        "heatmap_24x7": heatmap_24x7,
+        "chats": chats_meta,
+        "chats_total": len(chats_meta),
+        "enabled_filters": enabled_filters,
+        "examples_by_reason": examples_out,
     }
 
 
@@ -7004,6 +7605,8 @@ async def api_disable_autorenew(
     user.payment_method_bound = False
     user.payment_method_type = None
     user.payment_method_last4 = None
+    user.yookassa_payment_method_id = None
+    user.subscription_autorenew_months = None
     session.add(user)
     await session.commit()
     return {"ok": True}
@@ -7203,7 +7806,7 @@ async def api_admin_broadcasts_list(
     session: AsyncSession = Depends(get_db),
     scope: str = Query("mine"),
 ):
-    from app.services.admin_broadcast import broadcast_row_to_dict
+    from app.services.admin_broadcast import broadcast_list_origins_for_rows, broadcast_row_to_dict
 
     _u, full = await _require_broadcast_access(session, int(user_id))
     sc = str(scope or "mine").strip().lower()
@@ -7214,7 +7817,20 @@ async def api_admin_broadcasts_list(
     if effective != "all":
         q = q.where(AdminBroadcast.admin_telegram_id == int(user_id))
     rows = (await session.execute(q)).scalars().all()
-    return {"items": [broadcast_row_to_dict(r) for r in rows], "scope": effective}
+    origins_merged: dict[int, str] = {}
+    by_owner: dict[int, list] = {}
+    for r in rows:
+        oid = int(getattr(r, "admin_telegram_id", 0) or 0)
+        if oid > 0:
+            by_owner.setdefault(oid, []).append(r)
+    for oid, chunk in by_owner.items():
+        origins_merged.update(await broadcast_list_origins_for_rows(session, oid, chunk))
+    items = []
+    for r in rows:
+        d = broadcast_row_to_dict(r)
+        d["list_origin"] = origins_merged.get(int(r.id), "one_shot")
+        items.append(d)
+    return {"items": items, "scope": effective}
 
 
 @router.get("/admin/broadcasts/{broadcast_id}")
@@ -7223,7 +7839,7 @@ async def api_admin_broadcasts_get(
     user_id: int = Depends(require_init_data),
     session: AsyncSession = Depends(get_db),
 ):
-    from app.services.admin_broadcast import broadcast_row_to_dict
+    from app.services.admin_broadcast import broadcast_list_origins_for_rows, broadcast_row_to_dict
 
     _u, full = await _require_broadcast_access(session, int(user_id))
     q = await session.execute(
@@ -7236,7 +7852,13 @@ async def api_admin_broadcasts_get(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     if not full and int(getattr(row, "admin_telegram_id", 0) or 0) != int(user_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к этому посту")
-    return broadcast_row_to_dict(row)
+    d = broadcast_row_to_dict(row)
+    oid = int(getattr(row, "admin_telegram_id", 0) or 0)
+    if oid > 0:
+        d["list_origin"] = (await broadcast_list_origins_for_rows(session, oid, [row])).get(int(row.id), "one_shot")
+    else:
+        d["list_origin"] = "one_shot"
+    return d
 
 
 @router.get("/public/broadcast/click")
@@ -7263,6 +7885,153 @@ async def api_public_broadcast_click(
     session.add(ev)
     await session.commit()
     return RedirectResponse(url=url, status_code=307)
+
+
+_BROADCAST_LINK_CLICK_FILTER = or_(
+    AdminBroadcastClick.url.like("http://%"),
+    AdminBroadcastClick.url.like("https://%"),
+)
+_BROADCAST_CALLBACK_CLICK_FILTER = AdminBroadcastClick.url.like("callback:%")
+
+
+def _split_broadcast_click_rows(rows: list[tuple[Any, Any]]) -> tuple[int, int]:
+    users = 0
+    groups = 0
+    for kind, cnt in rows:
+        c = int(cnt or 0)
+        ks = str(kind or "").strip().lower()
+        if ks in {"group", "groups", "channel", "channels"}:
+            groups += c
+        else:
+            users += c
+    return users, groups
+
+
+async def _admin_broadcast_click_breakdown(
+    session: AsyncSession,
+    *,
+    bid: int | None = None,
+    bids: list[int] | None = None,
+    since: datetime | None = None,
+) -> dict[str, Any]:
+    if bid is not None:
+        flt: list[Any] = [AdminBroadcastClick.broadcast_id == int(bid)]
+    else:
+        bl = sorted({int(x) for x in (bids or []) if int(x) > 0})
+        if not bl:
+            return {
+                "users": 0,
+                "groups": 0,
+                "total": 0,
+                "link_users": 0,
+                "link_groups": 0,
+                "link_total": 0,
+                "callback_users": 0,
+                "callback_groups": 0,
+                "callback_total": 0,
+                "link_items": [],
+                "callback_items": [],
+            }
+        flt = [AdminBroadcastClick.broadcast_id.in_(bl)]
+    if since is not None:
+        flt = [*flt, AdminBroadcastClick.created_at >= since]
+
+    all_q = await session.execute(
+        select(AdminBroadcastClick.target_kind, func.count(AdminBroadcastClick.id))
+        .where(*flt)
+        .group_by(AdminBroadcastClick.target_kind)
+    )
+    link_q = await session.execute(
+        select(AdminBroadcastClick.target_kind, func.count(AdminBroadcastClick.id))
+        .where(*flt, _BROADCAST_LINK_CLICK_FILTER)
+        .group_by(AdminBroadcastClick.target_kind)
+    )
+    cb_q = await session.execute(
+        select(AdminBroadcastClick.target_kind, func.count(AdminBroadcastClick.id))
+        .where(*flt, _BROADCAST_CALLBACK_CLICK_FILTER)
+        .group_by(AdminBroadcastClick.target_kind)
+    )
+    link_items_q = await session.execute(
+        select(
+            AdminBroadcastClick.url,
+            AdminBroadcastClick.target_kind,
+            func.count(AdminBroadcastClick.id),
+        )
+        .where(*flt, _BROADCAST_LINK_CLICK_FILTER)
+        .group_by(AdminBroadcastClick.url, AdminBroadcastClick.target_kind)
+    )
+    callback_items_q = await session.execute(
+        select(
+            AdminBroadcastClick.url,
+            AdminBroadcastClick.target_kind,
+            func.count(AdminBroadcastClick.id),
+        )
+        .where(*flt, _BROADCAST_CALLBACK_CLICK_FILTER)
+        .group_by(AdminBroadcastClick.url, AdminBroadcastClick.target_kind)
+    )
+    u_all, g_all = _split_broadcast_click_rows(list(all_q.all()))
+    u_ln, g_ln = _split_broadcast_click_rows(list(link_q.all()))
+    u_cb, g_cb = _split_broadcast_click_rows(list(cb_q.all()))
+    link_map: dict[str, dict[str, Any]] = {}
+    for raw_url, kind, cnt in link_items_q.all():
+        url = str(raw_url or "").strip()
+        if not url:
+            continue
+        row = link_map.get(url)
+        if row is None:
+            row = {"key": url, "title": url, "users": 0, "groups": 0, "total": 0}
+            link_map[url] = row
+        c = int(cnt or 0)
+        ks = str(kind or "").strip().lower()
+        if ks in {"group", "groups", "channel", "channels"}:
+            row["groups"] += c
+        else:
+            row["users"] += c
+        row["total"] += c
+
+    callback_map: dict[str, dict[str, Any]] = {}
+    for raw_url, kind, cnt in callback_items_q.all():
+        val = str(raw_url or "").strip()
+        if not val:
+            continue
+        parts = val.split(":", 2)
+        btn_idx = -1
+        if len(parts) >= 2:
+            try:
+                btn_idx = int(parts[1])
+            except Exception:
+                btn_idx = -1
+        inner = parts[2] if len(parts) >= 3 else ""
+        title = f"Кнопка #{btn_idx + 1}" if btn_idx >= 0 else "Кнопка"
+        if inner:
+            title = f"{title} · {inner[:96]}"
+        row = callback_map.get(val)
+        if row is None:
+            row = {"key": val, "title": title, "users": 0, "groups": 0, "total": 0}
+            callback_map[val] = row
+        c = int(cnt or 0)
+        ks = str(kind or "").strip().lower()
+        if ks in {"group", "groups", "channel", "channels"}:
+            row["groups"] += c
+        else:
+            row["users"] += c
+        row["total"] += c
+
+    link_items = sorted(link_map.values(), key=lambda x: int(x.get("total", 0)), reverse=True)[:40]
+    callback_items = sorted(callback_map.values(), key=lambda x: int(x.get("total", 0)), reverse=True)[:40]
+    return {
+        "users": u_all,
+        "groups": g_all,
+        "total": u_all + g_all,
+        "link_users": u_ln,
+        "link_groups": g_ln,
+        "link_total": u_ln + g_ln,
+        "callback_users": u_cb,
+        "callback_groups": g_cb,
+        "callback_total": u_cb + g_cb,
+        "link_items": link_items,
+        "callback_items": callback_items,
+    }
 
 
 @router.get("/admin/broadcasts/{broadcast_id}/stats")
@@ -7306,6 +8075,25 @@ async def api_admin_broadcasts_stats(
         )
     )
     connected_bots_total = int(btotal_q.scalar() or 0)
+
+    from app.services.admin_broadcast import broadcast_url_tracking_configured
+
+    click_metrics = await _admin_broadcast_click_breakdown(session, bid=int(broadcast_id))
+    tracking_cfg = broadcast_url_tracking_configured()
+    click_extras = {
+        "real_link_clicks": int(click_metrics["link_users"]),
+        "real_link_transitions": int(click_metrics["link_groups"]),
+        "real_link_clicks_total": int(click_metrics["link_total"]),
+        "real_callback_clicks": int(click_metrics["callback_users"]),
+        "real_callback_transitions": int(click_metrics["callback_groups"]),
+        "real_callback_clicks_total": int(click_metrics["callback_total"]),
+        "real_link_items": click_metrics.get("link_items") or [],
+        "real_callback_items": click_metrics.get("callback_items") or [],
+        "broadcast_url_tracking_configured": bool(tracking_cfg),
+    }
+    real_clicks_users = int(click_metrics["users"])
+    real_clicks_groups = int(click_metrics["groups"])
+    real_clicks_total = int(click_metrics["total"])
 
     run_target_filter: list[Any] = []
     if wanted_target in {"group", "groups"}:
@@ -7389,23 +8177,6 @@ async def api_admin_broadcasts_stats(
             )
         latest_audience_total = int(run_rows[0][5] or 0)
         latest_audience_ok = int(run_rows[0][6] or 0)
-
-    clicks_q = await session.execute(
-        select(
-            AdminBroadcastClick.target_kind,
-            func.count(AdminBroadcastClick.id),
-        ).where(AdminBroadcastClick.broadcast_id == int(broadcast_id)).group_by(AdminBroadcastClick.target_kind)
-    )
-    real_clicks_users = 0
-    real_clicks_groups = 0
-    for kind, cnt in clicks_q.all():
-        c = int(cnt or 0)
-        ks = str(kind or "").strip().lower()
-        if ks in {"group", "groups"}:
-            real_clicks_groups += c
-        else:
-            real_clicks_users += c
-    real_clicks_total = real_clicks_users + real_clicks_groups
 
     if has_delivery and has_batch_id and has_created_at:
         bq = await session.execute(
@@ -7555,6 +8326,7 @@ async def api_admin_broadcasts_stats(
             "errors": [],
             "connected_groups_total": connected_groups_total,
             "connected_bots_total": connected_bots_total,
+            **click_extras,
         }
 
     if active_batch.startswith("legacy:"):
@@ -7590,6 +8362,7 @@ async def api_admin_broadcasts_stats(
             "errors": [],
             "connected_groups_total": connected_groups_total,
             "connected_bots_total": connected_bots_total,
+            **click_extras,
         }
         _log.warning(
             "broadcast stats legacy/live: id=%s target=%s batch=%s from_ts=%s to_ts=%s history_count=%s bots=%s groups=%s connected_groups_total=%s",
@@ -7637,6 +8410,7 @@ async def api_admin_broadcasts_stats(
             "errors": [],
             "connected_groups_total": connected_groups_total,
             "connected_bots_total": connected_bots_total,
+            **click_extras,
         }
         _log.warning(
             "broadcast stats no-delivery: id=%s target=%s batch=%s from_ts=%s to_ts=%s history_count=%s bots=%s groups=%s connected_groups_total=%s",
@@ -7685,6 +8459,7 @@ async def api_admin_broadcasts_stats(
             "errors": [],
             "connected_groups_total": connected_groups_total,
             "connected_bots_total": connected_bots_total,
+            **click_extras,
         }
 
     q = await session.execute(
@@ -7804,6 +8579,7 @@ async def api_admin_broadcasts_stats(
         "errors": errors,
         "connected_groups_total": connected_groups_total,
         "connected_bots_total": connected_bots_total,
+        **click_extras,
     }
     _log.warning(
         "broadcast stats: id=%s target=%s batch=%s from_ts=%s to_ts=%s history_count=%s bots=%s groups=%s per_groups=%s errors=%s connected_groups_total=%s",
@@ -8200,6 +8976,27 @@ async def api_admin_autopost_campaigns_autopost_stats(
             }
         )
 
+    from app.services.admin_broadcast import broadcast_url_tracking_configured
+
+    cm = await _admin_broadcast_click_breakdown(session, bids=rotation_ids, since=since)
+    clk_users = int(cm["users"])
+    clk_groups = int(cm["groups"])
+    total_clk = int(cm["total"])
+    track_ok = broadcast_url_tracking_configured()
+    ap_click_extras = {
+        "real_link_clicks": int(cm["link_users"]),
+        "real_link_transitions": int(cm["link_groups"]),
+        "real_link_clicks_total": int(cm["link_total"]),
+        "real_callback_clicks": int(cm["callback_users"]),
+        "real_callback_transitions": int(cm["callback_groups"]),
+        "real_callback_clicks_total": int(cm["callback_total"]),
+        "real_link_items": cm.get("link_items") or [],
+        "real_callback_items": cm.get("callback_items") or [],
+        "broadcast_url_tracking_configured": bool(track_ok),
+    }
+    delivered_total = int(bots_ok + groups_ok)
+    ctr = (100.0 * float(total_clk) / float(delivered_total)) if delivered_total > 0 else 0.0
+
     return {
         "campaign_id": int(campaign_id),
         "days": int(days),
@@ -8207,8 +9004,19 @@ async def api_admin_autopost_campaigns_autopost_stats(
         "posts_per_day_config": posts_per_day,
         "autopost_slots_recorded": len(autopost_rows),
         "bots": {"recipient_ok": bots_ok, "recipient_fail": bots_fail, "recipient_total": bot_rec_total},
-        "groups": {"recipient_ok": groups_ok, "recipient_fail": groups_fail, "recipient_total": group_rec_total},
+        "groups": {
+            "recipient_ok": groups_ok,
+            "recipient_fail": groups_fail,
+            "recipient_total": group_rec_total,
+            "clicks": int(clk_users),
+            "transitions": int(clk_groups),
+            "ctr": round(float(ctr), 2),
+        },
+        "real_clicks": int(clk_users),
+        "real_transitions": int(clk_groups),
+        "real_clicks_total": int(total_clk),
         "runs": runs_payload,
+        **ap_click_extras,
     }
 
 
@@ -8806,6 +9614,60 @@ async def api_admin_broadcasts_send(
         "n_users": int(n_users),
         "n_groups": int(n_groups),
     }
+
+
+# ---------- POST /api/webhooks/yoomoney (HTTP-уведомления кошелька ЮMoney, form-urlencoded) ----------
+@router.post("/webhooks/yoomoney")
+async def api_yoomoney_wallet_notification(
+    request: Request,
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Входящие переводы на кошелёк ЮMoney (виджет / P2P). Без initData.
+    Секрет из настроек HTTP-уведомлений: `YOOMONEY_NOTIFICATION_SECRET`.
+    Подпись: параметр `sign` (HMAC-SHA256), см. документацию ЮMoney.
+    """
+    secret = str(os.getenv("YOOMONEY_NOTIFICATION_SECRET") or "").strip()
+    if not secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="YooMoney notifications not configured",
+        )
+    try:
+        form = await request.form()
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid form")
+    flat: dict[str, str] = {}
+    for k, v in form.multi_items():
+        # повторы ключей — оставляем первое значение
+        key = str(k)
+        if key not in flat:
+            flat[key] = str(v)
+    from app.services.payments_yoomoney import process_yoomoney_http_notification
+
+    try:
+        await process_yoomoney_http_notification(session, flat)
+    except PermissionError:
+        _log.warning("YooMoney notification: invalid signature")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="invalid signature")
+    except RuntimeError as e:
+        if "yoomoney_secret" in str(e).lower():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="YooMoney secret not configured",
+            ) from e
+        _log.exception("YooMoney notification handler error")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="retry",
+        ) from e
+    except Exception:
+        _log.exception("YooMoney notification failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="retry",
+        )
+    return PlainTextResponse("OK", status_code=status.HTTP_200_OK)
 
 
 # ---------- POST /api/webhooks/yookassa/:secret (без initData) ----------

@@ -28,9 +28,45 @@ const cabinetTab = ref('all') // all | mine | shared
 /** Пресет внутри вкладки кабинета: все сущности | только группы | только каналы */
 const kindPreset = ref('all') // all | groups | channels
 const managersModalChat = ref(null)
-const managersData = ref({ managers: [], can_manage_access: false, limit: 3 })
+const managersData = ref({ managers: [], can_manage_access: false, limit: 3, chat_kind: 'group' })
 const managersLoading = ref(false)
 const addManagerValue = ref('')
+const addManagerPerms = ref({ protection: false, broadcast: false, reports: false, first_post_settings: false })
+
+const isManagersChannel = computed(
+  () => String(managersData.value?.chat_kind || managersModalChat.value?.chat_kind || 'group').toLowerCase() === 'channel'
+)
+const canSubmitNewManager = computed(() => {
+  const raw = String(addManagerValue.value || '').trim()
+  if (!raw) return false
+  const p = addManagerPerms.value || {}
+  if (isManagersChannel.value) return !!(p.broadcast || p.first_post_settings)
+  return !!(p.protection || p.broadcast || p.reports)
+})
+
+function _resetAddManagerForm() {
+  addManagerValue.value = ''
+  addManagerPerms.value = { protection: false, broadcast: false, reports: false, first_post_settings: false }
+}
+
+function permissionLabels(perms) {
+  const p = perms || {}
+  const out = []
+  if (p.protection) out.push('Защита')
+  if (p.broadcast) out.push('Рассылка')
+  if (p.reports) out.push('Отчёты')
+  if (p.first_post_settings) out.push('Первое сообщение')
+  return out
+}
+
+/** Для делегированного чата: разрешено ли право `key` (если delegated_permissions
+ *  не пришли — старая запись, считаем что разрешено всё). Для своих чатов: всегда true. */
+function delegatedCan(chat, key) {
+  if (!chat || !chat.is_shared) return true
+  const perms = chat.delegated_permissions
+  if (perms == null) return true
+  return !!perms[key]
+}
 const isPremium = ref(false)
 const showCabinetInfoModal = ref(false)
 const showDelegatedInfoModal = ref(false)
@@ -249,12 +285,19 @@ function goToProtection(chatId) {
 }
 
 function goToReports(chatId) {
-  const row = (chats.value || []).find((c) => Number(c.id) === Number(chatId))
-  setCabinetMode(row?.is_shared ? 'delegated' : 'owner')
+  // Открываем «Подробный отчёт по защите» (модалка на главной),
+  // одинаково и для общей кнопки, и для per-chat. При наличии chatId
+  // предварительно выбираем нужный чат, чтобы статистика была актуальна.
+  const isPerChat = !(chatId === undefined || chatId === null || chatId === '' || (typeof chatId === 'object' && !('id' in chatId)))
+  if (isPerChat) {
+    const row = (chats.value || []).find((c) => Number(c.id) === Number(chatId))
+    setCabinetMode(row?.is_shared ? 'delegated' : 'owner')
+    selectChat(chatId).catch(() => {})
+  } else {
+    setCabinetMode('delegated')
+  }
   setDashboardSection('account')
-  // Переходим в отдельную страницу отчётов (внутри приложения) — это стабильнее, чем модалка на Dashboard.
-  selectChat(chatId).catch(() => {})
-  router.push({ path: '/reports', query: { chat_id: String(chatId) } })
+  router.push({ path: '/', query: isPerChat ? { report: '1', chat_id: String(chatId) } : { report: '1' } })
 }
 
 function goToPremiumBilling() {
@@ -418,21 +461,30 @@ function closeManagers() {
     managersPollTimer = null
   }
   managersModalChat.value = null
-  addManagerValue.value = ''
+  _resetAddManagerForm()
 }
 
 async function addManager() {
   if (!managersModalChat.value?.id) return
   const raw = String(addManagerValue.value || '').trim()
   if (!raw) return
-  const payload = raw.startsWith('@') || Number.isNaN(Number(raw))
+  if (!canSubmitNewManager.value) {
+    window.alert('Выберите хотя бы одно право для админа.')
+    return
+  }
+  const base = raw.startsWith('@') || Number.isNaN(Number(raw))
     ? { username: raw }
     : { telegram_id: Number(raw) }
+  const p = addManagerPerms.value || {}
+  const permissions = isManagersChannel.value
+    ? { broadcast: !!p.broadcast, first_post_settings: !!p.first_post_settings }
+    : { protection: !!p.protection, broadcast: !!p.broadcast, reports: !!p.reports }
+  const payload = { ...base, permissions }
   managersLoading.value = true
   try {
     const res = await fetchSilent(() => api.chatManagerAdd(managersModalChat.value.id, payload))
     managersData.value = { ...managersData.value, ...res }
-    addManagerValue.value = ''
+    _resetAddManagerForm()
     await loadChats()
   } catch (e) {
     const d = e?.body?.detail || e?.message || 'Не удалось добавить админа'
@@ -483,7 +535,7 @@ function openDelegatedBroadcast(chatId) {
   } catch {
     //
   }
-  const nav = router.push({ path: '/admin', query: { cabinet: 'delegated' } })
+  const nav = router.push({ path: '/admin', query: { cabinet: 'delegated', tab: 'broadcasts' } })
   if (nav && typeof nav.catch === 'function') {
     nav.catch((err) => {
       const n = String(err?.name || err || '')
@@ -533,7 +585,7 @@ function openChannelBroadcast(chat) {
     >
       <div class="mx-auto mb-3 inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/8 px-3 py-1.5 text-xs font-semibold text-slate-100 shadow-[0_0_20px_-10px_rgba(255,255,255,0.35)]">
         <span class="inline-block hourglass-flip">⏳</span>
-        Загружаю подключённые чаты…
+        {{ delegatedChatsOnly ? 'Загружаю делегированный кабинет…' : 'Загружаю кабинет админа…' }}
       </div>
       <div class="space-y-2.5">
         <div class="mx-auto h-3 w-2/3 max-w-[14rem] animate-pulse rounded bg-white/15" />
@@ -600,19 +652,7 @@ function openChannelBroadcast(chat) {
             i
           </button>
         </div>
-        <div v-else class="rounded-xl border border-violet-400/25 bg-violet-950/20 p-2 text-[11px] text-violet-100">
-          <div class="flex items-start justify-between gap-2">
-            <span><span class="font-semibold">i</span> Фиолетовый ADM: сюда пускают чужим ключом — вижу только делегированные сущности; для групп — «Защита» и рассылка в группы, для каналов — «Рассылка» в ADM (в каналы), по тем правам, что тебе выдали.</span>
-            <button
-              type="button"
-              class="inline-flex h-6 min-w-6 items-center justify-center rounded-full border border-violet-300/40 bg-violet-900/35 px-1.5 text-[10px] font-extrabold text-violet-100"
-              @click="showDelegatedInfoModal = true"
-            >
-              i
-            </button>
-          </div>
-        </div>
-        <div class="mb-2 flex flex-wrap gap-1">
+        <div class="mb-2 flex flex-wrap items-center gap-1">
           <button
             type="button"
             class="rounded-lg px-2 py-1 text-[10px] font-semibold"
@@ -663,6 +703,27 @@ function openChannelBroadcast(chat) {
             @click="kindPreset = 'channels'"
           >
             Каналы
+          </button>
+          <button
+            v-if="delegatedChatsOnly"
+            type="button"
+            class="ml-auto inline-flex h-6 min-w-6 items-center justify-center rounded-full border border-violet-300/40 bg-violet-900/35 px-1.5 text-[10px] font-extrabold text-violet-100"
+            aria-label="Что такое фиолетовый ADM"
+            @click="showDelegatedInfoModal = true"
+          >
+            i
+          </button>
+        </div>
+        <div v-if="delegatedChatsOnly && (kindPreset === 'all' || kindPreset === 'groups')" class="mb-2">
+          <button
+            type="button"
+            class="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-violet-400/35 bg-violet-500/10 px-3 py-1.5 text-[11px] font-semibold text-violet-100 transition hover:bg-violet-500/15"
+            @click="goToReports"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M4 4h12l4 4v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" /><path d="M16 4v4h4" /><path d="M7 14h10M7 18h6M7 10h4" />
+            </svg>
+            Отчёты по группам
           </button>
         </div>
         <div v-if="cabinetTab === 'shared' && !delegatedChatsOnly" class="rounded-xl border border-white/12 bg-black/35 p-2.5">
@@ -725,6 +786,11 @@ function openChannelBroadcast(chat) {
                     class="rounded-full border border-violet-400/35 bg-violet-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-violet-100"
                   >Делегированный</span>
                   <span
+                    v-for="lbl in permissionLabels(chat.delegated_permissions)"
+                    :key="`fdp-${chat.id}-${lbl}`"
+                    class="rounded-full border border-violet-300/40 bg-violet-500/25 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-violet-50"
+                  >{{ lbl }}</span>
+                  <span
                     v-if="chatSpikeAlert(chat)"
                     class="rounded-full border border-yellow-400/45 bg-yellow-500/20 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-yellow-100"
                   >⚠ под угрозой</span>
@@ -753,19 +819,19 @@ function openChannelBroadcast(chat) {
             <div class="mt-2 flex flex-wrap gap-1 border-t border-white/10 pt-2">
               <template v-if="isChannelRow(chat)">
                 <button
-                  v-if="!chat.locked_by_limit"
+                  v-if="!chat.locked_by_limit && delegatedCan(chat, 'broadcast')"
                   type="button"
                   class="guard-green-soft rounded-lg px-2 py-1 text-[11px] font-semibold leading-tight"
                   @click="openChannelBroadcast(chat)"
                 >Рассылка</button>
                 <button
-                  v-if="!chat.locked_by_limit"
+                  v-if="!chat.locked_by_limit && delegatedCan(chat, 'first_post_settings')"
                   type="button"
                   class="rounded-lg border border-white/15 bg-white/10 px-2 py-1 text-[11px] font-semibold leading-tight text-slate-100 hover:bg-white/20"
                   @click="openChannelPostRules(chat)"
                 >Настройки</button>
                 <button
-                  v-else
+                  v-if="chat.locked_by_limit"
                   type="button"
                   class="rounded-lg border border-amber-400/40 bg-amber-900/30 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-100"
                   @click="goToPremiumBilling"
@@ -773,18 +839,19 @@ function openChannelBroadcast(chat) {
               </template>
               <template v-else>
                 <button
-                  v-if="!chat.locked_by_limit"
+                  v-if="!chat.locked_by_limit && delegatedCan(chat, 'protection')"
                   type="button"
                   class="guard-green-soft rounded-lg px-2 py-1 text-[11px] font-semibold leading-tight"
                   @click="goToProtection(chat.id)"
                 >Защита <span v-if="chatSpikeAlert(chat)">⚠</span></button>
                 <button
-                  v-else
+                  v-else-if="chat.locked_by_limit"
                   type="button"
                   class="rounded-lg border border-amber-400/40 bg-amber-900/30 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-100"
                   @click="goToPremiumBilling"
                 >💳 Premium: открыть и защитить</button>
                 <button
+                  v-if="delegatedCan(chat, 'broadcast')"
                   type="button"
                   class="rounded-lg border border-violet-400/35 bg-violet-900/30 px-2 py-1 text-[11px] font-semibold leading-tight text-violet-200"
                   @click="openDelegatedBroadcast(chat.id)"
@@ -800,7 +867,7 @@ function openChannelBroadcast(chat) {
                 <span v-if="(Number(chat.managers_count) || 0) > 0" class="min-w-[1.1rem] shrink-0 tabular-nums text-cyan-200/95">{{ Number(chat.managers_count) || 0 }}</span>
               </button>
               <button
-                v-if="!chat.locked_by_limit && !isChannelRow(chat)"
+                v-if="!chat.locked_by_limit && !isChannelRow(chat) && delegatedCan(chat, 'reports')"
                 type="button"
                 class="rounded-lg border border-white/15 bg-white/10 px-2 py-1 text-[11px] font-semibold leading-tight text-slate-100 hover:bg-white/20"
                 @click="goToReports(chat.id)"
@@ -965,19 +1032,24 @@ function openChannelBroadcast(chat) {
         <div v-else class="space-y-2">
           <div class="text-[11px] text-slate-300">Лимит: {{ managersData.managers?.length || 0 }}/{{ managersData.limit || 3 }}</div>
           <div class="space-y-1.5">
-            <div v-for="m in (managersData.managers || [])" :key="`m-${m.user_id}`" class="flex items-center justify-between rounded-lg border border-white/12 bg-white/5 px-2 py-1.5 text-xs">
-              <div class="min-w-0">
+            <div v-for="m in (managersData.managers || [])" :key="`m-${m.user_id}`" class="flex items-center justify-between gap-2 rounded-lg border border-white/12 bg-white/5 px-2 py-1.5 text-xs">
+              <div class="min-w-0 flex-1">
                 <span class="truncate">
                   {{ m.first_name || (m.username ? '@'+m.username : m.user_id) }}
                   <span class="text-slate-400">({{ m.user_id }})</span>
                 </span>
-                <div class="mt-0.5">
+                <div class="mt-0.5 flex flex-wrap items-center gap-1">
                   <span
                     class="inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
                     :class="m.is_online ? 'bg-emerald-500/20 text-emerald-200 ring-1 ring-emerald-400/30' : 'bg-slate-500/20 text-slate-300 ring-1 ring-slate-400/25'"
                   >
                     {{ m.is_online ? 'Онлайн' : 'Оффлайн' }}
                   </span>
+                  <span
+                    v-for="lbl in permissionLabels(m.permissions)"
+                    :key="`mp-${m.user_id}-${lbl}`"
+                    class="inline-flex items-center rounded-full bg-violet-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-violet-100 ring-1 ring-violet-400/30"
+                  >{{ lbl }}</span>
                 </div>
               </div>
               <div class="flex items-center gap-1">
@@ -1013,10 +1085,45 @@ function openChannelBroadcast(chat) {
             </div>
             <p v-if="!(managersData.invites || []).length" class="text-[11px] text-slate-500">Инвайтов пока нет.</p>
           </div>
-          <div v-if="managersData.can_manage_access" class="mt-2 space-y-1.5">
+          <div v-if="managersData.can_manage_access" class="mt-2 space-y-2 rounded-lg border border-white/10 bg-black/20 p-2">
             <input v-model="addManagerValue" type="text" class="w-full rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-xs text-white outline-none"
               placeholder="Telegram ID или @username" />
-            <button type="button" class="guard-green-soft rounded-lg px-3 py-2 text-xs font-semibold" @click="addManager">
+            <div>
+              <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Права делегата</p>
+              <div v-if="!isManagersChannel" class="flex flex-wrap gap-1.5">
+                <label class="inline-flex items-center gap-1.5 rounded-lg border border-white/12 bg-white/5 px-2 py-1.5 text-[11px] text-slate-100">
+                  <input v-model="addManagerPerms.protection" type="checkbox" class="h-3.5 w-3.5 accent-emerald-400" />
+                  <span>Защита</span>
+                </label>
+                <label class="inline-flex items-center gap-1.5 rounded-lg border border-white/12 bg-white/5 px-2 py-1.5 text-[11px] text-slate-100">
+                  <input v-model="addManagerPerms.broadcast" type="checkbox" class="h-3.5 w-3.5 accent-violet-400" />
+                  <span>Рассылка</span>
+                </label>
+                <label class="inline-flex items-center gap-1.5 rounded-lg border border-white/12 bg-white/5 px-2 py-1.5 text-[11px] text-slate-100">
+                  <input v-model="addManagerPerms.reports" type="checkbox" class="h-3.5 w-3.5 accent-sky-400" />
+                  <span>Отчёты</span>
+                </label>
+              </div>
+              <div v-else class="flex flex-wrap gap-1.5">
+                <label class="inline-flex items-center gap-1.5 rounded-lg border border-white/12 bg-white/5 px-2 py-1.5 text-[11px] text-slate-100">
+                  <input v-model="addManagerPerms.broadcast" type="checkbox" class="h-3.5 w-3.5 accent-violet-400" />
+                  <span>Рассылка</span>
+                </label>
+                <label class="inline-flex items-center gap-1.5 rounded-lg border border-white/12 bg-white/5 px-2 py-1.5 text-[11px] text-slate-100">
+                  <input v-model="addManagerPerms.first_post_settings" type="checkbox" class="h-3.5 w-3.5 accent-amber-400" />
+                  <span>Настройки первого сообщения в коммах</span>
+                </label>
+              </div>
+              <p v-if="!canSubmitNewManager && String(addManagerValue || '').trim()" class="mt-1 text-[10px] text-amber-300">
+                Выберите хотя бы одно право, иначе админа добавить нельзя.
+              </p>
+            </div>
+            <button
+              type="button"
+              class="guard-green-soft rounded-lg px-3 py-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50"
+              :disabled="!canSubmitNewManager || managersLoading"
+              @click="addManager"
+            >
               Добавить админа
             </button>
           </div>

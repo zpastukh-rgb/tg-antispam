@@ -1,14 +1,18 @@
 <script setup>
-import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import NavIcon from './NavIcon.vue'
 import { useDashboardSection } from '../composables/useDashboardSection'
 import { useApi } from '../composables/useApi'
+import { useCabinetMode } from '../composables/useCabinetMode'
 
 const route = useRoute()
 const router = useRouter()
 const { dashboardSection, setDashboardSection } = useDashboardSection()
 const { api, hasInitData } = useApi()
+const { setCabinetMode } = useCabinetMode()
+const PREMIUM_CACHE_KEY = 'guard.me.is_premium.v1'
+const DELEGATED_BC_CACHE_KEY = 'guard.me.has_delegated_broadcast.v1'
 const spikeActiveOwner = ref(false)
 const spikeActiveShared = ref(false)
 let spikeTimer = null
@@ -33,14 +37,56 @@ const navDragState = ref({
   startLeft: 0,
 })
 
-const items = [
+const baseItems = [
   { key: 'account', label: 'Аккаунт', icon: 'account', to: '/' },
   { key: 'partner', label: 'Партнер', icon: 'partner', section: 'partner', to: '/' },
   { key: 'protection', label: 'Защита', icon: 'shield', to: '/protection' },
   { key: 'support', label: 'Поддержка', icon: 'support', to: 'support' },
 ]
+const isPremiumUser = ref(false)
+const hasDelegatedBroadcast = ref(false)
+function _readBoolCache(key) {
+  try {
+    const raw = localStorage.getItem(key)
+    if (raw === '1') return true
+    if (raw === '0') return false
+  } catch {
+    //
+  }
+  return null
+}
+function _writeBoolCache(key, v) {
+  try {
+    localStorage.setItem(key, v ? '1' : '0')
+  } catch {
+    //
+  }
+}
+function readPremiumCache() { return _readBoolCache(PREMIUM_CACHE_KEY) }
+function writePremiumCache(v) { _writeBoolCache(PREMIUM_CACHE_KEY, v) }
+function readDelegatedBcCache() { return _readBoolCache(DELEGATED_BC_CACHE_KEY) }
+function writeDelegatedBcCache(v) { _writeBoolCache(DELEGATED_BC_CACHE_KEY, v) }
+const cachedPremium = readPremiumCache()
+if (cachedPremium !== null) isPremiumUser.value = !!cachedPremium
+const cachedDelegatedBc = readDelegatedBcCache()
+if (cachedDelegatedBc !== null) hasDelegatedBroadcast.value = !!cachedDelegatedBc
+
+/** «Рассылка» в таббаре видна всем авторизованным (маркетинг); реальный доступ в кабинете — Premium / делегирование. */
+const canSeeBroadcasts = computed(() => hasInitData.value)
+
+const items = computed(() => {
+  const base = [baseItems[0], baseItems[1]]
+  if (canSeeBroadcasts.value) {
+    base.push({ key: 'broadcasts', label: 'Рассылка', icon: 'telegram', to: '/admin', adminTab: 'broadcasts' })
+  }
+  base.push(baseItems[2], baseItems[3])
+  return base
+})
 
 function isActive(item) {
+  if (item.adminTab) {
+    return route.path === '/admin' && String(route.query?.tab || '').toLowerCase() === String(item.adminTab || '').toLowerCase()
+  }
   if (item.section) return route.path === '/' && dashboardSection.value === item.section
   if (item.to === '/') {
     return (
@@ -52,7 +98,7 @@ function isActive(item) {
 }
 
 function activeItemIndex() {
-  const idx = items.findIndex((item) => isActive(item))
+  const idx = items.value.findIndex((item) => isActive(item))
   return idx >= 0 ? idx : 0
 }
 
@@ -156,7 +202,7 @@ function endIndicatorDrag() {
       bestIdx = idx
     }
   })
-  const target = items[bestIdx]
+  const target = items.value[bestIdx]
   if (target) onTap(target)
   updateActiveIndicator(true)
   if (navIndicatorSettleTimer) clearTimeout(navIndicatorSettleTimer)
@@ -185,6 +231,12 @@ function onTap(item) {
     router.push('/')
     return
   }
+  if (item.adminTab) {
+    setCabinetMode('owner')
+    const nav = router.push({ path: item.to, query: { tab: item.adminTab } })
+    if (nav && typeof nav.catch === 'function') nav.catch(() => {})
+    return
+  }
   router.push(item.to)
 }
 
@@ -204,9 +256,22 @@ async function loadSpikeAlerts() {
     //
   }
 }
+async function loadPremiumFlag() {
+  if (!hasInitData.value) return
+  try {
+    const me = await api.me()
+    isPremiumUser.value = !!me?.is_premium
+    writePremiumCache(!!me?.is_premium)
+    hasDelegatedBroadcast.value = !!me?.has_delegated_broadcast
+    writeDelegatedBcCache(!!me?.has_delegated_broadcast)
+  } catch {
+    //
+  }
+}
 
 onMounted(async () => {
-  await loadSpikeAlerts()
+  void loadSpikeAlerts()
+  void loadPremiumFlag()
   spikeTimer = setInterval(loadSpikeAlerts, 30000)
   updateActiveIndicator(false)
   navResizeHandler = () => updateActiveIndicator(false)
@@ -237,17 +302,22 @@ onUnmounted(() => {
 })
 
 watch(
-  () => [route.path, dashboardSection.value],
+  () => [route.path, dashboardSection.value, items.value.length],
   () => updateActiveIndicator(true),
 )
 </script>
 
 <template>
   <nav
-    class="fixed bottom-3 left-6 right-6 z-40 mx-auto w-auto max-w-[17.8rem] rounded-[1.65rem] border-0 bg-[linear-gradient(180deg,rgba(18,21,28,0.42),rgba(12,14,18,0.42))] pb-[calc(0.18rem+env(safe-area-inset-bottom,0px))] pt-0 shadow-[0_14px_28px_-14px_rgba(0,0,0,0.62)] backdrop-blur-[14px] [contain:layout_paint] [transform:translateZ(0)]"
+    class="fixed bottom-3 left-6 right-6 z-40 mx-auto w-auto rounded-[1.65rem] border-0 bg-[linear-gradient(180deg,rgba(18,21,28,0.42),rgba(12,14,18,0.42))] pb-[calc(0.18rem+env(safe-area-inset-bottom,0px))] pt-0 shadow-[0_14px_28px_-14px_rgba(0,0,0,0.62)] backdrop-blur-[14px] [contain:layout_paint] [transform:translateZ(0)]"
+    :class="items.length > 4 ? 'max-w-[22.4rem]' : 'max-w-[17.8rem]'"
     style="font-family: 'Exo 2', 'Montserrat', sans-serif;"
   >
-    <div ref="navGridRef" class="relative mx-auto grid w-full max-w-[16.6rem] grid-cols-4 gap-0 px-0 pt-[0.18rem] pb-[0.06rem]">
+    <div
+      ref="navGridRef"
+      class="relative mx-auto grid w-full gap-0 px-0 pt-[0.18rem] pb-[0.06rem]"
+      :class="items.length > 4 ? 'max-w-[21.2rem] grid-cols-5' : 'max-w-[16.6rem] grid-cols-4'"
+    >
       <span
         class="nav-active-indicator absolute bottom-0 top-0 z-[3] rounded-full transition-[left,width,opacity,background-color,box-shadow,backdrop-filter,transform] duration-200 ease-out"
         :class="[
@@ -270,9 +340,9 @@ watch(
         />
       </span>
       <button
-        v-for="item in items"
+        v-for="(item, idx) in items"
         :key="item.key"
-        :ref="(el) => setItemButtonRef(el, items.findIndex((x) => x.key === item.key))"
+        :ref="(el) => setItemButtonRef(el, idx)"
         type="button"
         class="group relative z-[2] flex flex-col items-center justify-center gap-0 rounded-full px-0.5 py-[0.18rem] text-[10.5px] font-semibold tracking-[0.01em] transition-colors duration-200"
         :class="
@@ -294,7 +364,7 @@ watch(
         <span class="inline-flex h-8 w-8 shrink-0 items-center justify-center p-0 transition" :class="isActive(item) ? 'text-[#7cc0ff]' : 'text-zinc-200/95'">
           <NavIcon
             :name="item.icon"
-            :class="item.key === 'partner' ? 'h-[1.95rem] w-[1.95rem] text-current' : item.key === 'support' ? 'h-[1.72rem] w-[1.72rem] text-current' : 'h-[1.58rem] w-[1.58rem] text-current'"
+            :class="item.key === 'partner' ? 'h-[1.95rem] w-[1.95rem] text-current' : item.key === 'support' ? 'h-[1.72rem] w-[1.72rem] text-current' : item.key === 'broadcasts' ? 'h-[1.64rem] w-[1.64rem] text-current' : 'h-[1.58rem] w-[1.58rem] text-current'"
           />
         </span>
         <span class="-mt-[1px] max-w-full truncate leading-none" :class="isActive(item) ? 'text-[#7fc3ff]' : 'text-zinc-100/92'">{{ item.label }}</span>

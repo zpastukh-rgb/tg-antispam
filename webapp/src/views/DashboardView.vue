@@ -18,10 +18,10 @@ const bootError = ref('')
 const { dashboardSection, setDashboardSection, billingFromGroupStats } = useDashboardSection()
 const me = ref(null)
 const showQuickStartModal = ref(false)
-const quickHintKey = ref('')
-const showMoreMenu = ref(false)
+const showAccountHistoryModal = ref(false)
 const historyTab = ref('payments')
 const historyLoading = ref(false)
+const historyLoadCompleted = ref(false)
 const historyPayments = ref([])
 const historyTokens = ref([])
 const showReceiptModal = ref(false)
@@ -87,7 +87,6 @@ const paymentWaitBaselineUntilTs = ref(0)
 let paymentActivationPollTimer = null
 let premiumActivationCheckRunning = false
 let premiumActivationCheckQueued = false
-const moreMenuWrapRef = ref(null)
 const tokenBreakdownWrapRef = ref(null)
 const showTokenBreakdown = ref(false)
 let tokenHideTimer = null
@@ -108,10 +107,6 @@ const tokenLandingPackChoiceTitleRef = ref(null)
 const tokenLandingOrbitSrc = `${import.meta.env.BASE_URL}token-landing-orbit.png`
 let tokenLandingOrbitPreloadImg = null
 
-/** Круглые кнопки справа сверху: тот же размер/стиль, что и «Токены» */
-const quickNavTileClass =
-  'relative inline-flex h-7 w-7 items-center justify-center rounded-full border border-cyan-400/50 bg-gradient-to-br from-cyan-500/35 via-lime-400/25 to-fuchsia-600/25 text-lime-100 shadow-[0_0_18px_-6px_rgba(34,211,238,0.42)] backdrop-blur-md transition hover:brightness-110'
-const quickNavTileIconClass = 'h-4 w-4 text-lime-200 drop-shadow-[0_0_8px_rgba(190,242,100,0.75)]'
 const partnerData = ref(null)
 const partnerLoading = ref(false)
 const partnerError = ref('')
@@ -130,6 +125,7 @@ const bonusTransferLoading = ref(false)
 const docsExampleSale = ref(10000)
 const activitySummary = ref({
   protection_active: false,
+  protected_groups_count: 0,
   tariff: 'free',
   chats_count: 0,
   chats_count_total: 0,
@@ -144,6 +140,7 @@ const activitySummary = ref({
   groups_usage_progress: 0,
   channels_usage_progress: 0,
   today: { deleted: 0, muted: 0, banned: 0, enabled_metrics: { delete: true, mute: false, ban: false } },
+  yesterday: { deleted: 0, muted: 0, banned: 0, observed: 0, joins: 0 },
 })
 const activityJournal = ref([])
 const activityChats = ref([])
@@ -166,9 +163,197 @@ let dashSwitchTimer = null
 const showUpdatesRoadmapModal = ref(false)
 let activityTimer = null
 let updatesTimer = null
-let quickHintTimer = null
 /** Счётчик запросов activitySummary: не применять устаревший ответ при гонке параллельных вызовов */
 let activitySummaryFetchGen = 0
+/** Время успешного ответа activity summary (для пропуска лишнего refetch при возврате на вкладку). */
+let lastActivitySummaryOkAt = 0
+
+/** Период для блока «Статистика» на главной (не путать с верхним рядом — там всегда «сегодня» из summary). */
+const dashboardStatsPeriod = ref('today')
+const dashboardPeriodBreakdown = ref(null)
+const dashboardPeriodLoading = ref(false)
+const DASHBOARD_STATS_PERIOD_OPTIONS = [
+  { key: 'today', label: 'Сегодня' },
+  { key: '7d', label: '7 дней' },
+  { key: '14d', label: '14 дней' },
+  { key: '30d', label: '30 дней' },
+]
+
+/** Компактная карточка рассылки под статистикой (те же правила, что «Рассылка» в таббаре). */
+const broadcastMiniEligibleCount = ref(null)
+const broadcastMiniScheduledCount = ref(null)
+/** Успешные доставки (autopost) за сутки по первому посту — для «Сколько отправлено сегодня». */
+const broadcastMiniSentToday = ref(null)
+const broadcastMiniLoading = ref(false)
+let broadcastMiniDebounceTimer = null
+
+let statBroadcastNudgeTimer = null
+const statBroadcastDragDx = ref(0)
+const statBroadcastNudgePx = ref(0)
+const statBroadcastDragging = ref(false)
+let statBroadcastPointerId = null
+let statBroadcastPointerStartX = 0
+const statBroadcastJustDragged = ref(false)
+let statBroadcastJustDraggedClear = null
+
+/** Ручное переключение: «Обновления ↔ Premium», «Статистика ↔ Рассылки» */
+const homeUpdatesPremiumSlide = ref(0)
+const homeStatBroadcastSlide = ref(0)
+const homeUpdatesPremiumInstant = ref(false)
+const homeStatBroadcastInstant = ref(false)
+
+function setUpdatesPremiumSlide(i) {
+  const next = i === 1 ? 1 : 0
+  const cur = homeUpdatesPremiumSlide.value
+  if (next === cur) return
+  if (next < cur) {
+    homeUpdatesPremiumInstant.value = true
+    homeUpdatesPremiumSlide.value = next
+    void nextTick(() => {
+      requestAnimationFrame(() => {
+        homeUpdatesPremiumInstant.value = false
+      })
+    })
+  } else {
+    homeUpdatesPremiumInstant.value = false
+    homeUpdatesPremiumSlide.value = next
+  }
+}
+
+function stepUpdatesPremium(delta) {
+  const cur = homeUpdatesPremiumSlide.value
+  const n = cur + delta
+  const next = n <= 0 ? 0 : n >= 1 ? 1 : n
+  if (next === cur) return
+  if (delta < 0) {
+    homeUpdatesPremiumInstant.value = true
+    homeUpdatesPremiumSlide.value = next
+    void nextTick(() => {
+      requestAnimationFrame(() => {
+        homeUpdatesPremiumInstant.value = false
+      })
+    })
+  } else {
+    homeUpdatesPremiumInstant.value = false
+    homeUpdatesPremiumSlide.value = next
+  }
+}
+
+function stepStatBroadcast(delta) {
+  if (!accountShowBroadcastMiniCard.value) return
+  const cur = homeStatBroadcastSlide.value
+  const n = cur + delta
+  const next = n <= 0 ? 0 : n >= 1 ? 1 : n
+  if (next === cur) return
+  if (delta < 0) {
+    homeStatBroadcastInstant.value = true
+    homeStatBroadcastSlide.value = next
+    void nextTick(() => {
+      requestAnimationFrame(() => {
+        homeStatBroadcastInstant.value = false
+      })
+    })
+  } else {
+    homeStatBroadcastInstant.value = false
+    homeStatBroadcastSlide.value = next
+  }
+}
+
+function statBroadcastTrackStyle() {
+  if (!accountShowBroadcastMiniCard.value) return {}
+  const slide = homeStatBroadcastSlide.value
+  const drag = statBroadcastDragDx.value
+  const nudge = statBroadcastNudgePx.value
+  const instant = homeStatBroadcastInstant.value
+  const dragging = statBroadcastDragging.value
+  const extra = drag + nudge
+  return {
+    transform: `translateX(calc(-${slide * 50}% + ${extra}px))`,
+    transition:
+      dragging || instant
+        ? 'none'
+        : 'transform 0.45s cubic-bezier(0.22, 1, 0.36, 1)',
+  }
+}
+
+function statBroadcastPointerTargetIgnoresSwipe(el) {
+  if (!el || typeof el.closest !== 'function') return true
+  return !!el.closest('select, [data-no-swipe], a, input, textarea, label')
+}
+
+function onStatDeletedStatClick() {
+  if (statBroadcastJustDragged.value) return
+  void openActivityDetails()
+}
+
+function onStatBroadcastRailPointerDown(e) {
+  if (!accountShowBroadcastMiniCard.value) return
+  if (statBroadcastPointerTargetIgnoresSwipe(e.target)) return
+  if (e.button != null && e.button !== 0) return
+  statBroadcastPointerId = e.pointerId
+  statBroadcastPointerStartX = e.clientX
+  statBroadcastDragDx.value = 0
+  statBroadcastDragging.value = true
+  try {
+    e.currentTarget?.setPointerCapture?.(e.pointerId)
+  } catch {
+    //
+  }
+}
+
+function onStatBroadcastRailPointerMove(e) {
+  if (!statBroadcastDragging.value || e.pointerId !== statBroadcastPointerId) return
+  const dx = e.clientX - statBroadcastPointerStartX
+  statBroadcastDragDx.value = dx
+  if (Math.abs(dx) > 14) {
+    statBroadcastJustDragged.value = true
+    if (statBroadcastJustDraggedClear) clearTimeout(statBroadcastJustDraggedClear)
+    statBroadcastJustDraggedClear = setTimeout(() => {
+      statBroadcastJustDraggedClear = null
+      statBroadcastJustDragged.value = false
+    }, 320)
+  }
+}
+
+function onStatBroadcastRailPointerUp(e) {
+  if (statBroadcastPointerId === null || e.pointerId !== statBroadcastPointerId) return
+  try {
+    e.currentTarget?.releasePointerCapture?.(e.pointerId)
+  } catch {
+    //
+  }
+  const dx = statBroadcastDragDx.value
+  statBroadcastDragging.value = false
+  statBroadcastPointerId = null
+  statBroadcastDragDx.value = 0
+  const th = 52
+  const cur = homeStatBroadcastSlide.value
+  if (dx < -th && cur === 0) {
+    stepStatBroadcast(1)
+  } else if (dx > th && cur === 1) {
+    stepStatBroadcast(-1)
+  }
+}
+
+function onStatBroadcastRailPointerCancel(e) {
+  onStatBroadcastRailPointerUp(e)
+}
+
+function restartStatBroadcastNudge() {
+  if (statBroadcastNudgeTimer) {
+    clearInterval(statBroadcastNudgeTimer)
+    statBroadcastNudgeTimer = null
+  }
+  if (dashboardSection.value !== 'account' || !accountShowBroadcastMiniCard.value) return
+  statBroadcastNudgeTimer = setInterval(() => {
+    if (homeStatBroadcastSlide.value !== 0) return
+    if (statBroadcastDragging.value) return
+    statBroadcastNudgePx.value = 11
+    setTimeout(() => {
+      statBroadcastNudgePx.value = 0
+    }, 380)
+  }, 3000)
+}
 
 const currentUpdateSlide = computed(() => UPDATES_SLIDES[updatesIndex.value] || UPDATES_SLIDES[0])
 
@@ -415,6 +600,8 @@ const totalTokens = computed(() => {
   return String(Math.max(0, Math.round(total)))
 })
 const tariffIsPremium = computed(() => ['premium', 'pro', 'business'].includes((me.value?.tariff || 'free').toLowerCase()))
+/** Карточка «Рассылки» на главной: показываем всем авторизованным (маркетинг); доступ по-прежнему через Premium/делегирование. */
+const accountShowBroadcastMiniCard = computed(() => !!me.value)
 const dashboardAvatarSrc = computed(() => {
   const base = import.meta.env.BASE_URL
   return tariffIsPremium.value ? `${base}premium-guard-emblem.png` : `${base}avatar-free.png`
@@ -423,6 +610,10 @@ const dashboardAvatarSrc = computed(() => {
 const protCheckGradId = `prot-ok-${Math.random().toString(36).slice(2, 11)}`
 const protOffGradId = `prot-off-${Math.random().toString(36).slice(2, 11)}`
 const activityChatsCount = computed(() => Number(activitySummary.value?.chats_count || 0))
+/** Группы с включённым Guard (не каналы, не на паузе) — строка «Защищено сегодня». */
+const activityProtectedGroupsCount = computed(() =>
+  Math.max(0, Math.round(Number(activitySummary.value?.protected_groups_count ?? 0))),
+)
 const activityGroupsCount = computed(() => Number((activitySummary.value?.groups_count ?? activitySummary.value?.chats_count) || 0))
 const activityChannelsCount = computed(() => Number(activitySummary.value?.channels_count || 0))
 const activityGroupsLimit = computed(() => Number((activitySummary.value?.groups_limit ?? activitySummary.value?.group_limit ?? activitySummary.value?.chat_limit) || 0))
@@ -430,11 +621,229 @@ const activityChannelsLimit = computed(() => Number((activitySummary.value?.chan
 const activityGroupsProgress = computed(() => Number((activitySummary.value?.groups_usage_progress ?? activitySummary.value?.usage_progress) || 0))
 const activityChannelsProgress = computed(() => Number(activitySummary.value?.channels_usage_progress || 0))
 /** Есть подключённые группы и защита включена */
-const protectionStatusOk = computed(() => activityChatsCount.value > 0 && !!activitySummary.value?.protection_active)
-/** Нет ни одной группы — отдельное состояние UI */
+const protectionStatusOk = computed(() => !!activitySummary.value?.protection_active)
+/** Нет подключённых чатов в сводке — отдельное состояние UI */
 const protectionStatusNoChats = computed(() => activityChatsCount.value === 0)
 
+/** Оценка «сэкономлено админам» (₽): ~25 ₽ на обработанное удаление за сегодня (ориентир времени модератора). */
+const dashboardEstimatedSavedRub = computed(() => {
+  const d = Math.max(0, Math.round(Number(activitySummary.value?.today?.deleted || 0)))
+  return d * 25
+})
+
+/**
+ * Уровень защиты: 1–4 сегмента и цвет (красный → оранжевый → жёлтый → зелёный).
+ * Считаем балл 0–100 из факторов: тариф, protection_active, число защищённых групп
+ * (без каналов, без паузы), удаления за сутки, загрузка лимита групп.
+ */
+const dashboardProtectionLevelMeta = computed(() => {
+  const empty = {
+    segments: 0,
+    score: 0,
+    label: '—',
+    labelClass: 'text-white/45',
+    fillSegmentClass: '',
+  }
+  const n = activityProtectedGroupsCount.value
+  if (n <= 0) return empty
+
+  const del = Math.max(0, Math.round(Number(activitySummary.value?.today?.deleted || 0)))
+  const t = String(activitySummary.value?.tariff || 'free').toLowerCase()
+  const premium = ['premium', 'pro', 'business'].includes(t)
+  const protOn = !!activitySummary.value?.protection_active
+  const usage = Math.max(0, Math.min(100, activityGroupsProgress.value))
+
+  let score = 0
+  score += premium ? 22 : 10
+  score += protOn ? 38 : 8
+  score += Math.min(18, Math.round(n * 3))
+  score += Math.min(14, Math.round(del * 0.35))
+  score += Math.min(8, Math.round(usage / 12))
+
+  const s = Math.max(0, Math.min(100, Math.round(score)))
+
+  let segments = 1
+  if (s >= 72) segments = 4
+  else if (s >= 48) segments = 3
+  else if (s >= 24) segments = 2
+
+  const tiers = {
+    1: {
+      label: 'Слабый',
+      fillSegmentClass: 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.35)]',
+      labelClass: 'text-rose-400',
+    },
+    2: {
+      label: 'Базовый',
+      fillSegmentClass: 'bg-orange-500 shadow-[0_0_6px_rgba(249,115,22,0.32)]',
+      labelClass: 'text-orange-400',
+    },
+    3: {
+      label: 'Средний',
+      fillSegmentClass: 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.38)]',
+      labelClass: 'text-amber-300',
+    },
+    4: {
+      label: 'Сильный',
+      fillSegmentClass: 'bg-lime-400 shadow-[0_0_6px_rgba(163,230,53,0.38)]',
+      labelClass: 'text-lime-400',
+    },
+  }
+
+  const meta = tiers[segments]
+  return {
+    segments,
+    score: s,
+    label: meta.label,
+    labelClass: meta.labelClass,
+    fillSegmentClass: meta.fillSegmentClass,
+  }
+})
+
+/** Оценка часов, сэкономленных админам (25 ₽/удаление, ориентир 1500 ₽/ч модератора). */
+const dashboardSavedHoursLabel = computed(() => {
+  const d = Math.max(0, Math.round(Number(activitySummary.value?.today?.deleted || 0)))
+  if (d === 0) return '0 ч'
+  const hours = (d * 25) / 1500
+  if (hours < 0.05) return '< 0,1 ч'
+  return `${hours.toFixed(1).replace('.', ',')} ч`
+})
+
+/** Тренд «к вчера» для счётчиков (процент или текст). */
+function statTrendPctLine(todayVal, yesterdayVal) {
+  const t = Math.max(0, Math.round(Number(todayVal) || 0))
+  const y = Math.max(0, Math.round(Number(yesterdayVal) || 0))
+  if (t === 0 && y === 0) return 'нет данных'
+  if (y === 0) return t > 0 ? 'вчера было 0' : 'как вчера'
+  const pct = Math.round(((t - y) / y) * 100)
+  const sign = pct > 0 ? '+' : ''
+  return `${sign}${pct}% к вчера`
+}
+
+const statTrendDeleted = computed(() =>
+  statTrendPctLine(activitySummary.value?.today?.deleted, activitySummary.value?.yesterday?.deleted),
+)
+const statTrendSaved = computed(() =>
+  statTrendPctLine(activitySummary.value?.today?.deleted, activitySummary.value?.yesterday?.deleted),
+)
+const statTrendJoins = computed(() => {
+  const t = Math.max(0, Math.round(Number(activitySummary.value?.today?.joins ?? 0)))
+  const y = Math.max(0, Math.round(Number(activitySummary.value?.yesterday?.joins ?? 0)))
+  if (t === 0 && y === 0) return 'нет вступлений'
+  const diff = t - y
+  if (diff === 0) return 'как вчера'
+  if (diff > 0) return `+${diff} к вчера`
+  return `${diff} к вчера`
+})
+
+const statsCardUsesPeriod = computed(() => dashboardStatsPeriod.value !== 'today')
+const statsCardDeleted = computed(() => {
+  if (!statsCardUsesPeriod.value) {
+    return Math.max(0, Math.round(Number(activitySummary.value?.today?.deleted ?? 0)))
+  }
+  return Math.max(0, Math.round(Number(dashboardPeriodBreakdown.value?.total_deleted ?? 0)))
+})
+const statsCardJoins = computed(() => {
+  if (!statsCardUsesPeriod.value) {
+    return Math.max(0, Math.round(Number(activitySummary.value?.today?.joins ?? 0)))
+  }
+  return Math.max(0, Math.round(Number(dashboardPeriodBreakdown.value?.total_joined ?? 0)))
+})
+const statsCardSavedHoursLabel = computed(() => {
+  const d = statsCardDeleted.value
+  if (d === 0) return '0 ч'
+  const hours = (d * 25) / 1500
+  if (hours < 0.05) return '< 0,1 ч'
+  return `${hours.toFixed(1).replace('.', ',')} ч`
+})
+const statsCardTrendDeleted = computed(() => {
+  if (statsCardUsesPeriod.value) {
+    const p = DASHBOARD_STATS_PERIOD_OPTIONS.find((x) => x.key === dashboardStatsPeriod.value)
+    return p ? `за ${p.label.toLowerCase()}` : 'за период'
+  }
+  return statTrendDeleted.value
+})
+const statsCardTrendSaved = computed(() => {
+  if (statsCardUsesPeriod.value) {
+    const p = DASHBOARD_STATS_PERIOD_OPTIONS.find((x) => x.key === dashboardStatsPeriod.value)
+    return p ? `за ${p.label.toLowerCase()}` : 'за период'
+  }
+  return statTrendSaved.value
+})
+const statsCardTrendJoins = computed(() => {
+  if (statsCardUsesPeriod.value) {
+    return statsCardJoins.value > 0 ? `всего: ${statsCardJoins.value}` : 'нет вступлений'
+  }
+  return statTrendJoins.value
+})
+
+/** Доля занятых слотов групп по тарифу (вместо «точность AI»). */
+const statGroupsLimitPercent = computed(() => {
+  const p = Number(activityGroupsProgress.value || 0)
+  if (!Number.isFinite(p)) return '—'
+  return `${Math.max(0, Math.min(100, Math.round(p)))}%`
+})
+
+const statGroupsLimitFoot = computed(() => {
+  const left = Math.max(0, Math.round(Number(activityGroupsLimit.value || 0) - Number(activityGroupsCount.value || 0)))
+  if (Number(activityGroupsLimit.value || 0) <= 0) return 'тариф'
+  if (left === 0) return 'лимит'
+  if (left <= 3) return 'мало слотов'
+  return 'в норме'
+})
+
+function fmtRubInt(n) {
+  const v = Math.max(0, Math.round(Number(n) || 0))
+  try {
+    return v.toLocaleString('ru-RU')
+  } catch {
+    return String(v)
+  }
+}
+
+function ruChatsCountLabel(count) {
+  const n = Math.abs(Math.trunc(Number(count) || 0))
+  const k = n % 100
+  const l = n % 10
+  if (k > 10 && k < 20) return `${n} чатов`
+  if (l === 1) return `${n} чат`
+  if (l >= 2 && l <= 4) return `${n} чата`
+  return `${n} чатов`
+}
+
+function ruGroupsProtectedLabel(count) {
+  const n = Math.abs(Math.trunc(Number(count) || 0))
+  const k = n % 100
+  const l = n % 10
+  if (k > 10 && k < 20) return `${n} групп`
+  if (l === 1) return `${n} группа`
+  if (l >= 2 && l <= 4) return `${n} группы`
+  return `${n} групп`
+}
+
+function goManageChats() {
+  router.push({ path: '/chats' })
+}
+
+function goAccountHistory() {
+  showAccountHistoryModal.value = true
+  void loadHistoryIfNeeded()
+}
+
 /** Слайды виджета «Обновления»: imageUrl — опционально, картинка под текстом внутри карточки */
+/** Короткие пункты для карточки «Обновления» на вкладке Аккаунт */
+const ACCOUNT_HOME_UPDATE_BULLETS = [
+  'AI-фильтр стал точнее на 23%',
+  'Ускорили удаление спама',
+  'Новый режим «Анти-рейд»',
+]
+const ACCOUNT_HOME_PREMIUM_BULLETS = [
+  'AI-фильтр нового поколения',
+  'Автобан и анти-рейды',
+  'Приоритетная поддержка',
+  'Расширенная статистика',
+]
+
 const UPDATES_SLIDES = [
   {
     key: 'earn',
@@ -462,12 +871,6 @@ const UPDATES_SLIDES = [
   },
 ]
 
-/** Справа сверху вниз: токены → FAQ → ещё (без «Тарифа») */
-const quickTiles = [
-  { key: 'tokens', label: 'AURUM', icon: 'bolt' },
-  { key: 'faq', label: 'FAQ', icon: 'help' },
-  { key: 'more', label: 'Еще', icon: 'chevrons-down' },
-]
 const GROUP_STATS_PRESETS = [
   { key: '24h', label: '24 ч' },
   { key: '7d', label: '7 дн.' },
@@ -655,15 +1058,24 @@ async function loadMeInitial() {
   bootError.value = ''
   error.value = null
   loading.value = true
+  const actGen = ++activitySummaryFetchGen
   try {
-    applyMeState(await rawApi.me())
-  } catch (e) {
-    me.value = null
-    const d = String(e?.body?.detail || e?.message || '').trim()
-    bootError.value =
-      d && !/^load failed$/i.test(d)
-        ? d
-        : 'Не удалось загрузить профиль. Проверьте интернет или задеплойте API (сервис zealous-bravery).'
+    const [meRes, actRes] = await Promise.allSettled([rawApi.me(), rawApi.activitySummary()])
+    if (meRes.status === 'fulfilled') {
+      applyMeState(meRes.value)
+    } else {
+      me.value = null
+      const e = meRes.reason
+      const d = String(e?.body?.detail || e?.message || '').trim()
+      bootError.value =
+        d && !/^load failed$/i.test(d)
+          ? d
+          : 'Не удалось загрузить профиль. Проверьте интернет или задеплойте API (сервис zealous-bravery).'
+    }
+    if (actRes.status === 'fulfilled' && actGen === activitySummaryFetchGen) {
+      activitySummary.value = actRes.value
+      lastActivitySummaryOkAt = Date.now()
+    }
   } finally {
     loading.value = false
   }
@@ -683,13 +1095,40 @@ function openSharedThreatChats() {
 }
 
 onMounted(async () => {
-  preloadTokenLandingOrbit()
-  await loadMeInitial()
+  await Promise.all([loadMeInitial(), loadSpikeAlertsState()])
+  if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+    window.requestIdleCallback(() => preloadTokenLandingOrbit(), { timeout: 2500 })
+  } else {
+    setTimeout(() => preloadTokenLandingOrbit(), 1800)
+  }
   if (!dashboardSection.value) setDashboardSection('account')
   if (dashboardSection.value === 'partner') {
     await ensurePartnerData()
     await ensureReferralPeople()
     await ensurePartnerPayouts()
+  }
+  // Открыть модалку «Подробный отчёт по защите» из ?report=1
+  // (фиолетовый ADM → кнопка «Отчёты»).
+  if (String(route.query?.report || '') === '1') {
+    try { await openActivityDetails() } catch { /* */ }
+    try {
+      const q = { ...route.query }
+      delete q.report
+      router.replace({ path: route.path, query: q }).catch(() => {})
+    } catch { /* */ }
+  }
+  // Открыть модалку «Токены AURUM» из ?topup=1
+  // (синий ADM → «+ Пополнить» в настройках/состоянии подписки).
+  if (String(route.query?.topup || '') === '1') {
+    try {
+      if (tariffIsPremium.value) showPremiumAurumShowcaseModal.value = true
+      else showFreeAurumGateModal.value = true
+    } catch { /* */ }
+    try {
+      const q = { ...route.query }
+      delete q.topup
+      router.replace({ path: route.path, query: q }).catch(() => {})
+    } catch { /* */ }
   }
   try {
     const savedName = localStorage.getItem(receiptNameKey()) || ''
@@ -702,7 +1141,7 @@ onMounted(async () => {
   document.addEventListener('pointerdown', onGlobalPointerDown, true)
   startActivityAutoRefresh()
   restartUpdatesRotation()
-  await loadSpikeAlertsState()
+  restartStatBroadcastNudge()
   if (spikeAlertTimer) clearInterval(spikeAlertTimer)
   spikeAlertTimer = setInterval(loadSpikeAlertsState, 30000)
   await tryOpenProtectionReportFromRoute()
@@ -719,6 +1158,30 @@ watch(
     void tryOpenProtectionReportFromRoute()
   },
 )
+
+function scheduleBroadcastMiniSnapshot() {
+  if (broadcastMiniDebounceTimer) clearTimeout(broadcastMiniDebounceTimer)
+  broadcastMiniDebounceTimer = setTimeout(() => {
+    broadcastMiniDebounceTimer = null
+    const sec = dashboardSection.value || 'account'
+    if (sec !== 'account' && sec !== 'subscription') return
+    if (!accountShowBroadcastMiniCard.value) return
+    void loadBroadcastMiniSnapshot()
+  }, 280)
+}
+
+watch(
+  () => [dashboardSection.value, accountShowBroadcastMiniCard.value, me.value?.telegram_id, route.path],
+  () => {
+    scheduleBroadcastMiniSnapshot()
+    restartStatBroadcastNudge()
+  },
+  { immediate: true },
+)
+
+watch(accountShowBroadcastMiniCard, () => {
+  homeStatBroadcastSlide.value = 0
+})
 
 watch(
   () => [
@@ -899,10 +1362,15 @@ onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', onGlobalPointerDown, true)
   if (activityTimer) clearInterval(activityTimer)
   if (updatesTimer) clearInterval(updatesTimer)
-  if (quickHintTimer) clearTimeout(quickHintTimer)
   if (dashSwitchTimer) clearTimeout(dashSwitchTimer)
   if (tokenHideTimer) clearTimeout(tokenHideTimer)
   if (spikeAlertTimer) clearInterval(spikeAlertTimer)
+  if (broadcastMiniDebounceTimer) clearTimeout(broadcastMiniDebounceTimer)
+  if (statBroadcastNudgeTimer) {
+    clearInterval(statBroadcastNudgeTimer)
+    statBroadcastNudgeTimer = null
+  }
+  if (statBroadcastJustDraggedClear) clearTimeout(statBroadcastJustDraggedClear)
   if (paymentRedirectTimer) clearInterval(paymentRedirectTimer)
   stopPaymentActivationFastPolling()
   document.removeEventListener('visibilitychange', onVisibilityPaymentCheck)
@@ -943,17 +1411,6 @@ function toggleTokenBreakdown(ev) {
   showTokenBreakdown.value = !showTokenBreakdown.value
 }
 
-function openSettingsFromMoreMenu() {
-  showMoreMenu.value = false
-  window.dispatchEvent(new CustomEvent('guard-open-menu'))
-}
-
-function openFundsMovementModal() {
-  showMoreMenu.value = false
-  showFundsMovementModal.value = true
-  loadHistoryIfNeeded()
-}
-
 function closeFundsMovementModal() {
   showFundsMovementModal.value = false
 }
@@ -986,26 +1443,6 @@ function onGlobalPointerDown(event) {
       showSubscriptionInfo.value = false
     }
   }
-
-  if (showMoreMenu.value) {
-    const menuEl = moreMenuWrapRef.value
-    if (menuEl && !menuEl.contains(target)) {
-      showMoreMenu.value = false
-    }
-  }
-}
-
-function onQuickHintStart(key) {
-  if (quickHintTimer) clearTimeout(quickHintTimer)
-  quickHintTimer = setTimeout(() => {
-    quickHintKey.value = key
-  }, 450)
-}
-
-function onQuickHintEnd() {
-  if (quickHintTimer) clearTimeout(quickHintTimer)
-  quickHintTimer = null
-  quickHintKey.value = ''
 }
 
 function fmtAmount(v) {
@@ -1283,7 +1720,9 @@ watch(
         .catch(() => {})
       return
     }
-    if (section === 'account') refreshActivitySummarySilent()
+    if (section === 'account') {
+      if (Date.now() - lastActivitySummaryOkAt > 4500) refreshActivitySummarySilent()
+    }
   }
 )
 
@@ -1342,14 +1781,50 @@ function displayReferralName(item) {
   return 'Пользователь'
 }
 
+async function setDashboardStatsPeriod(key) {
+  const k = String(key || 'today')
+  dashboardStatsPeriod.value = k
+  if (k === 'today') {
+    dashboardPeriodBreakdown.value = null
+    await refreshActivitySummarySilent()
+    return
+  }
+  dashboardPeriodLoading.value = true
+  try {
+    dashboardPeriodBreakdown.value = await rawApi.activityBreakdown(k, 'all')
+  } catch {
+    dashboardPeriodBreakdown.value = null
+  } finally {
+    dashboardPeriodLoading.value = false
+  }
+}
+
+function onDashboardStatsPeriodChange(ev) {
+  const v = String(ev?.target?.value || 'today')
+  void setDashboardStatsPeriod(v)
+}
+
 async function refreshActivitySummarySilent() {
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
   const gen = ++activitySummaryFetchGen
   try {
     const data = await rawApi.activitySummary()
     if (gen !== activitySummaryFetchGen) return
     activitySummary.value = data
-  } catch {
-    //
+    lastActivitySummaryOkAt = Date.now()
+    if (dashboardStatsPeriod.value !== 'today') {
+      try {
+        dashboardPeriodBreakdown.value = await rawApi.activityBreakdown(dashboardStatsPeriod.value, 'all')
+      } catch {
+        dashboardPeriodBreakdown.value = null
+      }
+    }
+  } catch (e) {
+    try {
+      console.warn('[Guard] /api/activity/summary failed', e?.status, e?.body?.detail || e?.message || e)
+    } catch {
+      //
+    }
   }
 }
 
@@ -1440,6 +1915,60 @@ function applyGroupCustomRange() {
 
 function toggleGroupStatsRangePanel() {
   groupStatsRangeExpanded.value = !groupStatsRangeExpanded.value
+}
+
+function goBroadcastMiniCreate() {
+  router.push({ path: '/admin', query: { tab: 'broadcasts' } })
+}
+
+function _apSchedActive(ap) {
+  const rs = String(ap?.runState || '').toLowerCase()
+  return !!ap && (rs === 'running' || rs === 'paused')
+}
+
+async function loadBroadcastMiniSnapshot() {
+  if (!me.value || !hasInitData.value) return
+  broadcastMiniLoading.value = true
+  try {
+    const [gRes, chRes, brRes, campRes] = await Promise.all([
+      rawApi.adminBroadcastGroups('mine').catch(() => ({ items: [] })),
+      rawApi.adminBroadcastChannels('mine').catch(() => ({ items: [] })),
+      rawApi.adminBroadcasts('mine').catch(() => ({ items: [] })),
+      rawApi.adminAutopostCampaigns().catch(() => ({ items: [] })),
+    ])
+    const gItems = gRes?.items || []
+    const chItems = chRes?.items || []
+    broadcastMiniEligibleCount.value = gItems.length + chItems.length
+    const brList = brRes?.items || []
+    const camps = campRes?.items || []
+    let sched = 0
+    for (const c of camps) {
+      if (_apSchedActive(c?.autopost)) sched += 1
+    }
+    for (const b of brList) {
+      if (_apSchedActive(b?.autopost)) sched += 1
+    }
+    broadcastMiniScheduledCount.value = sched
+    broadcastMiniSentToday.value = null
+    if (brList.length > 0) {
+      const bid = Number(brList[0]?.id || 0)
+      if (bid > 0) {
+        try {
+          const st = await rawApi.adminBroadcastAutopostStats(bid, 1)
+          broadcastMiniSentToday.value =
+            Number(st?.bots?.recipient_ok || 0) + Number(st?.groups?.recipient_ok || 0)
+        } catch {
+          broadcastMiniSentToday.value = null
+        }
+      }
+    }
+  } catch {
+    broadcastMiniEligibleCount.value = null
+    broadcastMiniScheduledCount.value = null
+    broadcastMiniSentToday.value = null
+  } finally {
+    broadcastMiniLoading.value = false
+  }
 }
 
 async function openActivityDetails() {
@@ -1622,7 +2151,6 @@ function preloadTokenLandingOrbit() {
 }
 
 function onQuickNavTokensClick() {
-  showMoreMenu.value = false
   if (tariffIsPremium.value) showPremiumAurumShowcaseModal.value = true
   else showFreeAurumGateModal.value = true
 }
@@ -1642,14 +2170,16 @@ function onTokensBoltClick(ev) {
 }
 
 function startActivityAutoRefresh() {
-  refreshActivitySummarySilent()
   if (activityTimer) clearInterval(activityTimer)
-  activityTimer = setInterval(() => {
-    refreshActivitySummarySilent()
-    if (showActivityModal.value) refreshActivityJournalSilent()
-    if (showGroupActivityModal.value) refreshGroupActivitySilent()
+  const tick = () => {
+    if (typeof document === 'undefined' || document.visibilityState !== 'hidden') {
+      refreshActivitySummarySilent()
+      if (showActivityModal.value) refreshActivityJournalSilent()
+      if (showGroupActivityModal.value) refreshGroupActivitySilent()
+    }
     if (waitPremiumActivationAfterPayment.value) schedulePremiumActivationCheck()
-  }, 3000)
+  }
+  activityTimer = setInterval(tick, 20000)
 }
 
 
@@ -1712,7 +2242,7 @@ const docsCalc = computed(() => {
 })
 
 async function loadHistoryIfNeeded() {
-  if (historyPayments.value.length || historyTokens.value.length || historyLoading.value) return
+  if (historyLoadCompleted.value || historyLoading.value) return
   historyLoading.value = true
   try {
     const [p, t] = await Promise.all([
@@ -1723,6 +2253,7 @@ async function loadHistoryIfNeeded() {
     historyTokens.value = t?.items || []
   } finally {
     historyLoading.value = false
+    historyLoadCompleted.value = true
   }
 }
 
@@ -1944,7 +2475,7 @@ async function submitReceipt() {
 
     <div
       v-else-if="me"
-      class="relative isolate -mx-4 min-h-[calc(100dvh-7.5rem)] px-4 pb-2 pt-0 font-display md:-mx-6 md:px-6 md:pt-1"
+      class="relative isolate -mx-4 min-h-0 px-4 pb-1.5 pt-0 font-display md:-mx-6 md:px-6 md:pt-0"
     >
       <SubscriptionManagementPanel
         v-if="dashboardSection === 'subscription'"
@@ -1961,454 +2492,595 @@ async function submitReceipt() {
       >
         <span class="text-xs font-medium text-white/90 drop-shadow-[0_1px_4px_rgba(0,0,0,0.85)]">Секундочку…</span>
       </div>
-      <div class="pointer-events-none absolute right-1 top-2 z-20 text-white md:top-3">
-        <div class="pointer-events-auto mr-0.5 mt-2 flex flex-col items-center gap-2">
-          <template v-for="tile in quickTiles" :key="tile.key">
-            <div v-if="tile.key === 'more'" ref="moreMenuWrapRef" class="relative flex items-center justify-center">
-              <button
-                type="button"
-                :class="[quickNavTileClass, showMoreMenu ? 'ring-2 ring-amber-200/75 ring-offset-2 ring-offset-slate-950' : '']"
-                :title="tile.label"
-                :aria-label="tile.label"
-                @touchstart.passive="onQuickHintStart(tile.key)"
-                @touchend="onQuickHintEnd"
-                @touchcancel="onQuickHintEnd"
-                @mousedown="onQuickHintStart(tile.key)"
-                @mouseup="onQuickHintEnd"
-                @mouseleave="onQuickHintEnd"
-                @click="showMoreMenu = !showMoreMenu"
-              >
-                <NavIcon :name="tile.icon" :class="quickNavTileIconClass" />
-                <div
-                  v-if="quickHintKey === tile.key"
-                  class="pointer-events-none absolute right-[calc(100%+6px)] top-1/2 z-20 -translate-y-1/2 whitespace-nowrap rounded-md border border-slate-500 bg-slate-900 px-2 py-1 text-[10px] text-slate-100"
-                >
-                  {{ tile.label }}
-                </div>
-              </button>
-              <div
-                v-if="showMoreMenu"
-                class="absolute right-[calc(100%+8px)] top-0 z-30 w-52 rounded-xl border border-slate-300 bg-white p-1.5 shadow-xl dark:border-slate-600 dark:bg-slate-800"
-              >
-                <button
-                  type="button"
-                  class="w-full rounded-lg px-3 py-2 text-left text-sm font-medium text-slate-800 hover:bg-slate-100 dark:text-slate-100 dark:hover:bg-slate-700"
-                  @click="openSettingsFromMoreMenu()"
-                >
-                  <span class="inline-flex items-center gap-2">
-                    <NavIcon name="settings" class="h-4 w-4 text-slate-500 dark:text-slate-300" />
-                    Настройки
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  class="mt-1 w-full rounded-lg px-3 py-2 text-left text-sm font-medium text-slate-800 hover:bg-slate-100 dark:text-slate-100 dark:hover:bg-slate-700"
-                  @click="openFundsMovementModal()"
-                >
-                  <span class="inline-flex items-center gap-2">
-                    <NavIcon name="calculator" class="h-4 w-4 text-slate-500 dark:text-slate-300" />
-                    Движение средств
-                  </span>
-                </button>
-              </div>
-            </div>
-            <button
-              v-else-if="tile.key === 'tokens'"
-              type="button"
-              :class="[quickNavTileClass, dashboardSection === 'tokens' ? 'ring-2 ring-amber-200/80 ring-offset-2 ring-offset-slate-950' : '']"
-              :title="tile.label"
-              :aria-label="tile.label"
-              @touchstart.passive="onQuickHintStart(tile.key)"
-              @touchend="onQuickHintEnd"
-              @touchcancel="onQuickHintEnd"
-              @mousedown="onQuickHintStart(tile.key)"
-              @mouseup="onQuickHintEnd"
-              @mouseleave="onQuickHintEnd"
-              @click="onQuickNavTokensClick"
-            >
-              <NavIcon :name="tile.icon" :class="quickNavTileIconClass" />
-              <div
-                v-if="quickHintKey === tile.key"
-                class="pointer-events-none absolute right-[calc(100%+6px)] top-1/2 z-20 -translate-y-1/2 whitespace-nowrap rounded-md border border-slate-500 bg-slate-900 px-2 py-1 text-[10px] text-slate-100"
-              >
-                {{ tile.label }}
-              </div>
-            </button>
-            <button
-              v-else
-              type="button"
-              :class="[quickNavTileClass, dashboardSection === tile.key ? 'ring-2 ring-amber-200/80 ring-offset-2 ring-offset-slate-950' : '']"
-              :title="tile.label"
-              :aria-label="tile.label"
-              @touchstart.passive="onQuickHintStart(tile.key)"
-              @touchend="onQuickHintEnd"
-              @touchcancel="onQuickHintEnd"
-              @mousedown="onQuickHintStart(tile.key)"
-              @mouseup="onQuickHintEnd"
-              @mouseleave="onQuickHintEnd"
-              @click="showMoreMenu = false; setDashboardSection(tile.key)"
-            >
-              <NavIcon :name="tile.icon" :class="quickNavTileIconClass" />
-              <div
-                v-if="quickHintKey === tile.key"
-                class="pointer-events-none absolute right-[calc(100%+6px)] top-1/2 z-20 -translate-y-1/2 whitespace-nowrap rounded-md border border-slate-500 bg-slate-900 px-2 py-1 text-[10px] text-slate-100"
-              >
-                {{ tile.label }}
-              </div>
-            </button>
-          </template>
-        </div>
-      </div>
-
       <div class="mt-0 space-y-0">
         <div
-          class="relative -ml-5 -mt-0.5 pb-0.5 pl-2.5 pr-11 pt-1 text-slate-100 md:-ml-8 md:pl-3 md:pt-1.5"
+          class="relative w-full min-w-0 max-w-full pb-1 pt-0 text-slate-100"
           :class="showTokenBreakdown ? 'z-[45]' : ''"
         >
-          <div class="flex items-start justify-start gap-0 -translate-y-0.5 md:-translate-y-1">
-            <div
-              class="relative self-start drop-shadow-[0_4px_16px_rgba(0,0,0,0.35)]"
-              :class="
-                tariffIsPremium
-                  ? 'shrink-0 -translate-x-2.5 translate-y-0.5 md:-translate-x-3 md:translate-y-1'
-                  : 'flex h-[calc(10rem/1.5)] w-[calc(10rem/1.5)] flex-none shrink-0 translate-y-1 md:translate-y-1.5'
-              "
-            >
-              <img
-                :src="dashboardAvatarSrc"
-                alt=""
-                draggable="false"
-                :class="
-                  tariffIsPremium
-                    ? 'block h-[8rem] w-[8rem] max-w-[min(8rem,calc(100vw-8.75rem))] max-h-[min(8rem,calc(100vw-8.75rem))] rounded-xl object-contain object-top bg-transparent'
-                    : 'block h-full w-full rounded-xl object-contain object-top bg-transparent'
-                "
-                @dragstart.prevent
-              />
-              
-            </div>
-            <div
-              class="min-w-0 flex-1 pl-1 pt-4 md:pl-1.5 md:pt-5"
-              :class="
-                tariffIsPremium
-                  ? '-ml-3 -translate-x-1 md:-ml-4 md:-translate-x-2'
-                  : '-ml-1 translate-x-2 pl-2 md:-ml-2 md:translate-x-2.5 md:pl-2.5'
-              "
-            >
-              <div class="flex items-center gap-1.5">
-                <svg
-                  v-if="protectionStatusOk"
-                  class="h-3 w-3 shrink-0 self-center [filter:drop-shadow(0_0_2px_rgba(163,230,53,0.5))]"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  aria-hidden="true"
-                >
-                  <defs>
-                    <linearGradient :id="protCheckGradId" x1="3" y1="4" x2="21" y2="20" gradientUnits="userSpaceOnUse">
-                      <stop stop-color="#d9f99d" />
-                      <stop offset="0.5" stop-color="#a3e635" />
-                      <stop offset="1" stop-color="#4d7c0f" />
-                    </linearGradient>
-                  </defs>
-                  <circle cx="12" cy="12" r="12" :fill="`url(#${protCheckGradId})`" />
-                  <path
-                    d="M7 12l3 3 7-7"
-                    stroke="white"
-                    stroke-width="2.2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  />
-                </svg>
-                <svg
-                  v-else-if="protectionStatusNoChats"
-                  class="h-3 w-3 shrink-0 self-center [filter:drop-shadow(0_0_2px_rgba(251,113,133,0.5))]"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  aria-hidden="true"
-                >
-                  <defs>
-                    <linearGradient :id="protOffGradId" x1="3" y1="4" x2="21" y2="20" gradientUnits="userSpaceOnUse">
-                      <stop stop-color="#fecdd3" />
-                      <stop offset="0.5" stop-color="#fb7185" />
-                      <stop offset="1" stop-color="#9f1239" />
-                    </linearGradient>
-                  </defs>
-                  <circle cx="12" cy="12" r="12" :fill="`url(#${protOffGradId})`" />
-                  <path
-                    d="M8 8l8 8M16 8L8 16"
-                    stroke="white"
-                    stroke-width="2.2"
-                    stroke-linecap="round"
-                  />
-                </svg>
-                <svg
-                  v-else
-                  class="h-3 w-3 shrink-0 self-center text-amber-500/90"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  aria-hidden="true"
-                >
-                  <circle cx="12" cy="12" r="12" fill="currentColor" />
-                  <path d="M8 12h8" stroke="#0a0a0c" stroke-width="2.2" stroke-linecap="round" />
-                </svg>
-                <p
-                  class="text-[13px] font-semibold leading-tight tracking-tight"
-                  :class="protectionStatusOk ? 'text-lime-400' : protectionStatusNoChats ? 'text-rose-400' : 'text-amber-400'"
-                >
-                  <template v-if="protectionStatusOk">Защита активна</template>
-                  <template v-else-if="protectionStatusNoChats">Защита отключена</template>
-                  <template v-else>Защита не активна</template>
-                </p>
-                <span class="ml-auto inline-flex min-w-0 shrink-0 items-center text-[13px] font-semibold tabular-nums text-slate-100">
-                  <span
-                    ref="tokenBreakdownWrapRef"
-                    class="relative inline-flex min-h-[1.25rem] items-center gap-0.5 align-middle"
-                    @mouseenter="onTokenWrapEnter"
-                    @mouseleave="onTokenWrapLeave"
-                  >
-                    <span class="inline-block tabular-nums">{{ totalTokens }}</span>
-                    <button
-                      type="button"
-                      class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-lime-400 transition-colors hover:bg-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-lime-300/60"
-                      aria-label="Состав токенов"
-                      @click.stop="onTokensBoltClick"
-                    >
-                      <NavIcon name="bolt" class="pointer-events-none h-4 w-4" />
-                    </button>
-                    <div
-                      v-show="showTokenBreakdown"
-                      class="pointer-events-auto absolute right-0 top-[calc(100%+8px)] z-[60] w-[12.25rem] max-w-[min(12.25rem,calc(100vw-3.25rem))] overflow-hidden rounded-2xl border border-lime-400/25 bg-gradient-to-b from-slate-900/98 via-zinc-950/98 to-black/95 px-3 py-3 text-left shadow-[0_16px_48px_-12px_rgba(0,0,0,0.9),0_0_28px_-8px_rgba(163,230,53,0.18),inset_0_1px_0_rgba(255,255,255,0.08)] ring-1 ring-inset ring-white/[0.07] backdrop-blur-xl"
-                      @mouseenter="onTokenWrapEnter"
-                      @mouseleave="onTokenWrapLeave"
-                    >
-                      <div class="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-lime-300/45 to-transparent" aria-hidden="true" />
-                      <p class="text-[15px] font-extrabold leading-tight tracking-tight text-white">
-                        Всего
-                        <span class="ml-1.5 inline-block tabular-nums text-lime-100 drop-shadow-[0_0_14px_rgba(190,242,100,0.35)]">{{ totalTokens }}</span>
-                      </p>
-                      <div class="mt-2.5 space-y-2 border-t border-white/10 pt-2.5">
-                        <p class="flex items-baseline justify-between gap-2 text-[13px] leading-tight">
-                          <span class="shrink-0 text-[11px] font-bold uppercase tracking-wide text-slate-400">AURUM</span>
-                          <span class="min-w-0 text-right font-bold tabular-nums text-cyan-100 drop-shadow-[0_0_12px_rgba(34,211,238,0.28)]">{{ fmtAmount(me?.aurum_tokens || 0) }} ✨</span>
-                        </p>
-                        <p class="flex items-baseline justify-between gap-2 text-[13px] leading-tight">
-                          <span class="shrink-0 text-[11px] font-bold uppercase tracking-wide text-slate-400">Партнёрские</span>
-                          <span class="min-w-0 text-right font-bold tabular-nums text-lime-200 drop-shadow-[0_0_12px_rgba(190,242,100,0.22)]">{{ fmtAmount(me?.partner_tokens || 0) }} ⚡</span>
-                        </p>
-                      </div>
-                    </div>
-                  </span>
-                </span>
+          <!-- Главный блок: без отдельной тёмной подложки — контент на фоне экрана -->
+          <div class="pb-1 pl-0 pr-2 pt-0 md:pb-1.5 md:pr-2.5">
+            <div class="flex items-start gap-0">
+              <div class="relative mt-1 -ml-3 flex h-28 w-28 shrink-0 items-center justify-center self-start md:-ml-3.5">
+                <img
+                  :src="dashboardAvatarSrc"
+                  alt=""
+                  draggable="false"
+                  class="block h-28 w-28 max-h-[7rem] max-w-[7rem] object-contain object-top"
+                  @dragstart.prevent
+                />
               </div>
-              <div class="mt-1 flex flex-col gap-1">
-                <p v-if="Number(me?.broadcast_spend_tokens || 0) > 0" class="text-[11px] leading-tight text-slate-400">
-                  На рассылки в кабинете потрачено:
-                  <span class="font-semibold text-amber-200/95">{{ fmtAmount(me.broadcast_spend_tokens) }}</span>
-                  <NavIcon name="bolt" class="ml-0.5 inline-block h-3 w-3 align-middle text-amber-300/90" />
-                </p>
-                <div class="text-[11px] leading-tight text-slate-300">
-                  <div class="flex w-full min-w-0 flex-col gap-1">
-                    <div class="flex min-w-0 flex-col gap-0">
-                      <div class="flex min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
-                        <span class="shrink-0 text-[12px] font-semibold text-slate-200">Группы / чаты:</span>
-                        <span class="shrink-0 text-[12px] font-semibold tabular-nums text-slate-100">
-                          {{ activityGroupsCount }} / {{ activityGroupsLimit }}
-                        </span>
-                      </div>
-                      <div class="-mt-px flex min-w-0 items-center gap-0.5">
-                        <div
-                          class="h-1.5 min-w-0 max-w-[min(10rem,calc(100%-1.125rem))] flex-1 overflow-hidden rounded-full bg-slate-700/60"
-                        >
-                          <div
-                            class="h-full rounded-full transition-all duration-300"
-                            :style="{
-                              width: `${Math.max(0, Math.min(100, Number(activityGroupsProgress || 0)))}%`,
-                              background: `linear-gradient(90deg, rgba(190,242,100,0.75) 0%, rgba(132,204,22,0.9) 50%, rgba(52,211,153,0.7) 100%)`,
-                            }"
-                          />
-                        </div>
-                        <button
-                          type="button"
-                          class="inline-flex h-5 w-5 min-w-[1.25rem] shrink-0 items-center justify-center rounded-md bg-gradient-to-b from-lime-300 to-lime-600 text-[13px] font-bold leading-none text-lime-950 shadow-[0_3px_10px_rgba(101,163,13,0.5),inset_0_1px_0_rgba(255,255,255,0.35)] ring-1 ring-lime-200/60 transition duration-200 hover:scale-[1.06] hover:from-lime-200 hover:to-lime-500 hover:shadow-[0_5px_18px_rgba(163,230,53,0.7)] hover:ring-lime-100/80 active:scale-[0.98]"
-                          aria-label="Подключить группу"
-                          title="Подключить группу"
-                          @click="$router.push({ path: '/connect', query: { kind: 'group' } })"
-                        >
-                          +
-                        </button>
-                      </div>
+              <div class="flex min-h-0 min-w-0 flex-1 flex-col items-stretch pl-0.5 pt-0.5 sm:pl-1">
+                <div class="flex flex-wrap items-center gap-0.5">
+                  <svg
+                    v-if="protectionStatusOk"
+                    class="h-3 w-3 shrink-0 [filter:drop-shadow(0_0_4px_rgba(163,230,53,0.45))]"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    aria-hidden="true"
+                  >
+                    <defs>
+                      <linearGradient :id="protCheckGradId" x1="3" y1="4" x2="21" y2="20" gradientUnits="userSpaceOnUse">
+                        <stop stop-color="#d9f99d" />
+                        <stop offset="0.5" stop-color="#a3e635" />
+                        <stop offset="1" stop-color="#4d7c0f" />
+                      </linearGradient>
+                    </defs>
+                    <circle cx="12" cy="12" r="12" :fill="`url(#${protCheckGradId})`" />
+                    <path d="M7 12l3 3 7-7" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                  <svg
+                    v-else-if="protectionStatusNoChats"
+                    class="h-3 w-3 shrink-0"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    aria-hidden="true"
+                  >
+                    <defs>
+                      <linearGradient :id="protOffGradId" x1="3" y1="4" x2="21" y2="20" gradientUnits="userSpaceOnUse">
+                        <stop stop-color="#fecdd3" />
+                        <stop offset="0.5" stop-color="#fb7185" />
+                        <stop offset="1" stop-color="#9f1239" />
+                      </linearGradient>
+                    </defs>
+                    <circle cx="12" cy="12" r="12" :fill="`url(#${protOffGradId})`" />
+                    <path d="M8 8l8 8M16 8L8 16" stroke="white" stroke-width="2.2" stroke-linecap="round" />
+                  </svg>
+                  <svg v-else class="h-3 w-3 shrink-0 text-amber-500/90" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <circle cx="12" cy="12" r="12" fill="currentColor" />
+                    <path d="M8 12h8" stroke="#0a0a0c" stroke-width="2.2" stroke-linecap="round" />
+                  </svg>
+                  <p
+                    class="text-[11px] font-extrabold leading-tight tracking-tight md:text-[12px]"
+                    :class="protectionStatusOk ? 'text-lime-400' : protectionStatusNoChats ? 'text-rose-400' : 'text-amber-400'"
+                  >
+                    <template v-if="protectionStatusOk">Защита активна</template>
+                    <template v-else-if="protectionStatusNoChats">Защита отключена</template>
+                    <template v-else>Защита не активна</template>
+                  </p>
+                </div>
+
+                <div class="mt-2 w-full min-w-0 sm:mt-2.5">
+                  <div
+                    class="flex w-full min-w-0 items-stretch justify-between divide-x divide-white/[0.07]"
+                  >
+                    <div class="flex min-w-0 flex-1 flex-col items-center px-1.5 text-center sm:px-2">
+                      <p class="w-full text-[8px] font-semibold uppercase tracking-wide text-white/45">Удалено</p>
+                      <p class="mt-0.5 w-full text-[15px] font-extrabold tabular-nums leading-none text-white sm:text-[16px]">
+                        {{ activitySummary?.today?.deleted ?? 0 }}
+                      </p>
+                      <p class="mt-0.5 w-full text-[9px] font-medium leading-tight text-lime-400/95">сообщения</p>
                     </div>
-                    <div class="flex min-w-0 flex-col gap-0">
-                      <div class="flex min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
-                        <span class="shrink-0 text-[12px] font-semibold text-amber-200">Каналы:</span>
-                        <span class="shrink-0 text-[12px] font-semibold tabular-nums text-amber-100">
-                          {{ activityChannelsCount }} / {{ activityChannelsLimit }}
-                        </span>
-                      </div>
-                      <div class="-mt-px flex min-w-0 items-center gap-0.5">
-                        <div
-                          class="h-1.5 min-w-0 max-w-[min(10rem,calc(100%-1.125rem))] flex-1 overflow-hidden rounded-full bg-slate-700/50"
+                    <div class="flex min-w-0 flex-1 flex-col items-center px-1.5 text-center sm:px-2">
+                      <p class="w-full text-[8px] font-semibold uppercase tracking-wide text-white/45">Сэкономлено</p>
+                      <p class="mt-0.5 w-full whitespace-nowrap text-center text-[12px] font-extrabold tabular-nums leading-none text-white sm:text-[13px]">
+                        ~ {{ fmtRubInt(dashboardEstimatedSavedRub) }} ₽
+                      </p>
+                      <p class="mt-0.5 w-full text-[9px] font-medium leading-tight text-lime-400/95">админам</p>
+                    </div>
+                    <div class="flex min-w-0 flex-1 flex-col items-center px-1.5 text-center sm:px-2">
+                      <p class="w-full whitespace-nowrap text-[8px] font-semibold uppercase leading-tight tracking-wide text-white/45">
+                        Уровень защиты
+                      </p>
+                      <div class="mt-0.5 flex w-full min-w-0 flex-col items-stretch gap-1">
+                        <p
+                          class="text-center text-[13px] font-extrabold leading-tight sm:text-[14px]"
+                          :class="dashboardProtectionLevelMeta.labelClass"
                         >
-                          <div
-                            class="h-full rounded-full transition-all duration-300"
-                            :style="{
-                              width: `${Math.max(0, Math.min(100, Number(activityChannelsProgress || 0)))}%`,
-                              background: `linear-gradient(90deg, rgba(251,191,36,0.75) 0%, rgba(245,158,11,0.9) 55%, rgba(217,119,6,0.8) 100%)`,
-                            }"
+                          {{ dashboardProtectionLevelMeta.label }}
+                        </p>
+                        <!-- Полоска на всю ширину колонки; незаполнено — серым как в группах TG -->
+                        <div
+                          class="flex h-1 w-full min-w-0 gap-1"
+                          :title="`Оценка: ${dashboardProtectionLevelMeta.score ?? '—'}/100 (тариф, Guard не на паузе, защищённые группы, удаления за сутки, лимит групп)`"
+                        >
+                          <span
+                            v-for="seg in 4"
+                            :key="`prot-seg-${seg}`"
+                            class="min-h-[4px] min-w-0 flex-1 rounded-[2px]"
+                            :class="
+                              seg <= dashboardProtectionLevelMeta.segments && dashboardProtectionLevelMeta.fillSegmentClass
+                                ? dashboardProtectionLevelMeta.fillSegmentClass
+                                : 'bg-zinc-600/85'
+                            "
                           />
                         </div>
-                        <button
-                          type="button"
-                          class="inline-flex h-5 w-5 min-w-[1.25rem] shrink-0 items-center justify-center rounded-md bg-gradient-to-b from-amber-300 to-amber-600 text-[13px] font-bold leading-none text-amber-950 shadow-[0_3px_10px_rgba(217,119,6,0.5),inset_0_1px_0_rgba(255,255,255,0.35)] ring-1 ring-amber-200/70 transition duration-200 hover:scale-[1.06] hover:from-amber-200 hover:to-amber-500 hover:shadow-[0_5px_18px_rgba(252,211,77,0.75)] hover:ring-amber-100/85 active:scale-[0.98]"
-                          aria-label="Подключить канал"
-                          title="Подключить канал"
-                          @click="$router.push({ path: '/connect', query: { kind: 'channel' } })"
-                        >
-                          +
-                        </button>
                       </div>
                     </div>
                   </div>
                 </div>
+
+                <button
+                  type="button"
+                  class="mt-2 flex w-full items-center gap-1.5 rounded-lg bg-zinc-900/80 px-2 py-1 text-left transition hover:bg-zinc-800/80 active:bg-zinc-800/90 sm:mt-2.5 sm:py-1.5"
+                  @click="goManageChats"
+                >
+                  <span class="grid h-5 w-5 shrink-0 place-items-center rounded-md bg-lime-500/15 text-lime-300">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                      <circle cx="9" cy="7" r="4" />
+                      <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
+                    </svg>
+                  </span>
+                  <span class="min-w-0 flex-1 text-[11px] font-semibold leading-tight text-white sm:text-[12px]">
+                    Защищено сегодня: <span class="text-lime-400">{{ ruGroupsProtectedLabel(activityProtectedGroupsCount) }}</span>
+                  </span>
+                  <span class="shrink-0 text-sm font-light text-white/40" aria-hidden="true">›</span>
+                </button>
               </div>
             </div>
           </div>
-        </div>
 
-        <template v-if="dashboardSection === 'account'">
-
-        <div class="mt-2 grid grid-cols-2 items-start gap-2">
-          <div class="min-w-0 p-1">
-            <div class="rounded-2xl border border-white/10 bg-white/[0.07] p-2.5 shadow-[0_8px_32px_-8px_rgba(0,0,0,0.55)] backdrop-blur-xl">
-              <div class="grid grid-cols-[auto,minmax(0,1fr)] gap-x-1 gap-y-1 items-start text-slate-100">
-                <svg class="row-start-1 col-start-1 mt-[3px] h-2.5 w-2.5 shrink-0 text-lime-400" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
-                  <rect x="1" y="7" width="2.2" height="4" rx="0.4" />
-                  <rect x="4.4" y="4" width="2.2" height="7" rx="0.4" />
-                  <rect x="7.8" y="1" width="2.2" height="10" rx="0.4" />
-                </svg>
-                <p class="row-start-1 col-start-2 text-[12px] font-semibold leading-none tracking-tight">Сегодня</p>
-                <div class="col-span-2 row-start-2 min-w-0 space-y-0.5 text-[11px] leading-tight text-slate-200">
-                  <p v-if="activitySummary?.today?.enabled_metrics?.delete" class="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
-                    <span class="shrink-0 font-semibold tabular-nums text-white">+{{ activitySummary?.today?.deleted || 0 }}</span>
-                    <span class="min-w-0 whitespace-nowrap font-medium text-slate-300">Удалено <span class="font-semibold text-lime-300">сообщений</span></span>
+          <template v-if="dashboardSection === 'account'">
+          <!-- Нижний ряд: AURUM (уже) | чаты (шире) -->
+          <div class="mt-1 grid min-w-0 grid-cols-[minmax(0,40%)_minmax(0,60%)] gap-1.5 md:grid-cols-[minmax(0,38%)_minmax(0,62%)] md:gap-2">
+            <div class="relative min-w-0 rounded-xl border border-amber-400/15 bg-gradient-to-b from-black/45 to-zinc-950/90 px-1 pb-0.5 pt-1 shadow-[0_10px_36px_-18px_rgba(0,0,0,0.65)] backdrop-blur-md md:px-1.5">
+              <div class="flex items-start justify-between gap-1.5">
+                <div class="min-w-0">
+                  <p class="flex items-center gap-0.5 text-[8px] font-bold uppercase tracking-wide text-amber-200/90">
+                    <span aria-hidden="true">⚡</span> Токены AURUM
                   </p>
-                  <p v-if="activitySummary?.today?.enabled_metrics?.mute" class="flex flex-wrap items-center gap-x-3 gap-y-0.5">
-                    <span class="inline-flex shrink-0 items-center gap-2">
-                      <svg class="h-3.5 w-3.5 text-amber-200/90" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
-                        <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
-                        <line x1="3.5" y1="3.5" x2="20.5" y2="20.5" />
-                      </svg>
-                      <span class="font-semibold tabular-nums text-white">{{ activitySummary?.today?.muted || 0 }}</span>
-                    </span>
-                    <span class="whitespace-nowrap font-medium text-slate-300">Муты</span>
+                  <p class="mt-0.5 flex items-baseline gap-0.5 text-[18px] font-extrabold tabular-nums leading-none text-white">
+                    {{ fmtAmount(me?.aurum_tokens || 0) }}
+                    <span class="text-sm">✨</span>
                   </p>
-                  <p v-if="activitySummary?.today?.enabled_metrics?.ban" class="flex flex-wrap items-center gap-x-3 gap-y-0.5">
-                    <span class="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded bg-slate-700 text-[8px]">⛔</span>
-                    <span class="shrink-0 font-semibold tabular-nums text-white">{{ activitySummary?.today?.banned || 0 }}</span>
-                    <span class="whitespace-nowrap font-medium text-slate-300">Баны</span>
-                  </p>
-                  <p v-if="activitySummary?.today?.enabled_metrics?.observe" class="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
-                    <span class="shrink-0 font-semibold tabular-nums text-red-300">+{{ activitySummary?.today?.observed || 0 }}</span>
-                    <span class="min-w-0 whitespace-nowrap font-medium text-slate-300">Замечено <span class="font-semibold text-red-300/95">без удаления</span></span>
-                  </p>
+                  <p class="mt-0.5 text-[9px] text-white/45">Ваш баланс</p>
+                </div>
+                <div class="relative grid h-9 w-9 shrink-0 place-items-center">
+                  <span class="absolute inset-0 rounded-full border border-lime-400/25" />
+                  <span class="absolute inset-[3px] rounded-full border border-lime-400/15" />
+                  <NavIcon name="bolt" class="relative h-4 w-4 text-lime-400 drop-shadow-[0_0_8px_rgba(163,230,53,0.4)]" />
                 </div>
               </div>
-              <button
-                type="button"
-                class="mt-1.5 rounded-xl border border-white/10 bg-black/14 px-2.5 py-0.5 text-[11px] font-semibold text-slate-100 shadow-[0_0_28px_-12px_rgba(52,211,153,0.12)] backdrop-blur-md hover:bg-black/22"
-                @click="openActivityDetails"
-              >
-                Подробнее ›
-              </button>
+              <div class="mt-1 grid grid-cols-2 gap-0.5">
+                <button
+                  type="button"
+                  class="flex min-w-0 items-center justify-center gap-0.5 rounded-md bg-gradient-to-b from-lime-400 to-lime-600 px-1 py-1.5 text-[9px] font-bold leading-tight text-lime-950 shadow-[0_3px_10px_rgba(132,204,22,0.3)] transition hover:brightness-105 sm:text-[10px]"
+                  @click="onQuickNavTokensClick"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <circle cx="9" cy="21" r="1" /><circle cx="20" cy="21" r="1" />
+                    <path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6" />
+                  </svg>
+                  Купить
+                </button>
+                <button
+                  type="button"
+                  class="flex min-w-0 items-center justify-center gap-0.5 rounded-md border border-white/15 bg-white/[0.06] px-1 py-1.5 text-[9px] font-semibold leading-tight text-white/90 transition hover:bg-white/10 sm:text-[10px]"
+                  @click="goAccountHistory"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <circle cx="12" cy="12" r="10" />
+                    <path d="M12 6v6l4 2" />
+                  </svg>
+                  История
+                </button>
+              </div>
             </div>
-          </div>
-          <div class="min-w-0 p-1">
-            <div
-              class="relative rounded-2xl border border-white/10 bg-white/[0.07] p-2.5 shadow-[0_8px_32px_-8px_rgba(0,0,0,0.55)] backdrop-blur-xl"
-            >
+
+            <div class="relative min-w-0 rounded-xl bg-gradient-to-b from-black/40 to-zinc-950/90 px-1.5 pb-0.5 pt-1 shadow-[0_10px_36px_-18px_rgba(0,0,0,0.65)] backdrop-blur-md md:pl-2 md:pr-2">
               <button
                 v-if="spikeActiveShared"
                 type="button"
-                class="absolute right-2 top-2 inline-flex items-center justify-center"
-                title="Фиолетовый ADM: есть чат под угрозой"
+                class="absolute right-1 top-1 z-[1] inline-flex items-center justify-center"
+                title="Есть чат под угрозой"
                 aria-label="Открыть делегированные чаты под угрозой"
-                @click="openSharedThreatChats"
+                @click.stop="openSharedThreatChats"
               >
-                <span class="absolute inline-flex h-4 w-4 animate-ping rounded-full bg-yellow-400/55" />
-                <span class="relative text-[12px] leading-none text-yellow-300">⚠</span>
+                <span class="absolute inline-flex h-3 w-3 animate-ping rounded-full bg-yellow-400/55" />
+                <span class="relative text-[10px] leading-none text-yellow-300">⚠</span>
               </button>
-              <div class="mb-2 flex min-w-0 items-center gap-1.5">
-                <div class="flex min-w-0 flex-1 items-center gap-1 pl-0.5">
-                  <span class="shrink-0 text-[1.05rem] leading-none drop-shadow-[0_0_6px_rgba(251,146,60,0.35)]" aria-hidden="true">🔥</span>
-                  <span class="min-w-0 truncate text-[11px] font-bold tracking-tight text-white">Обновления</span>
-                </div>
-                <button
-                  type="button"
-                  class="flex shrink-0 items-center gap-0.5 rounded-md px-1 py-0.5 text-slate-400 hover:bg-white/10 hover:text-slate-200"
-                  aria-label="Все обновления"
-                  @click="showUpdatesRoadmapModal = true"
-                >
-                  <span class="flex gap-0.5 text-[9px] leading-none" aria-hidden="true">
-                    <span class="h-1 w-1 rounded-full bg-current opacity-80" />
-                    <span class="h-1 w-1 rounded-full bg-current opacity-80" />
-                    <span class="h-1 w-1 rounded-full bg-current opacity-80" />
-                  </span>
-                  <span class="text-xs font-medium text-slate-300">›</span>
-                </button>
-              </div>
-
-              <div
-                class="relative min-h-[9.5rem] overflow-hidden rounded-xl border-0 bg-black/22 shadow-[inset_0_0_24px_rgba(0,0,0,0.25)]"
-              >
-                <img
-                  v-if="currentUpdateSlide.imageUrl"
-                  :src="currentUpdateSlide.imageUrl"
-                  alt=""
-                  class="pointer-events-none absolute inset-0 h-full w-full object-cover object-right-bottom opacity-95"
-                  draggable="false"
-                >
-                <div
-                  class="pointer-events-none absolute inset-0 bg-gradient-to-br from-black/80 via-black/55 to-black/25"
-                  :class="currentUpdateSlide.imageUrl ? '' : 'from-black/70 via-[#1a1520]/85 to-black/40'"
-                />
-                <div class="relative z-[1] flex min-h-[9.5rem] flex-col p-3 pb-3.5">
-                  <p class="text-[13px] font-semibold leading-snug text-white drop-shadow-sm">
-                    {{ currentUpdateSlide.headline }}
-                  </p>
-                  <p class="mt-1.5 text-[11px] font-normal leading-relaxed text-slate-300 drop-shadow-sm">
-                    {{ currentUpdateSlide.body }}
-                  </p>
-                  <div class="mt-auto flex flex-wrap items-center gap-2 pt-3">
-                    <button
-                      v-if="currentUpdateSlide.primaryLabel"
-                      type="button"
-                      class="rounded-full bg-gradient-to-r from-lime-400 via-lime-500 to-emerald-700 px-4 py-2 text-[11px] font-bold text-slate-900 shadow-[0_4px_16px_rgba(132,204,22,0.35)]"
-                      @click="applyUpdatePrimaryAction()"
+              <p class="mb-0.5 flex items-center gap-1 text-[8px] font-bold uppercase tracking-wide text-white/85">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-sky-300/90" aria-hidden="true">
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                </svg>
+                Ваши чаты
+              </p>
+              <div class="space-y-1.5">
+                <div class="flex min-w-0 items-center gap-1.5">
+                  <span class="flex h-5 w-5 shrink-0 items-center justify-center" aria-hidden="true">
+                    <svg
+                      class="h-[18px] w-[18px] text-lime-300 [filter:drop-shadow(0_0_8px_rgba(132,204,22,0.85))]"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2.2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
                     >
-                      {{ currentUpdateSlide.primaryLabel }}
-                    </button>
+                      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                      <circle cx="9" cy="7" r="4" />
+                    </svg>
+                  </span>
+                  <span class="shrink-0 whitespace-nowrap text-[10px] font-semibold leading-tight text-lime-200">
+                    Группы
+                    <span class="ml-0.5 tabular-nums font-medium text-white/90">
+                      {{ activityGroupsCount }} / {{ activityGroupsLimit }}
+                    </span>
+                  </span>
+                  <div class="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-white/10">
+                    <div
+                      class="h-full rounded-full bg-gradient-to-r from-lime-400 to-emerald-600 transition-all"
+                      :style="{ width: `${Math.max(0, Math.min(100, Number(activityGroupsProgress || 0)))}%` }"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    class="grid h-4 w-4 shrink-0 place-items-center rounded-md border border-lime-300/35 bg-gradient-to-b from-lime-400 to-lime-600 text-[10px] font-bold leading-none text-lime-950 shadow-[0_0_10px_rgba(132,204,22,0.45)]"
+                    aria-label="Подключить группу"
+                    @click="$router.push({ path: '/connect', query: { kind: 'group' } })"
+                  >
+                    +
+                  </button>
+                </div>
+
+                <div class="flex min-w-0 items-center gap-1.5">
+                  <span class="flex h-5 w-5 shrink-0 items-center justify-center" aria-hidden="true">
+                    <svg
+                      class="h-5 w-5 text-cyan-300 [filter:drop-shadow(0_0_10px_rgba(34,211,238,0.95))]"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    >
+                      <path d="M11 5L6 9H2v6h4l5 4V5z" />
+                      <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                      <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+                    </svg>
+                  </span>
+                  <span class="shrink-0 whitespace-nowrap text-[10px] font-semibold leading-tight text-white/95">
+                    Каналы
+                    <span class="ml-0.5 tabular-nums font-medium text-white/90">
+                      {{ activityChannelsCount }} / {{ activityChannelsLimit }}
+                    </span>
+                  </span>
+                  <div class="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-white/10">
+                    <div
+                      class="h-full rounded-full bg-gradient-to-r from-amber-400 to-orange-600 transition-all"
+                      :style="{ width: `${Math.max(0, Math.min(100, Number(activityChannelsProgress || 0)))}%` }"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    class="grid h-4 w-4 shrink-0 place-items-center rounded-md border border-amber-300/40 bg-gradient-to-b from-amber-400 to-amber-600 text-[10px] font-bold leading-none text-amber-950 shadow-[0_0_10px_rgba(251,191,36,0.4)]"
+                    aria-label="Подключить канал"
+                    @click="$router.push({ path: '/connect', query: { kind: 'channel' } })"
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+              <button
+                type="button"
+                class="mt-1 flex w-full items-center justify-center gap-0.5 rounded-lg bg-black/30 py-1 text-[10px] font-semibold text-white/90 transition hover:bg-black/45"
+                @click="goManageChats"
+              >
+                Управление
+                <span class="text-white/40">›</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Статистика ↔ Рассылки: на всю ширину, свайп / подсказка раз в 3 с -->
+          <div
+            class="mt-0.5 w-full min-w-0"
+            :class="accountShowBroadcastMiniCard ? 'cursor-grab touch-pan-x active:cursor-grabbing' : ''"
+            @pointerdown="onStatBroadcastRailPointerDown"
+            @pointermove="onStatBroadcastRailPointerMove"
+            @pointerup="onStatBroadcastRailPointerUp"
+            @pointercancel="onStatBroadcastRailPointerCancel"
+          >
+            <div class="min-w-0 w-full overflow-hidden rounded-2xl">
+            <div
+              class="flex will-change-transform"
+              :class="accountShowBroadcastMiniCard ? 'w-[200%]' : 'w-full'"
+              :style="accountShowBroadcastMiniCard ? statBroadcastTrackStyle() : {}"
+            >
+              <div :class="accountShowBroadcastMiniCard ? 'w-1/2 shrink-0 pr-[3px]' : 'w-full shrink-0'">
+                <div
+                  class="rounded-2xl border border-white/[0.08] bg-gradient-to-b from-[#101010] to-[#0b0b0b] px-2 pb-1 pt-1 shadow-[0_16px_44px_-24px_rgba(0,0,0,0.9)] ring-1 ring-inset ring-white/[0.04] sm:px-2.5 sm:pb-1.5 sm:pt-1.5"
+                >
+                  <div class="flex items-start justify-between gap-2 pb-0.5 pt-0.5">
+                    <div class="-mt-px flex min-w-0 items-center gap-1.5">
+                      <span class="grid h-5 w-5 shrink-0 place-items-center text-lime-400/90" aria-hidden="true">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M18 20V10M12 20V4M6 20v-6" stroke-linecap="round" />
+                        </svg>
+                      </span>
+                      <span class="truncate text-[13px] font-semibold leading-none text-white sm:text-[14px]">Статистика</span>
+                    </div>
+                    <label class="relative shrink-0 pt-px">
+                      <span class="sr-only">Период статистики</span>
+                      <select
+                        class="pointer-events-auto max-w-[8.5rem] cursor-pointer appearance-none rounded-lg border border-lime-500/40 bg-black/50 py-0.5 pl-2 pr-7 text-[11px] font-semibold leading-none text-lime-400 outline-none ring-0 sm:max-w-none sm:py-1 sm:pl-2 sm:text-[12px]"
+                        :value="dashboardStatsPeriod"
+                        title="Период для показателей ниже"
+                        @change="onDashboardStatsPeriodChange"
+                      >
+                        <option
+                          v-for="opt in DASHBOARD_STATS_PERIOD_OPTIONS"
+                          :key="opt.key"
+                          :value="opt.key"
+                        >
+                          {{ opt.label }}
+                        </option>
+                      </select>
+                      <span class="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-lime-400/90" aria-hidden="true">
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="m6 9 6 6 6-6" stroke-linecap="round" stroke-linejoin="round" />
+                        </svg>
+                      </span>
+                    </label>
+                  </div>
+
+                  <div
+                    class="relative mt-0.5 flex min-w-0 gap-0 overflow-x-auto pb-0 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:gap-0.5"
+                    :class="dashboardPeriodLoading ? 'opacity-60' : ''"
+                  >
+                    <div
+                      role="button"
+                      tabindex="0"
+                      class="flex min-w-0 flex-[1_1_0] cursor-pointer flex-col border-r border-white/10 py-1 pr-1 transition hover:bg-white/[0.04] active:bg-white/[0.06]"
+                      @click="onStatDeletedStatClick"
+                      @keydown.enter.prevent="onStatDeletedStatClick"
+                    >
+                      <div class="flex items-center gap-1.5">
+                        <span class="grid h-[18px] w-[18px] shrink-0 place-items-center" aria-hidden="true">
+                          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-lime-400">
+                            <circle cx="12" cy="12" r="10" />
+                            <path d="m4.93 4.93 14.14 14.14" stroke-linecap="round" />
+                          </svg>
+                        </span>
+                        <span class="text-[14px] font-extrabold tabular-nums leading-none text-white sm:text-[15px]">{{ statsCardDeleted }}</span>
+                      </div>
+                      <p class="mt-1 w-full text-[10px] font-medium leading-snug text-white/60 sm:text-[11px]">Удалено</p>
+                      <p class="mt-0.5 line-clamp-2 w-full text-[9px] font-medium leading-snug text-lime-400/90 sm:text-[10px]">{{ statsCardTrendDeleted }}</p>
+                    </div>
+
+                    <div class="flex min-w-0 flex-[1_1_0] flex-col border-r border-white/10 px-1 py-1 sm:px-1.5">
+                      <div class="flex items-center gap-1.5">
+                        <span class="grid h-[18px] w-[18px] shrink-0 place-items-center" aria-hidden="true">
+                          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-sky-400">
+                            <circle cx="12" cy="12" r="10" />
+                            <path d="M12 6v6l4 2" stroke-linecap="round" stroke-linejoin="round" />
+                          </svg>
+                        </span>
+                        <span class="text-[14px] font-extrabold tabular-nums leading-none text-white sm:text-[15px]">{{ statsCardSavedHoursLabel }}</span>
+                      </div>
+                      <p class="mt-1 w-full text-[10px] font-medium leading-snug text-white/60 sm:text-[11px]">Сэкономлено</p>
+                      <p class="mt-0.5 line-clamp-2 w-full text-[9px] font-medium leading-snug text-lime-400/90 sm:text-[10px]">{{ statsCardTrendSaved }}</p>
+                    </div>
+
+                    <div class="flex min-w-0 flex-[1_1_0] flex-col border-r border-white/10 px-1 py-1 sm:px-1.5">
+                      <div class="flex items-center gap-1.5">
+                        <span class="grid h-[18px] w-[18px] shrink-0 place-items-center" aria-hidden="true">
+                          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-violet-400">
+                            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                            <circle cx="9" cy="7" r="4" />
+                            <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
+                          </svg>
+                        </span>
+                        <span class="text-[14px] font-extrabold tabular-nums leading-none text-white sm:text-[15px]">{{ statsCardJoins }}</span>
+                      </div>
+                      <p class="mt-1 w-full text-[10px] font-medium leading-snug text-white/60 sm:text-[11px]">Вступили</p>
+                      <p class="mt-0.5 line-clamp-2 w-full text-[9px] font-medium leading-snug text-lime-400/90 sm:text-[10px]">{{ statsCardTrendJoins }}</p>
+                    </div>
+
+                    <div class="flex min-w-0 flex-[1_1_0] flex-col py-1 pl-1 sm:pl-1.5">
+                      <div class="flex items-center gap-1.5">
+                        <span class="grid h-[18px] w-[18px] shrink-0 place-items-center" aria-hidden="true">
+                          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-amber-300">
+                            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" stroke-linecap="round" stroke-linejoin="round" />
+                          </svg>
+                        </span>
+                        <span class="text-[14px] font-extrabold tabular-nums leading-none text-white sm:text-[15px]">{{ statGroupsLimitPercent }}</span>
+                      </div>
+                      <p class="mt-1 w-full text-[10px] font-medium leading-snug text-white/60 sm:text-[11px]">Лимит групп</p>
+                      <p class="mt-0.5 line-clamp-2 w-full text-[9px] font-medium leading-snug text-lime-400/90 sm:text-[10px]">{{ statGroupsLimitFoot }}</p>
+                    </div>
                   </div>
                 </div>
               </div>
 
-              <div class="mt-2.5 flex justify-center gap-2">
+              <div
+                v-if="accountShowBroadcastMiniCard"
+                class="w-1/2 shrink-0 pl-[3px]"
+              >
+                <div
+                  class="overflow-hidden rounded-2xl border border-violet-500/35 bg-gradient-to-br from-[#151220] via-[#0c0a12] to-black shadow-[0_14px_40px_-20px_rgba(91,33,182,0.45)] ring-1 ring-inset ring-violet-400/10"
+                >
+                  <div class="flex items-start gap-1.5 px-1.5 pb-1 pt-1 sm:gap-2 sm:px-2 sm:pb-1 sm:pt-1.5">
+                    <div
+                      class="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-gradient-to-br from-violet-500 via-violet-700 to-indigo-950 shadow-[0_0_16px_rgba(167,139,250,0.38)] sm:h-8 sm:w-8"
+                      aria-hidden="true"
+                    >
+                      <NavIcon name="telegram" class="h-[17px] w-[17px] text-white drop-shadow-[0_1px_8px_rgba(255,255,255,0.35)]" />
+                    </div>
+                    <div class="min-w-0 flex-1">
+                      <span class="text-[12px] font-extrabold leading-tight text-white sm:text-[13px]">Рассылки</span>
+                      <p class="mt-0.5 line-clamp-2 text-[8px] leading-snug text-white/50 sm:text-[9px]">
+                        Отправляйте сообщения во все ваши чаты за секунды
+                      </p>
+                    </div>
+                    <span
+                      class="inline-flex max-w-[46%] shrink-0 rounded-full bg-gradient-to-r from-fuchsia-500 via-violet-500 to-indigo-500 p-[1.5px] shadow-[0_0_16px_rgba(168,85,247,0.4)]"
+                    >
+                      <button
+                        type="button"
+                        data-no-swipe
+                        class="flex min-w-0 items-center gap-0.5 rounded-full bg-gradient-to-b from-zinc-800 to-black px-2 py-1 text-[9px] font-bold leading-tight text-white ring-1 ring-inset ring-white/10 transition hover:brightness-110 active:scale-[0.98] sm:px-2.5 sm:text-[10px]"
+                        @click.stop="goBroadcastMiniCreate"
+                      >
+                        <span class="truncate">Создать</span>
+                        <span class="shrink-0 text-xs font-light text-violet-200/90" aria-hidden="true">›</span>
+                      </button>
+                    </span>
+                  </div>
+                  <div
+                    class="mx-1 mb-0.5 mt-0 grid grid-cols-3 gap-0 divide-x divide-white/[0.08] rounded-lg bg-black/50 px-1 py-0.5 sm:mx-1.5 sm:px-1.5"
+                  >
+                    <div class="flex min-w-0 flex-col gap-0.5 px-1 py-0.5">
+                      <div class="flex items-center gap-1">
+                        <span class="grid h-5 w-5 shrink-0 place-items-center rounded-md bg-black/35" aria-hidden="true">
+                          <NavIcon name="chats" class="h-3.5 w-3.5 text-white/85" />
+                        </span>
+                        <span class="text-[12px] font-extrabold tabular-nums leading-none text-white sm:text-[13px]">
+                          {{ broadcastMiniLoading ? '…' : (broadcastMiniEligibleCount ?? '—') }}
+                        </span>
+                      </div>
+                      <p class="w-full text-[8px] font-medium leading-tight text-white/48 sm:text-[9px]">Доступно чатов</p>
+                    </div>
+                    <div class="flex min-w-0 flex-col gap-0.5 px-1 py-0.5">
+                      <div class="flex items-center gap-1">
+                        <span class="grid h-5 w-5 shrink-0 place-items-center rounded-md bg-black/35" aria-hidden="true">
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-sky-300">
+                            <path d="m22 2-7 20-4-9-9-4Z" stroke-linejoin="round" />
+                          </svg>
+                        </span>
+                        <span class="text-[12px] font-extrabold tabular-nums leading-none text-white sm:text-[13px]">
+                          {{ broadcastMiniLoading ? '…' : (broadcastMiniSentToday ?? '—') }}
+                        </span>
+                      </div>
+                      <p class="w-full text-[8px] font-medium leading-tight text-white/48 sm:text-[9px]">Сколько отправлено сегодня</p>
+                    </div>
+                    <div class="flex min-w-0 flex-col gap-0.5 px-1 py-0.5">
+                      <div class="flex items-center gap-1">
+                        <span class="grid h-5 w-5 shrink-0 place-items-center rounded-md bg-black/35" aria-hidden="true">
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-violet-300">
+                            <circle cx="12" cy="12" r="10" />
+                            <path d="M12 6v6l4 2" stroke-linecap="round" stroke-linejoin="round" />
+                          </svg>
+                        </span>
+                        <span class="text-[12px] font-extrabold tabular-nums leading-none text-white sm:text-[13px]">
+                          {{ broadcastMiniLoading ? '…' : (broadcastMiniScheduledCount ?? 0) }}
+                        </span>
+                      </div>
+                      <p class="w-full text-[8px] font-medium leading-tight text-white/48 sm:text-[9px]">Запланировано</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            </div>
+          </div>
+
+          <!-- Обновления ↔ Premium: справа, компактная карточка -->
+          <div
+            class="ml-auto mr-0 mt-1 w-[min(100%,15rem)] max-w-[15rem] overflow-hidden rounded-2xl border border-white/[0.12] bg-gradient-to-b from-[#0d0d0d] to-[#060606] shadow-[0_12px_36px_-16px_rgba(0,0,0,0.92)] ring-1 ring-inset ring-lime-400/[0.07] sm:w-[min(100%,16rem)] sm:max-w-[16rem]"
+          >
+            <div
+              class="flex items-center justify-center gap-2 border-b border-white/[0.07] bg-black/25 px-2 py-1.5 sm:gap-3 sm:px-2 sm:py-2"
+            >
+              <div class="flex min-w-0 flex-1 items-center justify-center gap-2 sm:gap-4">
                 <button
-                  v-for="(_, idx) in UPDATES_SLIDES"
-                  :key="idx"
                   type="button"
-                  class="h-2 w-2 rounded-full transition-all"
-                  :class="updatesIndex === idx ? 'scale-110 bg-lime-400 shadow-[0_0_8px_rgba(163,230,53,0.7)]' : 'bg-white/25 hover:bg-white/40'"
-                  :aria-label="`Слайд ${idx + 1}`"
-                  :aria-current="updatesIndex === idx ? 'true' : undefined"
-                  @click="selectUpdatesSlide(idx)"
-                />
+                  class="text-[11px] font-extrabold tracking-tight transition sm:text-[12px]"
+                  :class="
+                    homeUpdatesPremiumSlide === 0
+                      ? 'text-lime-400 drop-shadow-[0_0_16px_rgba(163,230,53,0.4)]'
+                      : 'text-white/38 hover:text-white/70'
+                  "
+                  @click="setUpdatesPremiumSlide(0)"
+                >
+                  Обновления
+                </button>
+                <button
+                  type="button"
+                  class="text-[11px] font-extrabold tracking-tight transition sm:text-[12px]"
+                  :class="
+                    homeUpdatesPremiumSlide === 1
+                      ? 'text-amber-300 drop-shadow-[0_0_16px_rgba(252,211,77,0.35)]'
+                      : 'text-white/38 hover:text-white/70'
+                  "
+                  @click="setUpdatesPremiumSlide(1)"
+                >
+                  Premium защита
+                </button>
+              </div>
+            </div>
+            <div class="min-h-[9rem] overflow-hidden px-0.5 pb-0.5 sm:min-h-[9.5rem]">
+              <div
+                class="flex w-[200%] transition-transform ease-out"
+                :class="homeUpdatesPremiumInstant ? 'duration-0' : 'duration-500'"
+                :style="{ transform: `translateX(-${homeUpdatesPremiumSlide * 50}%)` }"
+              >
+                <div class="w-1/2 shrink-0 p-2 sm:p-2.5">
+                  <ul class="space-y-1 text-[10px] leading-snug text-white/[0.88] sm:text-[11px]">
+                    <li v-for="(line, i) in ACCOUNT_HOME_UPDATE_BULLETS" :key="`upd-${i}`" class="flex gap-2">
+                      <span class="mt-[0.4em] h-1.5 w-1.5 shrink-0 rounded-full bg-lime-400 shadow-[0_0_8px_rgba(163,230,53,0.5)]" aria-hidden="true" />
+                      <span>{{ line }}</span>
+                    </li>
+                  </ul>
+                  <div class="mt-2 border-t border-white/[0.08] pt-2">
+                    <button
+                      type="button"
+                      class="flex w-full items-center justify-between gap-1 text-left text-[10px] font-semibold text-white/55 transition hover:text-white/90 sm:text-[11px]"
+                      @click="showUpdatesRoadmapModal = true"
+                    >
+                      <span>Смотреть все обновления</span>
+                      <span class="text-base font-light text-white/35" aria-hidden="true">›</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="w-1/2 shrink-0 p-2 sm:p-2.5">
+                  <div
+                    class="flex min-h-[7.5rem] flex-col rounded-xl border border-amber-500/35 bg-gradient-to-b from-[#121212] to-[#070707] p-2 shadow-[0_12px_36px_-16px_rgba(180,83,9,0.28)] ring-1 ring-inset ring-amber-400/10 sm:min-h-[8rem] sm:p-2.5"
+                  >
+                    <ul class="flex-1 space-y-1 text-[10px] leading-snug text-white/[0.88] sm:text-[11px]">
+                      <li v-for="(line, i) in ACCOUNT_HOME_PREMIUM_BULLETS" :key="`prem-${i}`" class="flex gap-2">
+                        <span class="shrink-0 font-semibold text-amber-400/95" aria-hidden="true">✓</span>
+                        <span>{{ line }}</span>
+                      </li>
+                    </ul>
+                    <div class="mt-2 w-full">
+                      <button
+                        v-if="!tariffIsPremium"
+                        type="button"
+                        class="flex w-full items-center justify-center gap-1 rounded-xl bg-gradient-to-r from-[#5c4818] via-[#a16207] to-[#e8c84a] px-2 py-1.5 text-[10px] font-extrabold leading-tight text-white shadow-[0_4px_20px_-4px_rgba(234,179,8,0.5)] sm:text-[11px]"
+                        @click="openBillingSection({ scrollPlans: true })"
+                      >
+                        <span aria-hidden="true">🛡</span>
+                        Усилить защиту
+                      </button>
+                      <button
+                        v-else
+                        type="button"
+                        class="flex w-full items-center justify-center gap-1 rounded-xl bg-gradient-to-r from-[#5c4818] via-[#a16207] to-[#e8c84a] px-2 py-1.5 text-[10px] font-extrabold leading-tight text-white shadow-[0_4px_20px_-4px_rgba(234,179,8,0.4)] sm:text-[11px]"
+                        @click="openBillingSection()"
+                      >
+                        <span aria-hidden="true">👑</span>
+                        Продлить Premium
+                      </button>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
+          </template>
         </div>
 
-        </template>
       </div>
 
       <div v-if="dashboardSection === 'partner'" class="mt-1 space-y-3">
@@ -3741,6 +4413,128 @@ async function submitReceipt() {
         <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">
           Совет: сначала группа и отчёты, потом тонкая настройка фильтров.
         </p>
+      </div>
+    </div>
+
+    <div
+      v-if="showAccountHistoryModal"
+      class="fixed inset-0 z-[56] flex items-end justify-center bg-black/40 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-md md:items-center md:pb-3"
+      role="dialog"
+      aria-modal="true"
+      aria-label="История платежей и токенов"
+      @click.self="showAccountHistoryModal = false"
+    >
+      <div
+        class="flex max-h-[min(85vh,calc(100dvh-2.5rem))] w-full max-w-md flex-col overflow-hidden rounded-[22px] border border-black/[0.08] bg-[#f2f2f7] shadow-[0_25px_80px_-24px_rgba(0,0,0,0.45)] dark:border-white/[0.12] dark:bg-[#1c1c1e]"
+        @click.stop
+      >
+        <div class="flex shrink-0 items-center justify-between px-4 pb-2 pt-3">
+          <h2 class="text-[17px] font-semibold tracking-tight text-black dark:text-white">История</h2>
+          <button
+            type="button"
+            class="flex h-8 w-8 items-center justify-center rounded-full bg-black/[0.06] text-[17px] font-light leading-none text-black/45 transition active:scale-95 dark:bg-white/[0.12] dark:text-white/55 dark:hover:bg-white/[0.18]"
+            aria-label="Закрыть"
+            @click="showAccountHistoryModal = false"
+          >
+            ✕
+          </button>
+        </div>
+        <div class="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-y-contain px-3 pb-4 [-webkit-overflow-scrolling:touch]">
+          <div class="flex rounded-[10px] bg-black/[0.06] p-0.5 dark:bg-white/[0.08]">
+            <button
+              type="button"
+              class="flex-1 rounded-[9px] py-2 text-[13px] font-medium transition"
+              :class="
+                historyTab === 'payments'
+                  ? 'bg-white text-black shadow-sm dark:bg-zinc-600 dark:text-white dark:shadow-none'
+                  : 'text-black/45 dark:text-white/40'
+              "
+              @click="historyTab = 'payments'"
+            >
+              Платежи
+            </button>
+            <button
+              type="button"
+              class="flex-1 rounded-[9px] py-2 text-[13px] font-medium transition"
+              :class="
+                historyTab === 'tokens'
+                  ? 'bg-white text-black shadow-sm dark:bg-zinc-600 dark:text-white dark:shadow-none'
+                  : 'text-black/45 dark:text-white/40'
+              "
+              @click="historyTab = 'tokens'"
+            >
+              Токены
+            </button>
+          </div>
+
+          <div v-if="historyLoading" class="py-8 text-center text-[15px] text-black/35 dark:text-white/35">Секундочку…</div>
+          <div v-else-if="historyTab === 'payments'" class="space-y-2">
+            <div
+              v-if="historyPayments.length === 0"
+              class="rounded-[14px] bg-white px-4 py-6 text-center text-[15px] text-black/45 dark:bg-white/[0.06] dark:text-white/45"
+            >
+              Платежей пока нет.
+            </div>
+            <div
+              v-for="(item, idx) in historyPayments"
+              :key="`mh-dp-${idx}`"
+              class="rounded-[14px] border border-black/[0.06] bg-white p-3 dark:border-white/[0.08] dark:bg-white/[0.05]"
+            >
+              <p class="text-[13px] text-black/45 dark:text-white/45">{{ item.created_at || '—' }}</p>
+              <div class="mt-1.5 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                <div class="min-w-0">
+                  <p class="text-[15px] font-semibold text-black dark:text-white">
+                    <template v-if="String(item.tariff || '').toLowerCase() === 'tokens'">
+                      {{ fmtAmount(item.amount_rub) }} ₽ · {{ item.months }} ⚡
+                    </template>
+                    <template v-else>
+                      {{ fmtAmount(item.amount_rub) }} ₽ · {{ item.months }} мес.
+                    </template>
+                  </p>
+                  <p class="mt-0.5 text-[13px] text-black/45 dark:text-white/45">
+                    {{ providerLabel(item.provider) }} · {{ item.status }}
+                  </p>
+                </div>
+                <div class="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+                  <button
+                    v-if="item.receipt_url"
+                    type="button"
+                    class="rounded-full bg-emerald-500/90 px-3 py-1.5 text-[13px] font-semibold text-white"
+                    @click="openReceiptLink(item)"
+                  >
+                    Чек
+                  </button>
+                  <button
+                    type="button"
+                    class="rounded-full bg-sky-500/90 px-3 py-1.5 text-[13px] font-semibold text-white"
+                    @click="openReceiptModal(item)"
+                  >
+                    Получить чек
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div v-else class="space-y-2">
+            <div
+              v-if="historyTokens.length === 0"
+              class="rounded-[14px] bg-white px-4 py-6 text-center text-[15px] text-black/45 dark:bg-white/[0.06] dark:text-white/45"
+            >
+              Движения токенов пока нет.
+            </div>
+            <div
+              v-for="(item, idx) in historyTokens"
+              :key="`mh-dt-${idx}`"
+              class="rounded-[14px] border border-black/[0.06] bg-white p-3 dark:border-white/[0.08] dark:bg-white/[0.05]"
+            >
+              <p class="text-[13px] text-black/45 dark:text-white/45">{{ item.created_at || '—' }}</p>
+              <p class="mt-1 text-[15px] font-semibold" :class="item.delta >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'">
+                {{ item.delta >= 0 ? '+' : '' }}{{ fmtAmount(item.delta) }} ⚡
+              </p>
+              <p class="mt-0.5 text-[13px] text-black/45 dark:text-white/45">{{ tokenReasonLabel(item.reason) }}</p>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 

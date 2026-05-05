@@ -12,7 +12,7 @@ from decimal import Decimal
 from typing import Any
 
 import aiohttp
-from sqlalchemy import select, func
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Payment, Tariff, User, CreditLedger, PartnerCommission
@@ -228,6 +228,88 @@ async def _yookassa_create_payment(
                 desc = data.get("description") if isinstance(data, dict) else None
                 raise RuntimeError(str(desc or data))
             return data
+
+
+def yookassa_autorenew_worker_enabled() -> bool:
+    """Фоновые автосписания Premium по сохранённой карте (ENV, по умолчанию включено)."""
+    return str(os.getenv("YOOKASSA_AUTORENEW_WORKER_ENABLED", "1")).strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _autorenew_cooldown_hours() -> int:
+    try:
+        return max(1, int(os.getenv("YOOKASSA_AUTORENEW_COOLDOWN_HOURS", "20")))
+    except ValueError:
+        return 20
+
+
+def _autorenew_window_hours() -> int:
+    try:
+        return max(1, int(os.getenv("YOOKASSA_AUTORENEW_WINDOW_HOURS", "48")))
+    except ValueError:
+        return 48
+
+
+def autorenew_window_hours() -> int:
+    """Окно (часы до конца подписки), в котором бот пытается автосписание — для текстов и UI."""
+    return _autorenew_window_hours()
+
+
+async def _yookassa_create_autopayment(
+    amount_rub: str,
+    description: str,
+    payment_method_id: str,
+    metadata: dict[str, str],
+    *,
+    mode: str = "live",
+    idempotence_key: str,
+) -> dict[str, Any]:
+    """
+    Автоплатёж по сохранённому payment_method.id (без участия пользователя).
+    https://yookassa.ru/developers/payment-acceptance/scenario-extensions/recurring-payments/pay-with-saved
+    """
+    mm = _norm_mode(mode)
+    if not yookassa_configured(mm):
+        raise RuntimeError("yookassa_not_configured")
+    shop, _, _ = _yookassa_env(mm)
+    shop_tail = shop[-4:] if shop else "none"
+    pm_short = str(payment_method_id).strip()[:10]
+    log.info(
+        "YooKassa autopayment mode=%s shop_tail=%s amount=%s pm~=%s",
+        mm,
+        shop_tail,
+        amount_rub,
+        pm_short,
+    )
+    payload: dict[str, Any] = {
+        "amount": {"value": amount_rub, "currency": "RUB"},
+        "capture": True,
+        "payment_method_id": str(payment_method_id).strip(),
+        "description": description[:128],
+        "metadata": {str(k): str(v)[:512] for k, v in metadata.items()},
+    }
+    idem = str(idempotence_key or uuid.uuid4())[:128]
+    async with aiohttp.ClientSession() as http:
+        async with http.post(
+            _YOOKASSA_API,
+            json=payload,
+            headers={
+                "Authorization": _basic_auth_header(mm),
+                "Idempotence-Key": idem,
+                "Content-Type": "application/json",
+            },
+            timeout=aiohttp.ClientTimeout(total=45),
+        ) as resp:
+            data = await resp.json(content_type=None)
+            if resp.status >= 400:
+                log.warning("YooKassa autopayment HTTP %s: %s", resp.status, data)
+                desc_e = data.get("description") if isinstance(data, dict) else None
+                raise RuntimeError(str(desc_e or data))
+            return data if isinstance(data, dict) else {}
 
 
 async def _yookassa_get_payment(payment_id: str, *, mode: str = "live") -> dict[str, Any] | None:
@@ -536,12 +618,18 @@ async def _fulfill_payment(session: AsyncSession, yookassa_id: str, payment_obj:
     pm_type = str(pm.get("type") or "").strip() or None
     pm_card = pm.get("card") if isinstance(pm.get("card"), dict) else {}
     pm_last4 = str(pm_card.get("last4") or "").strip() or None
+    pm_id = str(pm.get("id") or "").strip() or None
     user.payment_method_bound = pm_saved
     user.payment_method_type = pm_type
     user.payment_method_last4 = pm_last4
+    user.yookassa_last_mode = "test" if bool(payment_obj.get("test")) else "live"
 
     is_tokens_payment = (str(getattr(row, "tariff", "") or "").lower() == "tokens")
     is_binding_probe = (str(getattr(row, "tariff", "") or "").lower() == "premium_probe")
+    if not is_tokens_payment and not is_binding_probe:
+        user.subscription_autorenew_months = int(row.months)
+        if pm_id and pm_saved:
+            user.yookassa_payment_method_id = pm_id
     if is_tokens_payment:
         pack_n = int(getattr(row, "months", 0) or 0)
         if pack_n > 0:
@@ -588,6 +676,8 @@ async def _fulfill_payment(session: AsyncSession, yookassa_id: str, payment_obj:
                 payment_obj.get("created_at")
             )
             user.subscription_activated_at = act_at or datetime.now(timezone.utc)
+        # Новый оплаченный период — счётчик попыток автосписания для следующего цикла обнуляем
+        user.autorenew_last_attempt_at = None
         await restore_owner_chats_after_premium(session, int(getattr(user, "telegram_id", 0) or 0))
 
     # Первая ли успешная оплата этого пользователя.
@@ -603,14 +693,32 @@ async def _fulfill_payment(session: AsyncSession, yookassa_id: str, payment_obj:
     ref_notify_texts: list[tuple[int, str]] = []
     now_utc = datetime.now(timezone.utc)
     # 3 уровня партнерки: 15% / 10% / 5%.
+    # Анти-арбитраж по цепочке: не платим при цикле A→B→A и не дублируем уровень при повторе tg.
     chain_tg_ids: list[int] = []
+    seen_chain: set[int] = set()
+    buyer_tg = int(user.telegram_id)
     current_tg = int(getattr(user, "referred_by_tg_id", 0) or 0)
     for _level in range(3):
         if not current_tg:
             break
+        if current_tg == buyer_tg:
+            break
+        if current_tg in seen_chain:
+            break
+        seen_chain.add(current_tg)
         chain_tg_ids.append(current_tg)
         next_ref_res = await session.execute(select(User.referred_by_tg_id).where(User.telegram_id == current_tg).limit(1))
         current_tg = int(next_ref_res.scalar_one_or_none() or 0)
+
+    def _partner_available_at_dt() -> datetime:
+        base = _next_payout_monday(now_utc + timedelta(days=7))
+        try:
+            extra_days = int(str(os.getenv("PARTNER_HOLD_EXTRA_DAYS") or "0").strip() or "0")
+        except Exception:
+            extra_days = 0
+        if extra_days > 0:
+            base = base + timedelta(days=extra_days)
+        return base
 
     for level, rate in REFERRAL_LEVEL_RATES:
         if level > len(chain_tg_ids):
@@ -633,7 +741,7 @@ async def _fulfill_payment(session: AsyncSession, yookassa_id: str, payment_obj:
                 ref_user.ref_paid_count = int(getattr(ref_user, "ref_paid_count", 0) or 0) + 1
 
         is_owner_fast = str(getattr(ref_user, "username", "") or "").lower() == "pastukh_viscera"
-        available_at = now_utc if is_owner_fast else _next_payout_monday(now_utc + timedelta(days=7))
+        available_at = now_utc if is_owner_fast else _partner_available_at_dt()
         comm = PartnerCommission(
             owner_user_id=int(ref_user.id),
             source_user_id=int(user.id),
@@ -771,3 +879,229 @@ async def _mark_payment_canceled(session: AsyncSession, yookassa_id: str) -> Non
     if row and row.status == "pending":
         row.status = "canceled"
         await session.commit()
+
+
+async def _notify_autorenew_card_revoked(telegram_id: int, *, bot: Any = None) -> None:
+    if not telegram_id:
+        return
+    text = (
+        "⚠️ *Guard*\n\n"
+        "Автопродление Premium не прошло: банк или ЮKassa отозвали разрешение на автосписание.\n\n"
+        "Привязка карты сброшена. Чтобы снова включить автопродление, оплатите подписку в приложении "
+        "и сохраните способ оплаты."
+    )
+    try:
+        from app.services.telegram_notify import send_user_dm
+
+        await send_user_dm(int(telegram_id), text)
+    except Exception:
+        log.exception("autorenew notify revoke failed tg=%s", telegram_id)
+
+
+async def _handle_autorenew_canceled(
+    session: AsyncSession,
+    user: User,
+    payment_obj: dict[str, Any],
+    *,
+    bot: Any = None,
+) -> None:
+    """Отмена автоплатежа: при отзыве разрешения — сбрасываем привязку как в ручном «отключить автопродление»."""
+    details = payment_obj.get("cancellation_details") if isinstance(payment_obj.get("cancellation_details"), dict) else {}
+    reason = str(details.get("reason") or "").strip().lower()
+    revoke = "permission" in reason or reason == "permission_revoked"
+    if revoke:
+        user.payment_method_bound = False
+        user.payment_method_type = None
+        user.payment_method_last4 = None
+        user.yookassa_payment_method_id = None
+        user.subscription_autorenew_months = None
+        session.add(user)
+    tid = int(getattr(user, "telegram_id", 0) or 0)
+    if revoke and tid > 0:
+        await _notify_autorenew_card_revoked(tid, bot=bot)
+
+
+async def try_yookassa_autorenew_for_user(
+    session: AsyncSession,
+    user: User,
+    *,
+    bot: Any = None,
+) -> bool:
+    """
+    Пытается списать Premium по сохранённому payment_method_id в окне до окончания подписки.
+    Возвращает True, если платёж сразу succeeded и _fulfill_payment отработал.
+    """
+    if not yookassa_autorenew_worker_enabled():
+        return False
+    if not yookassa_configured("live") and not yookassa_configured("test"):
+        return False
+    if str(getattr(user, "subscription_source", "") or "").strip().lower() != "payment":
+        return False
+    if not bool(getattr(user, "payment_method_bound", False)):
+        return False
+    pm_id = str(getattr(user, "yookassa_payment_method_id", "") or "").strip()
+    if not pm_id:
+        return False
+    sub_until = getattr(user, "subscription_until", None)
+    if not sub_until:
+        return False
+    now = datetime.now(timezone.utc)
+    if sub_until.tzinfo is None:
+        sub_until = sub_until.replace(tzinfo=timezone.utc)
+    else:
+        sub_until = sub_until.astimezone(timezone.utc)
+    if sub_until <= now:
+        return False
+    win = timedelta(hours=_autorenew_window_hours())
+    if sub_until > now + win:
+        return False
+    cooldown = timedelta(hours=_autorenew_cooldown_hours())
+    last_att = getattr(user, "autorenew_last_attempt_at", None)
+    if last_att is not None:
+        if last_att.tzinfo is None:
+            last_att = last_att.replace(tzinfo=timezone.utc)
+        else:
+            last_att = last_att.astimezone(timezone.utc)
+        if now - last_att < cooldown:
+            return False
+
+    res = await session.execute(
+        update(User)
+        .where(
+            User.id == int(user.id),
+            User.yookassa_payment_method_id.isnot(None),
+            or_(
+                User.autorenew_last_attempt_at.is_(None),
+                User.autorenew_last_attempt_at < now - cooldown,
+            ),
+        )
+        .values(autorenew_last_attempt_at=now)
+        .returning(User.id)
+    )
+    if res.scalar_one_or_none() is None:
+        await session.rollback()
+        return False
+
+    months = int(getattr(user, "subscription_autorenew_months", 0) or 0)
+    if months not in _ALLOWED_MONTHS:
+        months = 1
+    amount = _MONTH_TO_PRICE_RUB[months]
+    amount_str = f"{Decimal(str(amount)).quantize(Decimal('0.01'))}"
+    mode = str(getattr(user, "yookassa_last_mode", None) or "live").strip().lower()
+    if mode not in ("live", "test"):
+        mode = "live"
+    if not yookassa_configured(mode):
+        if yookassa_configured("live"):
+            mode = "live"
+        elif yookassa_configured("test"):
+            mode = "test"
+    if not yookassa_configured(mode):
+        log.warning("YooKassa autorenew: no configured mode for user_id=%s", user.id)
+        await session.commit()
+        return False
+
+    tg_id = int(getattr(user, "telegram_id", 0) or 0)
+    idem = f"autorenew-u{user.id}-until{sub_until.date().isoformat()}"
+    desc = f"Guard Premium автопродление {months} мес."
+    meta = {
+        "telegram_user_id": str(tg_id),
+        "months": str(months),
+        "autorenew": "1",
+        "yookassa_mode": _norm_mode(mode),
+    }
+    try:
+        data = await _yookassa_create_autopayment(
+            amount_str,
+            desc,
+            pm_id,
+            meta,
+            mode=mode,
+            idempotence_key=idem,
+        )
+    except Exception as e:
+        log.warning("YooKassa autorenew API user_id=%s: %s", user.id, e)
+        await session.commit()
+        return False
+
+    yid = str(data.get("id") or "").strip()
+    if not yid:
+        await session.commit()
+        return False
+    st = str(data.get("status") or "").strip().lower()
+
+    dup = await session.execute(
+        select(Payment.id).where(Payment.payment_id == yid, Payment.provider == "yookassa").limit(1)
+    )
+    if dup.scalar_one_or_none() is not None:
+        log.info("YooKassa autorenew: payment %s already in DB, skip duplicate", yid)
+        await session.commit()
+        return False
+
+    pay = Payment(
+        user_id=int(user.id),
+        amount=float(amount),
+        currency="RUB",
+        months=int(months),
+        tariff=Tariff.PREMIUM.value,
+        status="pending",
+        provider="yookassa",
+        payment_id=yid,
+    )
+    session.add(pay)
+    await session.flush()
+    if st == "succeeded":
+        await _fulfill_payment(session, yid, data)
+        return True
+    if st == "pending":
+        await session.commit()
+        return False
+    if st == "canceled":
+        pay.status = "canceled"
+        u2 = await session.get(User, int(user.id))
+        if u2:
+            await _handle_autorenew_canceled(session, u2, data, bot=bot)
+        await session.commit()
+        return False
+    await session.commit()
+    return False
+
+
+async def run_yookassa_autorenew_batch(*, bot: Any = None, limit: int = 40) -> int:
+    """
+    Находит пользователей в окне автопродления и по очереди пытается списать оплату.
+    Вызывается из планировщика бота (reminders). Возвращает число успешных мгновенных списаний.
+    """
+    if not yookassa_autorenew_worker_enabled():
+        return 0
+    from app.db.session import get_session
+
+    now = datetime.now(timezone.utc)
+    window_end = now + timedelta(hours=_autorenew_window_hours())
+    q = (
+        select(User)
+        .where(
+            User.tariff.in_((Tariff.PREMIUM.value, Tariff.PRO.value, Tariff.BUSINESS.value)),
+            User.subscription_source == "payment",
+            User.payment_method_bound == True,  # noqa: E712
+            User.yookassa_payment_method_id.isnot(None),
+            User.subscription_until.is_not(None),
+            User.subscription_until > now,
+            User.subscription_until <= window_end,
+        )
+        .order_by(User.subscription_until.asc())
+        .limit(int(limit))
+    )
+    async with await get_session() as session:
+        rows = (await session.execute(q)).scalars().all()
+    ok = 0
+    for u in rows:
+        try:
+            async with await get_session() as session:
+                u2 = await session.get(User, int(getattr(u, "id", 0) or 0))
+                if not u2:
+                    continue
+                if await try_yookassa_autorenew_for_user(session, u2, bot=bot):
+                    ok += 1
+        except Exception:
+            log.exception("YooKassa autorenew batch user_id=%s", getattr(u, "id", None))
+    return ok

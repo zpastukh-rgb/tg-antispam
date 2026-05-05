@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
     Chat,
+    ModerationLog,
     Rule,
     UserContext,
     ChatManager,
@@ -38,6 +39,49 @@ from app.services.user_service import (
 )
 
 
+async def get_activity_summary_chat_ids(session: AsyncSession, user_id: int) -> list[int]:
+    """ID чатов для агрегатов главного экрана (\"/api/activity/summary\").
+
+    База — `get_managed_chats`. Дополнительно подтягиваем чаты, где защита уже реально работает,
+    но флаг в БД ещё «ждёт» (is_active=False / обрыв сценария подключения), и чаты с недавними
+    `moderation_logs` у владельца — иначе бот режет спам, а сводка на главной остаётся нулевой.
+    """
+    uid = int(user_id)
+    managed = await get_managed_chats(session, uid)
+    ids: set[int] = {int(c.id) for c in managed}
+    log_targets = select(Chat.log_chat_id).where(Chat.log_chat_id.is_not(None))
+    # Владелец: не активирован в UI, но строка правил уже есть (JOIN надёжнее EXISTS для SA2).
+    res_rule = await session.execute(
+        select(Chat.id)
+        .join(Rule, Rule.chat_id == Chat.id)
+        .where(
+            Chat.owner_user_id == uid,
+            Chat.is_log_chat.is_(False),
+            Chat.is_active.is_(False),
+            Chat.id.not_in(log_targets),
+        )
+    )
+    for (cid,) in res_rule.all():
+        ids.add(int(cid))
+
+    since = datetime.now(timezone.utc) - timedelta(days=30)
+    mgr_ids = select(ChatManager.chat_id).where(ChatManager.user_id == uid)
+    res_logs = await session.execute(
+        select(Chat.id)
+        .distinct()
+        .join(ModerationLog, ModerationLog.chat_id == Chat.id)
+        .where(
+            Chat.is_log_chat.is_(False),
+            ModerationLog.created_at >= since,
+            or_(Chat.owner_user_id == uid, Chat.id.in_(mgr_ids)),
+        )
+    )
+    for (cid,) in res_logs.all():
+        ids.add(int(cid))
+
+    return sorted(ids)
+
+
 async def get_managed_chats(session: AsyncSession, user_id: int) -> list[Chat]:
     """Защищаемые чаты пользователя (владелец или менеджер)."""
     manager_sub = select(ChatManager.chat_id).where(ChatManager.user_id == user_id)
@@ -51,6 +95,25 @@ async def get_managed_chats(session: AsyncSession, user_id: int) -> list[Chat]:
         .where(
             Chat.is_log_chat == False,  # noqa: E712
             Chat.is_active == True,  # noqa: E712
+            (Chat.owner_user_id == user_id) | (Chat.id.in_(select(managed_sub.c.chat_id))),
+        )
+        .order_by(Chat.id.asc())
+    )
+    return list(res.scalars().all())
+
+
+async def get_accessible_chats_any_active(session: AsyncSession, user_id: int) -> list[Chat]:
+    """Те же чаты, что и у get_managed_chats, но включая is_active=False (пауза в списке без отключения правил)."""
+    manager_sub = select(ChatManager.chat_id).where(ChatManager.user_id == user_id)
+    invite_sub = select(ChatManagerInvite.chat_id).where(
+        ChatManagerInvite.status == "connected",
+        (ChatManagerInvite.connected_user_id == user_id) | (ChatManagerInvite.target_telegram_id == user_id),
+    )
+    managed_sub = manager_sub.union(invite_sub).subquery()
+    res = await session.execute(
+        select(Chat)
+        .where(
+            Chat.is_log_chat == False,  # noqa: E712
             (Chat.owner_user_id == user_id) | (Chat.id.in_(select(managed_sub.c.chat_id))),
         )
         .order_by(Chat.id.asc())
@@ -108,11 +171,37 @@ async def set_selected_chat(session: AsyncSession, user_id: int, chat_id: int | 
     await session.commit()
 
 
+async def _access_via_owner_or_delegate(session: AsyncSession, user_id: int, row: Chat | None) -> bool:
+    """Владелец чата или подключённый менеджер/делегат (без фильтра is_active)."""
+    if row is None or bool(getattr(row, "is_log_chat", False)):
+        return False
+    uid = int(user_id)
+    cid = int(row.id)
+    if int(getattr(row, "owner_user_id", 0) or 0) == uid:
+        return True
+    r1 = await session.execute(
+        select(ChatManager.id).where(ChatManager.chat_id == cid, ChatManager.user_id == uid).limit(1),
+    )
+    if r1.first():
+        return True
+    r2 = await session.execute(
+        select(ChatManagerInvite.id).where(
+            ChatManagerInvite.chat_id == cid,
+            ChatManagerInvite.status == "connected",
+            (ChatManagerInvite.connected_user_id == uid) | (ChatManagerInvite.target_telegram_id == uid),
+        ).limit(1),
+    )
+    return bool(r2.first())
+
+
 async def user_can_access_chat(session: AsyncSession, user_id: int, chat_id: int) -> bool:
     """Проверка: пользователь владелец или менеджер чата.
 
     Дополнительно: владелец/менеджер **канала** с привязанной группой обсуждения получает доступ к API
     по id этой группы (правила комментариев хранятся на Rule(chat_id=группа обсуждения)).
+
+    Чаты на паузе (`is_active=False`) не входят в `get_managed_chats`, но владелец/делегат должны иметь доступ,
+    иначе Mini App не может загрузить чат и снова включить Guard.
     """
     chats = await get_managed_chats(session, user_id)
     cid = int(chat_id)
@@ -123,6 +212,19 @@ async def user_can_access_chat(session: AsyncSession, user_id: int, chat_id: int
             continue
         lid = getattr(c, "linked_discussion_chat_id", None)
         if lid is not None and int(lid) == cid:
+            return True
+
+    row = await session.get(Chat, cid)
+    if await _access_via_owner_or_delegate(session, user_id, row):
+        return True
+    res_disc = await session.execute(
+        select(Chat).where(
+            Chat.linked_discussion_chat_id == cid,
+            Chat.is_log_chat == False,  # noqa: E712
+        ),
+    )
+    for chn in res_disc.scalars().all():
+        if await _access_via_owner_or_delegate(session, user_id, chn):
             return True
     return False
 
@@ -232,8 +334,8 @@ async def _lazy_ensure_owner_promo_row(session: AsyncSession, code_clean: str) -
     await session.execute(
         text(
             """
-            INSERT INTO promo_codes (code, tariff, days)
-            VALUES (:code, 'premium', 0)
+            INSERT INTO promo_codes (code, tariff, days, grant_tokens, grant_aurum)
+            VALUES (:code, 'premium', 0, 0.0, 0.0)
             ON CONFLICT (code) DO NOTHING
             """
         ),
@@ -264,8 +366,8 @@ async def _lazy_ensure_repeatable_tokens2000_row(session: AsyncSession, code_cle
 async def apply_promo_code(session: AsyncSession, user_id: int, code: str) -> tuple[bool, str]:
     """
     Активировать промокод для пользователя.
-    Каждый пользователь (telegram_id) может активировать один и тот же код только один раз;
-    другие пользователи тот же код активируют независимо.
+    Каждый пользователь (telegram_id) может активировать один и тот же код только один раз,
+    кроме многоразовых: TOK2000 и владельческий GUARDIAN_OWNER (можно снова после сброса/по желанию).
     Returns: (success, message).
     """
     from sqlalchemy.exc import IntegrityError
@@ -286,7 +388,7 @@ async def apply_promo_code(session: AsyncSession, user_id: int, code: str) -> tu
     if not user:
         return False, "Пользователь не найден"
 
-    if not is_owner_forever and not is_repeatable_tokens2000:
+    if not is_repeatable_tokens2000 and not is_owner_forever:
         res_red = await session.execute(
             select(PromoCodeRedemption)
             .where(
@@ -333,8 +435,21 @@ async def apply_promo_code(session: AsyncSession, user_id: int, code: str) -> tu
                 external_key=ek,
             )
         )
-    if not is_owner_forever and not is_repeatable_tokens2000:
-        session.add(PromoCodeRedemption(promo_code_id=promo.id, telegram_user_id=user_id))
+    if not is_repeatable_tokens2000:
+        if is_owner_forever:
+            # Одна строка в истории при первом применении; повторные вводы без дубликата unique.
+            res_exist = await session.execute(
+                select(PromoCodeRedemption)
+                .where(
+                    PromoCodeRedemption.promo_code_id == promo.id,
+                    PromoCodeRedemption.telegram_user_id == user_id,
+                )
+                .limit(1)
+            )
+            if not res_exist.scalar_one_or_none():
+                session.add(PromoCodeRedemption(promo_code_id=promo.id, telegram_user_id=user_id))
+        else:
+            session.add(PromoCodeRedemption(promo_code_id=promo.id, telegram_user_id=user_id))
     try:
         await session.commit()
     except IntegrityError:
