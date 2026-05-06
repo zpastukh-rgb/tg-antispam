@@ -12,7 +12,12 @@ import {
 import { hasFullAdminRights } from '../utils/adminAccess'
 import { useCabinetMode } from '../composables/useCabinetMode'
 import SubscriptionManagementPanel from '../components/SubscriptionManagementPanel.vue'
-import CabinetPremiumStatsHero from '../components/CabinetPremiumStatsHero.vue'
+import OwnerCabinetHome from '../components/OwnerCabinetHome.vue'
+import OwnerCabinetProtectionStats from '../components/OwnerCabinetProtectionStats.vue'
+import CabinetPremiumTitleBar from '../components/CabinetPremiumTitleBar.vue'
+import SecurityPinGateModal from '../components/SecurityPinGateModal.vue'
+import { useSecurityPinGate } from '../composables/useSecurityPinGate'
+import { shouldAskPinForAction } from '../utils/settingsSecurity'
 
 const { api, fetch, fetchSilent, hasInitData } = useApi()
 const route = useRoute()
@@ -32,31 +37,80 @@ function goAdminEmbed(name) {
 
 /** Синий ADM (Premium): hero как на главной + сетка разделов и вложенные экраны. */
 const premiumAdmSection = ref('')
+const ownerProtectionStatsMode = ref('protection')
 function openPremiumAdmCard(key) {
   const k = String(key || '')
   if (k === 'partner') {
     premiumAdmSection.value = ''
-    tab.value = 'referrals'
+    ownerProtectionStatsMode.value = 'protection'
+    router.push({ path: '/', query: { section: 'partner' } }).catch(() => {})
     return
   }
   if (k === 'broadcasts') {
     premiumAdmSection.value = ''
+    ownerProtectionStatsMode.value = 'protection'
     tab.value = 'broadcasts'
     return
   }
   if (k === 'settings') {
     premiumAdmSection.value = ''
-    tab.value = 'subscription'
+    ownerProtectionStatsMode.value = 'protection'
+    router.push('/settings').catch(() => {})
     return
   }
+  if (k === 'updates') {
+    premiumAdmSection.value = ''
+    ownerProtectionStatsMode.value = 'protection'
+    router.push({ path: '/', query: { section: 'account', updates: '1' } }).catch(() => {})
+    return
+  }
+  if (k === 'stats') {
+    premiumAdmSection.value = 'protection'
+    ownerProtectionStatsMode.value = 'growth'
+    return
+  }
+  ownerProtectionStatsMode.value = 'protection'
   premiumAdmSection.value = k
 }
 function premiumExitToHome() {
   premiumAdmSection.value = ''
   tab.value = 'overview'
 }
+
+function goOwnerSubscriptionPage() {
+  router.push({ path: '/', query: { section: 'subscription' } }).catch(() => {})
+}
+
+function onGuardHeaderBack(ev) {
+  if (String(route.path || '') !== '/admin') return
+  if (showFullAdminShell.value && adminOverviewEmbed.value) {
+    ev.preventDefault()
+    adminOverviewEmbed.value = ''
+    return
+  }
+  if (isOwnerCabinet.value) {
+    if (premiumAdmSection.value) {
+      ev.preventDefault()
+      premiumAdmSection.value = ''
+      return
+    }
+    if (tab.value !== 'overview') {
+      ev.preventDefault()
+      tab.value = 'overview'
+      adminOverviewEmbed.value = ''
+      return
+    }
+  }
+}
+
 watch(tab, (v) => {
   if (v !== 'overview') premiumAdmSection.value = ''
+  if (String(route.path || '') === '/admin') {
+    const nt = String(v || 'overview')
+    if (String(route.query.admin_tab || '') !== nt) {
+      router.replace({ path: '/admin', query: { ...route.query, admin_tab: nt } }).catch(() => {})
+    }
+  }
 })
 
 const payouts = ref([])
@@ -592,6 +646,11 @@ async function openBcConfirmModal() {
 async function submitBcConfirmedSend() {
   const bid = Number(bcSelectedId.value || 0)
   if (!bid) return
+  const okPin = await requestPinIfNeeded('broadcast')
+  if (!okPin) {
+    if (shouldAskPinForAction('broadcast')) alert('Нужен код из «Настройки → Безопасность»')
+    return
+  }
   bcConfirmSending.value = true
   try {
     await persistCurrentBroadcast()
@@ -630,6 +689,15 @@ async function openQuickAutopost() {
 
 /** Полная серверная админка (все вкладки). */
 const meAdminProfile = ref(null)
+const {
+  pinGateOpen,
+  pinGateInput,
+  pinGateError,
+  pinGateBusy,
+  requestPinIfNeeded,
+  submitPinGate,
+  cancelPinGate,
+} = useSecurityPinGate(() => Number(meAdminProfile.value?.telegram_id || 0))
 function applyAdminMeSubscription(next) {
   meAdminProfile.value = next
 }
@@ -643,17 +711,11 @@ const guardApiBaseEffective = computed(() => {
   const a = String(window.__GUARD_API_BASE_EFFECTIVE__ || window.__GUARD_API_BASE__ || '').trim()
   return a || ''
 })
-/** Premium без полных прав: обзор + рефералы + рассылка (как «синий» упрощённый ADM). */
+/** Premium без полных прав (тариф). */
 const isPremiumCabinet = computed(() => {
   const m = meAdminProfile.value
   if (!m || hasFullAdminRights(m)) return false
   return !!m.is_premium
-})
-/** Личная «статистика защиты / партнёрка» как у Premium: у премиум-кабинета или у полного админа с Premium. */
-const showPersonalPartnerOverview = computed(() => {
-  if (isPremiumCabinet.value) return true
-  const m = meAdminProfile.value
-  return !!(showFullAdminShell.value && m && m.is_premium)
 })
 /** Free, делегированный менеджер: только рассылка/автопост по чужим чатам, без обзора Premium. */
 const isDelegatedFreeBroadcastCabinet = computed(() => {
@@ -661,6 +723,19 @@ const isDelegatedFreeBroadcastCabinet = computed(() => {
   if (!m || hasFullAdminRights(m)) return false
   if (!!m.is_premium) return false
   return !!m.has_managed_shared_chat
+})
+/** Владелец Free/Premium без серверной админки; не путать с делегированным только рассылкой. */
+const isOwnerCabinet = computed(() => {
+  if (isDelegatedFreeBroadcastCabinet.value) return false
+  const m = meAdminProfile.value
+  if (!m || hasFullAdminRights(m)) return false
+  return true
+})
+/** Личная «статистика защиты / партнёрка»: кабинет владельца или полный админ с Premium. */
+const showPersonalPartnerOverview = computed(() => {
+  if (isOwnerCabinet.value) return true
+  const m = meAdminProfile.value
+  return !!(showFullAdminShell.value && m && m.is_premium)
 })
 const delegatePayerSaving = ref(false)
 const aurumTransferToDelegateTg = ref('')
@@ -702,13 +777,14 @@ async function submitAurumTransferToDelegate() {
 
 /** Общие ограничения рассылки (только группы, без «в боты» как у полного админа). */
 const isBroadcastShellLite = computed(
-  () => isPremiumCabinet.value || isDelegatedFreeBroadcastCabinet.value,
+  () => isOwnerCabinet.value || isDelegatedFreeBroadcastCabinet.value,
 )
 /** Кампании автопоста и плашка-памятка: полный админ + Premium + делегированный кабинет рассылки. */
 const showAutopostCampaignsUi = computed(
   () => showFullAdminShell.value || isBroadcastShellLite.value,
 )
 const plActivitySummary = ref(null)
+const plActivityBreakdown = ref(null)
 const plActivityJournal = ref([])
 const showPartnerEventsModal = ref(false)
 const showPartnerSpendModal = ref(false)
@@ -784,6 +860,8 @@ const PARTNER_HOURLY_PRESETS = [
   { id: '24h', label: '24ч', hours: 24 },
   { id: '7d', label: '7д', hours: 24 * 7 },
   { id: '30d', label: '30д', hours: 24 * 30 },
+  { id: '6m', label: '6м', hours: 24 * 183 },
+  { id: '1y', label: '1г', hours: 24 * 365 },
 ]
 
 function partnerNormalizeAction(action) {
@@ -842,6 +920,7 @@ function partnerReasonRu(reason) {
     profanity: 'Мат',
     jobs: 'Подработки',
     casino: 'Казино',
+    politics: 'Анти-политика',
     silence: 'Тишина',
   }
   if (map[raw]) return map[raw]
@@ -850,12 +929,14 @@ function partnerReasonRu(reason) {
 }
 
 async function loadPartnerLiteActivity() {
-  const [s, j, jr] = await Promise.all([
+  const [s, b, j, jr] = await Promise.all([
     api.activitySummary(),
+    api.activityBreakdown('today', 'all').catch(() => null),
     api.activityJournal(null, 80),
     api.ownerJoinReportSettings().catch(() => ({ periods: [] })),
   ])
   plActivitySummary.value = s
+  plActivityBreakdown.value = b
   plActivityJournal.value = j?.items || []
   ownerJoinReportPeriods.value = Array.isArray(jr?.periods) ? jr.periods : []
 }
@@ -1162,6 +1243,37 @@ const partnerChartSeries = computed(() => {
     events: slots.map((s) => Number(s?.events || 0)),
   }
 })
+const ownerHourlyTotalsForStats = computed(() => partnerHourlyData.value?.totals || {})
+const ownerModerationSeriesForStats = computed(() => partnerChartSeries.value?.moderation || [])
+const ownerStatsPeriodKey = computed(() => {
+  if (partnerHourlyUseCustomRange.value) return 'custom'
+  const p = String(partnerHourlyPreset.value || '24h')
+  if (p === '7d') return '7d'
+  if (p === '30d') return '30d'
+  if (p === '6m') return '6m'
+  if (p === '1y') return '1y'
+  return 'today'
+})
+
+function onOwnerStatsPeriodChange(payload) {
+  const key = String(payload?.key || 'today')
+  partnerHourlyUseCustomRange.value = false
+  if (key === '7d') partnerHourlyPreset.value = '7d'
+  else if (key === '30d') partnerHourlyPreset.value = '30d'
+  else if (key === '6m') partnerHourlyPreset.value = '6m'
+  else if (key === '1y') partnerHourlyPreset.value = '1y'
+  else partnerHourlyPreset.value = '24h'
+  void loadPartnerHourlyActivity()
+}
+
+const showCabinetCrownNav = computed(() => {
+  if (!isOwnerCabinet.value || showFullAdminShell.value) return false
+  const ps = String(premiumAdmSection.value || '')
+  if (ps === 'protection') return true
+  const t = String(tab.value || '')
+  if (t === 'broadcasts' || t === 'subscription') return true
+  return false
+})
 const partnerChartHover = ref(null)
 function partnerChartPoint(values, idx) {
   const arr = (values || []).map((x) => Number(x || 0))
@@ -1450,8 +1562,6 @@ function selectPartnerChatFromList(chatId) {
   showPartnerHourlyChatPicker.value = false
   loadPartnerHourlyActivity()
 }
-
-const partnerJoinsOverviewHint = computed(() => partnerPresetDateHint(partnerHourlyPreset.value || '24h'))
 
 function openPartnerEventsModal() {
   showPartnerEventsModal.value = true
@@ -3697,7 +3807,7 @@ async function loadReferralsFunnel() {
 }
 
 async function loadGlobalBadUrls() {
-  const canRead = showFullAdminShell.value || isPremiumCabinet.value
+  const canRead = showFullAdminShell.value || isOwnerCabinet.value
   if (!canRead) {
     globalBadUrlItems.value = []
     globalBadUrlSystemItems.value = []
@@ -3714,7 +3824,7 @@ async function loadGlobalBadUrls() {
       const mine = bases.find((x) => Number(x?.owner_telegram_id || 0) === myTg)
       globalBadUrlItems.value = mine?.items || []
       globalBadUrlUserBases.value = bases.filter((x) => Number(x?.owner_telegram_id || 0) !== myTg)
-    } else if (isPremiumCabinet.value) {
+    } else if (isOwnerCabinet.value) {
       const r = await fetch(() => api.meGlobalBadUrlsList())
       globalBadUrlItems.value = r?.items || []
       globalBadUrlSystemItems.value = []
@@ -4113,6 +4223,11 @@ function resolveTestTargetTelegramId() {
 }
 
 async function createAdminTestSubscription(months) {
+  const okPin = await requestPinIfNeeded('payments')
+  if (!okPin) {
+    if (shouldAskPinForAction('payments')) alert('Нужен код из «Настройки → Безопасность»')
+    return
+  }
   testPayLoading.value = true
   try {
     const targetId = resolveTestTargetTelegramId()
@@ -4130,6 +4245,11 @@ async function createAdminTestSubscription(months) {
 }
 
 async function createAdminTestTokens(tokens) {
+  const okPin = await requestPinIfNeeded('payments')
+  if (!okPin) {
+    if (shouldAskPinForAction('payments')) alert('Нужен код из «Настройки → Безопасность»')
+    return
+  }
   testPayLoading.value = true
   try {
     const targetId = resolveTestTargetTelegramId()
@@ -4147,6 +4267,11 @@ async function createAdminTestTokens(tokens) {
 }
 
 async function createAdminBindingProbe(mode = 'live') {
+  const okPin = await requestPinIfNeeded('payments')
+  if (!okPin) {
+    if (shouldAskPinForAction('payments')) alert('Нужен код из «Настройки → Безопасность»')
+    return
+  }
   testPayLoading.value = true
   try {
     const targetId = resolveTestTargetTelegramId()
@@ -4687,6 +4812,11 @@ async function sendBc(target = 'users') {
     quote?.broadcast_charge_applies && Number(quote.cost_tokens || 0) > 0
       ? ` Будет списано ${Number(quote.cost_tokens)} ✨ (чатов в выборе: ${Number(quote.n_groups || 0)}; размер аудитории не умножает цену).`
       : ''
+  const okPin = await requestPinIfNeeded('broadcast')
+  if (!okPin) {
+    if (shouldAskPinForAction('broadcast')) alert('Нужен код из «Настройки → Безопасность»')
+    return
+  }
   if (!window.confirm(`${titleByTarget}${costHint} Запущенная отправка на сервере не останавливается, но прогресс можно скрыть кнопкой «Отменить просмотр».`)) return
   bcSending.value = true
   try {
@@ -5047,6 +5177,7 @@ onMounted(async () => {
   }
   window.addEventListener('click', onGlobalClickForEmoji)
   document.addEventListener('selectionchange', onBcEditorSelectionChange)
+  window.addEventListener('guard:header-back', onGuardHeaderBack)
   if (!hasInitData.value) {
     loading.value = false
     return
@@ -5057,11 +5188,6 @@ onMounted(async () => {
   try {
     meAdminProfile.value = await api.me()
     bcLastSendTargetByPost.value = bcLoadLastTargetsMap()
-    if (isPremiumCabinet.value) {
-      loading.value = false
-      router.replace('/')
-      return
-    }
     const bcDeepTab = String(route.query.tab || '').toLowerCase() === 'broadcasts'
     let bcDeepChannel = 0
     try {
@@ -5078,7 +5204,7 @@ onMounted(async () => {
         loadBroadcastEligibleGroups(),
         loadBroadcastEligibleChannels(),
       ])
-    } else if (isPremiumCabinet.value) {
+    } else if (isOwnerCabinet.value) {
       tab.value = 'overview'
       bcStatsTab.value = 'groups'
       bcBroadcastGroupScope.value = 'mine'
@@ -5132,6 +5258,13 @@ onMounted(async () => {
 })
 
 watch(
+  () => premiumAdmSection.value,
+  (s) => {
+    if (s === 'protection') void loadPartnerHourlyActivity()
+  },
+)
+
+watch(
   () => bcShowPreview.value,
   (open) => {
     if (!open) bcRevokePreviewMediaThumbs()
@@ -5152,6 +5285,7 @@ onBeforeUnmount(() => {
   revokeAllBcMediaPreviewUrls()
   window.removeEventListener('click', onGlobalClickForEmoji)
   document.removeEventListener('selectionchange', onBcEditorSelectionChange)
+  window.removeEventListener('guard:header-back', onGuardHeaderBack)
   if (bcStatsReloadTimer.value) {
     clearTimeout(bcStatsReloadTimer.value)
     bcStatsReloadTimer.value = null
@@ -5181,7 +5315,7 @@ watch(
       await loadPayouts()
       return
     }
-    if (v === 'referrals' && (isPremiumCabinet.value || showFullAdminShell.value)) {
+    if (v === 'referrals' && (isOwnerCabinet.value || showFullAdminShell.value)) {
       await Promise.all([loadReferralLite(), loadMyPartnerStatsLite()])
       return
     }
@@ -5190,7 +5324,7 @@ watch(
       return
     }
     if (v === 'bad_urls') {
-      if (!showFullAdminShell.value && !isPremiumCabinet.value) {
+      if (!showFullAdminShell.value && !isOwnerCabinet.value) {
         tab.value = 'overview'
         return
       }
@@ -5390,42 +5524,46 @@ watch(
     <div v-if="!hasInitData" class="rounded-xl border border-amber-200 bg-amber-50 p-4 text-amber-800 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-200">
       Откройте панель из Telegram.
     </div>
-    <div v-else-if="loading" class="rounded-xl border border-slate-200 bg-white p-4 text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
-      Загрузка...
+    <div
+      v-else-if="loading"
+      class="relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-slate-900/88 via-slate-950/90 to-black/95 p-6 text-center text-slate-100 shadow-[0_16px_50px_-16px_rgba(0,0,0,0.85)] backdrop-blur-xl ring-1 ring-white/10"
+      aria-busy="true"
+    >
+      <div class="mx-auto mb-3 inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/8 px-3 py-1.5 text-xs font-semibold text-slate-100 shadow-[0_0_20px_-10px_rgba(255,255,255,0.35)]">
+        <span class="inline-block bc-hourglass">⏳</span>
+        Загружаю кабинет админа…
+      </div>
+      <div class="space-y-2.5">
+        <div class="mx-auto h-3 w-2/3 max-w-[14rem] animate-pulse rounded bg-white/15" />
+        <div class="h-20 animate-pulse rounded-xl bg-white/10" />
+        <div class="h-20 animate-pulse rounded-xl bg-white/10" />
+      </div>
     </div>
     <div v-else-if="error" class="rounded-xl border border-rose-300 bg-rose-50 p-4 text-rose-700 dark:border-rose-700 dark:bg-rose-900/20 dark:text-rose-300">
       {{ error }}
     </div>
     <template v-else>
-    <h1 class="text-xl font-semibold text-gray-100 md:text-2xl">
+    <CabinetPremiumTitleBar
+      v-if="showCabinetCrownNav"
+      :profile="meAdminProfile"
+      @go-subscription="goOwnerSubscriptionPage"
+    />
+    <h1
+      v-if="!(isOwnerCabinet && !premiumAdmSection && tab === 'overview') && !(isOwnerCabinet && showCabinetCrownNav)"
+      class="text-xl font-semibold text-gray-100 md:text-2xl"
+    >
       {{
-        isPremiumCabinet || (showFullAdminShell && meAdminProfile?.is_premium)
-          ? '👑 Кабинет Premium'
-          : isDelegatedFreeBroadcastCabinet
-            ? 'Рассылка (делегированный чат)'
-            : showFullAdminShell
-              ? 'Сервисная админка'
-              : 'Админка'
+        isDelegatedFreeBroadcastCabinet
+          ? 'Рассылка (делегированный чат)'
+          : isOwnerCabinet && !meAdminProfile?.is_premium
+            ? '📋 Кабинет Free'
+            : isPremiumCabinet || (showFullAdminShell && meAdminProfile?.is_premium)
+              ? '👑 Кабинет Premium'
+              : showFullAdminShell
+                ? 'Сервисная админка'
+                : 'Админка'
       }}
     </h1>
-    <div class="flex items-center gap-2">
-      <button
-        type="button"
-        class="rounded-lg border border-white/15 bg-white/10 px-2.5 py-1 text-xs font-semibold text-slate-100 hover:bg-white/15 disabled:opacity-50"
-        :disabled="!navBackStack.length"
-        @click="navBack"
-      >
-        ← Назад
-      </button>
-      <button
-        type="button"
-        class="rounded-lg border border-white/15 bg-white/10 px-2.5 py-1 text-xs font-semibold text-slate-100 hover:bg-white/15 disabled:opacity-50"
-        :disabled="!navForwardStack.length"
-        @click="navForward"
-      >
-        Вперёд →
-      </button>
-    </div>
     <p
       v-if="isDelegatedFreeBroadcastCabinet"
       class="text-[12px] leading-snug text-violet-200/90"
@@ -5447,253 +5585,50 @@ watch(
         <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'messages' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'messages'">Сообщения</button>
       </div>
     </div>
-    <div v-else-if="isPremiumCabinet && (tab !== 'overview' || premiumAdmSection)" class="flex justify-start">
-      <button
-        type="button"
-        class="rounded-lg border border-cyan-400/35 bg-cyan-500/10 px-3 py-1.5 text-xs font-semibold text-cyan-100 hover:bg-cyan-500/20"
-        @click="premiumExitToHome"
-      >
-        ← Все разделы
-      </button>
-    </div>
 
     <div
-      v-if="tab === 'overview' && (isPremiumCabinet || showPersonalPartnerOverview || (showFullAdminShell && data))"
+      v-if="tab === 'overview' && (showPersonalPartnerOverview || (showFullAdminShell && data))"
       class="grid grid-cols-2 gap-2"
     >
-      <template v-if="isPremiumCabinet && !showFullAdminShell">
+      <template v-if="isOwnerCabinet && !showFullAdminShell">
         <template v-if="!premiumAdmSection">
-          <div class="col-span-2 overflow-hidden rounded-2xl border border-white/10 bg-slate-950/40 px-1 pb-2 pt-1">
-            <CabinetPremiumStatsHero
+          <div class="col-span-2">
+            <OwnerCabinetHome
               :summary="plActivitySummary"
               :profile="meAdminProfile"
+              :referral-paid-count="referralInfo?.paid_count != null ? referralInfo.paid_count : null"
+              :broadcast-spend-tokens="meAdminProfile?.broadcast_spend_tokens != null ? meAdminProfile.broadcast_spend_tokens : null"
+              @open-section="openPremiumAdmCard"
+              @open-main="goOwnerSubscriptionPage"
             />
-          </div>
-          <div class="col-span-2 grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              class="rounded-xl border border-emerald-500/40 bg-emerald-950/35 p-3 text-left shadow-[0_0_20px_-12px_rgba(16,185,129,0.6)] transition hover:bg-emerald-950/55"
-              @click="openPremiumAdmCard('protection')"
-            >
-              <p class="text-[10px] font-bold uppercase tracking-wide text-emerald-200">Защита</p>
-              <p class="mt-1 text-[11px] text-slate-300">Удаления за 24ч, журнал событий Guard</p>
-              <p class="mt-2 text-2xl font-extrabold text-white">{{ Number(plActivitySummary?.today?.deleted || 0) }}</p>
-              <p class="text-[10px] text-emerald-200/80">сообщений удалено сегодня</p>
-            </button>
-            <button
-              type="button"
-              class="rounded-xl border border-cyan-500/40 bg-cyan-950/35 p-3 text-left shadow-[0_0_20px_-12px_rgba(34,211,238,0.55)] transition hover:bg-cyan-950/55"
-              @click="openPremiumAdmCard('stats')"
-            >
-              <p class="text-[10px] font-bold uppercase tracking-wide text-cyan-200">Статистика</p>
-              <p class="mt-1 text-[11px] text-slate-300">Группы, каналы, подключения за 24ч</p>
-              <p class="mt-2 text-lg font-extrabold text-cyan-100">
-                {{ Number((plActivitySummary?.groups_count ?? plActivitySummary?.chats_count) || 0) }} гр.
-                · {{ Number(plActivitySummary?.channels_count || 0) }} кан.
-              </p>
-              <p class="text-[10px] text-cyan-200/80">+{{ Number(plActivitySummary?.today?.joins || 0) }} за сутки</p>
-            </button>
-            <button
-              type="button"
-              class="rounded-xl border border-sky-500/40 bg-sky-950/30 p-3 text-left shadow-[0_0_20px_-12px_rgba(14,165,233,0.5)] transition hover:bg-sky-950/50"
-              @click="openPremiumAdmCard('updates')"
-            >
-              <p class="text-[10px] font-bold uppercase tracking-wide text-sky-200">Обновления</p>
-              <p class="mt-1 text-[11px] text-slate-300">Лента новостей и дорожная карта — на главной приложения</p>
-            </button>
-            <button
-              type="button"
-              class="rounded-xl border border-amber-500/40 bg-amber-950/30 p-3 text-left shadow-[0_0_20px_-12px_rgba(245,158,11,0.45)] transition hover:bg-amber-950/50"
-              @click="openPremiumAdmCard('partner')"
-            >
-              <p class="text-[10px] font-bold uppercase tracking-wide text-amber-200">Партнёрка</p>
-              <p class="mt-1 text-[11px] text-slate-300">Рефералы и выплаты</p>
-              <p v-if="referralInfo?.paid_count != null" class="mt-2 text-xl font-extrabold text-amber-100">{{ referralInfo.paid_count }} платящих</p>
-            </button>
-            <button
-              type="button"
-              class="rounded-xl border border-fuchsia-500/40 bg-fuchsia-950/30 p-3 text-left shadow-[0_0_20px_-12px_rgba(217,70,239,0.5)] transition hover:bg-fuchsia-950/50"
-              @click="openPremiumAdmCard('broadcasts')"
-            >
-              <p class="text-[10px] font-bold uppercase tracking-wide text-fuchsia-200">Рассылки</p>
-              <p class="mt-1 text-[11px] text-slate-300">Рассылка и автопост по вашим чатам</p>
-              <p class="mt-2 text-lg font-extrabold text-fuchsia-100">{{ Number(meAdminProfile?.broadcast_spend_tokens || 0) }} ⚡</p>
-              <p class="text-[10px] text-fuchsia-200/75">расход токенов</p>
-            </button>
-            <button
-              type="button"
-              class="rounded-xl border border-violet-500/40 bg-violet-950/35 p-3 text-left shadow-[0_0_20px_-12px_rgba(139,92,246,0.5)] transition hover:bg-violet-950/55"
-              @click="openPremiumAdmCard('settings')"
-            >
-              <p class="text-[10px] font-bold uppercase tracking-wide text-violet-200">Настройки</p>
-              <p class="mt-1 text-[11px] text-slate-300">Тариф, подписка и параметры кабинета</p>
-            </button>
           </div>
         </template>
         <template v-else-if="premiumAdmSection === 'protection'">
-          <div class="col-span-2 rounded-xl border border-emerald-600/40 bg-slate-900/85 p-3 text-slate-100">
-            <p class="text-xs font-semibold text-emerald-300/90">Защита</p>
-            <p class="mt-1 text-[11px] text-slate-400">Удаления системой защиты, журнал последних действий по вашим группам и каналам.</p>
-          </div>
-          <div
-            role="button"
-            tabindex="0"
-            class="relative col-span-2 cursor-pointer select-none rounded-xl border border-emerald-500/45 bg-emerald-950/30 p-3 pt-9 text-left shadow-[0_0_18px_-8px_rgba(16,185,129,0.55)] outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/60"
-            @click="openPartnerEventsModal"
-            @keydown.enter.prevent="openPartnerEventsModal"
-            @keydown.space.prevent="openPartnerEventsModal"
-          >
-            <button
-              type="button"
-              v-bind="partnerHelpBind('journal')"
-              @click.stop.prevent="partnerShowHelp('journal')"
-              @mousedown.stop
-            >
-              i
-            </button>
-            <p class="text-[10px] font-semibold uppercase tracking-wide text-emerald-200/90">За 24ч удалений</p>
-            <p class="mt-1 text-lg font-extrabold text-emerald-100">{{ Number(plActivitySummary?.today?.deleted || 0) }}</p>
-            <p class="text-[10px] text-emerald-100/75">открыть журнал событий и действий</p>
-          </div>
-        </template>
-        <template v-else-if="premiumAdmSection === 'stats'">
-          <div class="col-span-2 rounded-xl border border-cyan-600/40 bg-slate-900/85 p-3 text-slate-100">
-            <p class="text-xs font-semibold text-cyan-300/90">Статистика</p>
-            <p class="mt-1 text-[11px] text-slate-400">Группы и каналы, подключения за 24ч, расходы на рассылки, отчёты владельца.</p>
-          </div>
-          <div
-            role="button"
-            tabindex="0"
-            class="relative cursor-pointer select-none rounded-xl border border-cyan-500/45 bg-cyan-950/30 p-3 pt-9 text-left shadow-[0_0_18px_-8px_rgba(34,211,238,0.55)] outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
-            @click="openPartnerGroupsModal"
-            @keydown.enter.prevent="openPartnerGroupsModal"
-            @keydown.space.prevent="openPartnerGroupsModal"
-          >
-            <button
-              type="button"
-              v-bind="partnerHelpBind('chatList')"
-              @click.stop.prevent="partnerShowHelp('chatList')"
-              @mousedown.stop
-            >
-              i
-            </button>
-            <p class="text-[10px] font-semibold uppercase tracking-wide text-cyan-200/90">Группы</p>
-            <p class="mt-1 text-lg font-extrabold text-cyan-100">
-              {{ Number((plActivitySummary?.groups_count ?? plActivitySummary?.chats_count) || 0) }} / {{ Number((plActivitySummary?.groups_limit ?? plActivitySummary?.chat_limit) || 0) }}
-            </p>
-            <p class="text-[10px] text-cyan-100/75">лимиты считаются отдельно</p>
-          </div>
-          <div
-            role="button"
-            tabindex="0"
-            class="relative cursor-pointer select-none rounded-xl border border-amber-500/45 bg-amber-950/30 p-3 pt-9 text-left shadow-[0_0_18px_-8px_rgba(251,191,36,0.45)] outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
-            @click="openPartnerGroupsModal"
-            @keydown.enter.prevent="openPartnerGroupsModal"
-            @keydown.space.prevent="openPartnerGroupsModal"
-          >
-            <button
-              type="button"
-              v-bind="partnerHelpBind('chatList')"
-              @click.stop.prevent="partnerShowHelp('chatList')"
-              @mousedown.stop
-            >
-              i
-            </button>
-            <p class="text-[10px] font-semibold uppercase tracking-wide text-amber-200/90">Каналы</p>
-            <p class="mt-1 text-lg font-extrabold text-amber-100">
-              {{ Number(plActivitySummary?.channels_count || 0) }} / {{ Number((plActivitySummary?.channels_limit ?? plActivitySummary?.channel_limit) || 0) }}
-            </p>
-            <p class="text-[10px] text-amber-100/75">лимиты считаются отдельно</p>
-          </div>
-          <div
-            role="button"
-            tabindex="0"
-            class="relative cursor-pointer select-none rounded-xl border border-violet-500/45 bg-violet-950/30 p-3 pt-9 text-left shadow-[0_0_18px_-8px_rgba(139,92,246,0.55)] outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60"
-            @click="openPartnerJoinsModal"
-            @keydown.enter.prevent="openPartnerJoinsModal"
-            @keydown.space.prevent="openPartnerJoinsModal"
-          >
-            <button
-              type="button"
-              v-bind="partnerHelpBind('dayCounter')"
-              @click.stop.prevent="partnerShowHelp('dayCounter')"
-              @mousedown.stop
-            >
-              i
-            </button>
-            <p class="text-[10px] font-semibold uppercase tracking-wide text-violet-200/90">Подключились</p>
-            <p class="mt-1 text-lg font-extrabold text-violet-100">{{ Number(plActivitySummary?.today?.joins || 0) }}</p>
-            <p class="text-[10px] text-violet-100/75">за 24ч (все группы/каналы)</p>
-            <p class="mt-0.5 text-[9px] text-violet-200/60">Период пресета: {{ partnerJoinsOverviewHint }}</p>
-          </div>
-          <div
-            role="button"
-            tabindex="0"
-            class="relative cursor-pointer select-none rounded-xl border border-fuchsia-400/45 bg-fuchsia-900/25 p-3 pt-9 text-left shadow-[0_0_18px_-8px_rgba(217,70,239,0.55)] outline-none focus-visible:ring-2 focus-visible:ring-fuchsia-400/60"
-            @click="showPartnerSpendModal = true"
-            @keydown.enter.prevent="showPartnerSpendModal = true"
-            @keydown.space.prevent="showPartnerSpendModal = true"
-          >
-            <button
-              type="button"
-              v-bind="partnerHelpBind('spend')"
-              @click.stop.prevent="partnerShowHelp('spend')"
-              @mousedown.stop
-            >
-              i
-            </button>
-            <p class="text-[10px] font-semibold uppercase tracking-wide text-fuchsia-200/90">Расходы</p>
-            <p class="mt-1 text-lg font-extrabold text-fuchsia-100">
-              {{ Number(meAdminProfile?.broadcast_spend_tokens || 0) }} ⚡
-            </p>
-            <p class="text-[10px] text-fuchsia-100/75">на рассылки и автопост</p>
-          </div>
-          <div class="col-span-2 rounded-xl border border-cyan-500/40 bg-slate-950/88 p-2.5 shadow-inner ring-1 ring-cyan-900/50 backdrop-blur-sm">
-            <p class="text-[10px] font-semibold uppercase tracking-wide text-cyan-200">Сводка владельца групп</p>
-            <p class="mt-0.5 text-[11px] text-slate-300">
-              Короткие отчёты в личку по всем вашим подключённым группам/каналам: сколько подключились и сколько сейчас участников.
-            </p>
-            <div class="mt-2 flex flex-wrap gap-1.5">
-              <button
-                v-for="p in OWNER_JOIN_REPORT_PRESETS"
-                :key="`owner-jr-${p.id}`"
-                type="button"
-                class="rounded-md px-2 py-1 text-[10px] font-semibold"
-                :class="(ownerJoinReportPeriods || []).includes(p.id) ? 'bg-cyan-600 text-white' : 'bg-slate-700 text-slate-200'"
-                @click="toggleOwnerJoinReportPreset(p.id)"
-              >
-                {{ p.label }}
-              </button>
-              <button
-                type="button"
-                class="rounded-md bg-emerald-700 px-2 py-1 text-[10px] font-semibold text-white disabled:opacity-60"
-                :disabled="ownerJoinReportSaving"
-                @click="saveOwnerJoinReportSettings"
-              >
-                Сохранить отчёты
-              </button>
-              <button
-                type="button"
-                class="rounded-md bg-indigo-700 px-2 py-1 text-[10px] font-semibold text-white"
-                @click="openPartnerHourlyModal"
-              >
-                Активность по часам
-              </button>
-            </div>
+          <div class="col-span-2 min-h-0">
+            <OwnerCabinetProtectionStats
+              :summary="plActivitySummary || {}"
+              :hourly-data="partnerHourlyData"
+              :loading="partnerHourlyLoading"
+              :period-key="ownerStatsPeriodKey"
+              :mode="ownerProtectionStatsMode"
+              @period-change="onOwnerStatsPeriodChange"
+              @open-groups="openPartnerGroupsModal"
+            />
           </div>
         </template>
         <template v-else-if="premiumAdmSection === 'updates'">
-          <div class="col-span-2 rounded-xl border border-sky-500/40 bg-slate-950/90 p-4 shadow-inner">
-            <p class="text-sm font-semibold text-sky-100">Обновления</p>
-            <p class="mt-2 text-[13px] leading-snug text-slate-400">
-              Полная лента новостей, изменений и дорожной карты открывается на главном экране приложения — без дублирования здесь.
+          <div class="col-span-2 overflow-hidden rounded-2xl bg-gradient-to-br from-[#0c1326]/96 via-[#111a35]/94 to-[#050812]/98 p-4 shadow-[0_20px_52px_-22px_rgba(56,189,248,0.38)] ring-1 ring-cyan-300/15">
+            <p class="text-[13px] font-semibold uppercase tracking-[0.08em] text-cyan-200/85">Лента обновлений</p>
+            <p class="mt-2 text-[14px] leading-snug text-slate-100/85">
+              Все релизы, улучшения и дорожная карта доступны на главной странице в блоке
+              «Смотреть все обновления».
             </p>
             <button
               type="button"
-              class="mt-4 w-full rounded-lg bg-sky-600 py-2.5 text-sm font-semibold text-white shadow-[0_0_20px_-8px_rgba(2,132,199,0.6)] transition hover:bg-sky-500"
-              @click="router.push('/')"
+              class="mt-4 w-full rounded-xl bg-gradient-to-r from-cyan-600 via-sky-500 to-indigo-500 py-2.5 text-sm font-semibold text-white shadow-[0_12px_28px_-12px_rgba(56,189,248,0.8)] transition hover:brightness-110 active:scale-[0.99]"
+              @click="router.push({ path: '/', query: { section: 'account', updates: '1' } })"
             >
-              Открыть главную
+              Открыть ленту обновлений
             </button>
           </div>
         </template>
@@ -5809,39 +5744,6 @@ watch(
             {{ Number(meAdminProfile?.broadcast_spend_tokens || 0) }} ⚡
           </p>
           <p class="text-[10px] text-fuchsia-100/75">на рассылки и автопост</p>
-        </div>
-        <div class="col-span-2 rounded-xl border border-cyan-500/40 bg-slate-950/88 p-2.5 shadow-inner ring-1 ring-cyan-900/50 backdrop-blur-sm">
-          <p class="text-[10px] font-semibold uppercase tracking-wide text-cyan-200">Сводка владельца групп</p>
-          <p class="mt-0.5 text-[11px] text-slate-300">
-            Короткие отчёты в личку по всем вашим подключённым группам/каналам: сколько подключились и сколько сейчас участников.
-          </p>
-          <div class="mt-2 flex flex-wrap gap-1.5">
-            <button
-              v-for="p in OWNER_JOIN_REPORT_PRESETS"
-              :key="`owner-jr-${p.id}`"
-              type="button"
-              class="rounded-md px-2 py-1 text-[10px] font-semibold"
-              :class="(ownerJoinReportPeriods || []).includes(p.id) ? 'bg-cyan-600 text-white' : 'bg-slate-700 text-slate-200'"
-              @click="toggleOwnerJoinReportPreset(p.id)"
-            >
-              {{ p.label }}
-            </button>
-            <button
-              type="button"
-              class="rounded-md bg-emerald-700 px-2 py-1 text-[10px] font-semibold text-white disabled:opacity-60"
-              :disabled="ownerJoinReportSaving"
-              @click="saveOwnerJoinReportSettings"
-            >
-              Сохранить отчёты
-            </button>
-            <button
-              type="button"
-              class="rounded-md bg-indigo-700 px-2 py-1 text-[10px] font-semibold text-white"
-              @click="openPartnerHourlyModal"
-            >
-              Активность по часам
-            </button>
-          </div>
         </div>
       </template>
       <template v-if="showFullAdminShell && data">
@@ -6260,8 +6162,8 @@ watch(
         </div>
       </div>
     </div>
-    <div v-else-if="tab === 'referrals' && (isPremiumCabinet || showFullAdminShell)" class="space-y-2">
-      <div v-if="isPremiumCabinet || showFullAdminShell" class="grid grid-cols-2 gap-2 sm:grid-cols-3">
+    <div v-else-if="tab === 'referrals' && (isOwnerCabinet || showFullAdminShell)" class="space-y-2">
+      <div v-if="isOwnerCabinet || showFullAdminShell" class="grid grid-cols-2 gap-2 sm:grid-cols-3">
         <div class="rounded-xl border border-fuchsia-500/45 bg-gradient-to-br from-fuchsia-950/80 to-purple-900/50 p-3 text-center shadow-[0_0_20px_-8px_rgba(217,70,239,0.45)]">
           <p class="text-[10px] font-semibold uppercase tracking-wide text-fuchsia-200/90">Всего с партнёрки</p>
           <p class="mt-1 text-lg font-extrabold text-fuchsia-100">{{ myPartnerStats.total_rub || 0 }} ₽</p>
@@ -6593,9 +6495,9 @@ watch(
       </Teleport>
     </div>
 
-    <div v-else-if="(showFullAdminShell || isPremiumCabinet) && tab === 'bad_urls'" class="space-y-3">
+    <div v-else-if="(showFullAdminShell || isOwnerCabinet) && tab === 'bad_urls'" class="space-y-3">
       <!-- Premium: только личная база URL -->
-      <template v-if="isPremiumCabinet && !showFullAdminShell">
+      <template v-if="isOwnerCabinet && !showFullAdminShell">
         <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
           <div class="flex items-center justify-between gap-2">
             <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">Моя база URL</p>
@@ -6843,7 +6745,7 @@ watch(
       </template>
     </div>
 
-    <div v-else-if="(showFullAdminShell || isPremiumCabinet) && tab === 'subscription'" class="space-y-3">
+    <div v-else-if="(showFullAdminShell || isOwnerCabinet) && tab === 'subscription'" class="space-y-3">
       <SubscriptionManagementPanel
         v-if="meAdminProfile"
         :profile="meAdminProfile"
@@ -6953,18 +6855,6 @@ watch(
       <div
         class="min-w-0 space-y-2.5 px-4 py-3 md:px-6 pb-[max(5.25rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))] md:pb-[max(6rem,calc(6.5rem+env(safe-area-inset-bottom,0px)))]"
       >
-      <div class="flex items-center justify-between gap-2 px-0.5 py-1">
-        <p class="text-sm font-semibold tracking-tight text-zinc-100">Рассылка</p>
-        <button
-          type="button"
-          class="bc-tool-btn bc-broadcast-i"
-          title="Справка по рассылке"
-          @click="bcShowMainHelp = true"
-        >
-          i
-        </button>
-      </div>
-
       <div class="rounded-2xl border border-white/[0.08] bg-gradient-to-b from-[#0f141d]/94 via-[#0c1017]/96 to-black/95 px-3 py-3 shadow-[0_18px_48px_-24px_rgba(0,0,0,0.95)] ring-1 ring-white/[0.05]">
         <p class="text-[24px] font-black leading-none tracking-tight text-white">Рассылки</p>
         <p class="mt-1 text-[12px] leading-snug text-zinc-300">Отправляйте сообщения один раз в каналы, группы или боты.</p>
@@ -7374,14 +7264,14 @@ watch(
       </div>
 
       <div
-        v-if="cabinetMode === 'delegated'"
+        v-if="false && cabinetMode === 'delegated'"
         class="rounded-lg bg-zinc-950/45 px-2.5 py-1.5 text-[11px] text-zinc-300 ring-1 ring-white/[0.05] backdrop-blur-md"
       >
         Фиолетовый ADM: рассылка и автопост только по делегированным группам/каналам.
       </div>
 
       <div
-        v-if="bcBroadcastCanScopeAll && showFullAdminShell"
+        v-if="false && bcBroadcastCanScopeAll && showFullAdminShell"
         class="flex flex-wrap items-center gap-2 rounded-lg bg-zinc-950/40 px-2.5 py-1.5 text-[11px] text-zinc-300 ring-1 ring-white/[0.05] backdrop-blur-md"
       >
         <span class="text-zinc-500">Черновики в списке:</span>
@@ -7403,7 +7293,7 @@ watch(
         </button>
       </div>
 
-      <div class="flex flex-wrap gap-1.5">
+      <div v-if="false" class="flex flex-wrap gap-1.5">
         <button
           type="button"
           class="rounded-xl border border-white/[0.1] bg-zinc-800/90 px-3 py-1.5 text-xs font-semibold text-zinc-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] ring-1 ring-white/[0.05] backdrop-blur-md transition hover:bg-zinc-700/90"
@@ -7421,9 +7311,9 @@ watch(
         </button>
       </div>
 
-      <div v-if="bcLoading" class="text-sm text-slate-400">Загрузка…</div>
+      <div v-if="false && bcLoading" class="text-sm text-slate-400">Загрузка…</div>
 
-      <div v-else class="grid min-w-0 gap-2.5 lg:grid-cols-[minmax(0,200px)_minmax(0,1fr)]">
+      <div v-if="false" class="grid min-w-0 gap-2.5 lg:grid-cols-[minmax(0,200px)_minmax(0,1fr)]">
         <div
           class="max-h-[min(40vh,300px)] space-y-1 overflow-y-auto rounded-xl bg-zinc-950/40 p-1.5 ring-1 ring-white/[0.06] backdrop-blur-xl"
         >
@@ -10325,6 +10215,16 @@ watch(
     </div>
     </div>
   </div>
+
+  <SecurityPinGateModal
+    :open="pinGateOpen"
+    :busy="pinGateBusy"
+    :error="pinGateError"
+    :model-value="pinGateInput"
+    @update:model-value="pinGateInput = $event"
+    @submit="submitPinGate"
+    @cancel="cancelPinGate"
+  />
 </template>
 
 <style scoped>

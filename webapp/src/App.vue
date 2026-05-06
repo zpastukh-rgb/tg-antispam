@@ -41,7 +41,7 @@ onBeforeUnmount(() => {
 
 /** Меньше отступ сверху под шапкой на главной и «Защите» (фон на всю ширину) */
 const mainContentCompactTop = computed(() =>
-  ['Dashboard', 'Protection'].includes(String(route.name || '')),
+  ['Dashboard', 'Protection', 'Settings'].includes(String(route.name || '')),
 )
 
 function openMenu() {
@@ -54,6 +54,12 @@ function closeSidebar() {
 
 const subscriptionScreenActive = computed(
   () => route.name === 'Dashboard' && dashboardSection.value === 'subscription',
+)
+/** Скрыть cyan/violet ADM в шапке на экране статуса подписки (главная или вкладка в /admin). */
+const suppressAdmBadges = computed(
+  () =>
+    subscriptionScreenActive.value ||
+    (route.path === '/admin' && String(route.query.admin_tab || '') === 'subscription'),
 )
 
 function onSubscriptionBackFromHeader() {
@@ -79,6 +85,7 @@ function onSubscriptionBackFromHeader() {
       <AppHeader
         :sidebar-open="sidebarOpen"
         :subscription-screen="subscriptionScreenActive"
+        :suppress-adm-badges="suppressAdmBadges"
         @menu-click="openMenu"
         @subscription-back="onSubscriptionBackFromHeader"
       />

@@ -7,6 +7,9 @@ import { useCabinetMode } from '../composables/useCabinetMode'
 import { useDashboardSection } from '../composables/useDashboardSection'
 import { useToast } from '../composables/useToast'
 import ChannelPostRulesModal from '../components/ChannelPostRulesModal.vue'
+import SecurityPinGateModal from '../components/SecurityPinGateModal.vue'
+import { useSecurityPinGate } from '../composables/useSecurityPinGate'
+import { shouldAskPinForAction } from '../utils/settingsSecurity'
 
 const router = useRouter()
 const route = useRoute()
@@ -30,8 +33,10 @@ const kindPreset = ref('all') // all | groups | channels
 const managersModalChat = ref(null)
 const managersData = ref({ managers: [], can_manage_access: false, limit: 3, chat_kind: 'group' })
 const managersLoading = ref(false)
+const managersStats = ref(null)
 const addManagerValue = ref('')
-const addManagerPerms = ref({ protection: false, broadcast: false, reports: false, first_post_settings: false })
+const addManagerPerms = ref({ protection: false, broadcast: false, reports: false, stats: false, first_post_settings: false })
+const addManagerPermsOpen = ref(false)
 
 const isManagersChannel = computed(
   () => String(managersData.value?.chat_kind || managersModalChat.value?.chat_kind || 'group').toLowerCase() === 'channel'
@@ -41,12 +46,23 @@ const canSubmitNewManager = computed(() => {
   if (!raw) return false
   const p = addManagerPerms.value || {}
   if (isManagersChannel.value) return !!(p.broadcast || p.first_post_settings)
-  return !!(p.protection || p.broadcast || p.reports)
+  return !!(p.protection || p.broadcast || p.reports || p.stats)
 })
 
 function _resetAddManagerForm() {
   addManagerValue.value = ''
-  addManagerPerms.value = { protection: false, broadcast: false, reports: false, first_post_settings: false }
+  addManagerPerms.value = { protection: false, broadcast: false, reports: false, stats: false, first_post_settings: false }
+  addManagerPermsOpen.value = false
+}
+
+function managerPermEntries(perms) {
+  const p = perms || {}
+  const out = []
+  if (p.protection) out.push({ key: 'protection', label: 'Защита' })
+  if (p.broadcast) out.push({ key: 'broadcast', label: 'Рассылка' })
+  if (p.reports || p.stats) out.push({ key: 'reports', label: 'Отчёты / Статистика' })
+  if (p.first_post_settings) out.push({ key: 'first_post_settings', label: 'Первое сообщение' })
+  return out
 }
 
 function permissionLabels(perms) {
@@ -54,7 +70,7 @@ function permissionLabels(perms) {
   const out = []
   if (p.protection) out.push('Защита')
   if (p.broadcast) out.push('Рассылка')
-  if (p.reports) out.push('Отчёты')
+  if (p.reports || p.stats) out.push('Отчёты / Статистика')
   if (p.first_post_settings) out.push('Первое сообщение')
   return out
 }
@@ -68,6 +84,17 @@ function delegatedCan(chat, key) {
   return !!perms[key]
 }
 const isPremium = ref(false)
+/** Для проверки PIN при отключении чата */
+const viewerTelegramId = ref(0)
+const {
+  pinGateOpen,
+  pinGateInput,
+  pinGateError,
+  pinGateBusy,
+  requestPinIfNeeded,
+  submitPinGate,
+  cancelPinGate,
+} = useSecurityPinGate(() => viewerTelegramId.value)
 const showCabinetInfoModal = ref(false)
 const showDelegatedInfoModal = ref(false)
 const showManagersInfoModal = ref(false)
@@ -183,6 +210,7 @@ async function loadChats() {
       cabinetTab.value = 'shared'
     }
     isPremium.value = !!me?.is_premium
+    viewerTelegramId.value = Number(me?.telegram_id || 0)
     selectedChatId.value = data.selected_chat_id ?? null
     pendingCount.value = Array.isArray(p?.chats) ? p.chats.length : 0
     try {
@@ -265,6 +293,13 @@ async function selectChat(id) {
 
 async function removeChat(chat) {
   if (!chat?.id || !hasInitData.value) return
+  const okPin = await requestPinIfNeeded('chat_remove')
+  if (!okPin) {
+    if (shouldAskPinForAction('chat_remove')) {
+      showToast('Нужен код из «Настройки → Безопасность»')
+    }
+    return
+  }
   const kindLabel = isChannelRow(chat) ? 'канал' : 'группу'
   const ok = window.confirm(`Удалить ${kindLabel} «${chat.title || chat.id}» из подключённых?`)
   if (!ok) return
@@ -440,7 +475,12 @@ async function openManagers(chat) {
   managersModalChat.value = chat
   managersLoading.value = true
   try {
-    managersData.value = await fetchSilent(() => api.chatManagers(chat.id))
+    const [md, gs] = await Promise.all([
+      fetchSilent(() => api.chatManagers(chat.id)),
+      fetchSilent(() => api.activityGroupBreakdown(chat.id, { hours: 24 * 7 })).catch(() => null),
+    ])
+    managersData.value = md
+    managersStats.value = gs
     if (managersPollTimer) clearInterval(managersPollTimer)
     managersPollTimer = setInterval(async () => {
       if (!managersModalChat.value?.id) return
@@ -461,6 +501,7 @@ function closeManagers() {
     managersPollTimer = null
   }
   managersModalChat.value = null
+  managersStats.value = null
   _resetAddManagerForm()
 }
 
@@ -478,7 +519,7 @@ async function addManager() {
   const p = addManagerPerms.value || {}
   const permissions = isManagersChannel.value
     ? { broadcast: !!p.broadcast, first_post_settings: !!p.first_post_settings }
-    : { protection: !!p.protection, broadcast: !!p.broadcast, reports: !!p.reports }
+    : { protection: !!p.protection, broadcast: !!p.broadcast, reports: !!(p.reports || p.stats) }
   const payload = { ...base, permissions }
   managersLoading.value = true
   try {
@@ -494,11 +535,43 @@ async function addManager() {
   }
 }
 
+function onAddManagerPrimaryClick() {
+  addManagerPermsOpen.value = true
+}
+function onAddManagerInputEnter() {
+  if (!String(addManagerValue.value || '').trim()) return
+  if (!addManagerPermsOpen.value) {
+    addManagerPermsOpen.value = true
+    return
+  }
+  if (canSubmitNewManager.value) void addManager()
+}
+
 async function removeManager(uid) {
   if (!managersModalChat.value?.id || !uid) return
   managersLoading.value = true
   try {
     const res = await fetchSilent(() => api.chatManagerRemove(managersModalChat.value.id, uid))
+    managersData.value = { ...managersData.value, ...res }
+    await loadChats()
+  } finally {
+    managersLoading.value = false
+  }
+}
+
+async function removeManagerPermission(manager, key) {
+  if (!managersModalChat.value?.id || !manager?.user_id || !key) return
+  const base = manager?.permissions || {}
+  const nextPerms = {
+    protection: !!base.protection,
+    broadcast: !!base.broadcast,
+    reports: !!base.reports,
+    first_post_settings: !!base.first_post_settings,
+  }
+  nextPerms[key] = false
+  managersLoading.value = true
+  try {
+    const res = await fetchSilent(() => api.chatManagerUpdate(managersModalChat.value.id, manager.user_id, { permissions: nextPerms }))
     managersData.value = { ...managersData.value, ...res }
     await loadChats()
   } finally {
@@ -1014,25 +1087,33 @@ function openChannelBroadcast(chat) {
       class="fixed inset-0 z-[300] flex items-end justify-center bg-black/70 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
       @click.self="closeManagers"
     >
-      <div class="w-full max-w-xl rounded-2xl border border-white/15 bg-slate-950 p-4 text-slate-100 shadow-2xl">
-        <div class="mb-3 flex items-center justify-between gap-2 border-b border-white/10 pb-2">
+      <div class="w-full max-w-4xl rounded-3xl bg-gradient-to-b from-[#0c1523]/96 via-[#0a111d]/97 to-[#070d17]/99 p-4 text-slate-100 shadow-[0_32px_90px_-30px_rgba(0,0,0,0.95)] backdrop-blur-2xl ring-1 ring-sky-500/15">
+        <div class="mb-3 flex items-center justify-between gap-2 pb-2">
           <h3 class="text-sm font-semibold text-white">Админы чата: {{ managersModalChat.title }}</h3>
           <div class="flex items-center gap-1">
             <button
               type="button"
-              class="inline-flex h-6 min-w-6 items-center justify-center rounded-full border border-sky-400/35 bg-sky-950/25 px-1.5 text-[10px] font-extrabold text-sky-200"
+              class="inline-flex h-6 min-w-[1.5rem] items-center justify-center rounded-full bg-cyan-500/12 px-1 text-[10px] font-bold text-cyan-200/95 shadow-[0_0_18px_-10px_rgba(34,211,238,0.75)] ring-1 ring-cyan-400/28"
+              title="Справка"
               @click="showManagersInfoModal = true"
             >
               i
             </button>
-            <button type="button" class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-white/10 hover:text-white" @click="closeManagers">✕</button>
+            <button type="button" class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-slate-800/80 hover:text-white" @click="closeManagers">✕</button>
           </div>
         </div>
         <div v-if="managersLoading" class="text-xs text-slate-400">Загрузка…</div>
         <div v-else class="space-y-2">
-          <div class="text-[11px] text-slate-300">Лимит: {{ managersData.managers?.length || 0 }}/{{ managersData.limit || 3 }}</div>
+          <div class="text-[11px] text-slate-300">Админов: {{ managersData.managers?.length || 0 }} · лимит: без ограничений</div>
+          <div v-if="managersStats" class="rounded-xl bg-slate-900/55 p-2.5 text-[11px] text-slate-200 ring-1 ring-slate-700/45">
+            <p>
+              Удалено за 7 дней: <b>{{ Number(managersStats?.total_deleted || 0) }}</b>
+              · Подключилось: <b>{{ Number(managersStats?.total_joined || 0) }}</b>
+              · Сообщений: <b>{{ Number(managersStats?.total_messages || 0) }}</b>
+            </p>
+          </div>
           <div class="space-y-1.5">
-            <div v-for="m in (managersData.managers || [])" :key="`m-${m.user_id}`" class="flex items-center justify-between gap-2 rounded-lg border border-white/12 bg-white/5 px-2 py-1.5 text-xs">
+            <div v-for="m in (managersData.managers || [])" :key="`m-${m.user_id}`" class="flex items-center justify-between gap-2 rounded-xl bg-slate-900/60 px-2.5 py-2.5 text-xs shadow-[0_12px_30px_-22px_rgba(0,0,0,0.95)] ring-1 ring-slate-700/40 backdrop-blur-xl">
               <div class="min-w-0 flex-1">
                 <span class="truncate">
                   {{ m.first_name || (m.username ? '@'+m.username : m.user_id) }}
@@ -1046,17 +1127,27 @@ function openChannelBroadcast(chat) {
                     {{ m.is_online ? 'Онлайн' : 'Оффлайн' }}
                   </span>
                   <span
-                    v-for="lbl in permissionLabels(m.permissions)"
-                    :key="`mp-${m.user_id}-${lbl}`"
-                    class="inline-flex items-center rounded-full bg-violet-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-violet-100 ring-1 ring-violet-400/30"
-                  >{{ lbl }}</span>
+                    v-for="perm in managerPermEntries(m.permissions)"
+                    :key="`mp-${m.user_id}-${perm.key}`"
+                    class="inline-flex items-center gap-1 rounded-full bg-violet-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-violet-100 ring-1 ring-violet-400/30"
+                  >
+                    {{ perm.label }}
+                    <button
+                      v-if="managersData.can_manage_access"
+                      type="button"
+                      class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full bg-violet-900/35 text-[10px] leading-none text-white ring-1 ring-violet-300/35"
+                      @click.stop="removeManagerPermission(m, perm.key)"
+                    >
+                      ✕
+                    </button>
+                  </span>
                 </div>
               </div>
               <div class="flex items-center gap-1">
                 <button
                   v-if="managersData.can_manage_access"
                   type="button"
-                  class="rounded border border-red-500/35 bg-red-950/25 px-1.5 py-0.5 text-[11px] text-red-200"
+                  class="rounded-lg bg-red-950/35 px-1.5 py-0.5 text-[11px] text-red-200 ring-1 ring-red-400/35"
                   @click="removeManager(m.user_id)"
                 >
                   Удалить админа
@@ -1067,7 +1158,7 @@ function openChannelBroadcast(chat) {
           </div>
           <div v-if="managersData.can_manage_access" class="space-y-1">
             <p class="text-[11px] text-slate-300">Статусы приглашений</p>
-            <div v-for="inv in (managersData.invites || [])" :key="`inv-${inv.id}`" class="flex items-center justify-between rounded-lg border border-white/10 bg-black/30 px-2 py-1 text-[11px]">
+            <div v-for="inv in (managersData.invites || [])" :key="`inv-${inv.id}`" class="flex items-center justify-between rounded-lg bg-slate-900/55 px-2 py-1.5 text-[11px] ring-1 ring-slate-700/40">
               <span class="truncate text-slate-200">
                 {{ inv.target_username ? '@' + inv.target_username : (inv.target_telegram_id || '—') }}
               </span>
@@ -1076,7 +1167,7 @@ function openChannelBroadcast(chat) {
                 <button
                   v-if="managersData.can_manage_access && inv.status !== 'connected'"
                   type="button"
-                  class="rounded border border-amber-500/35 bg-amber-950/25 px-1.5 py-0.5 text-[10px] text-amber-200"
+                  class="rounded-lg bg-amber-950/35 px-1.5 py-0.5 text-[10px] text-amber-200 ring-1 ring-amber-400/35"
                   @click="cancelInvite(inv.id)"
                 >
                   Отменить
@@ -1085,46 +1176,17 @@ function openChannelBroadcast(chat) {
             </div>
             <p v-if="!(managersData.invites || []).length" class="text-[11px] text-slate-500">Инвайтов пока нет.</p>
           </div>
-          <div v-if="managersData.can_manage_access" class="mt-2 space-y-2 rounded-lg border border-white/10 bg-black/20 p-2">
-            <input v-model="addManagerValue" type="text" class="w-full rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-xs text-white outline-none"
+          <div v-if="managersData.can_manage_access" class="mt-2 space-y-2 rounded-2xl bg-gradient-to-b from-slate-900/70 to-slate-950/65 p-3 backdrop-blur-xl ring-1 ring-slate-700/45">
+            <input v-model="addManagerValue" type="text" class="w-full rounded-xl bg-slate-950/80 px-3 py-2 text-xs text-white outline-none ring-1 ring-slate-700/45 transition focus:ring-cyan-400/40"
+              @keydown.enter.prevent="onAddManagerInputEnter"
               placeholder="Telegram ID или @username" />
-            <div>
-              <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Права делегата</p>
-              <div v-if="!isManagersChannel" class="flex flex-wrap gap-1.5">
-                <label class="inline-flex items-center gap-1.5 rounded-lg border border-white/12 bg-white/5 px-2 py-1.5 text-[11px] text-slate-100">
-                  <input v-model="addManagerPerms.protection" type="checkbox" class="h-3.5 w-3.5 accent-emerald-400" />
-                  <span>Защита</span>
-                </label>
-                <label class="inline-flex items-center gap-1.5 rounded-lg border border-white/12 bg-white/5 px-2 py-1.5 text-[11px] text-slate-100">
-                  <input v-model="addManagerPerms.broadcast" type="checkbox" class="h-3.5 w-3.5 accent-violet-400" />
-                  <span>Рассылка</span>
-                </label>
-                <label class="inline-flex items-center gap-1.5 rounded-lg border border-white/12 bg-white/5 px-2 py-1.5 text-[11px] text-slate-100">
-                  <input v-model="addManagerPerms.reports" type="checkbox" class="h-3.5 w-3.5 accent-sky-400" />
-                  <span>Отчёты</span>
-                </label>
-              </div>
-              <div v-else class="flex flex-wrap gap-1.5">
-                <label class="inline-flex items-center gap-1.5 rounded-lg border border-white/12 bg-white/5 px-2 py-1.5 text-[11px] text-slate-100">
-                  <input v-model="addManagerPerms.broadcast" type="checkbox" class="h-3.5 w-3.5 accent-violet-400" />
-                  <span>Рассылка</span>
-                </label>
-                <label class="inline-flex items-center gap-1.5 rounded-lg border border-white/12 bg-white/5 px-2 py-1.5 text-[11px] text-slate-100">
-                  <input v-model="addManagerPerms.first_post_settings" type="checkbox" class="h-3.5 w-3.5 accent-amber-400" />
-                  <span>Настройки первого сообщения в коммах</span>
-                </label>
-              </div>
-              <p v-if="!canSubmitNewManager && String(addManagerValue || '').trim()" class="mt-1 text-[10px] text-amber-300">
-                Выберите хотя бы одно право, иначе админа добавить нельзя.
-              </p>
-            </div>
             <button
               type="button"
-              class="guard-green-soft rounded-lg px-3 py-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50"
-              :disabled="!canSubmitNewManager || managersLoading"
-              @click="addManager"
+              class="guard-green-soft rounded-xl px-4 py-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50"
+              :disabled="managersLoading || !String(addManagerValue || '').trim()"
+              @click="onAddManagerPrimaryClick"
             >
-              Добавить админа
+              {{ addManagerPermsOpen ? 'Подтвердить права' : 'Выбрать права и добавить' }}
             </button>
           </div>
           <p v-if="managersData.premium_enabled === false" class="text-xs text-amber-300">
@@ -1135,6 +1197,55 @@ function openChannelBroadcast(chat) {
           </p>
         </div>
       </div>
+    </div>
+
+    <div
+      v-if="managersModalChat && addManagerPermsOpen"
+      class="fixed inset-0 z-[315] flex items-center justify-center bg-black/75 px-4"
+      @click.self="addManagerPermsOpen = false"
+    >
+      <form
+        class="w-full max-w-md rounded-2xl bg-gradient-to-b from-slate-900/96 to-slate-950/98 p-4 shadow-[0_28px_80px_-30px_rgba(0,0,0,0.95)] ring-1 ring-slate-700/50"
+        @submit.prevent="addManager"
+      >
+        <div class="mb-3 flex items-center justify-end">
+          <button type="button" class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-slate-800/80 hover:text-white" @click="addManagerPermsOpen = false">✕</button>
+        </div>
+        <div v-if="!isManagersChannel" class="flex flex-wrap gap-1.5">
+          <label class="inline-flex items-center gap-1.5 rounded-xl bg-slate-900/65 px-2.5 py-1.5 text-[11px] text-slate-100 ring-1 ring-slate-700/45">
+            <input v-model="addManagerPerms.protection" type="checkbox" class="h-3.5 w-3.5 accent-emerald-400" />
+            <span>Защита</span>
+          </label>
+          <label class="inline-flex items-center gap-1.5 rounded-xl bg-slate-900/65 px-2.5 py-1.5 text-[11px] text-slate-100 ring-1 ring-slate-700/45">
+            <input v-model="addManagerPerms.broadcast" type="checkbox" class="h-3.5 w-3.5 accent-violet-400" />
+            <span>Рассылка</span>
+          </label>
+          <label class="inline-flex items-center gap-1.5 rounded-xl bg-slate-900/65 px-2.5 py-1.5 text-[11px] text-slate-100 ring-1 ring-slate-700/45">
+            <input v-model="addManagerPerms.stats" type="checkbox" class="h-3.5 w-3.5 accent-sky-400" />
+            <span>Статистика</span>
+          </label>
+          <label class="inline-flex items-center gap-1.5 rounded-xl bg-slate-900/65 px-2.5 py-1.5 text-[11px] text-slate-100 ring-1 ring-slate-700/45">
+            <input v-model="addManagerPerms.reports" type="checkbox" class="h-3.5 w-3.5 accent-cyan-400" />
+            <span>Отчёты</span>
+          </label>
+        </div>
+        <div v-else class="flex flex-wrap gap-1.5">
+          <label class="inline-flex items-center gap-1.5 rounded-xl bg-slate-900/65 px-2.5 py-1.5 text-[11px] text-slate-100 ring-1 ring-slate-700/45">
+            <input v-model="addManagerPerms.broadcast" type="checkbox" class="h-3.5 w-3.5 accent-violet-400" />
+            <span>Рассылка</span>
+          </label>
+          <label class="inline-flex items-center gap-1.5 rounded-xl bg-slate-900/65 px-2.5 py-1.5 text-[11px] text-slate-100 ring-1 ring-slate-700/45">
+            <input v-model="addManagerPerms.first_post_settings" type="checkbox" class="h-3.5 w-3.5 accent-amber-400" />
+            <span>Настройки первого сообщения в коммах</span>
+          </label>
+        </div>
+        <div class="mt-4 flex gap-2">
+          <button type="button" class="flex-1 rounded-xl bg-slate-800/85 px-3 py-2 text-xs font-semibold text-slate-200 ring-1 ring-slate-700/45" @click="addManagerPermsOpen = false">Отмена</button>
+          <button type="submit" class="guard-green-soft flex-1 rounded-xl px-3 py-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50" :disabled="managersLoading || !canSubmitNewManager">
+            Добавить админа
+          </button>
+        </div>
+      </form>
     </div>
 
     <div
@@ -1231,12 +1342,19 @@ function openChannelBroadcast(chat) {
           <h3 class="text-sm font-semibold">😈 Админы чата</h3>
           <button class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-white/10" @click="showManagersInfoModal = false">✕</button>
         </div>
-        <p class="text-xs text-slate-300">
-          Статусы «Отправлено → Подключается → Подключился» я обновляю сам; онлайн подтягиваю по мере данных от Telegram. Список админов крутит только владелец с Premium — так спокойнее для безопасности.
+        <p class="text-[13px] leading-relaxed text-slate-200/95">
+          <span class="font-semibold text-white">Приглашения.</span>
+          Статусы цепочки «отправлено → принял → подключился» показывают, на каком шаге человек.
+          Метка «онлайн» — когда Telegram передаёт активность.
         </p>
-        <p class="mt-2 text-[11px] leading-relaxed text-slate-400">
-          Для <span class="text-slate-200">канала с обсуждением</span>: приглашённый здесь админ получает доступ в Mini App к рассылке в канал и к «Настройки» правил в комментариях (данные живут на чате обсуждения, но доступ выдаётся с канала).
-          В Telegram боту по-прежнему нужны админские права в канале и в группе обсуждения — иначе отправка в треды не сработает.
+        <p class="mt-3 text-[12px] leading-relaxed text-slate-400">
+          <span class="font-semibold text-slate-300">Кто может менять список.</span>
+          Добавлять и убирать админов может только владелец чата с Premium — так мы ограничиваем выдачу прав модерации.
+        </p>
+        <p class="mt-3 text-[12px] leading-relaxed text-slate-400">
+          <span class="font-semibold text-slate-300">Канал и обсуждение.</span>
+          Если вы выдали админку здесь на канале, человек в приложении открывает рассылку в канал и настройки правил в комментариях.
+          В самом Telegram у бота должны быть права администратора и в канале, и в группе обсуждения — иначе посты и правила в треды не дойдут.
         </p>
       </div>
     </div>
@@ -1246,6 +1364,16 @@ function openChannelBroadcast(chat) {
       :discussion-chat-id="channelPostRulesDiscussionId"
       :channel-id="channelPostRulesChannelId"
       :channel-title="channelPostRulesChannelTitle"
+    />
+
+    <SecurityPinGateModal
+      :open="pinGateOpen"
+      :busy="pinGateBusy"
+      :error="pinGateError"
+      :model-value="pinGateInput"
+      @update:model-value="pinGateInput = $event"
+      @submit="submitPinGate"
+      @cancel="cancelPinGate"
     />
   </div>
 </template>

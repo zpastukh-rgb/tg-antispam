@@ -38,7 +38,7 @@ export function hasFullAdminRights(me) {
   return false
 }
 
-/** Кнопка «ADM» (cyan): только полная админка. Premium-кабинет и Free без прав — без этой кнопки. */
+/** Кнопка «ADM» (cyan): любой пользователь с initData — «синий» кабинет владельца (Free/Premium). */
 export function canOpenAdminEntry(me) {
-  return hasFullAdminRights(me)
+  return !!me
 }

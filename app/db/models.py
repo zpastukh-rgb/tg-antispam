@@ -385,7 +385,7 @@ class Rule(Base):
     filter_channel_posts_action: Mapped[str] = mapped_column(String(16), default="delete")
 
     # Guard жёсткий словарь: мат / подработки / казино / реклама / обзывательства /
-    # антирасист / антифашист / антипошлость
+    # антирасист / антифашист / антипошлость / анти-политика
     filter_profanity_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     filter_jobs_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     filter_casino_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -394,6 +394,7 @@ class Rule(Base):
     filter_racism_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     filter_nazi_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     filter_vulgar_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_politics_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     # Репутация (карма) за благодарности в группе.
     reputation_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
 

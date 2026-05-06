@@ -1,11 +1,24 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import SecurityPinGateModal from '../components/SecurityPinGateModal.vue'
 import { useApi } from '../composables/useApi'
+import { useSecurityPinGate } from '../composables/useSecurityPinGate'
 import { useToast } from '../composables/useToast'
+import { shouldAskPinForAction } from '../utils/settingsSecurity'
 import { formatDateTimeRu } from '../utils/formatDateTime'
 
 const { api, error, fetchSilent, hasInitData } = useApi()
 const { showToast } = useToast()
+const meTelegramId = ref(null)
+const {
+  pinGateOpen,
+  pinGateInput,
+  pinGateError,
+  pinGateBusy,
+  requestPinIfNeeded,
+  submitPinGate,
+  cancelPinGate,
+} = useSecurityPinGate(() => Number(meTelegramId.value || 0))
 const billing = ref(null)
 const promoCode = ref('')
 const promoLoading = ref(false)
@@ -40,6 +53,11 @@ const tariffLabel = computed(() => {
 const subscriptionUntilLabel = computed(() => formatDateTimeRu(billing.value?.subscription_until))
 
 async function startPayment(months) {
+  const okPin = await requestPinIfNeeded('payments')
+  if (!okPin) {
+    if (shouldAskPinForAction('payments')) showToast('Нужен код из «Настройки → Безопасность»')
+    return
+  }
   payLoadingMonths.value = months
   try {
     const r = await fetchSilent(() => api.yookassaCreatePayment(months))
@@ -60,6 +78,36 @@ async function startPayment(months) {
     showToast(typeof msg === 'string' ? msg : 'Ошибка создания платежа')
   } finally {
     payLoadingMonths.value = null
+  }
+}
+
+async function startTestTariffPayment(months) {
+  if (!billing.value?.test_tariff_payment_visible) return
+  const okPin = await requestPinIfNeeded('payments')
+  if (!okPin) {
+    if (shouldAskPinForAction('payments')) showToast('Нужен код из «Настройки → Безопасность»')
+    return
+  }
+  payLoadingTestMonths.value = months
+  try {
+    const r = await fetchSilent(() => api.yookassaCreateTestSubscriptionPayment(months))
+    const url = r?.confirmation_url
+    if (!url) {
+      showToast('Нет ссылки на оплату')
+      return
+    }
+    const tg = window.Telegram?.WebApp
+    if (typeof tg?.openLink === 'function') {
+      tg.openLink(url, { try_instant_view: false })
+    } else {
+      window.open(url, '_blank', 'noopener,noreferrer')
+    }
+    showToast('Откроется страница оплаты')
+  } catch (e) {
+    const msg = e?.body?.detail || e?.message || 'Ошибка создания платежа'
+    showToast(typeof msg === 'string' ? msg : 'Ошибка создания платежа')
+  } finally {
+    payLoadingTestMonths.value = null
   }
 }
 
@@ -88,6 +136,12 @@ onMounted(async () => {
   if (!hasInitData.value) return
   try {
     billing.value = await fetchSilent(() => api.billing())
+  } catch {
+    //
+  }
+  try {
+    const m = await fetchSilent(() => api.me())
+    if (m?.telegram_id != null) meTelegramId.value = Number(m.telegram_id)
   } catch {
     //
   }
@@ -245,5 +299,15 @@ onMounted(async () => {
         </ul>
       </div>
     </div>
+
+    <SecurityPinGateModal
+      :open="pinGateOpen"
+      :busy="pinGateBusy"
+      :error="pinGateError"
+      :model-value="pinGateInput"
+      @update:model-value="pinGateInput = $event"
+      @submit="submitPinGate"
+      @cancel="cancelPinGate"
+    />
   </div>
 </template>

@@ -16,10 +16,15 @@ import {
 import { normalizeHtmlForTelegram } from '../utils/telegramHtmlForTg'
 import {
   isTwoFaPinRequiredForAction,
-  isConfirmRequiredForAction,
   verifyPinDigits,
   SECURITY_ACTION_MASTER_PROTECTION_OFF,
 } from '../composables/useSecurityTwoFa'
+import {
+  shouldAskPinForAction,
+  shouldConfirmForAction,
+  verifyPin,
+  loadPinHash,
+} from '../utils/settingsSecurity'
 
 const router = useRouter()
 const route = useRoute()
@@ -138,6 +143,8 @@ const pickerToggleBusyByChat = ref({})
 const showProtectionPinModal = ref(false)
 const protectionPinInput = ref('')
 const protectionPinError = ref('')
+/** Telegram ID для проверки PIN из «Настройки → Безопасность» (хэш в localStorage) */
+const viewerTelegramId = ref(0)
 let protectionPinResolver = null
 
 function requestProtectionPin() {
@@ -148,9 +155,25 @@ function requestProtectionPin() {
     showProtectionPinModal.value = true
   })
 }
-function submitProtectionPin() {
-  if (!verifyPinDigits(protectionPinInput.value)) {
-    protectionPinError.value = 'Неверный PIN'
+async function submitProtectionPin() {
+  const pin = String(protectionPinInput.value || '').replace(/\D/g, '').slice(0, 4)
+  if (pin.length !== 4) {
+    protectionPinError.value = 'Введите 4 цифры'
+    return
+  }
+  const tid = Number(viewerTelegramId.value || 0)
+  const storedHash = loadPinHash()
+  let ok = false
+  if (storedHash && tid) {
+    try {
+      ok = await verifyPin(tid, pin, storedHash)
+    } catch {
+      ok = false
+    }
+  }
+  if (!ok) ok = verifyPinDigits(protectionPinInput.value)
+  if (!ok) {
+    protectionPinError.value = 'Неверный код'
     return
   }
   showProtectionPinModal.value = false
@@ -170,10 +193,13 @@ function masterOffConfirmMessage(chatTitle) {
 }
 
 async function ensureCanTurnMasterOff(chatTitle) {
-  if (isTwoFaPinRequiredForAction(SECURITY_ACTION_MASTER_PROTECTION_OFF)) {
-    return requestProtectionPin()
+  const needPin =
+    shouldAskPinForAction('protection_settings') || isTwoFaPinRequiredForAction(SECURITY_ACTION_MASTER_PROTECTION_OFF)
+  if (needPin) {
+    const okPin = await requestProtectionPin()
+    if (!okPin) return false
   }
-  if (isConfirmRequiredForAction(SECURITY_ACTION_MASTER_PROTECTION_OFF)) {
+  if (shouldConfirmForAction('protection_settings')) {
     return window.confirm(masterOffConfirmMessage(chatTitle))
   }
   return true
@@ -373,20 +399,23 @@ onMounted(async () => {
       premium: !!meData?.is_premium,
     })
     isPremium.value = !!meData?.is_premium
+    viewerTelegramId.value = Number(meData?.telegram_id || 0)
     writePremiumCache(isPremium.value)
     chatsList.value = chats || []
-    selectedChatId.value = selected_chat_id ?? null
+    const fallbackSelectedChatId = pickDefaultProtectionChatId(chatsList.value)
+    const resolvedSelectedChatId = Number(selected_chat_id || 0) || fallbackSelectedChatId || null
+    selectedChatId.value = resolvedSelectedChatId
     void postRulesHydrateDraftsFromServer()
-    if (!selected_chat_id) {
+    if (!resolvedSelectedChatId) {
       chat.value = { noSelection: true }
-      guardLog('Protection', 'no selected_chat_id → empty state')
+      guardLog('Protection', 'no selected chat for protection → empty state')
       return
     }
     let data = null
-    if (eagerChatPromise && Number(selected_chat_id) === cachedSelectedId) {
+    if (eagerChatPromise && Number(resolvedSelectedChatId) === cachedSelectedId) {
       data = await eagerChatPromise
     }
-    if (!data?.rule) data = await fetchSilent(() => api.chat(selected_chat_id))
+    if (!data?.rule) data = await fetchSilent(() => api.chat(resolvedSelectedChatId))
     chat.value = data
     ensureChatRuleShape(chat.value)
     redirectChannelToBroadcastFromChatPayload(data)
@@ -543,6 +572,20 @@ const pickerDelegatedChats = computed(() =>
 const pickerOwnChats = computed(() =>
   sortChatsByAvailability((chatsList.value || []).filter((c) => !c.is_shared && !isChannelListRow(c))),
 )
+function delegatedCanProtection(chatRow) {
+  if (!chatRow?.is_shared) return true
+  const perms = chatRow?.delegated_permissions
+  if (perms == null) return true
+  return !!perms.protection
+}
+function pickDefaultProtectionChatId(rows = []) {
+  const list = Array.isArray(rows) ? rows : []
+  const firstAllowed = list.find((c) => !c?.locked_by_limit && delegatedCanProtection(c) && !isChannelListRow(c))
+  if (firstAllowed?.id) return Number(firstAllowed.id)
+  const firstGroup = list.find((c) => !isChannelListRow(c))
+  if (firstGroup?.id) return Number(firstGroup.id)
+  return null
+}
 const pickerTotalChats = computed(() => Number((chatsList.value || []).length || 0))
 const pickerActiveChats = computed(() =>
   Number((chatsList.value || []).filter((c) => !c?.locked_by_limit && !!c?.master_anti_spam).length || 0),
@@ -575,8 +618,8 @@ async function switchChat(chatId) {
     goToPremiumBilling()
     return
   }
-  if (target && !target.is_active) {
-    showToast('Чат на паузе. Включите «Активна», чтобы открыть настройки.')
+  if (target && !delegatedCanProtection(target)) {
+    showToast('У вас нет права «Защита» для этого чата.')
     return
   }
   if (target && isChannelListRow(target)) {
@@ -617,6 +660,7 @@ async function openChatPicker() {
       fetchSilent(() => api.me()).catch(() => ({ is_premium: false })),
     ])
     isPremium.value = !!meData?.is_premium
+    viewerTelegramId.value = Number(meData?.telegram_id || 0)
     writePremiumCache(isPremium.value)
     const rows = chatsRes?.chats || []
     chatsList.value = rows
@@ -726,12 +770,14 @@ function onAntispamListButtonClick() {
 
 function pickerProtectionOn(c) {
   if (c?.locked_by_limit) return false
+  if (!delegatedCanProtection(c)) return false
   return !!c?.master_anti_spam
 }
 
 async function toggleChatProtectionFromPicker(chatRow) {
   const cid = Number(chatRow?.id || 0)
   if (!cid || chatRow?.locked_by_limit) return
+  if (!delegatedCanProtection(chatRow)) return
   if (pickerToggleBusyByChat.value[cid]) return
   const next = !pickerProtectionOn(chatRow)
   const titleHint = String(chatRow?.title || '').trim() || `#${cid}`
@@ -884,6 +930,12 @@ function linkScopeButtonClass(currentScope, optValue) {
 
 function boolToggleClass(on) {
   return on ? 'guard-green-soft' : protToggleOff
+}
+
+function hardDictSwitchClass(on) {
+  return on
+    ? 'border-emerald-400/45 bg-emerald-500/[0.34] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.14)]'
+    : 'border-rose-400/45 bg-rose-500/[0.28] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.09)]'
 }
 
 function actionButtonClass(current, value) {
@@ -3232,15 +3284,17 @@ const protCardIndigo =
                       :class="
                         c.locked_by_limit
                           ? 'border-amber-300/45 bg-amber-900/35 text-amber-100 opacity-80'
-                          : pickerProtectionOn(c)
-                            ? 'border-lime-300/55 bg-lime-500/20 text-lime-100'
-                            : 'border-slate-400/35 bg-slate-700/35 text-slate-200'
+                          : !delegatedCanProtection(c)
+                            ? 'border-slate-500/35 bg-slate-800/45 text-slate-300 opacity-85'
+                            : pickerProtectionOn(c)
+                              ? 'border-lime-300/55 bg-lime-500/20 text-lime-100'
+                              : 'border-slate-400/35 bg-slate-700/35 text-slate-200'
                       "
-                      :disabled="c.locked_by_limit || !!pickerToggleBusyByChat[Number(c.id)]"
+                      :disabled="c.locked_by_limit || !delegatedCanProtection(c) || !!pickerToggleBusyByChat[Number(c.id)]"
                       @click.stop="toggleChatProtectionFromPicker(c)"
                     >
                       <span v-if="pickerToggleBusyByChat[Number(c.id)]" class="inline-block hourglass-flip">⏳</span>
-                      <span v-else>{{ pickerProtectionOn(c) ? 'Активна' : 'На паузе' }}</span>
+                      <span v-else>{{ !delegatedCanProtection(c) ? 'Нет доступа' : (pickerProtectionOn(c) ? 'Активна' : 'На паузе') }}</span>
                     </button>
                     <span
                       v-if="c.locked_by_limit"
@@ -3286,15 +3340,17 @@ const protCardIndigo =
                       :class="
                         c.locked_by_limit
                           ? 'border-amber-300/45 bg-amber-900/35 text-amber-100 opacity-80'
-                          : pickerProtectionOn(c)
-                            ? 'border-lime-300/55 bg-lime-500/20 text-lime-100'
-                            : 'border-slate-400/35 bg-slate-700/35 text-slate-200'
+                          : !delegatedCanProtection(c)
+                            ? 'border-slate-500/35 bg-slate-800/45 text-slate-300 opacity-85'
+                            : pickerProtectionOn(c)
+                              ? 'border-lime-300/55 bg-lime-500/20 text-lime-100'
+                              : 'border-slate-400/35 bg-slate-700/35 text-slate-200'
                       "
-                      :disabled="c.locked_by_limit || !!pickerToggleBusyByChat[Number(c.id)]"
+                      :disabled="c.locked_by_limit || !delegatedCanProtection(c) || !!pickerToggleBusyByChat[Number(c.id)]"
                       @click.stop="toggleChatProtectionFromPicker(c)"
                     >
                       <span v-if="pickerToggleBusyByChat[Number(c.id)]" class="inline-block hourglass-flip">⏳</span>
-                      <span v-else>{{ pickerProtectionOn(c) ? 'Активна' : 'На паузе' }}</span>
+                      <span v-else>{{ !delegatedCanProtection(c) ? 'Нет доступа' : (pickerProtectionOn(c) ? 'Активна' : 'На паузе') }}</span>
                     </button>
                     <span
                       v-if="c.locked_by_limit"
@@ -3521,95 +3577,133 @@ const protCardIndigo =
               </button>
             </div>
             <p class="mb-3 text-xs text-rose-100/90">
-              Режет мат и искажённые формы по корням, а также подозрительные темы: подработки-скам, казино и ставки.
+              Режет мат и искажённые формы по корням, а также подозрительные темы: подработки-скам, казино/ставки и политические обсуждения.
             </p>
             <div class="space-y-2">
           <div class="flex items-center justify-between gap-2">
                 <span class="text-xs text-rose-100/90">Мат</span>
             <button
               type="button"
-                  :class="boolToggleClass(chat.rule.filter_profanity_enabled)"
-                  class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium"
+                  :class="hardDictSwitchClass(chat.rule.filter_profanity_enabled)"
+                  class="relative h-[30px] w-[50px] shrink-0 rounded-full border transition duration-200"
               @click="updateRule({ filter_profanity_enabled: !chat.rule.filter_profanity_enabled })"
             >
-              {{ chat.rule.filter_profanity_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+              <span
+                class="absolute left-[2px] top-1/2 h-[24px] w-[24px] rounded-full bg-white shadow-md transition duration-200"
+                :style="{ transform: chat.rule.filter_profanity_enabled ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }"
+              />
             </button>
               </div>
               <div class="flex items-center justify-between gap-2">
                 <span class="text-xs text-rose-100/90">Мутные подработки</span>
                 <button
                   type="button"
-                  :class="boolToggleClass(chat.rule.filter_jobs_enabled)"
-                  class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium"
+                  :class="hardDictSwitchClass(chat.rule.filter_jobs_enabled)"
+                  class="relative h-[30px] w-[50px] shrink-0 rounded-full border transition duration-200"
                   @click="updateRule({ filter_jobs_enabled: !chat.rule.filter_jobs_enabled })"
                 >
-                  {{ chat.rule.filter_jobs_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+                  <span
+                    class="absolute left-[2px] top-1/2 h-[24px] w-[24px] rounded-full bg-white shadow-md transition duration-200"
+                    :style="{ transform: chat.rule.filter_jobs_enabled ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }"
+                  />
                 </button>
               </div>
               <div class="flex items-center justify-between gap-2">
                 <span class="text-xs text-rose-100/90">Казино / ставки</span>
                 <button
                   type="button"
-                  :class="boolToggleClass(chat.rule.filter_casino_enabled)"
-                  class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium"
+                  :class="hardDictSwitchClass(chat.rule.filter_casino_enabled)"
+                  class="relative h-[30px] w-[50px] shrink-0 rounded-full border transition duration-200"
                   @click="updateRule({ filter_casino_enabled: !chat.rule.filter_casino_enabled })"
                 >
-                  {{ chat.rule.filter_casino_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+                  <span
+                    class="absolute left-[2px] top-1/2 h-[24px] w-[24px] rounded-full bg-white shadow-md transition duration-200"
+                    :style="{ transform: chat.rule.filter_casino_enabled ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }"
+                  />
                 </button>
               </div>
               <div class="flex items-center justify-between gap-2">
                 <span class="text-xs text-rose-100/90">Реклама / акции / распродажи</span>
                 <button
                   type="button"
-                  :class="boolToggleClass(chat.rule.filter_ads_enabled)"
-                  class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium"
+                  :class="hardDictSwitchClass(chat.rule.filter_ads_enabled)"
+                  class="relative h-[30px] w-[50px] shrink-0 rounded-full border transition duration-200"
                   @click="updateRule({ filter_ads_enabled: !chat.rule.filter_ads_enabled })"
                 >
-                  {{ chat.rule.filter_ads_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+                  <span
+                    class="absolute left-[2px] top-1/2 h-[24px] w-[24px] rounded-full bg-white shadow-md transition duration-200"
+                    :style="{ transform: chat.rule.filter_ads_enabled ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }"
+                  />
                 </button>
               </div>
               <div class="flex items-center justify-between gap-2">
                 <span class="text-xs text-rose-100/90">Обзывательства / оскорбления</span>
                 <button
                   type="button"
-                  :class="boolToggleClass(chat.rule.filter_insults_enabled)"
-                  class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium"
+                  :class="hardDictSwitchClass(chat.rule.filter_insults_enabled)"
+                  class="relative h-[30px] w-[50px] shrink-0 rounded-full border transition duration-200"
                   @click="updateRule({ filter_insults_enabled: !chat.rule.filter_insults_enabled })"
                 >
-                  {{ chat.rule.filter_insults_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+                  <span
+                    class="absolute left-[2px] top-1/2 h-[24px] w-[24px] rounded-full bg-white shadow-md transition duration-200"
+                    :style="{ transform: chat.rule.filter_insults_enabled ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }"
+                  />
                 </button>
               </div>
               <div class="flex items-center justify-between gap-2">
                 <span class="text-xs text-rose-100/90">Антирасист (этнические оскорбления)</span>
                 <button
                   type="button"
-                  :class="boolToggleClass(chat.rule.filter_racism_enabled)"
-                  class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium"
+                  :class="hardDictSwitchClass(chat.rule.filter_racism_enabled)"
+                  class="relative h-[30px] w-[50px] shrink-0 rounded-full border transition duration-200"
                   @click="updateRule({ filter_racism_enabled: !chat.rule.filter_racism_enabled })"
                 >
-                  {{ chat.rule.filter_racism_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+                  <span
+                    class="absolute left-[2px] top-1/2 h-[24px] w-[24px] rounded-full bg-white shadow-md transition duration-200"
+                    :style="{ transform: chat.rule.filter_racism_enabled ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }"
+                  />
                 </button>
               </div>
               <div class="flex items-center justify-between gap-2">
                 <span class="text-xs text-rose-100/90">Антифашист (нацизм / лозунги)</span>
                 <button
                   type="button"
-                  :class="boolToggleClass(chat.rule.filter_nazi_enabled)"
-                  class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium"
+                  :class="hardDictSwitchClass(chat.rule.filter_nazi_enabled)"
+                  class="relative h-[30px] w-[50px] shrink-0 rounded-full border transition duration-200"
                   @click="updateRule({ filter_nazi_enabled: !chat.rule.filter_nazi_enabled })"
                 >
-                  {{ chat.rule.filter_nazi_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+                  <span
+                    class="absolute left-[2px] top-1/2 h-[24px] w-[24px] rounded-full bg-white shadow-md transition duration-200"
+                    :style="{ transform: chat.rule.filter_nazi_enabled ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }"
+                  />
                 </button>
               </div>
               <div class="flex items-center justify-between gap-2">
                 <span class="text-xs text-rose-100/90">Антипошлость (анатомия / половые)</span>
                 <button
                   type="button"
-                  :class="boolToggleClass(chat.rule.filter_vulgar_enabled)"
-                  class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium"
+                  :class="hardDictSwitchClass(chat.rule.filter_vulgar_enabled)"
+                  class="relative h-[30px] w-[50px] shrink-0 rounded-full border transition duration-200"
                   @click="updateRule({ filter_vulgar_enabled: !chat.rule.filter_vulgar_enabled })"
                 >
-                  {{ chat.rule.filter_vulgar_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+                  <span
+                    class="absolute left-[2px] top-1/2 h-[24px] w-[24px] rounded-full bg-white shadow-md transition duration-200"
+                    :style="{ transform: chat.rule.filter_vulgar_enabled ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }"
+                  />
+                </button>
+              </div>
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-xs text-rose-100/90">Анти-политика (политтемы / война / деятели)</span>
+                <button
+                  type="button"
+                  :class="hardDictSwitchClass(chat.rule.filter_politics_enabled)"
+                  class="relative h-[30px] w-[50px] shrink-0 rounded-full border transition duration-200"
+                  @click="updateRule({ filter_politics_enabled: !chat.rule.filter_politics_enabled })"
+                >
+                  <span
+                    class="absolute left-[2px] top-1/2 h-[24px] w-[24px] rounded-full bg-white shadow-md transition duration-200"
+                    :style="{ transform: chat.rule.filter_politics_enabled ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }"
+                  />
                 </button>
               </div>
             </div>

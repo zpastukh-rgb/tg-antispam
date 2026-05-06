@@ -7,7 +7,7 @@ import re
 import uuid
 from datetime import datetime, timezone, timedelta
 
-from sqlalchemy import or_, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
@@ -37,6 +37,7 @@ from app.services.user_service import (
     TARIFF_GROUP_LIMITS,
     TARIFF_CHANNEL_LIMITS,
 )
+from app.services.pii_user_store import hydrate_users_from_pii
 
 
 async def get_activity_summary_chat_ids(session: AsyncSession, user_id: int) -> list[int]:
@@ -82,13 +83,29 @@ async def get_activity_summary_chat_ids(session: AsyncSession, user_id: int) -> 
     return sorted(ids)
 
 
+async def _invite_match_subquery(session: AsyncSession, user_id: int):
+    """Подзапрос chat_id по connected-инвайтам делегата (по id и по username)."""
+    uid = int(user_id)
+    username = ""
+    urow = (await session.execute(select(User).where(User.telegram_id == uid).limit(1))).scalar_one_or_none()
+    if urow is not None:
+        await hydrate_users_from_pii([urow])
+        raw_un = getattr(urow, "username", None)
+        if raw_un:
+            username = str(raw_un or "").strip().lstrip("@").lower()
+    match_filter = (ChatManagerInvite.connected_user_id == uid) | (ChatManagerInvite.target_telegram_id == uid)
+    if username:
+        match_filter = match_filter | (func.lower(ChatManagerInvite.target_username) == username)
+    return select(ChatManagerInvite.chat_id).where(
+        ChatManagerInvite.status == "connected",
+        match_filter,
+    )
+
+
 async def get_managed_chats(session: AsyncSession, user_id: int) -> list[Chat]:
     """Защищаемые чаты пользователя (владелец или менеджер)."""
     manager_sub = select(ChatManager.chat_id).where(ChatManager.user_id == user_id)
-    invite_sub = select(ChatManagerInvite.chat_id).where(
-        ChatManagerInvite.status == "connected",
-        (ChatManagerInvite.connected_user_id == user_id) | (ChatManagerInvite.target_telegram_id == user_id),
-    )
+    invite_sub = await _invite_match_subquery(session, int(user_id))
     managed_sub = manager_sub.union(invite_sub).subquery()
     res = await session.execute(
         select(Chat)
@@ -105,10 +122,7 @@ async def get_managed_chats(session: AsyncSession, user_id: int) -> list[Chat]:
 async def get_accessible_chats_any_active(session: AsyncSession, user_id: int) -> list[Chat]:
     """Те же чаты, что и у get_managed_chats, но включая is_active=False (пауза в списке без отключения правил)."""
     manager_sub = select(ChatManager.chat_id).where(ChatManager.user_id == user_id)
-    invite_sub = select(ChatManagerInvite.chat_id).where(
-        ChatManagerInvite.status == "connected",
-        (ChatManagerInvite.connected_user_id == user_id) | (ChatManagerInvite.target_telegram_id == user_id),
-    )
+    invite_sub = await _invite_match_subquery(session, int(user_id))
     managed_sub = manager_sub.union(invite_sub).subquery()
     res = await session.execute(
         select(Chat)
@@ -191,7 +205,20 @@ async def _access_via_owner_or_delegate(session: AsyncSession, user_id: int, row
             (ChatManagerInvite.connected_user_id == uid) | (ChatManagerInvite.target_telegram_id == uid),
         ).limit(1),
     )
-    return bool(r2.first())
+    if r2.first():
+        return True
+    ures = await session.execute(select(User.username).where(User.telegram_id == uid).limit(1))
+    uname = str(ures.scalar_one_or_none() or "").strip().lstrip("@").lower()
+    if not uname:
+        return False
+    r3 = await session.execute(
+        select(ChatManagerInvite.id).where(
+            ChatManagerInvite.chat_id == cid,
+            ChatManagerInvite.status == "connected",
+            func.lower(ChatManagerInvite.target_username) == uname,
+        ).limit(1),
+    )
+    return bool(r3.first())
 
 
 async def user_can_access_chat(session: AsyncSession, user_id: int, chat_id: int) -> bool:

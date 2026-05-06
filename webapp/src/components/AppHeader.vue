@@ -20,6 +20,8 @@ const props = defineProps({
   sidebarOpen: Boolean,
   /** Экран «Подписка» на главной: назад вместо меню, без кнопок ADM */
   subscriptionScreen: { type: Boolean, default: false },
+  /** Скрыть кнопки ADM (например статус подписки в админке). */
+  suppressAdmBadges: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['menu-click', 'subscription-back'])
@@ -162,7 +164,7 @@ function goBack() {
     </div>
     <div class="flex items-center gap-1">
       <button
-        v-if="canSeeAdmin && !subscriptionScreen"
+        v-if="canSeeAdmin && !subscriptionScreen && !suppressAdmBadges"
         type="button"
         class="inline-flex h-[22px] shrink-0 items-center justify-center rounded border border-cyan-400/45 px-1.5 text-[9px] font-bold leading-none tracking-wide text-cyan-600 transition-colors hover:bg-cyan-500/10 dark:text-cyan-300 dark:hover:bg-cyan-500/15"
         :class="isBlueAdmActive ? 'bg-cyan-500/15 shadow-[0_0_12px_rgba(34,211,238,0.45)] ring-1 ring-cyan-300/35' : ''"
@@ -172,7 +174,7 @@ function goBack() {
         ADM
       </button>
       <button
-        v-if="hasDelegated && !subscriptionScreen"
+        v-if="hasDelegated && !subscriptionScreen && !suppressAdmBadges"
         type="button"
         class="inline-flex h-[22px] shrink-0 items-center justify-center rounded border border-violet-400/45 px-1.5 text-[9px] font-bold leading-none tracking-wide text-violet-300 transition-colors hover:bg-violet-500/10"
         :class="isPurpleAdmActive ? 'bg-violet-500/15 shadow-[0_0_12px_rgba(167,139,250,0.5)] ring-1 ring-violet-300/45' : ''"

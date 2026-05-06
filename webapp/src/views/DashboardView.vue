@@ -4,9 +4,12 @@ import { useRouter, useRoute } from 'vue-router'
 import { useApi, messageFromApiError } from '../composables/useApi'
 import { api as rawApi } from '../api/client'
 import NavIcon from '../components/NavIcon.vue'
+import SecurityPinGateModal from '../components/SecurityPinGateModal.vue'
 import SubscriptionManagementPanel from '../components/SubscriptionManagementPanel.vue'
 import { useDashboardSection } from '../composables/useDashboardSection'
+import { useSecurityPinGate } from '../composables/useSecurityPinGate'
 import { useToast } from '../composables/useToast'
+import { shouldAskPinForAction } from '../utils/settingsSecurity'
 import { formatDateTimeRu, formatDateTimeShortRu } from '../utils/formatDateTime'
 import { openTelegramDeepLink } from '../utils/openTelegramDeepLink'
 
@@ -17,6 +20,15 @@ const { showToast } = useToast()
 const bootError = ref('')
 const { dashboardSection, setDashboardSection, billingFromGroupStats } = useDashboardSection()
 const me = ref(null)
+const {
+  pinGateOpen,
+  pinGateInput,
+  pinGateError,
+  pinGateBusy,
+  requestPinIfNeeded,
+  submitPinGate,
+  cancelPinGate,
+} = useSecurityPinGate(() => Number(me.value?.telegram_id || 0))
 const showQuickStartModal = ref(false)
 const showAccountHistoryModal = ref(false)
 const historyTab = ref('payments')
@@ -161,6 +173,8 @@ const updatesIndex = ref(0)
 const dashSwitchBusy = ref(false)
 let dashSwitchTimer = null
 const showUpdatesRoadmapModal = ref(false)
+/** Раскрытый текст обновления в модалке ленты (ключ slide.key) */
+const updatesRoadmapExpanded = ref({})
 let activityTimer = null
 let updatesTimer = null
 /** Счётчик запросов activitySummary: не применять устаревший ответ при гонке параллельных вызовов */
@@ -348,7 +362,7 @@ function restartStatBroadcastNudge() {
   statBroadcastNudgeTimer = setInterval(() => {
     if (homeStatBroadcastSlide.value !== 0) return
     if (statBroadcastDragging.value) return
-    statBroadcastNudgePx.value = 11
+    statBroadcastNudgePx.value = -11
     setTimeout(() => {
       statBroadcastNudgePx.value = 0
     }, 380)
@@ -413,6 +427,7 @@ function moderationReasonRu(reason) {
     profanity: 'Мат',
     jobs: 'Подработки',
     casino: 'Казино / ставки',
+    politics: 'Анти-политика',
     silence: 'Режим тишины',
     antinakrutka: 'Анти-накрутка',
     captcha: 'Капча',
@@ -830,13 +845,48 @@ function goAccountHistory() {
   void loadHistoryIfNeeded()
 }
 
-/** Слайды виджета «Обновления»: imageUrl — опционально, картинка под текстом внутри карточки */
-/** Короткие пункты для карточки «Обновления» на вкладке Аккаунт */
-const ACCOUNT_HOME_UPDATE_BULLETS = [
-  'AI-фильтр стал точнее на 23%',
-  'Ускорили удаление спама',
-  'Новый режим «Анти-рейд»',
-]
+function formatUpdateMetaShort(s) {
+  const v = String(s?.version || '1').trim()
+  try {
+    const iso = s?.publishedAt
+    if (!iso) return `v${v}`
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return `v${v}`
+    const dayMonth = d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })
+    const time = d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
+    return `v${v} · ${dayMonth} · ${time}`
+  } catch {
+    return `v${v}`
+  }
+}
+
+function formatUpdateMetaLong(s) {
+  const v = String(s?.version || '1').trim()
+  try {
+    const iso = s?.publishedAt
+    if (!iso) return `v${v}`
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return `v${v}`
+    const dateStr = d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' })
+    const timeStr = d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
+    return `v${v} · ${dateStr} · ${timeStr}`
+  } catch {
+    return `v${v}`
+  }
+}
+
+function toggleUpdatesRoadmapExpand(key) {
+  const k = String(key || '')
+  updatesRoadmapExpanded.value = {
+    ...updatesRoadmapExpanded.value,
+    [k]: !updatesRoadmapExpanded.value[k],
+  }
+}
+
+watch(showUpdatesRoadmapModal, (open) => {
+  if (!open) updatesRoadmapExpanded.value = {}
+})
+
 const ACCOUNT_HOME_PREMIUM_BULLETS = [
   'AI-фильтр нового поколения',
   'Автобан и анти-рейды',
@@ -844,32 +894,91 @@ const ACCOUNT_HOME_PREMIUM_BULLETS = [
   'Расширенная статистика',
 ]
 
+/** Лента обновлений: от новых к более ранним; на главной — только первые UPDATES_HOME_PREVIEW_N */
+const UPDATES_HOME_PREVIEW_N = 3
+
 const UPDATES_SLIDES = [
   {
+    key: 'stats_growth',
+    version: '2.4',
+    publishedAt: '2026-05-06T15:30:00+03:00',
+    headline: 'Статистика защиты и роста',
+    teaser:
+      'Один экран: удаления по фильтрам, динамика, подписки и сообщения — без прыжков по разделам.',
+    body: 'Мы переработали блок статистики в Premium-кабинете: видно, что сработало в защите, как растёт аудитория и какие чаты самые активные. Это экономит время модераторам: не нужно собирать картину по кускам — всё рядом и обновляется автоматически.',
+    primaryLabel: null,
+    primaryAction: null,
+    imageUrl: null,
+  },
+  {
+    key: 'filters_wave',
+    version: '2.3',
+    publishedAt: '2026-05-05T18:00:00+03:00',
+    headline: 'Новые фильтры и точнее триггеры',
+    teaser: 'Казино, ссылки, медиа и «глобальные» правила — меньше шума, больше контроля.',
+    body: 'Добавлены и уточнены фильтры под реальные сценарии: ставки и казино, подозрительные URL, медиа и жёсткие словари. Настройки стали понятнее: проще включить нужное и не ловить ложные срабатывания.',
+    primaryLabel: null,
+    primaryAction: null,
+    imageUrl: null,
+  },
+  {
+    key: 'launch_public',
+    version: '2.2',
+    publishedAt: '2026-05-04T12:00:00+03:00',
+    headline: 'Запуск AntiSpam Guard',
+    teaser: 'Мы вышли в прод: защита групп и каналов, статистика и регулярные улучшения по дорожной карте.',
+    body: 'Официальный запуск сервиса для администраторов Telegram. Вы можете подключать чаты, настраивать защиту, смотреть статистику и получать обновления без простоя. Мы на связи и продолжаем усиливать продукт после старта.',
+    primaryLabel: null,
+    primaryAction: null,
+    imageUrl: null,
+  },
+  {
     key: 'earn',
+    version: '2.1',
+    publishedAt: '2026-05-03T11:00:00+03:00',
     headline: 'Заработок с Guard',
-    body: 'Приглашай друзей и зарабатывай токены за их оплаты!',
+    teaser: 'Приглашайте пользователей — получайте токены за их оплаты.',
+    body: 'Реферальная программа помогает монетизировать аудиторию: вы делитесь ссылкой, подписчики оформляют Premium или пополняют баланс — вам начисляются токены. Меньше ручной работы, прозрачнее мотивация развивать сообщество.',
     primaryLabel: 'Заработать',
     primaryAction: 'partner',
     imageUrl: null,
   },
   {
     key: 'casino',
-    headline: 'Добавили фильтр казино',
-    body: 'Блокируем ставки, казино и спам-рассылки. Проверьте настройки защиты в чате.',
+    version: '2.0',
+    publishedAt: '2026-05-02T09:30:00+03:00',
+    headline: 'Фильтр казино и ставок',
+    teaser: 'Убираем ставки, казино-спам и навязчивые рассылки до того, как они испортят чат.',
+    body: 'Добавлен отдельный контур правил для ставок и казино: меньше флуда, чище лента. Проверьте профиль фильтров в защите чата — можно включить под ваш стиль общения.',
     primaryLabel: 'Посмотреть',
     primaryAction: 'protection',
     imageUrl: null,
   },
   {
+    key: 'premium_cabinet',
+    version: '1.9',
+    publishedAt: '2026-05-01T14:15:00+03:00',
+    headline: 'Premium-кабинет в одном стиле',
+    teaser: 'Синий ADM: защита, статистика роста, рассылки — без устаревших экранов.',
+    body: 'Обновили навигацию и визуал кабинета: меньше отвлекающих рамок, больше воздуха и понятных действий. Удобнее вести несколько чатов и следить за состоянием защиты.',
+    primaryLabel: null,
+    primaryAction: null,
+    imageUrl: null,
+  },
+  {
     key: 'ai',
-    headline: 'Скоро: искусственный интеллект',
-    body: 'Готовим умную модерацию и подсказки по настройке антиспама. Следите за новостями!',
+    version: '1.8',
+    publishedAt: '2026-04-28T10:00:00+03:00',
+    headline: 'Скоро: ИИ-помощник модерации',
+    teaser: 'Умные подсказки и авторазбор спорных сообщений — в разработке.',
+    body: 'Готовим модель, которая поможет администраторам быстрее принимать решения: контекст, риск и рекомендации по настройке антиспама. Следите за лентой — выпустим отдельным релизом.',
     primaryLabel: null,
     primaryAction: null,
     imageUrl: null,
   },
 ]
+
+const updatesHomePreview = computed(() => UPDATES_SLIDES.slice(0, UPDATES_HOME_PREVIEW_N))
 
 const GROUP_STATS_PRESETS = [
   { key: '24h', label: '24 ч' },
@@ -1044,7 +1153,8 @@ function updateBodyScrollLock() {
     showPaymentRedirectScreen.value ||
     showPremiumActivatedModal.value ||
     showFreeAurumGateModal.value ||
-    showPremiumAurumShowcaseModal.value
+    showPremiumAurumShowcaseModal.value ||
+    showUpdatesRoadmapModal.value
   )
   const body = document.body
   const html = document.documentElement
@@ -1130,6 +1240,16 @@ onMounted(async () => {
       router.replace({ path: route.path, query: q }).catch(() => {})
     } catch { /* */ }
   }
+  if (String(route.query?.updates || '') === '1') {
+    showUpdatesRoadmapModal.value = true
+    try {
+      const q = { ...route.query }
+      delete q.updates
+      router.replace({ path: route.path, query: q }).catch(() => {})
+    } catch {
+      //
+    }
+  }
   try {
     const savedName = localStorage.getItem(receiptNameKey()) || ''
     const savedEmail = localStorage.getItem(receiptEmailKey()) || ''
@@ -1191,6 +1311,7 @@ watch(
     showPremiumActivatedModal.value,
     showFreeAurumGateModal.value,
     showPremiumAurumShowcaseModal.value,
+    showUpdatesRoadmapModal.value,
   ],
   () => updateBodyScrollLock(),
 )
@@ -1216,6 +1337,21 @@ watch(
     }
   },
   { immediate: true },
+)
+
+watch(
+  () => String(route.query?.updates || ''),
+  (flag) => {
+    if (flag !== '1') return
+    showUpdatesRoadmapModal.value = true
+    try {
+      const q = { ...route.query }
+      delete q.updates
+      router.replace({ path: route.path, query: q }).catch(() => {})
+    } catch {
+      //
+    }
+  },
 )
 
 watch(dashboardSection, (section) => {
@@ -1317,6 +1453,11 @@ async function onPremiumPayMethodProceed() {
   const flow = premiumPayMethodFlow.value
   if (!m && !tokenPack) return
   if (method === 'card') {
+    const okPin = await requestPinIfNeeded('payments')
+    if (!okPin) {
+      if (shouldAskPinForAction('payments')) showToast('Нужен код из «Настройки → Безопасность»')
+      return
+    }
     premiumPayMethodProceedLoading.value = true
     try {
       if (flow === 'tokens') await startTokenPackPayment(tokenPack)
@@ -1590,6 +1731,11 @@ function continueTokenPackCheckout() {
 async function buyTokenPackAdminTest(tokens) {
   const t = Number(tokens || 0)
   if (!t) return
+  const okPin = await requestPinIfNeeded('payments')
+  if (!okPin) {
+    if (shouldAskPinForAction('payments')) showToast('Нужен код из «Настройки → Безопасность»')
+    return
+  }
   testTokenPayLoading.value = true
   try {
     const r = await fetchSilent(() => rawApi.adminTestCreateTokensPayment(t))
@@ -1918,7 +2064,7 @@ function toggleGroupStatsRangePanel() {
 }
 
 function goBroadcastMiniCreate() {
-  router.push({ path: '/admin', query: { tab: 'broadcasts' } })
+  router.push({ path: '/admin', query: { admin_tab: 'broadcasts' } })
 }
 
 function _apSchedActive(ap) {
@@ -2179,7 +2325,7 @@ function startActivityAutoRefresh() {
     }
     if (waitPremiumActivationAfterPayment.value) schedulePremiumActivationCheck()
   }
-  activityTimer = setInterval(tick, 20000)
+  activityTimer = setInterval(tick, 3000)
 }
 
 
@@ -2987,10 +3133,10 @@ async function submitReceipt() {
 
           <!-- Обновления ↔ Premium: справа, компактная карточка -->
           <div
-            class="ml-auto mr-0 mt-1 w-[min(100%,15rem)] max-w-[15rem] overflow-hidden rounded-2xl border border-white/[0.12] bg-gradient-to-b from-[#0d0d0d] to-[#060606] shadow-[0_12px_36px_-16px_rgba(0,0,0,0.92)] ring-1 ring-inset ring-lime-400/[0.07] sm:w-[min(100%,16rem)] sm:max-w-[16rem]"
+            class="ml-auto mr-0 mt-1 w-[min(100%,15rem)] max-w-[15rem] overflow-hidden rounded-2xl bg-gradient-to-b from-[#100c08] to-[#050505] shadow-[0_14px_38px_-18px_rgba(245,158,11,0.35)] ring-1 ring-amber-400/35 sm:w-[min(100%,16rem)] sm:max-w-[16rem]"
           >
             <div
-              class="flex items-center justify-center gap-2 border-b border-white/[0.07] bg-black/25 px-2 py-1.5 sm:gap-3 sm:px-2 sm:py-2"
+              class="flex items-center justify-center gap-2 border-b border-amber-500/15 bg-black/25 px-2 py-1.5 sm:gap-3 sm:px-2 sm:py-2"
             >
               <div class="flex min-w-0 flex-1 items-center justify-center gap-2 sm:gap-4">
                 <button
@@ -2998,24 +3144,24 @@ async function submitReceipt() {
                   class="text-[11px] font-extrabold tracking-tight transition sm:text-[12px]"
                   :class="
                     homeUpdatesPremiumSlide === 0
-                      ? 'text-lime-400 drop-shadow-[0_0_16px_rgba(163,230,53,0.4)]'
+                      ? 'text-amber-300 drop-shadow-[0_0_16px_rgba(252,211,77,0.35)]'
                       : 'text-white/38 hover:text-white/70'
                   "
                   @click="setUpdatesPremiumSlide(0)"
                 >
-                  Обновления
+                  Premium защита
                 </button>
                 <button
                   type="button"
                   class="text-[11px] font-extrabold tracking-tight transition sm:text-[12px]"
                   :class="
                     homeUpdatesPremiumSlide === 1
-                      ? 'text-amber-300 drop-shadow-[0_0_16px_rgba(252,211,77,0.35)]'
+                      ? 'text-lime-400 drop-shadow-[0_0_16px_rgba(163,230,53,0.4)]'
                       : 'text-white/38 hover:text-white/70'
                   "
                   @click="setUpdatesPremiumSlide(1)"
                 >
-                  Premium защита
+                  Обновления
                 </button>
               </div>
             </div>
@@ -3026,28 +3172,10 @@ async function submitReceipt() {
                 :style="{ transform: `translateX(-${homeUpdatesPremiumSlide * 50}%)` }"
               >
                 <div class="w-1/2 shrink-0 p-2 sm:p-2.5">
-                  <ul class="space-y-1 text-[10px] leading-snug text-white/[0.88] sm:text-[11px]">
-                    <li v-for="(line, i) in ACCOUNT_HOME_UPDATE_BULLETS" :key="`upd-${i}`" class="flex gap-2">
-                      <span class="mt-[0.4em] h-1.5 w-1.5 shrink-0 rounded-full bg-lime-400 shadow-[0_0_8px_rgba(163,230,53,0.5)]" aria-hidden="true" />
-                      <span>{{ line }}</span>
-                    </li>
-                  </ul>
-                  <div class="mt-2 border-t border-white/[0.08] pt-2">
-                    <button
-                      type="button"
-                      class="flex w-full items-center justify-between gap-1 text-left text-[10px] font-semibold text-white/55 transition hover:text-white/90 sm:text-[11px]"
-                      @click="showUpdatesRoadmapModal = true"
-                    >
-                      <span>Смотреть все обновления</span>
-                      <span class="text-base font-light text-white/35" aria-hidden="true">›</span>
-                    </button>
-                  </div>
-                </div>
-                <div class="w-1/2 shrink-0 p-2 sm:p-2.5">
                   <div
-                    class="flex min-h-[7.5rem] flex-col rounded-xl border border-amber-500/35 bg-gradient-to-b from-[#121212] to-[#070707] p-2 shadow-[0_12px_36px_-16px_rgba(180,83,9,0.28)] ring-1 ring-inset ring-amber-400/10 sm:min-h-[8rem] sm:p-2.5"
+                    class="flex min-h-[7.5rem] flex-col rounded-xl bg-gradient-to-b from-[#161210] to-[#080705] p-2.5 shadow-[inset_0_1px_0_rgba(251,191,36,0.07),0_10px_28px_-14px_rgba(180,83,9,0.28)] sm:min-h-[8rem] sm:p-3"
                   >
-                    <ul class="flex-1 space-y-1 text-[10px] leading-snug text-white/[0.88] sm:text-[11px]">
+                    <ul class="flex-1 space-y-1.5 text-[11px] leading-snug text-white/[0.92] sm:text-[12px]">
                       <li v-for="(line, i) in ACCOUNT_HOME_PREMIUM_BULLETS" :key="`prem-${i}`" class="flex gap-2">
                         <span class="shrink-0 font-semibold text-amber-400/95" aria-hidden="true">✓</span>
                         <span>{{ line }}</span>
@@ -3057,7 +3185,7 @@ async function submitReceipt() {
                       <button
                         v-if="!tariffIsPremium"
                         type="button"
-                        class="flex w-full items-center justify-center gap-1 rounded-xl bg-gradient-to-r from-[#5c4818] via-[#a16207] to-[#e8c84a] px-2 py-1.5 text-[10px] font-extrabold leading-tight text-white shadow-[0_4px_20px_-4px_rgba(234,179,8,0.5)] sm:text-[11px]"
+                        class="flex w-full items-center justify-center gap-1.5 rounded-2xl bg-gradient-to-r from-amber-950 via-amber-600 to-yellow-300 px-3 py-2.5 text-[11px] font-extrabold leading-tight text-white shadow-[0_10px_34px_-10px_rgba(251,191,36,0.65),inset_0_1px_0_rgba(255,255,255,0.22)] ring-1 ring-amber-300/45 sm:text-[12px]"
                         @click="openBillingSection({ scrollPlans: true })"
                       >
                         <span aria-hidden="true">🛡</span>
@@ -3066,13 +3194,35 @@ async function submitReceipt() {
                       <button
                         v-else
                         type="button"
-                        class="flex w-full items-center justify-center gap-1 rounded-xl bg-gradient-to-r from-[#5c4818] via-[#a16207] to-[#e8c84a] px-2 py-1.5 text-[10px] font-extrabold leading-tight text-white shadow-[0_4px_20px_-4px_rgba(234,179,8,0.4)] sm:text-[11px]"
+                        class="flex w-full items-center justify-center gap-1.5 rounded-2xl bg-gradient-to-r from-amber-950 via-amber-500 to-yellow-200 px-3 py-2.5 text-[11px] font-extrabold leading-tight text-amber-950 shadow-[0_12px_40px_-12px_rgba(251,191,36,0.75),inset_0_1px_0_rgba(255,255,255,0.35)] ring-1 ring-amber-200/50 sm:text-[12px]"
                         @click="openBillingSection()"
                       >
                         <span aria-hidden="true">👑</span>
                         Продлить Premium
                       </button>
                     </div>
+                  </div>
+                </div>
+                <div class="w-1/2 shrink-0 p-2 sm:p-2.5">
+                  <ul class="space-y-1.5 text-[10px] leading-snug text-white/[0.88] sm:text-[11px]">
+                    <li
+                      v-for="s in updatesHomePreview"
+                      :key="`upd-${s.key}`"
+                      class="rounded-lg bg-white/[0.04] px-2 py-1 ring-1 ring-lime-400/12"
+                    >
+                      <p class="text-[9px] font-semibold text-lime-300/90">{{ formatUpdateMetaShort(s) }}</p>
+                      <p class="mt-0.5 font-semibold leading-tight text-white">{{ s.headline }}</p>
+                    </li>
+                  </ul>
+                  <div class="mt-2 border-t border-lime-400/12 pt-2">
+                    <button
+                      type="button"
+                      class="flex w-full items-center justify-between gap-1 text-left text-[10px] font-semibold text-white/55 transition hover:text-white/90 sm:text-[11px]"
+                      @click="showUpdatesRoadmapModal = true"
+                    >
+                      <span>Смотреть все обновления</span>
+                      <span class="text-base font-light text-white/35" aria-hidden="true">›</span>
+                    </button>
                   </div>
                 </div>
               </div>
@@ -4793,34 +4943,57 @@ async function submitReceipt() {
 
     <div
       v-if="showUpdatesRoadmapModal"
-      class="fixed inset-0 z-[70] flex items-end justify-center bg-black/70 p-3 backdrop-blur-sm md:items-center"
+      class="fixed inset-0 z-[70] flex items-end justify-center bg-[#03050c]/82 p-3 backdrop-blur-md md:items-center"
+      role="presentation"
       @click.self="showUpdatesRoadmapModal = false"
     >
-      <div class="w-full max-w-md rounded-2xl border border-white/10 bg-slate-950/95 p-4 text-slate-100 shadow-2xl">
-        <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-base font-semibold text-white">Лента обновлений</h3>
-          <button
-            type="button"
-            class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-white/10 hover:text-white"
-            @click="showUpdatesRoadmapModal = false"
-          >
-            ✕
-          </button>
+      <div
+        class="flex max-h-[min(86vh,calc(100dvh-2rem))] w-full max-w-md flex-col overflow-hidden rounded-[22px] bg-gradient-to-br from-[#0a1022]/98 via-[#0d1530]/96 to-[#04070f]/98 text-slate-100 shadow-[0_28px_70px_-30px_rgba(56,189,248,0.42)] ring-1 ring-cyan-400/20"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="updates-roadmap-title"
+      >
+        <div class="shrink-0 p-4 pb-2">
+          <div class="flex items-center justify-between gap-2">
+            <h3 id="updates-roadmap-title" class="text-[17px] font-semibold tracking-tight text-white">Лента обновлений</h3>
+            <button
+              type="button"
+              class="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-slate-900/55 text-sm text-slate-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] transition hover:bg-slate-800/75 hover:text-white"
+              @click="showUpdatesRoadmapModal = false"
+            >
+              ✕
+            </button>
+          </div>
+          <p class="mt-1 text-[12px] leading-snug text-slate-400/95">
+            На главной показаны последние {{ UPDATES_HOME_PREVIEW_N }} релиза — здесь полный список.
+          </p>
         </div>
-        <p class="mb-3 text-xs leading-relaxed text-slate-400">
-          Позже сюда добавим загрузку картинок для каждого блока. На главном экране фото можно будет задать в поле <span class="font-mono text-slate-300">imageUrl</span> у слайда — оно ляжет под текст в карточке.
-        </p>
-        <ul class="space-y-3 text-sm">
-          <li
-            v-for="(s, idx) in UPDATES_SLIDES"
-            :key="s.key"
-            class="rounded-xl border border-white/10 bg-black/30 p-3"
-          >
-            <p class="text-xs font-medium text-lime-400/90">№{{ idx + 1 }} · {{ s.key }}</p>
-            <p class="mt-1 font-semibold text-white">{{ s.headline }}</p>
-            <p class="mt-1 text-xs leading-relaxed text-slate-400">{{ s.body }}</p>
-          </li>
-        </ul>
+        <div class="min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-4 pb-4 [-webkit-overflow-scrolling:touch]">
+          <ul class="space-y-3">
+            <li
+              v-for="s in UPDATES_SLIDES"
+              :key="s.key"
+              class="rounded-2xl bg-gradient-to-br from-slate-900/72 via-slate-950/55 to-black/50 p-3.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_16px_34px_-22px_rgba(34,211,238,0.35)] ring-1 ring-cyan-400/15"
+            >
+              <p class="text-[11px] font-semibold tracking-wide text-cyan-200/95">{{ formatUpdateMetaLong(s) }}</p>
+              <p class="mt-1.5 text-[15px] font-bold leading-snug text-white">{{ s.headline }}</p>
+              <p class="mt-2 text-[13px] leading-snug text-slate-300/95">{{ s.teaser }}</p>
+              <div
+                v-if="updatesRoadmapExpanded[s.key]"
+                class="mt-2 border-t border-white/[0.06] pt-2 text-[13px] leading-relaxed text-slate-200/95"
+              >
+                {{ s.body }}
+              </div>
+              <button
+                type="button"
+                class="mt-3 text-[13px] font-semibold text-cyan-300 transition hover:text-cyan-200"
+                @click="toggleUpdatesRoadmapExpand(s.key)"
+              >
+                {{ updatesRoadmapExpanded[s.key] ? 'Скрыть' : 'Показать полностью' }}
+              </button>
+            </li>
+          </ul>
+        </div>
       </div>
     </div>
 
@@ -5456,6 +5629,16 @@ async function submitReceipt() {
         </button>
       </div>
     </div>
+
+    <SecurityPinGateModal
+      :open="pinGateOpen"
+      :busy="pinGateBusy"
+      :error="pinGateError"
+      :model-value="pinGateInput"
+      @update:model-value="pinGateInput = $event"
+      @submit="submitPinGate"
+      @cancel="cancelPinGate"
+    />
 
   </div>
 </template>

@@ -30,6 +30,7 @@ from app.db.ensure_defaults import (
     DEFAULT_INSULT_ROOTS,
     DEFAULT_JOBS_ROOTS,
     DEFAULT_NAZI_ROOTS,
+    DEFAULT_POLITICS_ROOTS,
     DEFAULT_PROFANITY_ROOTS,
     DEFAULT_RACISM_ROOTS,
     DEFAULT_VULGAR_ROOTS,
@@ -1827,6 +1828,7 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     use_racism = bool(getattr(rule, "filter_racism_enabled", False))
     use_nazi = bool(getattr(rule, "filter_nazi_enabled", False))
     use_vulgar = bool(getattr(rule, "filter_vulgar_enabled", False))
+    use_politics = bool(getattr(rule, "filter_politics_enabled", False))
 
     # Узкие словари проверяем РАНЬШЕ profanity, чтобы конкретные категории
     # (обзывательства/реклама/казино/подработки/расизм/нацизм/пошлость) попадали
@@ -1867,6 +1869,16 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
         if hit_vulgar:
             return Verdict(
                 True, _with_newbie_reason("vulgar", newbie_win), hit_vulgar, action,
+                mute_minutes=mute_min,
+                log_it=log_enabled,
+                log_extra=("anti-edit" if edited else ""),
+            )
+    if use_politics:
+        politics_set = _builtin_words(DEFAULT_POLITICS_ROOTS)
+        hit_politics = profanity_hit(text_norm, politics_set, text_without_urls_norm=text_for_stopwords_norm)
+        if hit_politics:
+            return Verdict(
+                True, _with_newbie_reason("politics", newbie_win), hit_politics, action,
                 mute_minutes=mute_min,
                 log_it=log_enabled,
                 log_extra=("anti-edit" if edited else ""),
@@ -1917,6 +1929,7 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
             - _builtin_words(DEFAULT_RACISM_ROOTS)
             - _builtin_words(DEFAULT_NAZI_ROOTS)
             - _builtin_words(DEFAULT_VULGAR_ROOTS)
+            - _builtin_words(DEFAULT_POLITICS_ROOTS)
         )
         hit_prof = profanity_hit(text_norm, mat_set, text_without_urls_norm=text_for_stopwords_norm)
         if hit_prof:
@@ -1992,9 +2005,10 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
         racism_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_RACISM_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
         nazi_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_NAZI_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
         vulgar_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_VULGAR_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
-        if has_linkish or prof_probe or jobs_probe or casino_probe or ads_probe or insult_probe or racism_probe or nazi_probe or vulgar_probe:
+        politics_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_POLITICS_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
+        if has_linkish or prof_probe or jobs_probe or casino_probe or ads_probe or insult_probe or racism_probe or nazi_probe or vulgar_probe or politics_probe:
             logger.warning(
-                "[moderation clean diag] chat=%s user=%s link_mode=%s filter_links=%s action=%s prof_on=%s jobs_on=%s casino_on=%s ads_on=%s insults_on=%s probes(link=%s,prof=%s,jobs=%s,casino=%s,ads=%s,insult=%s) text=%r",
+                "[moderation clean diag] chat=%s user=%s link_mode=%s filter_links=%s action=%s prof_on=%s jobs_on=%s casino_on=%s ads_on=%s insults_on=%s politics_on=%s probes(link=%s,prof=%s,jobs=%s,casino=%s,ads=%s,insult=%s,politics=%s) text=%r",
                 chat_id,
                 user_id,
                 _links_mode,
@@ -2005,12 +2019,14 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
                 use_casino,
                 use_ads,
                 use_insults,
+                use_politics,
                 has_linkish,
                 bool(prof_probe),
                 bool(jobs_probe),
                 bool(casino_probe),
                 bool(ads_probe),
                 bool(insult_probe),
+                bool(politics_probe),
                 (text[:180] + "…") if len(text) > 180 else text,
             )
     except Exception:

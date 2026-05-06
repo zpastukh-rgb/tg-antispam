@@ -208,13 +208,6 @@ watch(
     :class="variant === 'page' ? '-mx-4 min-h-[calc(100dvh-7.5rem)] px-4 pb-6 pt-1 md:-mx-6 md:px-6' : 'py-0'"
   >
     <div
-      v-if="variant === 'embedded' && !hideEmbeddedHint"
-      class="mb-3 rounded-xl border border-lime-500/20 bg-black/50 px-3 py-2 text-[12px] text-lime-100/85"
-    >
-      Данные вашей подписки по аккаунту Telegram, с которым открыта админка.
-    </div>
-
-    <div
       class="space-y-4 w-full"
       :class="
         useDarkShell

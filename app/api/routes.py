@@ -97,6 +97,7 @@ from app.services.user_service import (
     Tariff,
 )
 from app.services.pii_user_store import (
+    hydrate_users_from_pii,
     pii_find_telegram_id_by_username_lower,
     pii_storage_enabled,
     resolve_username_lookup,
@@ -876,6 +877,7 @@ def _rule_to_dict(rule: Rule, stopwords_count: int = 0) -> dict:
         "filter_racism_enabled": bool(getattr(rule, "filter_racism_enabled", False)),
         "filter_nazi_enabled": bool(getattr(rule, "filter_nazi_enabled", False)),
         "filter_vulgar_enabled": bool(getattr(rule, "filter_vulgar_enabled", False)),
+        "filter_politics_enabled": bool(getattr(rule, "filter_politics_enabled", False)),
         "reputation_enabled": bool(getattr(rule, "reputation_enabled", False)),
         "log_enabled": bool(rule.log_enabled),
         "guardian_messages_enabled": bool(getattr(rule, "guardian_messages_enabled", True)),
@@ -922,7 +924,9 @@ async def api_me(
     user = await get_or_create_user(
         session, user_id, username=init_username, first_name=init_first_name
     )
-    chats = await get_managed_chats(session, user_id)
+    # Для списка кабинетов показываем и чаты на паузе (is_active=False),
+    # чтобы делегат видел выданные ему группы и мог открыть соответствующие разделы.
+    chats = await get_accessible_chats_any_active(session, user_id)
     can_add, current_count, limit = await can_add_chat(session, user_id)
     can_add_channel_more, _current_channels_count, _channel_limit = await can_add_channel(session, user_id)
     groups_count, channels_count = await count_managed_chats_by_kind(session, user_id)
@@ -1071,6 +1075,49 @@ async def api_me_delegate_broadcast_payer_patch(
     user.delegate_broadcast_payer = val
     await session.commit()
     return {"ok": True, "delegate_broadcast_payer": val}
+
+
+@router.post("/me/purge-owned-chats-analytics")
+async def api_me_purge_owned_chats_analytics(
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Удаляет журнал модерации и события активности сообщений по всем чатам,
+    где текущий пользователь — владелец (telegram id). Обнуляет счётчики сообщений на чатах.
+    Не затрагивает чужие чаты и делегированные подключения.
+    """
+    owned_rows = (await session.execute(select(Chat.id).where(Chat.owner_user_id == int(user_id)))).all()
+    ids = [int(r[0]) for r in owned_rows if r and r[0] is not None]
+    if not ids:
+        return {
+            "ok": True,
+            "deleted_moderation_logs": 0,
+            "deleted_activity_events": 0,
+            "chats_reset": 0,
+        }
+
+    mod_res = await session.execute(delete(ModerationLog).where(ModerationLog.chat_id.in_(ids)))
+    act_res = await session.execute(delete(ChatActivityEvent).where(ChatActivityEvent.chat_id.in_(ids)))
+
+    chats_reset = 0
+    for cid in ids:
+        row = await session.get(Chat, int(cid))
+        if row is None:
+            continue
+        row.messages_checked = 0
+        row.messages_deleted = 0
+        row.users_banned = 0
+        session.add(row)
+        chats_reset += 1
+
+    await session.commit()
+    return {
+        "ok": True,
+        "deleted_moderation_logs": int(mod_res.rowcount or 0),
+        "deleted_activity_events": int(act_res.rowcount or 0),
+        "chats_reset": chats_reset,
+    }
 
 
 @router.post("/billing/aurum-transfer-to-delegate")
@@ -1339,7 +1386,7 @@ async def api_chats(
         # Free: жёстко держим активными только доступные чаты (остальные отключаем).
         await enforce_owner_active_chat_limit(session, int(user_id), int(TARIFF_CHAT_LIMITS.get(Tariff.FREE.value, 3) or 3))
         await session.commit()
-    chats = await get_managed_chats(session, user_id)
+    chats = await get_accessible_chats_any_active(session, user_id)
     m = str(mode or "all").strip().lower()
     if m == "own":
         chats = [c for c in chats if int(getattr(c, "owner_user_id", 0) or 0) == int(user_id)]
@@ -1359,6 +1406,7 @@ async def api_chats(
     owner_users: dict[int, User] = {}
     if owner_ids:
         owner_rows = (await session.execute(select(User).where(User.telegram_id.in_(list(owner_ids))))).scalars().all()
+        await hydrate_users_from_pii(owner_rows)
         owner_users = {int(getattr(u, "telegram_id", 0) or 0): u for u in owner_rows}
     # Для Free показываем «заблокированные лимитом»; для всех тарифов показываем и паузные
     # собственные подключённые чаты (is_active=False, но Rule уже существует), чтобы их можно
@@ -1572,7 +1620,7 @@ async def api_spike_alerts(
 ):
     """Активные флаги «чат под угрозой» (последний всплеск спама, TTL ~1 час)."""
     now = datetime.now(timezone.utc)
-    chats = await get_managed_chats(session, user_id)
+    chats = await get_accessible_chats_any_active(session, user_id)
     if not chats:
         return {"active": False, "active_owner": False, "active_shared": False, "items": []}
     chat_map = {int(c.id): c for c in chats}
@@ -1650,7 +1698,7 @@ async def api_chat_managers(
         "chat_kind": str(getattr(chat, "chat_kind", "group") or "group"),
         "can_manage_access": can_manage,
         "premium_enabled": premium_enabled,
-        "limit": 3,
+        "limit": 0,
         "managers": managers,
         "invites": await _chat_manager_invites_payload(session, int(chat_id), owner_uid) if can_manage else [],
     }
@@ -1725,9 +1773,6 @@ async def api_chat_managers_add(
     if target_id > 0 and target_id == owner_uid:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Owner already has full access")
 
-    cnt = (await session.execute(select(func.count(ChatManager.id)).where(ChatManager.chat_id == int(chat_id)))).scalar_one()
-    if int(cnt or 0) >= 3:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Managers limit reached (max 3)")
     created_status = "sent"
     if target_id > 0 and target_user:
         # Делегированный админ должен быть админом/владельцем этого чата в Telegram.
@@ -1818,7 +1863,7 @@ async def api_chat_managers_add(
         "ok": True,
         "managers": await _chat_managers_payload(session, int(chat_id)),
         "invites": await _chat_manager_invites_payload(session, int(chat_id), owner_uid),
-        "limit": 3,
+        "limit": 0,
         "created_status": created_status,
     }
 
@@ -1856,7 +1901,87 @@ async def api_chat_managers_remove(
         "ok": True,
         "managers": await _chat_managers_payload(session, int(chat_id)),
         "invites": await _chat_manager_invites_payload(session, int(chat_id), int(getattr(chat, "owner_user_id", 0) or 0)),
-        "limit": 3,
+        "limit": 0,
+    }
+
+
+@router.patch("/chat/{chat_id}/managers/{manager_user_id}")
+async def api_chat_managers_patch(
+    chat_id: int,
+    manager_user_id: int,
+    body: dict,
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    await _touch_user_presence(session, user_id)
+    chat = await session.get(Chat, int(chat_id))
+    if not chat:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+    if int(getattr(chat, "owner_user_id", 0) or 0) != int(user_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only owner can manage admins")
+    owner_user = (await session.execute(select(User).where(User.telegram_id == int(user_id)).limit(1))).scalar_one_or_none()
+    if not (owner_user and _is_user_premium_now(owner_user, datetime.now(timezone.utc))):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Функция доступна только на Premium")
+    if int(manager_user_id) <= 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Bad manager id")
+
+    row = (
+        await session.execute(
+            select(ChatManager).where(ChatManager.chat_id == int(chat_id), ChatManager.user_id == int(manager_user_id)).limit(1)
+        )
+    ).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Manager not found")
+
+    perms_raw = body.get("permissions") or {}
+    if not isinstance(perms_raw, dict):
+        perms_raw = {}
+    chat_kind = str(getattr(chat, "chat_kind", "group") or "group").lower()
+    if chat_kind == "channel":
+        next_perms = {
+            "protection": False,
+            "broadcast": bool(perms_raw.get("broadcast")),
+            "reports": False,
+            "first_post_settings": bool(perms_raw.get("first_post_settings")),
+        }
+    else:
+        next_perms = {
+            "protection": bool(perms_raw.get("protection")),
+            "broadcast": bool(perms_raw.get("broadcast")),
+            "reports": bool(perms_raw.get("reports")),
+            "first_post_settings": False,
+        }
+
+    if not any(next_perms.values()):
+        await session.execute(
+            delete(ChatManager).where(ChatManager.chat_id == int(chat_id), ChatManager.user_id == int(manager_user_id))
+        )
+    else:
+        row.can_protection = next_perms["protection"]
+        row.can_broadcast = next_perms["broadcast"]
+        row.can_reports = next_perms["reports"]
+        row.can_first_post_settings = next_perms["first_post_settings"]
+
+    inv = (
+        await session.execute(
+            select(ChatManagerInvite).where(
+                ChatManagerInvite.chat_id == int(chat_id),
+                ChatManagerInvite.owner_user_id == int(getattr(chat, "owner_user_id", 0) or 0),
+                ChatManagerInvite.target_telegram_id == int(manager_user_id),
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    if inv:
+        inv.can_protection = next_perms["protection"]
+        inv.can_broadcast = next_perms["broadcast"]
+        inv.can_reports = next_perms["reports"]
+        inv.can_first_post_settings = next_perms["first_post_settings"]
+    await session.commit()
+    return {
+        "ok": True,
+        "managers": await _chat_managers_payload(session, int(chat_id)),
+        "invites": await _chat_manager_invites_payload(session, int(chat_id), int(getattr(chat, "owner_user_id", 0) or 0)),
+        "limit": 0,
     }
 
 
@@ -2782,7 +2907,7 @@ async def api_chat_rule(
         "use_global_bad_urls",
         "filter_profanity_enabled", "filter_jobs_enabled", "filter_casino_enabled",
         "filter_ads_enabled", "filter_insults_enabled",
-        "filter_racism_enabled", "filter_nazi_enabled", "filter_vulgar_enabled",
+        "filter_racism_enabled", "filter_nazi_enabled", "filter_vulgar_enabled", "filter_politics_enabled",
         "reputation_enabled",
         "log_enabled",
         "guardian_messages_enabled",
@@ -5941,8 +6066,10 @@ async def api_activity_breakdown(
     (`tz_offset_min` = -new Date().getTimezoneOffset()), чтобы графики
     «по часам» соответствовали локальному времени пользователя.
     """
-    chats = await get_managed_chats(session, user_id)
-    active_chats = [c for c in chats if not bool(getattr(c, "is_log_chat", False)) and bool(getattr(c, "is_active", True))]
+    # Для статистики должны быть видны и чаты на паузе, иначе у делегатов
+    # пропадают группы из выборки и "делегированные" выглядят пустыми.
+    chats = await get_accessible_chats_any_active(session, user_id)
+    active_chats = [c for c in chats if not bool(getattr(c, "is_log_chat", False))]
     if scope == "own":
         active_chats = [c for c in active_chats if int(getattr(c, "owner_user_id", 0) or 0) == int(user_id)]
     elif scope == "delegated":
@@ -6115,6 +6242,7 @@ async def api_activity_breakdown(
         "racism": _filter_enabled("filter_racism_enabled", False),
         "nazi": _filter_enabled("filter_nazi_enabled", False),
         "vulgar": _filter_enabled("filter_vulgar_enabled", False),
+        "politics": _filter_enabled("filter_politics_enabled", False),
         "link": (
             _filter_enabled("filter_links", True)
             and any(str(getattr(r, "filter_links_mode", "forbid") or "forbid").lower() != "allow" for r in rules_list)
@@ -7079,6 +7207,7 @@ async def api_activity_group_breakdown(
         {"key": "profanity", "label": "Мат (словарь)", "count": c("profanity", "profanity_newbie"), "premium": False, "tone": "rose"},
         {"key": "jobs", "label": "Подработки", "count": c("jobs", "jobs_newbie"), "premium": False, "tone": "amber"},
         {"key": "casino", "label": "Казино / ставки", "count": c("casino", "casino_newbie"), "premium": False, "tone": "amber"},
+        {"key": "politics", "label": "Анти-политика", "count": c("politics", "politics_newbie"), "premium": False, "tone": "rose"},
         {"key": "silence", "label": "Режим тишины", "count": c("silence"), "premium": True, "tone": "violet"},
         {"key": "newbie_mode", "label": "Срабатывания для новичков", "count": int(newbie_hits or 0), "premium": True, "tone": "violet"},
         {"key": "antinakrutka", "label": "Антинакрутка", "count": 0, "premium": True, "tone": "slate", "note": "События не пишутся в эту статистику"},

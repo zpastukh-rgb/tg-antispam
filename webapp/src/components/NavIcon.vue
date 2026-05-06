@@ -154,6 +154,28 @@ const supportHeadsetSrc = `${import.meta.env.BASE_URL}icons/support-headset.png`
       <line x1="3" y1="6" x2="21" y2="6" />
       <line x1="3" y1="18" x2="21" y2="18" />
     </template>
+    <!-- bar chart -->
+    <template v-else-if="name === 'chart-bar'">
+      <line x1="18" y1="20" x2="18" y2="10" />
+      <line x1="12" y1="20" x2="12" y2="4" />
+      <line x1="6" y1="20" x2="6" y2="14" />
+    </template>
+    <!-- users -->
+    <template v-else-if="name === 'users'">
+      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+      <circle cx="9" cy="7" r="4" />
+      <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+    </template>
+    <!-- send / plane -->
+    <template v-else-if="name === 'send'">
+      <line x1="22" y1="2" x2="11" y2="13" />
+      <polygon points="22 2 15 22 11 13 2 9 22 2" />
+    </template>
+    <!-- chevron-right -->
+    <template v-else-if="name === 'chevron-right'">
+      <polyline points="9 18 15 12 9 6" />
+    </template>
     <template v-else>
       <circle cx="12" cy="12" r="2" />
     </template>

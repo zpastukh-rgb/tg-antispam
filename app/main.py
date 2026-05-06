@@ -177,6 +177,7 @@ _RULES_COLUMNS_008 = (
     ("filter_racism_enabled", "BOOLEAN", "FALSE"),
     ("filter_nazi_enabled", "BOOLEAN", "FALSE"),
     ("filter_vulgar_enabled", "BOOLEAN", "FALSE"),
+    ("filter_politics_enabled", "BOOLEAN", "FALSE"),
     ("delete_left_messages", "BOOLEAN", "TRUE"),
 )
 

@@ -90,8 +90,8 @@ function isActive(item) {
   if (item.section) return route.path === '/' && dashboardSection.value === item.section
   if (item.to === '/') {
     return (
-      route.path === '/'
-      && (dashboardSection.value === 'account' || dashboardSection.value === 'subscription')
+      (route.path === '/' && (dashboardSection.value === 'account' || dashboardSection.value === 'subscription'))
+      || route.path === '/settings'
     )
   }
   return route.path.startsWith(item.to)

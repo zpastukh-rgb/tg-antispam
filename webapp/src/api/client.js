@@ -360,6 +360,7 @@ export const api = {
   setReportsChat: (chatId, logChatId) => api.post(`/api/chat/${chatId}/reports-chat`, { log_chat_id: logChatId }),
   chatManagers: (chatId) => api.get(`/api/chat/${chatId}/managers`),
   chatManagerAdd: (chatId, payload) => api.post(`/api/chat/${chatId}/managers`, payload),
+  chatManagerUpdate: (chatId, managerUserId, payload) => api.patch(`/api/chat/${chatId}/managers/${managerUserId}`, payload),
   chatManagerRemove: (chatId, managerUserId) => api.delete(`/api/chat/${chatId}/managers/${managerUserId}`),
   chatManagerInviteCancel: (chatId, inviteId) => api.delete(`/api/chat/${chatId}/manager-invites/${inviteId}`),
   copySettings: (chatId, targetChatId) => api.post(`/api/chat/${chatId}/copy-settings`, { target_chat_id: targetChatId }),
@@ -417,6 +418,8 @@ export const api = {
   billingTokenPacks: () => api.get('/api/billing/token-packs'),
   /** Владелец: кто платит AURUM за рассылки делегата — owner | delegate | delegate_first */
   meDelegateBroadcastPayerPatch: (value) => api.patch('/api/me/delegate-broadcast-payer', { value }),
+  /** Владелец: очистить модерацию/активность по своим чатах (не платежи и не подписка). */
+  mePurgeOwnedChatsAnalytics: () => api.post('/api/me/purge-owned-chats-analytics', {}),
   /** Перевод AURUM владельца менеджеру (менеджер должен быть в chat_managers хотя бы одного чата владельца). */
   billingAurumTransferToDelegate: (targetTelegramId, amount) =>
     api.post('/api/billing/aurum-transfer-to-delegate', {
