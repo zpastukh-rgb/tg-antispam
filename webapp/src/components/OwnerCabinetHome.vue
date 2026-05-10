@@ -61,7 +61,7 @@ function open(key) {
         >
           <span class="text-[10px]">👑</span> Premium
         </span>
-        <p class="text-[13px] font-bold text-white">Защита</p>
+        <p class="text-[13px] font-bold text-white">Защита / Отчёты</p>
         <p class="mt-0.5 text-[11px] font-semibold" :class="protectionActive ? 'text-emerald-300' : 'text-rose-300/90'">
           {{ protectionActive ? 'Активна' : 'Не активна' }}
         </p>
@@ -84,7 +84,7 @@ function open(key) {
         >
           <span class="text-[10px]">👑</span> Premium
         </span>
-        <p class="text-[13px] font-bold text-white">Статистика</p>
+        <p class="text-[13px] font-bold text-white">Статистика роста</p>
         <p class="mt-0.5 text-[11px] text-white/45">Сегодня</p>
         <p class="mt-3 text-4xl font-black tabular-nums leading-none text-white">
           {{ joinsToday >= 0 ? `+${joinsToday}` : joinsToday }}

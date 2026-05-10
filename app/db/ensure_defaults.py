@@ -129,6 +129,30 @@ DEFAULT_POLITICS_ROOTS = (
     "гитлер", "муссолини",
 )
 
+# Религиозная тематика / конфессиональные обсуждения.
+DEFAULT_RELIGION_ROOTS = (
+    "религи", "религиоз", "вера", "вероисповед", "конфесс",
+    "бог", "бож", "господ", "господь", "иисус", "христ", "христиан", "православ",
+    "католик", "протестант", "библи", "евангел", "церков", "храм", "монастыр",
+    "священ", "патриарх", "митрополит", "икон", "крест", "молитв", "исповед", "причаст",
+    "ислам", "мусульман", "коран", "намаз", "мечет", "мулла", "имам", "суннит", "шиит", "рамадан",
+    "иудаизм", "иудеи", "иудей", "тора", "талмуд", "синагог", "раввин", "кашрут",
+    "будд", "буддизм", "лама", "далай", "нирван", "сангх",
+    "индуизм", "вед", "кришн", "шива", "вишну", "мантр", "пудж",
+    "сикх", "джайн", "баха", "языч", "пастафари",
+)
+
+# Эзотерика / магия / оккультные практики.
+DEFAULT_ESOTERIC_ROOTS = (
+    "эзотер", "магия", "магич", "колдов", "ведьм", "ведун", "чарод",
+    "оккульт", "ритуал", "приворот", "отворот", "сглаз", "порч", "заговор",
+    "экстрасенс", "ясновид", "гадани", "таро", "гороскоп", "астролог", "натальн",
+    "нумеролог", "руны", "амулет", "талисман", "оберег",
+    "чакр", "аур", "энергетическ", "карм", "карма", "реинкарнац",
+    "медиум", "спирит", "духовн практик", "биоэнерг", "маятник",
+    "алхим", "каббал", "ведьмин", "шаман", "шаманизм",
+)
+
 # Обзывательства / оскорбления без мата (отдельный фильтр).
 # Используется поиск по корню, поэтому одна запись ловит словоформы:
 # "дурак" → "дурак/дурака/дураков/дурачьё/дурацкий" и т.д.
@@ -1169,6 +1193,10 @@ async def ensure_rules_channel_posts_filter_columns(engine: AsyncEngine) -> None
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_channel_posts_enabled BOOLEAN DEFAULT FALSE",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_channel_posts_action VARCHAR(16) DEFAULT 'delete'",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_politics_enabled BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_religion_enabled BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_religion_promo_only BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_esoteric_enabled BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_esoteric_promo_only BOOLEAN DEFAULT FALSE",
     )
     try:
         async with engine.begin() as conn:

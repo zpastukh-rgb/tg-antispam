@@ -20,6 +20,7 @@ const saving = ref(false)
 const clearing = ref(false)
 const showReportsInfoModal = ref(false)
 const botInfo = ref(null)
+const meProfile = ref(null)
 let stopListen = null
 
 const reportsBg = `${import.meta.env.BASE_URL}app-global-bg.png`
@@ -82,9 +83,10 @@ async function switchChat(chatId) {
 onMounted(async () => {
   if (!hasInitData.value) return
   try {
-    const [chatsData, botData] = await Promise.all([
+    const [chatsData, botData, meData] = await Promise.all([
       fetchSilent(() => api.chats('all')).catch(() => ({ selected_chat_id: null, chats: [] })),
       fetchSilent(() => api.botInfo()).catch(() => ({})),
+      fetchSilent(() => api.me()).catch(() => null),
     ])
     const requestedChatId = Number(route.query?.chat_id || 0) || null
     let selected_chat_id = chatsData?.selected_chat_id
@@ -94,6 +96,14 @@ onMounted(async () => {
     }
     chatsList.value = chatsData?.chats || []
     botInfo.value = botData || null
+    meProfile.value = meData || null
+    if (!selected_chat_id) {
+      const fallback = (chatsData?.chats || []).find((c) => Number(c?.id || 0) !== 0)
+      if (fallback?.id) {
+        selected_chat_id = Number(fallback.id)
+        await fetchSilent(() => api.selectChat(selected_chat_id)).catch(() => {})
+      }
+    }
     if (!selected_chat_id) {
       chat.value = { noSelection: true }
       return
@@ -169,6 +179,19 @@ async function updateRule(patch) {
     saving.value = false
   }
 }
+
+function goToExtendedStatsReports() {
+  if (meProfile.value?.is_premium) {
+    router.push({ path: '/admin', query: { tab: 'overview', open: 'stats_reports' } }).catch(() => {})
+    return
+  }
+  showToast('Расширенная статистика — с Premium Guard')
+  router.push({ path: '/admin', query: { tab: 'overview', open: 'stats_reports' } }).catch(() => {})
+}
+
+function goPremiumFromReports() {
+  router.push({ path: '/', query: { section: 'subscription' } }).catch(() => {})
+}
 </script>
 
 <template>
@@ -205,7 +228,24 @@ async function updateRule(patch) {
 
     <div v-else-if="chat?.rule">
       <div
-        class="relative -mx-4 overflow-hidden rounded-2xl border border-white/10 shadow-[0_24px_80px_-32px_rgba(0,0,0,0.85)] ring-1 ring-white/10 md:-mx-6"
+        v-if="meProfile && !meProfile.is_premium && cabinetMode !== 'delegated'"
+        class="mb-3 overflow-hidden rounded-[1.1rem] border border-violet-500/35 bg-gradient-to-br from-violet-950/45 via-[#0c0a12] to-black p-3 text-[12px] leading-snug text-violet-50/95 shadow-[0_0_36px_-12px_rgba(139,92,246,0.4)] ring-1 ring-violet-400/20"
+      >
+        <p class="font-semibold text-violet-200">😈 Guard · отчёты</p>
+        <p class="mt-1 text-[11px] text-slate-300">
+          На Free расширенная статистика и сводки по чатам не показываются (без Premium это были бы нули). Оформите
+          <b class="text-violet-200">Premium Guard</b> — откроются графики, отчёты и кнопка «Отслеживать» без ограничений.
+        </p>
+        <button
+          type="button"
+          class="mt-2 w-full rounded-xl bg-violet-600 py-2.5 text-xs font-bold text-white shadow-[0_10px_28px_-8px_rgba(124,58,237,0.5)] transition hover:bg-violet-500 active:scale-[0.99]"
+          @click="goPremiumFromReports"
+        >
+          Оформить Premium
+        </button>
+      </div>
+      <div
+        class="relative -mx-4 overflow-hidden rounded-2xl border border-slate-700/60 shadow-[0_24px_80px_-32px_rgba(0,0,0,0.85)] ring-1 ring-slate-700/40 md:-mx-6"
       >
       <div
         class="pointer-events-none absolute inset-0 bg-cover bg-center"
@@ -226,7 +266,7 @@ async function updateRule(patch) {
           >Мой чат</span>
         </div>
         <div
-          class="relative overflow-hidden rounded-[1.15rem] border border-white/14 bg-zinc-950/45 p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] ring-1 ring-white/10 backdrop-blur-2xl"
+          class="relative overflow-hidden rounded-[1.15rem] border border-slate-700/65 bg-zinc-950/45 p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] ring-1 ring-slate-700/40 backdrop-blur-2xl"
         >
           <div class="flex items-center gap-1.5">
             <div
@@ -236,7 +276,7 @@ async function updateRule(patch) {
             </div>
             <button
               type="button"
-              class="shrink-0 rounded-lg border border-white/14 bg-white/8 px-2.5 py-1.5 text-[11px] font-semibold text-slate-100 transition hover:bg-white/14"
+              class="shrink-0 rounded-lg border border-slate-700/70 bg-zinc-900/75 px-2.5 py-1.5 text-[11px] font-semibold text-slate-100 transition hover:bg-zinc-800/80"
               aria-label="Выбор чата"
               @click="showChatPicker = true"
             >
@@ -244,6 +284,32 @@ async function updateRule(patch) {
             </button>
           </div>
         </div>
+
+        <section
+          class="overflow-hidden rounded-[1.1rem] border border-slate-700/65 bg-zinc-950/35 p-2.5 ring-1 ring-slate-700/35 backdrop-blur-2xl"
+        >
+          <div class="flex items-start justify-between gap-2">
+            <div class="min-w-0">
+              <h2 class="text-[11px] font-semibold uppercase tracking-wide text-slate-100">Расширенная статистика и отчёты</h2>
+              <p class="mt-1 text-[10px] leading-snug text-slate-400">
+                Статистика по чатам и каналам + расширенные отчёты.
+              </p>
+            </div>
+            <span
+              v-if="!meProfile?.is_premium"
+              class="shrink-0 rounded-full border border-amber-500/35 bg-amber-500/12 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-200"
+            >
+              Premium
+            </span>
+          </div>
+          <button
+            type="button"
+            class="mt-2 w-full rounded-lg border border-cyan-500/35 bg-cyan-500/12 px-3 py-2 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-500/20 active:scale-[0.99]"
+            @click="goToExtendedStatsReports"
+          >
+            Отслеживать
+          </button>
+        </section>
 
         <div
           class="overflow-hidden rounded-[1.1rem] border border-violet-400/25 bg-violet-950/20 p-2.5 text-[11px] leading-snug text-violet-50/95 ring-1 ring-violet-500/20 backdrop-blur-2xl"
@@ -301,7 +367,7 @@ async function updateRule(patch) {
             <p v-if="!reportsChatUrl" class="text-center text-[10px] text-slate-400">Нет ссылки — проверьте API.</p>
             <button
               type="button"
-              class="w-full max-w-[240px] self-center rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-xs font-semibold text-slate-100 transition hover:bg-white/15 active:scale-[0.99]"
+              class="w-full max-w-[240px] self-center rounded-lg border border-slate-700/70 bg-zinc-900/75 px-3 py-2 text-xs font-semibold text-slate-100 transition hover:bg-zinc-800/80 active:scale-[0.99]"
               @click="refreshReportsStatus"
             >
               Обновить
@@ -311,11 +377,11 @@ async function updateRule(patch) {
         </section>
 
         <section
-          class="overflow-hidden rounded-[1.1rem] border border-white/12 bg-zinc-950/35 p-2.5 ring-1 ring-white/10 backdrop-blur-2xl"
+          class="overflow-hidden rounded-[1.1rem] border border-slate-700/65 bg-zinc-950/35 p-2.5 ring-1 ring-slate-700/35 backdrop-blur-2xl"
         >
           <h2 class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-200">Настройки</h2>
           <div class="space-y-1.5">
-            <div class="flex items-center justify-between gap-2 rounded-lg border border-white/10 bg-white/[0.06] px-2 py-1.5 ring-1 ring-white/5">
+            <div class="flex items-center justify-between gap-2 rounded-lg border border-slate-700/65 bg-zinc-900/70 px-2 py-1.5 ring-1 ring-slate-700/35">
               <span class="text-[11px] text-slate-200/90">В чат</span>
               <button
                 type="button"
@@ -326,7 +392,7 @@ async function updateRule(patch) {
                 {{ chat.rule.log_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
               </button>
             </div>
-            <div class="flex items-center justify-between gap-2 rounded-lg border border-white/10 bg-white/[0.06] px-2 py-1.5 ring-1 ring-white/5">
+            <div class="flex items-center justify-between gap-2 rounded-lg border border-slate-700/65 bg-zinc-900/70 px-2 py-1.5 ring-1 ring-slate-700/35">
               <span class="text-[11px] text-slate-200/90">Сообщ. Guard</span>
               <button
                 type="button"
@@ -337,7 +403,7 @@ async function updateRule(patch) {
                 {{ chat.rule.guardian_messages_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
               </button>
             </div>
-            <div class="flex items-center justify-between gap-2 rounded-lg border border-white/10 bg-white/[0.06] px-2 py-1.5 ring-1 ring-white/5">
+            <div class="flex items-center justify-between gap-2 rounded-lg border border-slate-700/65 bg-zinc-900/70 px-2 py-1.5 ring-1 ring-slate-700/35">
               <span class="text-[11px] text-slate-200/90">Автоотчёты</span>
               <button
                 type="button"

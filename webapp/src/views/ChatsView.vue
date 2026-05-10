@@ -4,7 +4,6 @@ import { useRouter, useRoute } from 'vue-router'
 import { useApi } from '../composables/useApi'
 import { guardLog, guardWarn } from '../utils/guardDebugLog'
 import { useCabinetMode } from '../composables/useCabinetMode'
-import { useDashboardSection } from '../composables/useDashboardSection'
 import { useToast } from '../composables/useToast'
 import ChannelPostRulesModal from '../components/ChannelPostRulesModal.vue'
 import SecurityPinGateModal from '../components/SecurityPinGateModal.vue'
@@ -16,7 +15,6 @@ const route = useRoute()
 const { api, error, fetchSilent, hasInitData } = useApi()
 const { showToast } = useToast()
 const { setCabinetMode } = useCabinetMode()
-const { setDashboardSection } = useDashboardSection()
 /** Только фиолетовый ADM: ?cabinet=delegated. Обычный список чатов не зависит от localStorage — всегда свои + делегированные. */
 const delegatedChatsOnly = computed(() => String(route.query.cabinet || '').toLowerCase() === 'delegated')
 const focusThreatOnly = computed(() => String(route.query.threat || '') === '1')
@@ -62,16 +60,6 @@ function managerPermEntries(perms) {
   if (p.broadcast) out.push({ key: 'broadcast', label: 'Рассылка' })
   if (p.reports || p.stats) out.push({ key: 'reports', label: 'Отчёты / Статистика' })
   if (p.first_post_settings) out.push({ key: 'first_post_settings', label: 'Первое сообщение' })
-  return out
-}
-
-function permissionLabels(perms) {
-  const p = perms || {}
-  const out = []
-  if (p.protection) out.push('Защита')
-  if (p.broadcast) out.push('Рассылка')
-  if (p.reports || p.stats) out.push('Отчёты / Статистика')
-  if (p.first_post_settings) out.push('Первое сообщение')
   return out
 }
 
@@ -320,19 +308,16 @@ function goToProtection(chatId) {
 }
 
 function goToReports(chatId) {
-  // Открываем «Подробный отчёт по защите» (модалка на главной),
-  // одинаково и для общей кнопки, и для per-chat. При наличии chatId
-  // предварительно выбираем нужный чат, чтобы статистика была актуальна.
   const isPerChat = !(chatId === undefined || chatId === null || chatId === '' || (typeof chatId === 'object' && !('id' in chatId)))
   if (isPerChat) {
     const row = (chats.value || []).find((c) => Number(c.id) === Number(chatId))
     setCabinetMode(row?.is_shared ? 'delegated' : 'owner')
     selectChat(chatId).catch(() => {})
-  } else {
-    setCabinetMode('delegated')
+    router.push({ path: '/admin', query: { tab: 'overview', open: 'stats_reports', chat_id: String(chatId) } })
+    return
   }
-  setDashboardSection('account')
-  router.push({ path: '/', query: isPerChat ? { report: '1', chat_id: String(chatId) } : { report: '1' } })
+  setCabinetMode('owner')
+  router.push({ path: '/admin', query: { tab: 'overview', open: 'stats_reports' } })
 }
 
 function goToPremiumBilling() {
@@ -460,13 +445,13 @@ function chatCardClass(chat) {
   const spikeCls = spike ? 'ring-2 ring-yellow-300/70 shadow-[0_0_20px_-10px_rgba(250,204,21,0.95)]' : ''
   if (isChannelRow(chat)) {
     const base = chat.is_shared
-      ? 'rounded-xl border border-violet-400/25 bg-violet-950/20 p-2.5 shadow-md ring-1 ring-violet-500/20 backdrop-blur-sm'
-      : 'rounded-xl border border-emerald-500/20 bg-black/40 p-2.5 shadow-md ring-1 ring-emerald-900/25 backdrop-blur-sm dark:bg-black/45'
+      ? 'rounded-xl border border-violet-500/18 bg-violet-950/18 p-2.5 shadow-md ring-1 ring-violet-500/15 backdrop-blur-sm'
+      : 'rounded-xl border border-emerald-500/16 bg-black/40 p-2.5 shadow-md ring-1 ring-emerald-900/20 backdrop-blur-sm dark:bg-black/45'
     return [base, spikeCls]
   }
   const base = chat.is_shared
-    ? 'rounded-xl border border-violet-400/25 bg-violet-950/20 p-2.5 shadow-md ring-1 ring-violet-500/20 backdrop-blur-sm'
-    : 'rounded-xl border border-white/12 bg-black/40 p-2.5 shadow-md ring-1 ring-black/30 backdrop-blur-sm dark:bg-black/45 dark:ring-white/5'
+    ? 'rounded-xl border border-violet-500/18 bg-violet-950/18 p-2.5 shadow-md ring-1 ring-violet-500/15 backdrop-blur-sm'
+    : 'rounded-xl border border-slate-700/50 bg-black/40 p-2.5 shadow-md ring-1 ring-black/30 backdrop-blur-sm dark:bg-black/45 dark:ring-slate-700/40'
   return [base, spikeCls]
 }
 
@@ -799,7 +784,7 @@ function openChannelBroadcast(chat) {
             Отчёты по группам
           </button>
         </div>
-        <div v-if="cabinetTab === 'shared' && !delegatedChatsOnly" class="rounded-xl border border-white/12 bg-black/35 p-2.5">
+        <div v-if="cabinetTab === 'shared' && !delegatedChatsOnly" class="rounded-xl border border-slate-700/55 bg-black/35 p-2.5">
           <div class="flex items-center justify-between gap-2">
             <div>
               <p class="text-sm font-semibold text-white">Админы и доступы</p>
@@ -812,12 +797,12 @@ function openChannelBroadcast(chat) {
         </div>
         <p
           v-if="chats.length && !frameDelegated.length && !frameOwnChannels.length && !frameOwnGroups.length"
-          class="rounded-lg border border-white/10 bg-black/30 px-2 py-2 text-center text-[11px] text-slate-300"
+          class="rounded-lg border border-slate-700/55 bg-black/30 px-2 py-2 text-center text-[11px] text-slate-300"
         >
           Нет сущностей для выбранного пресета. Переключите «Все», «Группы» или «Каналы».
         </p>
 
-        <div v-if="frameDelegated.length" class="space-y-2 rounded-xl border border-white/12 bg-black/35 p-2.5">
+        <div v-if="frameDelegated.length" class="space-y-2 rounded-xl border border-slate-700/55 bg-black/35 p-2.5">
           <div
             class="flex items-center justify-between rounded-lg border border-violet-400/30 bg-violet-900/25 px-2 py-1 text-[11px] font-semibold text-violet-100"
           >
@@ -856,14 +841,6 @@ function openChannelBroadcast(chat) {
                     class="rounded-full border border-violet-400/35 bg-violet-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-violet-100"
                   >Группа</span>
                   <span
-                    class="rounded-full border border-violet-400/35 bg-violet-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-violet-100"
-                  >Делегированный</span>
-                  <span
-                    v-for="lbl in permissionLabels(chat.delegated_permissions)"
-                    :key="`fdp-${chat.id}-${lbl}`"
-                    class="rounded-full border border-violet-300/40 bg-violet-500/25 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-violet-50"
-                  >{{ lbl }}</span>
-                  <span
                     v-if="chatSpikeAlert(chat)"
                     class="rounded-full border border-yellow-400/45 bg-yellow-500/20 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-yellow-100"
                   >⚠ под угрозой</span>
@@ -889,7 +866,7 @@ function openChannelBroadcast(chat) {
                 @click="removeChat(chat)"
               >✕</button>
             </div>
-            <div class="mt-2 flex flex-wrap gap-1 border-t border-white/10 pt-2">
+            <div class="mt-2 flex flex-wrap gap-1 border-t border-slate-700/60 pt-2">
               <template v-if="isChannelRow(chat)">
                 <button
                   v-if="!chat.locked_by_limit && delegatedCan(chat, 'broadcast')"
@@ -900,7 +877,7 @@ function openChannelBroadcast(chat) {
                 <button
                   v-if="!chat.locked_by_limit && delegatedCan(chat, 'first_post_settings')"
                   type="button"
-                  class="rounded-lg border border-white/15 bg-white/10 px-2 py-1 text-[11px] font-semibold leading-tight text-slate-100 hover:bg-white/20"
+                  class="rounded-lg border border-slate-700/70 bg-zinc-900/75 px-2 py-1 text-[11px] font-semibold leading-tight text-slate-100 hover:bg-zinc-800/80"
                   @click="openChannelPostRules(chat)"
                 >Настройки</button>
                 <button
@@ -933,7 +910,7 @@ function openChannelBroadcast(chat) {
               <button
                 v-if="canOpenManagers(chat)"
                 type="button"
-                class="inline-flex min-w-0 max-w-full items-center justify-center gap-1 rounded-lg border border-white/15 bg-white/10 px-2.5 py-1 text-[11px] font-semibold leading-tight text-slate-100 hover:bg-white/20"
+                class="inline-flex min-w-0 max-w-full items-center justify-center gap-1 rounded-lg border border-slate-700/70 bg-zinc-900/75 px-2.5 py-1 text-[11px] font-semibold leading-tight text-slate-100 hover:bg-zinc-800/80"
                 @click="openManagers(chat)"
               >
                 <span>Админы</span>
@@ -942,14 +919,14 @@ function openChannelBroadcast(chat) {
               <button
                 v-if="!chat.locked_by_limit && !isChannelRow(chat) && delegatedCan(chat, 'reports')"
                 type="button"
-                class="rounded-lg border border-white/15 bg-white/10 px-2 py-1 text-[11px] font-semibold leading-tight text-slate-100 hover:bg-white/20"
+                class="rounded-lg border border-slate-700/70 bg-zinc-900/75 px-2 py-1 text-[11px] font-semibold leading-tight text-slate-100 hover:bg-zinc-800/80"
                 @click="goToReports(chat.id)"
               >{{ chat.log_chat_id ? 'Отчёты ✓' : 'Отчёты' }}</button>
             </div>
           </div>
         </div>
 
-        <div v-if="frameOwnChannels.length" class="space-y-2 rounded-xl border border-white/12 bg-black/35 p-2.5">
+        <div v-if="frameOwnChannels.length" class="space-y-2 rounded-xl border border-slate-700/55 bg-black/35 p-2.5">
           <div class="rounded-lg border border-emerald-400/30 bg-emerald-950/25 px-2 py-1 text-[11px] font-semibold text-emerald-100">
             Каналы
           </div>
@@ -977,7 +954,7 @@ function openChannelBroadcast(chat) {
                 @click="removeChat(chat)"
               >✕</button>
             </div>
-            <div class="mt-2 flex flex-wrap gap-1 border-t border-white/10 pt-2">
+            <div class="mt-2 flex flex-wrap gap-1 border-t border-slate-700/60 pt-2">
               <button
                 v-if="!chat.locked_by_limit"
                 type="button"
@@ -987,7 +964,7 @@ function openChannelBroadcast(chat) {
               <button
                 v-if="!chat.locked_by_limit"
                 type="button"
-                class="rounded-lg border border-white/15 bg-white/10 px-2 py-1 text-[11px] font-semibold leading-tight text-slate-100 hover:bg-white/20"
+                class="rounded-lg border border-slate-700/70 bg-zinc-900/75 px-2 py-1 text-[11px] font-semibold leading-tight text-slate-100 hover:bg-zinc-800/80"
                 @click="openChannelPostRules(chat)"
               >Настройки</button>
               <button
@@ -999,7 +976,7 @@ function openChannelBroadcast(chat) {
               <button
                 v-if="canOpenManagers(chat)"
                 type="button"
-                class="inline-flex min-w-0 max-w-full items-center justify-center gap-1 rounded-lg border border-white/15 bg-white/10 px-2.5 py-1 text-[11px] font-semibold leading-tight text-slate-100"
+                class="inline-flex min-w-0 max-w-full items-center justify-center gap-1 rounded-lg border border-slate-700/70 bg-zinc-900/75 px-2.5 py-1 text-[11px] font-semibold leading-tight text-slate-100"
                 @click="openManagers(chat)"
               >
                 <span>Админы</span>
@@ -1015,7 +992,7 @@ function openChannelBroadcast(chat) {
           </div>
         </div>
 
-        <div v-if="frameOwnGroups.length" class="space-y-2 rounded-xl border border-white/12 bg-black/35 p-2.5">
+        <div v-if="frameOwnGroups.length" class="space-y-2 rounded-xl border border-slate-700/55 bg-black/35 p-2.5">
           <div class="rounded-lg border border-cyan-400/25 bg-cyan-900/20 px-2 py-1 text-[11px] font-semibold text-cyan-100">
             Мои чаты
           </div>
@@ -1042,7 +1019,7 @@ function openChannelBroadcast(chat) {
                 @click="removeChat(chat)"
               >✕</button>
             </div>
-            <div class="mt-2 flex flex-wrap gap-1 border-t border-white/10 pt-2">
+            <div class="mt-2 flex flex-wrap gap-1 border-t border-slate-700/60 pt-2">
               <button
                 v-if="!chat.locked_by_limit"
                 type="button"
@@ -1058,7 +1035,7 @@ function openChannelBroadcast(chat) {
               <button
                 v-if="canOpenManagers(chat)"
                 type="button"
-                class="inline-flex min-w-0 max-w-full items-center justify-center gap-1 rounded-lg border border-white/15 bg-white/10 px-2.5 py-1 text-[11px] font-semibold leading-tight text-slate-100"
+                class="inline-flex min-w-0 max-w-full items-center justify-center gap-1 rounded-lg border border-slate-700/70 bg-zinc-900/75 px-2.5 py-1 text-[11px] font-semibold leading-tight text-slate-100"
                 @click="openManagers(chat)"
               >
                 <span>Админы</span>
@@ -1073,7 +1050,7 @@ function openChannelBroadcast(chat) {
               <button
                 v-if="!chat.locked_by_limit"
                 type="button"
-                class="rounded-lg border border-white/15 bg-white/10 px-2 py-1 text-[11px] font-semibold leading-tight text-slate-100"
+                class="rounded-lg border border-slate-700/70 bg-zinc-900/75 px-2 py-1 text-[11px] font-semibold leading-tight text-slate-100"
                 @click="goToReports(chat.id)"
               >{{ chat.log_chat_id ? 'Отчёты ✓' : 'Отчёты' }}</button>
             </div>

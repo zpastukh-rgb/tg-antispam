@@ -27,12 +27,14 @@ from app.db.session import get_session
 from app.db.ensure_defaults import (
     DEFAULT_ADS_ROOTS,
     DEFAULT_CASINO_ROOTS,
+    DEFAULT_ESOTERIC_ROOTS,
     DEFAULT_INSULT_ROOTS,
     DEFAULT_JOBS_ROOTS,
     DEFAULT_NAZI_ROOTS,
     DEFAULT_POLITICS_ROOTS,
     DEFAULT_PROFANITY_ROOTS,
     DEFAULT_RACISM_ROOTS,
+    DEFAULT_RELIGION_ROOTS,
     DEFAULT_VULGAR_ROOTS,
 )
 from app.moderation_lexicon import root_matches_token
@@ -956,6 +958,98 @@ def jobs_offer_hit(text_norm: str, text_without_urls_norm: Optional[str] = None)
     return None
 
 
+def _religion_esoteric_promo_context(text_norm: str, text_without_urls_norm: Optional[str] = None) -> bool:
+    """
+    Мягкий режим фильтров «религия / эзотерика»: срабатывать только при признаках
+    услуги, продажи или призыва (спам), а не при обычном обсуждении темы.
+    """
+    raw = (text_without_urls_norm if text_without_urls_norm is not None else text_norm) or ""
+    c = normalize_spam_text(raw)
+    if not c:
+        return False
+    squashed = c.replace(" ", "")
+
+    if bool(_MONEY_RE.search(c)) or bool(_MONEY_RE.search(squashed)):
+        return True
+
+    contact_cues = (
+        "в лс",
+        "влс",
+        "в личк",
+        "вличк",
+        "личку",
+        "личке",
+        "пиши в",
+        "пишите в",
+        "напиши в",
+        "напишите в",
+        "в био",
+        "вбио",
+        "в профил",
+        "впрофил",
+        "в описан",
+        "за детал",
+        "по ссылке",
+        "ссылк в опис",
+        "t.me/",
+        "tme/",
+        "tg://",
+        "переход в канал",
+        "заходите в канал",
+    )
+    has_contact = any(x in c for x in contact_cues) or any(x.replace(" ", "") in squashed for x in contact_cues)
+
+    service_cues = (
+        "услуг",
+        "консульт",
+        "консультац",
+        "сеанс",
+        "прайс",
+        "стоимост",
+        "оплат",
+        "перевод на",
+        "скидк",
+        "акци",
+        "распродаж",
+        "заказать",
+        "оформить",
+        "абонемент",
+        "пакет ",
+        "запись открыт",
+        "записываем",
+        "записывайтесь",
+        "записаться",
+        "запишитесь",
+        "набор ",
+        "осталось мест",
+        "мест мало",
+    )
+    has_service = any(x in c for x in service_cues)
+
+    cta_cues = (
+        "подпишись",
+        "подписывайся",
+        "подпишитесь",
+        "переходи",
+        "переходите",
+        "жми сюда",
+        "кто хочет",
+        "пиши плюс",
+        "ставьте плюс",
+        "репост",
+        "рассылк",
+        "вступайте",
+        "залетайте",
+    )
+    has_cta = any(x in c for x in cta_cues)
+
+    if has_contact and (has_cta or has_service):
+        return True
+    if has_cta and has_service:
+        return True
+    return False
+
+
 def find_links(text: str) -> List[str]:
     return [m.group(1) for m in URL_RE.finditer(text or "")]
 
@@ -1829,6 +1923,10 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     use_nazi = bool(getattr(rule, "filter_nazi_enabled", False))
     use_vulgar = bool(getattr(rule, "filter_vulgar_enabled", False))
     use_politics = bool(getattr(rule, "filter_politics_enabled", False))
+    use_religion = bool(getattr(rule, "filter_religion_enabled", False))
+    religion_promo_only = bool(getattr(rule, "filter_religion_promo_only", False))
+    use_esoteric = bool(getattr(rule, "filter_esoteric_enabled", False))
+    esoteric_promo_only = bool(getattr(rule, "filter_esoteric_promo_only", False))
 
     # Узкие словари проверяем РАНЬШЕ profanity, чтобы конкретные категории
     # (обзывательства/реклама/казино/подработки/расизм/нацизм/пошлость) попадали
@@ -1883,6 +1981,46 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
                 log_it=log_enabled,
                 log_extra=("anti-edit" if edited else ""),
             )
+    if use_religion:
+        religion_set = _builtin_words(DEFAULT_RELIGION_ROOTS)
+        hit_religion = profanity_hit(text_norm, religion_set, text_without_urls_norm=text_for_stopwords_norm)
+        if hit_religion:
+            if religion_promo_only and not _religion_esoteric_promo_context(
+                text_norm, text_without_urls_norm=text_for_stopwords_norm
+            ):
+                pass
+            else:
+                _bits = []
+                if edited:
+                    _bits.append("anti-edit")
+                if religion_promo_only:
+                    _bits.append("религия: мягкий режим (объявление/услуга/призыв)")
+                return Verdict(
+                    True, _with_newbie_reason("religion", newbie_win), hit_religion, action,
+                    mute_minutes=mute_min,
+                    log_it=log_enabled,
+                    log_extra="; ".join(_bits),
+                )
+    if use_esoteric:
+        esoteric_set = _builtin_words(DEFAULT_ESOTERIC_ROOTS)
+        hit_esoteric = profanity_hit(text_norm, esoteric_set, text_without_urls_norm=text_for_stopwords_norm)
+        if hit_esoteric:
+            if esoteric_promo_only and not _religion_esoteric_promo_context(
+                text_norm, text_without_urls_norm=text_for_stopwords_norm
+            ):
+                pass
+            else:
+                _bits_e = []
+                if edited:
+                    _bits_e.append("anti-edit")
+                if esoteric_promo_only:
+                    _bits_e.append("эзотерика: мягкий режим (объявление/услуга/призыв)")
+                return Verdict(
+                    True, _with_newbie_reason("esoteric", newbie_win), hit_esoteric, action,
+                    mute_minutes=mute_min,
+                    log_it=log_enabled,
+                    log_extra="; ".join(_bits_e),
+                )
     if use_ads:
         ads_set = _builtin_words(DEFAULT_ADS_ROOTS)
         hit_ads = profanity_hit(text_norm, ads_set, text_without_urls_norm=text_for_stopwords_norm)
@@ -1930,6 +2068,8 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
             - _builtin_words(DEFAULT_NAZI_ROOTS)
             - _builtin_words(DEFAULT_VULGAR_ROOTS)
             - _builtin_words(DEFAULT_POLITICS_ROOTS)
+            - _builtin_words(DEFAULT_RELIGION_ROOTS)
+            - _builtin_words(DEFAULT_ESOTERIC_ROOTS)
         )
         hit_prof = profanity_hit(text_norm, mat_set, text_without_urls_norm=text_for_stopwords_norm)
         if hit_prof:
@@ -2006,9 +2146,11 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
         nazi_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_NAZI_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
         vulgar_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_VULGAR_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
         politics_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_POLITICS_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
-        if has_linkish or prof_probe or jobs_probe or casino_probe or ads_probe or insult_probe or racism_probe or nazi_probe or vulgar_probe or politics_probe:
+        religion_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_RELIGION_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
+        esoteric_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_ESOTERIC_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
+        if has_linkish or prof_probe or jobs_probe or casino_probe or ads_probe or insult_probe or racism_probe or nazi_probe or vulgar_probe or politics_probe or religion_probe or esoteric_probe:
             logger.warning(
-                "[moderation clean diag] chat=%s user=%s link_mode=%s filter_links=%s action=%s prof_on=%s jobs_on=%s casino_on=%s ads_on=%s insults_on=%s politics_on=%s probes(link=%s,prof=%s,jobs=%s,casino=%s,ads=%s,insult=%s,politics=%s) text=%r",
+                "[moderation clean diag] chat=%s user=%s link_mode=%s filter_links=%s action=%s prof_on=%s jobs_on=%s casino_on=%s ads_on=%s insults_on=%s politics_on=%s religion_on=%s esoteric_on=%s probes(link=%s,prof=%s,jobs=%s,casino=%s,ads=%s,insult=%s,politics=%s,religion=%s,esoteric=%s) text=%r",
                 chat_id,
                 user_id,
                 _links_mode,
@@ -2020,6 +2162,8 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
                 use_ads,
                 use_insults,
                 use_politics,
+                use_religion,
+                use_esoteric,
                 has_linkish,
                 bool(prof_probe),
                 bool(jobs_probe),
@@ -2027,6 +2171,8 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
                 bool(ads_probe),
                 bool(insult_probe),
                 bool(politics_probe),
+                bool(religion_probe),
+                bool(esoteric_probe),
                 (text[:180] + "…") if len(text) > 180 else text,
             )
     except Exception:

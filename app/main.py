@@ -178,6 +178,10 @@ _RULES_COLUMNS_008 = (
     ("filter_nazi_enabled", "BOOLEAN", "FALSE"),
     ("filter_vulgar_enabled", "BOOLEAN", "FALSE"),
     ("filter_politics_enabled", "BOOLEAN", "FALSE"),
+    ("filter_religion_enabled", "BOOLEAN", "FALSE"),
+    ("filter_religion_promo_only", "BOOLEAN", "FALSE"),
+    ("filter_esoteric_enabled", "BOOLEAN", "FALSE"),
+    ("filter_esoteric_promo_only", "BOOLEAN", "FALSE"),
     ("delete_left_messages", "BOOLEAN", "TRUE"),
 )
 

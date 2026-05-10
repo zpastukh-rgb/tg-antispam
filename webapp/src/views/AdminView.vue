@@ -38,8 +38,16 @@ function goAdminEmbed(name) {
 /** Синий ADM (Premium): hero как на главной + сетка разделов и вложенные экраны. */
 const premiumAdmSection = ref('')
 const ownerProtectionStatsMode = ref('protection')
+const ownerProtectionReportOpen = ref(false)
+const ownerProtectionReportContext = ref({
+  scope: 'all',
+  chatId: null,
+  chatTitle: '',
+  eligibleChatIds: [],
+})
 function openPremiumAdmCard(key) {
   const k = String(key || '')
+  ownerProtectionReportOpen.value = false
   if (k === 'partner') {
     premiumAdmSection.value = ''
     ownerProtectionStatsMode.value = 'protection'
@@ -73,6 +81,7 @@ function openPremiumAdmCard(key) {
   premiumAdmSection.value = k
 }
 function premiumExitToHome() {
+  ownerProtectionReportOpen.value = false
   premiumAdmSection.value = ''
   tab.value = 'overview'
 }
@@ -124,9 +133,6 @@ const users = ref([])
 const usersPreset = ref('all')
 const showUserInfoModal = ref(false)
 const selectedAdminUser = ref(null)
-/** /api/admin/users/:id/subscription-profile — для карточки как в «Моя подписка» */
-const selectedUserSubscriptionProfile = ref(null)
-const selectedUserSubscriptionLoading = ref(false)
 const chats = ref([])
 const chatsOwnerFilter = ref(0)
 const navBackStack = ref([])
@@ -786,8 +792,6 @@ const showAutopostCampaignsUi = computed(
 const plActivitySummary = ref(null)
 const plActivityBreakdown = ref(null)
 const plActivityJournal = ref([])
-const showPartnerEventsModal = ref(false)
-const showPartnerSpendModal = ref(false)
 const showPartnerGroupsModal = ref(false)
 const partnerGroupsTab = ref('all')
 const showPartnerJoinsModal = ref(false)
@@ -839,8 +843,6 @@ const partnerSlotDetailData = ref({ joins: [], moderation: [] })
 const showPartnerSegmentModal = ref(false)
 const partnerOverlayOpen = computed(
   () =>
-    showPartnerEventsModal.value ||
-    showPartnerSpendModal.value ||
     showPartnerGroupsModal.value ||
     showPartnerJoinsModal.value ||
     showPartnerHourlyModal.value ||
@@ -921,6 +923,8 @@ function partnerReasonRu(reason) {
     jobs: 'Подработки',
     casino: 'Казино',
     politics: 'Анти-политика',
+    religion: 'Религия',
+    esoteric: 'Эзотерика / магия',
     silence: 'Тишина',
   }
   if (map[raw]) return map[raw]
@@ -1099,20 +1103,6 @@ const PARTNER_HELP = {
     lines: [
       'На главной — короткая сводка за последние 24 часа; в окне можно развернуть период и разрез по чатам.',
       'Считаю те же события, что в журнале: удаления, муты, баны и остальное по правилам чата.',
-    ],
-  },
-  journal: {
-    shortTitle: 'Журнал за сутки',
-    lines: [
-      'Здесь последние действия защиты: что снял с эфира, кого приглушил или выгнал.',
-      'Кнопки у строки появляются только там, где они реально нужны — не предлагаю разбан без бана.',
-    ],
-  },
-  spend: {
-    shortTitle: 'Списания ⚡',
-    lines: [
-      'Рассылка и автопост едят токены: сначала AURUM ✨, потом подписочные ⚡ — так честнее для кошелька.',
-      'Сколько снял за конкретный прогон, смотри в деталях; всё по тарифу, без сюрпризов.',
     ],
   },
   discussion: {
@@ -1563,8 +1553,22 @@ function selectPartnerChatFromList(chatId) {
   loadPartnerHourlyActivity()
 }
 
-function openPartnerEventsModal() {
-  showPartnerEventsModal.value = true
+function closeOwnerProtectionReport() {
+  ownerProtectionReportOpen.value = false
+}
+function onOwnerProtectionReportContextChange(next) {
+  const scope = String(next?.scope || 'all')
+  const chatIdNum = Number(next?.chatId || 0)
+  ownerProtectionReportContext.value = {
+    scope: ['all', 'own', 'delegated'].includes(scope) ? scope : 'all',
+    chatId: Number.isFinite(chatIdNum) && chatIdNum !== 0 ? chatIdNum : null,
+    chatTitle: String(next?.chatTitle || ''),
+    eligibleChatIds: Array.isArray(next?.eligibleChatIds)
+      ? next.eligibleChatIds
+        .map((x) => Number(x || 0))
+        .filter((n) => Number.isFinite(n) && n !== 0)
+      : [],
+  }
 }
 
 function partnerJournalActionHidden(ev, kind) {
@@ -1573,7 +1577,80 @@ function partnerJournalActionHidden(ev, kind) {
   return partnerJournalDoneKeys.value.has(`${kind}:${chatId}:${uid}`)
 }
 
-const partnerEvents24h = computed(() => (plActivityJournal.value || []).slice(0, 120))
+const ownerProtectionChatSharingMap = computed(() => {
+  const map = new Map()
+  const rows = Array.isArray(partnerHourlyData.value?.chats) ? partnerHourlyData.value.chats : []
+  for (const row of rows) {
+    const cid = Number(row?.id || 0)
+    if (!cid) continue
+    map.set(cid, !!(row?.is_delegated || row?.is_shared))
+  }
+  return map
+})
+const ownerProtectionChatIdByTitle = computed(() => {
+  const m = new Map()
+  const rows = Array.isArray(partnerHourlyData.value?.chats) ? partnerHourlyData.value.chats : []
+  for (const row of rows) {
+    const cid = Number(row?.id || 0)
+    const title = String(row?.title || '').trim().toLowerCase()
+    if (cid > 0 && title) m.set(title, cid)
+  }
+  return m
+})
+const ownerProtectionReportEvents = computed(() => {
+  const list = (plActivityJournal.value || []).slice(0, 160)
+  const ctx = ownerProtectionReportContext.value || {}
+  const scope = String(ctx.scope || 'all')
+  const targetChatIdRaw = Number(ctx.chatId || 0)
+  const eligible = new Set(
+    (ctx.eligibleChatIds || [])
+      .map((x) => Number(x || 0))
+      .filter((n) => Number.isFinite(n) && n !== 0),
+  )
+  const targetChatId = Number.isFinite(targetChatIdRaw) && targetChatIdRaw !== 0
+    ? targetChatIdRaw
+    : (eligible.size === 1 ? Array.from(eligible)[0] : 0)
+  const sharing = ownerProtectionChatSharingMap.value
+  const titleToId = ownerProtectionChatIdByTitle.value
+  return list.filter((ev) => {
+    const cidRaw = Number(ev?.chat_id || 0)
+    const titleKey = String(ev?.chat_title || '').trim().toLowerCase()
+    const cid = cidRaw > 0 ? cidRaw : Number(titleToId.get(titleKey) || 0)
+    if (targetChatId > 0) return cid === targetChatId
+    if (eligible.size > 0) return eligible.has(cid)
+    if (scope === 'own') return !sharing.get(cid)
+    if (scope === 'delegated') return !!sharing.get(cid)
+    return true
+  })
+})
+const ownerProtectionReportHint = computed(() => {
+  const ctx = ownerProtectionReportContext.value || {}
+  const targetChatIdRaw = Number(ctx.chatId || 0)
+  const eligible = (ctx.eligibleChatIds || [])
+    .map((x) => Number(x || 0))
+    .filter((n) => Number.isFinite(n) && n !== 0)
+  const targetChatId = (Number.isFinite(targetChatIdRaw) && targetChatIdRaw !== 0) ? targetChatIdRaw : (eligible.length === 1 ? eligible[0] : 0)
+  if (targetChatId > 0) {
+    return `Выбран чат: ${ctx.chatTitle || `#${targetChatId}`}. Показаны действия только по нему.`
+  }
+  if (ctx.scope === 'own') return 'Фильтр: свои. Показаны все ваши группы и чаты.'
+  if (ctx.scope === 'delegated') return 'Фильтр: делегированные. Показаны только делегированные группы и чаты.'
+  return 'Фильтр: все. Показаны все группы и чаты.'
+})
+function ownerProtectionReportTimeLabel(iso) {
+  if (!iso) return '—'
+  const dt = new Date(iso)
+  if (Number.isNaN(dt.getTime())) {
+    const s = String(iso)
+    const m = s.match(/(\d{2}):(\d{2})/)
+    return m ? `${m[1]}:${m[2]}` : s
+  }
+  return dt.toLocaleTimeString('ru-RU', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+}
 
 async function loadReferralLite() {
   const [info, people] = await Promise.all([api.referral(), api.referralPeople()])
@@ -3727,21 +3804,33 @@ const filteredAdminUsers = computed(() => {
   return rows
 })
 
+function adminUserPromoDurationLabel(u) {
+  const daysLeft = Number(u?.promo_days_left || 0)
+  if (daysLeft > 0) return `${daysLeft} дн`
+  const purpose = String(u?.promo_purpose || '').trim()
+  const m = purpose.match(/на\s+(\d+)\s*дн/i)
+  if (m) return `${Number(m[1] || 0)} дн`
+  return ''
+}
+
+function adminUserPaymentLabel(u) {
+  const promoCode = String(u?.promo_applied_code || '').trim()
+  if (promoCode) {
+    const dur = adminUserPromoDurationLabel(u)
+    return dur ? `Промокод ${promoCode} (${dur})` : `Промокод ${promoCode}`
+  }
+  const p = String(u?.payment_method_type || '').toLowerCase()
+  if (p.includes('card')) return 'ЮKassa (карта)'
+  if (p.includes('sbp')) return 'ЮKassa (СБП)'
+  if (p.includes('yoo_money')) return 'ЮKassa'
+  if (p) return `ЮKassa (${p})`
+  if (u?.payment_method_bound) return 'ЮKassa'
+  return 'Не оплачивал'
+}
+
 async function openAdminUserInfo(userRow) {
   selectedAdminUser.value = userRow || null
   showUserInfoModal.value = !!userRow
-  selectedUserSubscriptionProfile.value = null
-  const tg = Number(userRow?.telegram_id || 0)
-  if (!tg) return
-  selectedUserSubscriptionLoading.value = true
-  try {
-    const data = await fetchSilent(() => api.adminUserSubscriptionProfile(tg))
-    selectedUserSubscriptionProfile.value = data
-  } catch {
-    selectedUserSubscriptionProfile.value = null
-  } finally {
-    selectedUserSubscriptionLoading.value = false
-  }
 }
 
 function adminNavSnapshot() {
@@ -5250,6 +5339,11 @@ onMounted(async () => {
       tab.value = 'ops'
       opsInnerTab.value = String(route.query.ops || '').toLowerCase() === 'journal' ? 'journal' : 'pulse'
     }
+    if (isOwnerCabinet.value && String(route.query.open || '').toLowerCase() === 'stats_reports') {
+      tab.value = 'overview'
+      premiumAdmSection.value = 'protection'
+      ownerProtectionStatsMode.value = 'protection'
+    }
   } catch (e) {
     error.value = String(e?.body?.detail || e?.message || 'Нет доступа')
   } finally {
@@ -5450,6 +5544,7 @@ watch(
     bcSendTargetModalOpen.value ||
     bcSendModalOpen.value ||
     bcConfirmModalOpen.value ||
+    showUserInfoModal.value ||
     bcShowBotsPicker.value ||
     bcCampaignUxOpen.value ||
     bcCampaignUxRecipientPickerOpen.value,
@@ -5604,7 +5699,40 @@ watch(
           </div>
         </template>
         <template v-else-if="premiumAdmSection === 'protection'">
-          <div class="col-span-2 min-h-0">
+          <div
+            v-if="isOwnerCabinet && !meAdminProfile?.is_premium"
+            class="col-span-2 overflow-hidden rounded-[1.15rem] border border-violet-500/35 bg-gradient-to-br from-violet-950/50 via-[#0c0a14] to-black p-4 text-center shadow-[0_0_40px_-12px_rgba(139,92,246,0.45)] ring-1 ring-violet-400/20"
+          >
+            <div
+              class="mx-auto flex h-12 w-12 items-center justify-center rounded-full border-2 border-violet-400/50 bg-violet-950/80 text-2xl shadow-[0_0_28px_rgba(167,139,250,0.4)]"
+              aria-hidden="true"
+            >
+              😈
+            </div>
+            <p class="mt-3 text-[11px] font-extrabold uppercase tracking-[0.18em] text-violet-300">Guard · статистика</p>
+            <p class="mx-auto mt-2 max-w-md text-[13px] leading-relaxed text-slate-300">
+              На Free тарифе счётчики намеренно скрыты: здесь всё было бы «нулями» без реальной аналитики. Подключите
+              <b class="text-violet-200">Premium Guard</b>, чтобы видеть удаления, вступления и отчёты по вашим чатам.
+            </p>
+            <button
+              type="button"
+              class="mt-4 w-full max-w-sm rounded-2xl bg-violet-600 py-3 text-sm font-bold text-white shadow-[0_12px_32px_-8px_rgba(124,58,237,0.55)] transition hover:bg-violet-500 active:scale-[0.99]"
+              @click="goOwnerSubscriptionPage"
+            >
+              Оформить Premium
+            </button>
+          </div>
+          <div v-else class="col-span-2 min-h-0 space-y-2">
+            <div class="flex items-center justify-between gap-2 rounded-2xl bg-gradient-to-r from-cyan-950/70 via-sky-950/60 to-indigo-950/70 px-3 py-2.5 ring-1 ring-cyan-300/20">
+              <button
+                type="button"
+                class="rounded-xl border border-cyan-400/35 bg-cyan-500/10 px-3 py-1.5 text-[11px] font-semibold text-cyan-100 shadow-[0_10px_24px_-16px_rgba(34,211,238,0.75)] transition hover:bg-cyan-500/20"
+                @click="ownerProtectionReportOpen = !ownerProtectionReportOpen"
+              >
+                {{ ownerProtectionReportOpen ? 'Скрыть подробный отчёт' : 'Подробный отчёт' }}
+              </button>
+              <p class="text-[11px] text-cyan-100/75">Разбан / размут доступны прямо в отчёте</p>
+            </div>
             <OwnerCabinetProtectionStats
               :summary="plActivitySummary || {}"
               :hourly-data="partnerHourlyData"
@@ -5613,7 +5741,80 @@ watch(
               :mode="ownerProtectionStatsMode"
               @period-change="onOwnerStatsPeriodChange"
               @open-groups="openPartnerGroupsModal"
+              @report-context-change="onOwnerProtectionReportContextChange"
             />
+            <div
+              v-if="ownerProtectionReportOpen"
+              class="rounded-[24px] bg-gradient-to-br from-[#050b1f]/96 via-[#09132d]/95 to-[#02050e]/98 p-3 shadow-[0_35px_90px_-36px_rgba(6,182,212,0.7)] ring-1 ring-cyan-300/20 backdrop-blur-2xl"
+            >
+              <div class="mb-2 flex items-center justify-between">
+                <p class="text-base font-semibold text-white drop-shadow-[0_0_16px_rgba(34,211,238,0.35)]">Подробный отчёт по защите</p>
+                <button
+                  type="button"
+                  class="inline-flex h-8 w-8 items-center justify-center rounded-full bg-white/10 text-cyan-100 transition hover:bg-white/15"
+                  @click="closeOwnerProtectionReport"
+                >
+                  ✕
+                </button>
+              </div>
+              <p class="mb-2 text-[11px] text-cyan-100/85">
+                Удалений за 24ч: <b>{{ Number(plActivitySummary?.today?.deleted || 0) }}</b>. {{ ownerProtectionReportHint }}
+              </p>
+              <div class="max-h-[52vh] space-y-1 overflow-y-auto pr-1">
+                <div
+                  v-for="(ev, ei) in ownerProtectionReportEvents"
+                  :key="`owner-protection-report-${ei}-${ev.created_at}-${ev.user_id}`"
+                  class="rounded-xl px-2.5 py-2 text-[11px] ring-1 backdrop-blur-md"
+                  :class="partnerNormalizeAction(ev.action) === 'observe'
+                    ? 'bg-gradient-to-br from-red-950/60 via-rose-950/55 to-red-900/50 text-red-100 ring-red-300/35'
+                    : 'bg-gradient-to-br from-slate-900/75 via-slate-900/65 to-slate-800/60 text-slate-100 ring-cyan-300/20'"
+                >
+                  <div class="flex flex-wrap items-center gap-1 text-[10px] text-slate-300/80">
+                    <span>{{ ownerProtectionReportTimeLabel(ev.created_at) }}</span>
+                    <span>·</span>
+                    <span class="font-mono">{{ ev.chat_title }}</span>
+                  </div>
+                  <p class="mt-0.5 font-semibold">
+                    <a
+                      v-if="partnerUserHref(ev)"
+                      href="#"
+                      class="text-sky-300 underline decoration-sky-500/50 underline-offset-2 hover:text-sky-200"
+                      @click.prevent.stop="openExternalLink(partnerUserHref(ev))"
+                    >{{ partnerUserLabel(ev) }}</a>
+                    <span v-else>{{ partnerUserLabel(ev) }}</span>
+                    · {{ partnerActionLabelRu(ev.action) }}
+                    <span v-if="partnerNormalizeAction(ev.action) === 'delete' || partnerNormalizeAction(ev.action) === 'observe'"> · {{ partnerReasonRu(ev.reason) }}</span>
+                  </p>
+                  <div class="mt-1.5 flex flex-wrap gap-1.5">
+                    <button
+                      v-if="partnerNormalizeAction(ev.action) === 'mute' && !partnerJournalActionHidden(ev, 'mute')"
+                      type="button"
+                      class="rounded-md bg-emerald-500/80 px-2 py-1 text-[10px] font-semibold text-white shadow-[0_10px_20px_-10px_rgba(16,185,129,0.85)]"
+                      @click="partnerQuickUnmute(ev)"
+                    >
+                      Размут
+                    </button>
+                    <button
+                      v-if="partnerNormalizeAction(ev.action) === 'ban' && !partnerJournalActionHidden(ev, 'ban')"
+                      type="button"
+                      class="rounded-md bg-indigo-500/85 px-2 py-1 text-[10px] font-semibold text-white shadow-[0_10px_20px_-10px_rgba(99,102,241,0.85)]"
+                      @click="partnerQuickUnban(ev)"
+                    >
+                      Разбан
+                    </button>
+                    <button
+                      v-if="partnerNormalizeAction(ev.action) === 'observe'"
+                      type="button"
+                      class="rounded-md bg-amber-500/85 px-2 py-1 text-[10px] font-semibold text-slate-950 shadow-[0_10px_20px_-10px_rgba(251,191,36,0.85)]"
+                      @click="partnerQuickObserve(ev)"
+                    >
+                      Замечено
+                    </button>
+                  </div>
+                </div>
+                <p v-if="!(ownerProtectionReportEvents || []).length" class="py-6 text-center text-[11px] text-slate-400">Пока нет событий.</p>
+              </div>
+            </div>
           </div>
         </template>
         <template v-else-if="premiumAdmSection === 'updates'">
@@ -5632,119 +5833,6 @@ watch(
             </button>
           </div>
         </template>
-      </template>
-      <template v-else-if="showPersonalPartnerOverview && showFullAdminShell">
-        <div class="col-span-2 rounded-xl border border-slate-600 bg-slate-900/80 p-3 text-slate-100">
-          <p class="text-xs font-semibold text-lime-300/90">Статистика защиты (ваши группы)</p>
-          <p class="mt-1 text-[11px] text-slate-400">Управление по вашим подключённым группам/каналам: активность, подключения, удаления, расходы и отчёты в личку.</p>
-        </div>
-        <div
-          role="button"
-          tabindex="0"
-          class="relative cursor-pointer select-none rounded-xl border border-cyan-500/45 bg-cyan-950/30 p-3 pt-9 text-left shadow-[0_0_18px_-8px_rgba(34,211,238,0.55)] outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
-          @click="openPartnerGroupsModal"
-          @keydown.enter.prevent="openPartnerGroupsModal"
-          @keydown.space.prevent="openPartnerGroupsModal"
-        >
-          <button
-            type="button"
-            v-bind="partnerHelpBind('chatList')"
-            @click.stop.prevent="partnerShowHelp('chatList')"
-            @mousedown.stop
-          >
-            i
-          </button>
-          <p class="text-[10px] font-semibold uppercase tracking-wide text-cyan-200/90">Группы</p>
-          <p class="mt-1 text-lg font-extrabold text-cyan-100">
-            {{ Number((plActivitySummary?.groups_count ?? plActivitySummary?.chats_count) || 0) }} / {{ Number((plActivitySummary?.groups_limit ?? plActivitySummary?.chat_limit) || 0) }}
-          </p>
-          <p class="text-[10px] text-cyan-100/75">лимиты считаются отдельно</p>
-        </div>
-        <div
-          role="button"
-          tabindex="0"
-          class="relative cursor-pointer select-none rounded-xl border border-amber-500/45 bg-amber-950/30 p-3 pt-9 text-left shadow-[0_0_18px_-8px_rgba(251,191,36,0.45)] outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
-          @click="openPartnerGroupsModal"
-          @keydown.enter.prevent="openPartnerGroupsModal"
-          @keydown.space.prevent="openPartnerGroupsModal"
-        >
-          <button
-            type="button"
-            v-bind="partnerHelpBind('chatList')"
-            @click.stop.prevent="partnerShowHelp('chatList')"
-            @mousedown.stop
-          >
-            i
-          </button>
-          <p class="text-[10px] font-semibold uppercase tracking-wide text-amber-200/90">Каналы</p>
-          <p class="mt-1 text-lg font-extrabold text-amber-100">
-            {{ Number(plActivitySummary?.channels_count || 0) }} / {{ Number((plActivitySummary?.channels_limit ?? plActivitySummary?.channel_limit) || 0) }}
-          </p>
-          <p class="text-[10px] text-amber-100/75">лимиты считаются отдельно</p>
-        </div>
-        <div
-          role="button"
-          tabindex="0"
-          class="relative cursor-pointer select-none rounded-xl border border-violet-500/45 bg-violet-950/30 p-3 pt-9 text-left shadow-[0_0_18px_-8px_rgba(139,92,246,0.55)] outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60"
-          @click="openPartnerJoinsModal"
-          @keydown.enter.prevent="openPartnerJoinsModal"
-          @keydown.space.prevent="openPartnerJoinsModal"
-        >
-          <button
-            type="button"
-            v-bind="partnerHelpBind('dayCounter')"
-            @click.stop.prevent="partnerShowHelp('dayCounter')"
-            @mousedown.stop
-          >
-            i
-          </button>
-          <p class="text-[10px] font-semibold uppercase tracking-wide text-violet-200/90">Подключились</p>
-          <p class="mt-1 text-lg font-extrabold text-violet-100">{{ Number(plActivitySummary?.today?.joins || 0) }}</p>
-          <p class="text-[10px] text-violet-100/75">за 24ч (все группы/каналы)</p>
-          <p class="mt-0.5 text-[9px] text-violet-200/60">Период пресета: {{ partnerJoinsOverviewHint }}</p>
-        </div>
-        <div
-          role="button"
-          tabindex="0"
-          class="relative cursor-pointer select-none rounded-xl border border-emerald-500/45 bg-emerald-950/30 p-3 pt-9 text-left shadow-[0_0_18px_-8px_rgba(16,185,129,0.55)] outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/60"
-          @click="openPartnerEventsModal"
-          @keydown.enter.prevent="openPartnerEventsModal"
-          @keydown.space.prevent="openPartnerEventsModal"
-        >
-          <button
-            type="button"
-            v-bind="partnerHelpBind('journal')"
-            @click.stop.prevent="partnerShowHelp('journal')"
-            @mousedown.stop
-          >
-            i
-          </button>
-          <p class="text-[10px] font-semibold uppercase tracking-wide text-emerald-200/90">За 24ч удалений</p>
-          <p class="mt-1 text-lg font-extrabold text-emerald-100">{{ Number(plActivitySummary?.today?.deleted || 0) }}</p>
-          <p class="text-[10px] text-emerald-100/75">последние события и действия</p>
-        </div>
-        <div
-          role="button"
-          tabindex="0"
-          class="relative cursor-pointer select-none rounded-xl border border-fuchsia-400/45 bg-fuchsia-900/25 p-3 pt-9 text-left shadow-[0_0_18px_-8px_rgba(217,70,239,0.55)] outline-none focus-visible:ring-2 focus-visible:ring-fuchsia-400/60"
-          @click="showPartnerSpendModal = true"
-          @keydown.enter.prevent="showPartnerSpendModal = true"
-          @keydown.space.prevent="showPartnerSpendModal = true"
-        >
-          <button
-            type="button"
-            v-bind="partnerHelpBind('spend')"
-            @click.stop.prevent="partnerShowHelp('spend')"
-            @mousedown.stop
-          >
-            i
-          </button>
-          <p class="text-[10px] font-semibold uppercase tracking-wide text-fuchsia-200/90">Расходы</p>
-          <p class="mt-1 text-lg font-extrabold text-fuchsia-100">
-            {{ Number(meAdminProfile?.broadcast_spend_tokens || 0) }} ⚡
-          </p>
-          <p class="text-[10px] text-fuchsia-100/75">на рассылки и автопост</p>
-        </div>
       </template>
       <template v-if="showFullAdminShell && data">
         <div class="col-span-2 rounded-xl border border-cyan-500/35 bg-slate-950/90 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
@@ -5823,7 +5911,8 @@ watch(
           <span class="rounded-full border border-white/20 bg-white/10 px-2 py-0.5 text-slate-200">{{ userOnlineState(u.last_webapp_seen_at).label }}</span>
         </div>
         <p class="mt-1 text-[9px] text-slate-500">
-          Согласия: док. {{ u.legal_bundle_accepted_at ? '✓' : '—' }} · ПД {{ u.legal_pd_accepted_at ? '✓' : '—' }} · марк. {{ u.legal_marketing_opt_in ? 'да' : 'нет' }}
+          Согласия: пакет документов — <b>{{ u.legal_bundle_accepted_at ? 'да' : 'нет' }}</b> · ПД —
+          <b>{{ u.legal_pd_accepted_at ? 'да' : 'нет' }}</b> · маркетинг — <b>{{ u.legal_marketing_opt_in ? 'да' : 'нет' }}</b>
         </p>
         <div class="mt-2">
           <div class="flex flex-wrap gap-2">
@@ -5868,16 +5957,8 @@ watch(
           <span v-if="selectedAdminUser.username" class="ml-1 text-cyan-300">@{{ selectedAdminUser.username }}</span>
           <span class="ml-1 text-xs text-slate-400">ID {{ selectedAdminUser.telegram_id }}</span>
         </p>
-        <p v-if="selectedUserSubscriptionLoading" class="mt-2 text-xs text-slate-400">Загрузка подписки…</p>
-        <div v-else-if="selectedUserSubscriptionProfile" class="mt-3 -mx-1 max-h-[min(70vh,480px)] overflow-y-auto">
-          <SubscriptionManagementPanel
-            :profile="selectedUserSubscriptionProfile"
-            variant="embedded"
-            :read-only="true"
-            :hide-embedded-hint="true"
-          />
-        </div>
         <div class="mt-2 space-y-1 text-[11px] text-slate-300">
+          <p>Способ оплаты/активации: <b>{{ adminUserPaymentLabel(selectedAdminUser) }}</b></p>
           <p>AURUM: <b>{{ selectedAdminUser.aurum_tokens || 0 }} ✨</b> · Партнёрские: <b>{{ selectedAdminUser.partner_tokens }} ⚡</b></p>
           <p>Первый /start: <b>{{ fmtUserSeenAt(selectedAdminUser.first_start_at) }}</b> · Регистрация: <b>{{ fmtUserSeenAt(selectedAdminUser.created_at) }}</b></p>
           <p>В панели: <b>{{ fmtUserSeenAt(selectedAdminUser.last_webapp_seen_at) }}</b> · Статус: <b>{{ userOnlineState(selectedAdminUser.last_webapp_seen_at).label }}</b></p>
@@ -5896,12 +5977,17 @@ watch(
           </p>
           <p v-else>Промокод не активирован.</p>
           <p class="mt-2 border-t border-white/10 pt-2">
-            Согласия:
-            <b class="text-emerald-300">{{ selectedAdminUser.legal_bundle_accepted_at ? '✓ пакет ' + fmtUserSeenAt(selectedAdminUser.legal_bundle_accepted_at) : '— пакет' }}</b>
-            ·
-            <b class="text-emerald-300">{{ selectedAdminUser.legal_pd_accepted_at ? '✓ ПД ' + fmtUserSeenAt(selectedAdminUser.legal_pd_accepted_at) : '— ПД' }}</b>
-            ·
-            <b class="text-sky-300">маркетинг: {{ selectedAdminUser.legal_marketing_opt_in ? 'да' : 'нет' }}</b>
+            <span class="font-semibold text-slate-200">Согласия (юр.):</span>
+            пакет документов —
+            <b class="text-emerald-300">{{ selectedAdminUser.legal_bundle_accepted_at ? 'да' : 'нет' }}</b>
+            <span v-if="selectedAdminUser.legal_bundle_accepted_at" class="text-slate-500">
+              ({{ fmtUserSeenAt(selectedAdminUser.legal_bundle_accepted_at) }})</span>
+            · обработка ПД —
+            <b class="text-emerald-300">{{ selectedAdminUser.legal_pd_accepted_at ? 'да' : 'нет' }}</b>
+            <span v-if="selectedAdminUser.legal_pd_accepted_at" class="text-slate-500">
+              ({{ fmtUserSeenAt(selectedAdminUser.legal_pd_accepted_at) }})</span>
+            · маркетинг —
+            <b class="text-sky-300">{{ selectedAdminUser.legal_marketing_opt_in ? 'да' : 'нет' }}</b>
           </p>
         </div>
       </div>
@@ -6855,6 +6941,11 @@ watch(
       <div
         class="min-w-0 space-y-2.5 px-4 py-3 md:px-6 pb-[max(5.25rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))] md:pb-[max(6rem,calc(6.5rem+env(safe-area-inset-bottom,0px)))]"
       >
+      <CabinetPremiumTitleBar
+        v-if="isOwnerCabinet && !showFullAdminShell"
+        :profile="meAdminProfile"
+        @go-subscription="goOwnerSubscriptionPage"
+      />
       <div class="rounded-2xl border border-white/[0.08] bg-gradient-to-b from-[#0f141d]/94 via-[#0c1017]/96 to-black/95 px-3 py-3 shadow-[0_18px_48px_-24px_rgba(0,0,0,0.95)] ring-1 ring-white/[0.05]">
         <p class="text-[24px] font-black leading-none tracking-tight text-white">Рассылки</p>
         <p class="mt-1 text-[12px] leading-snug text-zinc-300">Отправляйте сообщения один раз в каналы, группы или боты.</p>
@@ -8991,95 +9082,6 @@ watch(
           <button type="button" class="bc-tool-btn" @click="bcShowLinkInfo = false">✕</button>
         </div>
         <p class="break-all text-sm text-slate-200">{{ bcActiveLinkUrl || 'Курсор не внутри ссылки' }}</p>
-      </div>
-    </div>
-
-    <div
-      v-if="showPartnerEventsModal"
-      class="fixed inset-0 z-[65] flex items-end justify-center bg-black/70 p-3 md:items-center"
-      @click.self="showPartnerEventsModal = false"
-    >
-      <div
-        class="flex h-[min(85vh,calc(100dvh-24px))] max-h-[85vh] w-full max-w-2xl min-h-0 flex-col overflow-hidden rounded-2xl border border-cyan-400/50 bg-slate-950 p-4 shadow-2xl"
-        @click.stop
-      >
-        <div class="mb-2 flex shrink-0 items-center justify-between">
-          <p class="text-base font-semibold text-white">Последние события защиты (24ч)</p>
-          <button type="button" class="bc-tool-btn" @click="showPartnerEventsModal = false">✕</button>
-        </div>
-        <p class="mb-2 shrink-0 text-[11px] text-slate-300">Удалений за 24ч: <b>{{ Number(plActivitySummary?.today?.deleted || 0) }}</b>. Ниже последние события с релевантными действиями.</p>
-        <div class="min-h-0 flex-1 touch-pan-y space-y-1 overflow-y-auto overscroll-y-contain pr-1">
-          <div
-            v-for="(ev, ei) in partnerEvents24h"
-            :key="`plj-modal-${ei}-${ev.created_at}-${ev.user_id}`"
-            class="rounded-lg border px-2 py-2 text-[11px]"
-            :class="partnerNormalizeAction(ev.action) === 'observe'
-              ? 'border-red-500/60 bg-red-950/40 text-red-100'
-              : 'border-slate-700 bg-slate-800/80 text-slate-200'"
-          >
-            <div class="flex flex-wrap items-center gap-1 text-[10px] text-slate-400">
-              <span>{{ ev.created_at }}</span>
-              <span>·</span>
-              <span class="font-mono">{{ ev.chat_title }}</span>
-            </div>
-            <p class="mt-0.5 font-semibold">
-              <a
-                v-if="partnerUserHref(ev)"
-                href="#"
-                class="text-sky-300 underline decoration-sky-500/50 underline-offset-2 hover:text-sky-200"
-                @click.prevent.stop="openExternalLink(partnerUserHref(ev))"
-              >{{ partnerUserLabel(ev) }}</a>
-              <span v-else>{{ partnerUserLabel(ev) }}</span>
-              · {{ partnerActionLabelRu(ev.action) }}
-              <span v-if="partnerNormalizeAction(ev.action) === 'delete' || partnerNormalizeAction(ev.action) === 'observe'"> · {{ partnerReasonRu(ev.reason) }}</span>
-            </p>
-            <div class="mt-1.5 flex flex-wrap gap-1.5">
-              <button
-                v-if="partnerNormalizeAction(ev.action) === 'mute' && !partnerJournalActionHidden(ev, 'mute')"
-                type="button"
-                class="rounded-md bg-emerald-700 px-2 py-1 text-[10px] font-semibold text-white"
-                @click="partnerQuickUnmute(ev)"
-              >
-                Размут
-              </button>
-              <button
-                v-if="partnerNormalizeAction(ev.action) === 'ban' && !partnerJournalActionHidden(ev, 'ban')"
-                type="button"
-                class="rounded-md bg-indigo-700 px-2 py-1 text-[10px] font-semibold text-white"
-                @click="partnerQuickUnban(ev)"
-              >
-                Разбан
-              </button>
-              <button
-                v-if="partnerNormalizeAction(ev.action) === 'observe'"
-                type="button"
-                class="rounded-md bg-amber-700 px-2 py-1 text-[10px] font-semibold text-white"
-                @click="partnerQuickObserve(ev)"
-              >
-                Замечено
-              </button>
-            </div>
-          </div>
-          <p v-if="!(partnerEvents24h || []).length" class="py-6 text-center text-[11px] text-slate-500">Пока нет событий.</p>
-        </div>
-      </div>
-    </div>
-
-    <div
-      v-if="showPartnerSpendModal"
-      class="fixed inset-0 z-[66] flex items-center justify-center bg-black/70 p-3 pb-[calc(4.5rem+env(safe-area-inset-bottom,0px))] md:pb-6"
-      @click.self="showPartnerSpendModal = false"
-    >
-      <div class="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-2xl border border-fuchsia-400/50 bg-slate-950 p-4 shadow-2xl">
-        <div class="mb-2 flex items-center justify-between">
-          <p class="text-base font-semibold text-white">Расходы на рассылки</p>
-          <button type="button" class="bc-tool-btn" @click="showPartnerSpendModal = false">✕</button>
-        </div>
-        <div class="space-y-1 text-sm text-slate-200">
-          <p>Всего списано: <b>{{ Number(meAdminProfile?.broadcast_spend_tokens || 0) }} ⚡</b></p>
-          <p>Из подписки: <b>{{ Number(meAdminProfile?.broadcast_spend_sub_tokens || 0) }} ⚡</b></p>
-          <p>Из AURUM: <b>{{ Number(meAdminProfile?.broadcast_spend_aurum_tokens || 0) }} ✨</b></p>
-        </div>
       </div>
     </div>
 

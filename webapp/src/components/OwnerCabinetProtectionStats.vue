@@ -10,7 +10,7 @@ const props = defineProps({
   mode: { type: String, default: 'protection' },
 })
 
-const emit = defineEmits(['period-change', 'open-groups'])
+const emit = defineEmits(['period-change', 'open-groups', 'report-context-change'])
 
 const statsPeriod = ref(props.periodKey || 'today')
 const statsType = ref('all')
@@ -69,6 +69,8 @@ const REASON_LABEL_MAP = {
   casino: 'Казино / ставки',
   jobs: 'Подработки',
   politics: 'Анти-политика',
+  religion: 'Религия',
+  esoteric: 'Эзотерика / магия',
   buttons: 'Кнопки',
   antinakrutka: 'Анти-накрутка',
   flood: 'Флуд',
@@ -115,6 +117,17 @@ const selectedScopeChatRow = computed(() => {
   if (inScoped) return inScoped
   return chats.value.find((c) => String(c?.id) === id) || null
 })
+const reportContextPayload = computed(() => ({
+  scope: String(statsScope.value || 'all'),
+  chatId: selectedChatId.value === 'all' ? null : Number(selectedChatId.value || 0),
+  chatTitle: String(selectedScopeChatRow.value?.title || ''),
+  eligibleChatIds:
+    selectedChatId.value === 'all'
+      ? availableScopeChats.value
+        .map((c) => Number(c?.id || 0))
+        .filter((n) => Number.isFinite(n) && n !== 0)
+      : [Number(selectedChatId.value || 0)].filter((n) => Number.isFinite(n) && n !== 0),
+}))
 
 function normalizeReason(reason) {
   const raw = String(reason || '').trim().toLowerCase()
@@ -184,9 +197,11 @@ async function loadBreakdown() {
   breakdownLoading.value = true
   try {
     const period = statsPeriod.value === '6m' ? '180d' : statsPeriod.value === '1y' ? '365d' : statsPeriod.value
-    const chatId = selectedChatId.value === 'all' ? null : Number(selectedChatId.value || 0)
+    const chatIdRaw = selectedChatId.value === 'all' ? null : Number(selectedChatId.value || 0)
+    const hasChatId = chatIdRaw != null && Number.isFinite(Number(chatIdRaw)) && Number(chatIdRaw) !== 0
+    const chatId = hasChatId ? Number(chatIdRaw) : null
     const base = await api.activityBreakdown(period, statsScope.value, null)
-    if (chatId && chatId > 0) {
+    if (chatId != null) {
       // Для выбранного чата используем activityBreakdown с chat_id:
       // этот эндпоинт возвращает полную детализацию (by_reason/by_hour/heatmap),
       // в отличие от group-breakdown (там buckets только для карточек).
@@ -220,6 +235,7 @@ watch(statsScope, () => {
   breakdownData.value = null
 })
 watch(availableScopeChats, (rows) => {
+  if (!Array.isArray(rows) || rows.length === 0) return
   if (selectedChatId.value === 'all') return
   const ok = rows.some((c) => String(c?.id) === String(selectedChatId.value))
   if (!ok) selectedChatId.value = 'all'
@@ -230,6 +246,13 @@ watch([statsPeriod, statsScope, selectedChatId], () => {
   threatDetails.value = {}
   threatLoadingId.value = ''
 })
+watch(
+  reportContextPayload,
+  (ctx) => {
+    emit('report-context-change', ctx)
+  },
+  { immediate: true, deep: true },
+)
 
 const reasonRows = computed(() => {
   const arrRows = Array.isArray(breakdownData.value?.by_reason)
@@ -544,6 +567,31 @@ function onPeriodPick(key) {
   statsPeriod.value = key
   emit('period-change', { key })
 }
+function emitReportContextNow() {
+  emit('report-context-change', {
+    scope: String(statsScope.value || 'all'),
+    chatId: selectedChatId.value === 'all' ? null : Number(selectedChatId.value || 0),
+    chatTitle: String(selectedScopeChatRow.value?.title || ''),
+    eligibleChatIds:
+      selectedChatId.value === 'all'
+        ? availableScopeChats.value
+          .map((c) => Number(c?.id || 0))
+          .filter((n) => Number.isFinite(n) && n !== 0)
+        : [Number(selectedChatId.value || 0)].filter((n) => Number.isFinite(n) && n !== 0),
+  })
+}
+function pickStatsScope(scopeKey) {
+  statsScope.value = String(scopeKey || 'all')
+  emitReportContextNow()
+}
+function pickScopeAllChats() {
+  selectedChatId.value = 'all'
+  emitReportContextNow()
+}
+function pickScopeChat(chatId) {
+  selectedChatId.value = String(chatId || 'all')
+  emitReportContextNow()
+}
 
 const touchStartX = ref(null)
 function onTouchStart(e) { touchStartX.value = e.changedTouches?.[0]?.clientX ?? null }
@@ -593,12 +641,12 @@ onUnmounted(() => {
         </button>
       </div>
       <div class="grid grid-cols-3 gap-2">
-        <button v-for="s in SCOPE_TABS" :key="s.key" type="button" class="rounded-xl border px-2.5 py-2 text-[11px] font-semibold transition" :class="statsScope === s.key ? 'border-emerald-400/70 bg-emerald-500/15 text-emerald-100' : 'border-white/10 bg-white/[0.04] text-slate-300'" @click="statsScope = s.key">
+        <button v-for="s in SCOPE_TABS" :key="s.key" type="button" class="rounded-xl border px-2.5 py-2 text-[11px] font-semibold transition" :class="statsScope === s.key ? 'border-emerald-400/70 bg-emerald-500/15 text-emerald-100' : 'border-white/10 bg-white/[0.04] text-slate-300'" @click="pickStatsScope(s.key)">
           {{ s.label }}
         </button>
       </div>
       <div v-if="statsScope !== 'all' && availableScopeChats.length" class="flex gap-2 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        <button type="button" class="shrink-0 rounded-full px-3 py-1.5 text-[11px] font-semibold transition" :class="pillActiveClass(selectedChatId === 'all')" @click="selectedChatId = 'all'">
+        <button type="button" class="shrink-0 rounded-full px-3 py-1.5 text-[11px] font-semibold transition" :class="pillActiveClass(selectedChatId === 'all')" @click="pickScopeAllChats()">
           Все группы
         </button>
         <button
@@ -607,7 +655,7 @@ onUnmounted(() => {
           type="button"
           class="shrink-0 rounded-full px-3 py-1.5 text-[11px] font-semibold transition"
           :class="pillActiveClass(String(selectedChatId) === String(c.id))"
-          @click="selectedChatId = String(c.id)"
+          @click="pickScopeChat(c.id)"
         >
           {{ c.title || c.id }}
         </button>

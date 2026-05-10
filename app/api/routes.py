@@ -878,6 +878,10 @@ def _rule_to_dict(rule: Rule, stopwords_count: int = 0) -> dict:
         "filter_nazi_enabled": bool(getattr(rule, "filter_nazi_enabled", False)),
         "filter_vulgar_enabled": bool(getattr(rule, "filter_vulgar_enabled", False)),
         "filter_politics_enabled": bool(getattr(rule, "filter_politics_enabled", False)),
+        "filter_religion_enabled": bool(getattr(rule, "filter_religion_enabled", False)),
+        "filter_religion_promo_only": bool(getattr(rule, "filter_religion_promo_only", False)),
+        "filter_esoteric_enabled": bool(getattr(rule, "filter_esoteric_enabled", False)),
+        "filter_esoteric_promo_only": bool(getattr(rule, "filter_esoteric_promo_only", False)),
         "reputation_enabled": bool(getattr(rule, "reputation_enabled", False)),
         "log_enabled": bool(rule.log_enabled),
         "guardian_messages_enabled": bool(getattr(rule, "guardian_messages_enabled", True)),
@@ -2908,6 +2912,8 @@ async def api_chat_rule(
         "filter_profanity_enabled", "filter_jobs_enabled", "filter_casino_enabled",
         "filter_ads_enabled", "filter_insults_enabled",
         "filter_racism_enabled", "filter_nazi_enabled", "filter_vulgar_enabled", "filter_politics_enabled",
+        "filter_religion_enabled", "filter_religion_promo_only",
+        "filter_esoteric_enabled", "filter_esoteric_promo_only",
         "reputation_enabled",
         "log_enabled",
         "guardian_messages_enabled",
@@ -6243,6 +6249,8 @@ async def api_activity_breakdown(
         "nazi": _filter_enabled("filter_nazi_enabled", False),
         "vulgar": _filter_enabled("filter_vulgar_enabled", False),
         "politics": _filter_enabled("filter_politics_enabled", False),
+        "religion": _filter_enabled("filter_religion_enabled", False),
+        "esoteric": _filter_enabled("filter_esoteric_enabled", False),
         "link": (
             _filter_enabled("filter_links", True)
             and any(str(getattr(r, "filter_links_mode", "forbid") or "forbid").lower() != "allow" for r in rules_list)
@@ -7208,6 +7216,8 @@ async def api_activity_group_breakdown(
         {"key": "jobs", "label": "Подработки", "count": c("jobs", "jobs_newbie"), "premium": False, "tone": "amber"},
         {"key": "casino", "label": "Казино / ставки", "count": c("casino", "casino_newbie"), "premium": False, "tone": "amber"},
         {"key": "politics", "label": "Анти-политика", "count": c("politics", "politics_newbie"), "premium": False, "tone": "rose"},
+        {"key": "religion", "label": "Религия", "count": c("religion", "religion_newbie"), "premium": False, "tone": "rose"},
+        {"key": "esoteric", "label": "Эзотерика / магия", "count": c("esoteric", "esoteric_newbie"), "premium": False, "tone": "rose"},
         {"key": "silence", "label": "Режим тишины", "count": c("silence"), "premium": True, "tone": "violet"},
         {"key": "newbie_mode", "label": "Срабатывания для новичков", "count": int(newbie_hits or 0), "premium": True, "tone": "violet"},
         {"key": "antinakrutka", "label": "Антинакрутка", "count": 0, "premium": True, "tone": "slate", "note": "События не пишутся в эту статистику"},

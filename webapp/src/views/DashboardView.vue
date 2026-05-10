@@ -428,6 +428,8 @@ function moderationReasonRu(reason) {
     jobs: 'Подработки',
     casino: 'Казино / ставки',
     politics: 'Анти-политика',
+    religion: 'Религия',
+    esoteric: 'Эзотерика / магия',
     silence: 'Режим тишины',
     antinakrutka: 'Анти-накрутка',
     captcha: 'Капча',
@@ -615,6 +617,8 @@ const totalTokens = computed(() => {
   return String(Math.max(0, Math.round(total)))
 })
 const tariffIsPremium = computed(() => ['premium', 'pro', 'business'].includes((me.value?.tariff || 'free').toLowerCase()))
+/** Free-аккаунт: на главной не показываем «живую» сводку статистики — нули и пояснение (как в кабинете Guard). */
+const dashboardStatsPremiumLocked = computed(() => !!me.value && !me.value.is_premium)
 /** Карточка «Рассылки» на главной: показываем всем авторизованным (маркетинг); доступ по-прежнему через Premium/делегирование. */
 const accountShowBroadcastMiniCard = computed(() => !!me.value)
 const dashboardAvatarSrc = computed(() => {
@@ -724,15 +728,15 @@ const dashboardSavedHoursLabel = computed(() => {
   return `${hours.toFixed(1).replace('.', ',')} ч`
 })
 
-/** Тренд «к вчера» для счётчиков (процент или текст). */
+/** Сравнение с предыдущим днём (понятные формулировки, не «к вчера»). */
 function statTrendPctLine(todayVal, yesterdayVal) {
   const t = Math.max(0, Math.round(Number(todayVal) || 0))
   const y = Math.max(0, Math.round(Number(yesterdayVal) || 0))
   if (t === 0 && y === 0) return 'нет данных'
-  if (y === 0) return t > 0 ? 'вчера было 0' : 'как вчера'
+  if (y === 0) return t > 0 ? 'вчера: 0' : 'без изменений к прошлому дню'
   const pct = Math.round(((t - y) / y) * 100)
   const sign = pct > 0 ? '+' : ''
-  return `${sign}${pct}% к вчера`
+  return `${sign}${pct}% к прошлому дню`
 }
 
 const statTrendDeleted = computed(() =>
@@ -746,25 +750,28 @@ const statTrendJoins = computed(() => {
   const y = Math.max(0, Math.round(Number(activitySummary.value?.yesterday?.joins ?? 0)))
   if (t === 0 && y === 0) return 'нет вступлений'
   const diff = t - y
-  if (diff === 0) return 'как вчера'
-  if (diff > 0) return `+${diff} к вчера`
-  return `${diff} к вчера`
+  if (diff === 0) return 'столько же, как вчера'
+  if (diff > 0) return `на ${diff} больше, чем вчера`
+  return `на ${Math.abs(diff)} меньше, чем вчера`
 })
 
 const statsCardUsesPeriod = computed(() => dashboardStatsPeriod.value !== 'today')
 const statsCardDeleted = computed(() => {
+  if (dashboardStatsPremiumLocked.value) return 0
   if (!statsCardUsesPeriod.value) {
     return Math.max(0, Math.round(Number(activitySummary.value?.today?.deleted ?? 0)))
   }
   return Math.max(0, Math.round(Number(dashboardPeriodBreakdown.value?.total_deleted ?? 0)))
 })
 const statsCardJoins = computed(() => {
+  if (dashboardStatsPremiumLocked.value) return 0
   if (!statsCardUsesPeriod.value) {
     return Math.max(0, Math.round(Number(activitySummary.value?.today?.joins ?? 0)))
   }
   return Math.max(0, Math.round(Number(dashboardPeriodBreakdown.value?.total_joined ?? 0)))
 })
 const statsCardSavedHoursLabel = computed(() => {
+  if (dashboardStatsPremiumLocked.value) return '0 ч'
   const d = statsCardDeleted.value
   if (d === 0) return '0 ч'
   const hours = (d * 25) / 1500
@@ -772,6 +779,7 @@ const statsCardSavedHoursLabel = computed(() => {
   return `${hours.toFixed(1).replace('.', ',')} ч`
 })
 const statsCardTrendDeleted = computed(() => {
+  if (dashboardStatsPremiumLocked.value) return 'нужен Premium Guard'
   if (statsCardUsesPeriod.value) {
     const p = DASHBOARD_STATS_PERIOD_OPTIONS.find((x) => x.key === dashboardStatsPeriod.value)
     return p ? `за ${p.label.toLowerCase()}` : 'за период'
@@ -779,6 +787,7 @@ const statsCardTrendDeleted = computed(() => {
   return statTrendDeleted.value
 })
 const statsCardTrendSaved = computed(() => {
+  if (dashboardStatsPremiumLocked.value) return 'нужен Premium Guard'
   if (statsCardUsesPeriod.value) {
     const p = DASHBOARD_STATS_PERIOD_OPTIONS.find((x) => x.key === dashboardStatsPeriod.value)
     return p ? `за ${p.label.toLowerCase()}` : 'за период'
@@ -786,6 +795,7 @@ const statsCardTrendSaved = computed(() => {
   return statTrendSaved.value
 })
 const statsCardTrendJoins = computed(() => {
+  if (dashboardStatsPremiumLocked.value) return 'нужен Premium Guard'
   if (statsCardUsesPeriod.value) {
     return statsCardJoins.value > 0 ? `всего: ${statsCardJoins.value}` : 'нет вступлений'
   }
@@ -794,12 +804,14 @@ const statsCardTrendJoins = computed(() => {
 
 /** Доля занятых слотов групп по тарифу (вместо «точность AI»). */
 const statGroupsLimitPercent = computed(() => {
+  if (dashboardStatsPremiumLocked.value) return '0%'
   const p = Number(activityGroupsProgress.value || 0)
   if (!Number.isFinite(p)) return '—'
   return `${Math.max(0, Math.min(100, Math.round(p)))}%`
 })
 
 const statGroupsLimitFoot = computed(() => {
+  if (dashboardStatsPremiumLocked.value) return 'оформите Premium'
   const left = Math.max(0, Math.round(Number(activityGroupsLimit.value || 0) - Number(activityGroupsCount.value || 0)))
   if (Number(activityGroupsLimit.value || 0) <= 0) return 'тариф'
   if (left === 0) return 'лимит'
@@ -2959,7 +2971,8 @@ async function submitReceipt() {
                     <label class="relative shrink-0 pt-px">
                       <span class="sr-only">Период статистики</span>
                       <select
-                        class="pointer-events-auto max-w-[8.5rem] cursor-pointer appearance-none rounded-lg border border-lime-500/40 bg-black/50 py-0.5 pl-2 pr-7 text-[11px] font-semibold leading-none text-lime-400 outline-none ring-0 sm:max-w-none sm:py-1 sm:pl-2 sm:text-[12px]"
+                        class="pointer-events-auto max-w-[8.5rem] cursor-pointer appearance-none rounded-lg border border-lime-500/40 bg-black/50 py-0.5 pl-2 pr-7 text-[11px] font-semibold leading-none text-lime-400 outline-none ring-0 sm:max-w-none sm:py-1 sm:pl-2 sm:text-[12px] disabled:cursor-not-allowed disabled:opacity-45"
+                        :disabled="dashboardStatsPremiumLocked"
                         :value="dashboardStatsPeriod"
                         title="Период для показателей ниже"
                         @change="onDashboardStatsPeriodChange"
@@ -2981,15 +2994,19 @@ async function submitReceipt() {
                   </div>
 
                   <div
+                    v-if="dashboardStatsPremiumLocked"
+                    class="mt-1.5 rounded-lg border border-violet-500/30 bg-violet-950/35 px-2 py-1.5 text-[10px] leading-snug text-violet-100/95 ring-1 ring-violet-400/15"
+                  >
+                    <span class="font-semibold text-violet-200">😈 Guard:</span>
+                    на Free счётчики скрыты — ниже нули. Подключите Premium, чтобы видеть реальную статистику защиты и роста.
+                  </div>
+
+                  <div
                     class="relative mt-0.5 flex min-w-0 gap-0 overflow-x-auto pb-0 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:gap-0.5"
                     :class="dashboardPeriodLoading ? 'opacity-60' : ''"
                   >
                     <div
-                      role="button"
-                      tabindex="0"
-                      class="flex min-w-0 flex-[1_1_0] cursor-pointer flex-col border-r border-white/10 py-1 pr-1 transition hover:bg-white/[0.04] active:bg-white/[0.06]"
-                      @click="onStatDeletedStatClick"
-                      @keydown.enter.prevent="onStatDeletedStatClick"
+                      class="flex min-w-0 flex-[1_1_0] flex-col border-r border-white/10 py-1 pr-1"
                     >
                       <div class="flex items-center gap-1.5">
                         <span class="grid h-[18px] w-[18px] shrink-0 place-items-center" aria-hidden="true">

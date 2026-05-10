@@ -907,6 +907,36 @@ async function toggleMasterProtection() {
   await updateRule({ master_anti_spam: next })
 }
 
+async function toggleReligionHardDict() {
+  if (!chat.value?.rule) return
+  const on = !chat.value.rule.filter_religion_enabled
+  await updateRule(
+    on
+      ? { filter_religion_enabled: true }
+      : { filter_religion_enabled: false, filter_religion_promo_only: false },
+  )
+}
+
+async function toggleReligionPromoOnly() {
+  if (!chat.value?.rule || !chat.value.rule.filter_religion_enabled) return
+  await updateRule({ filter_religion_promo_only: !chat.value.rule.filter_religion_promo_only })
+}
+
+async function toggleEsotericHardDict() {
+  if (!chat.value?.rule) return
+  const on = !chat.value.rule.filter_esoteric_enabled
+  await updateRule(
+    on
+      ? { filter_esoteric_enabled: true }
+      : { filter_esoteric_enabled: false, filter_esoteric_promo_only: false },
+  )
+}
+
+async function toggleEsotericPromoOnly() {
+  if (!chat.value?.rule || !chat.value.rule.filter_esoteric_enabled) return
+  await updateRule({ filter_esoteric_promo_only: !chat.value.rule.filter_esoteric_promo_only })
+}
+
 function policyButtonClass(currentMode, optValue) {
   const selected = currentMode === optValue
   if (!selected) {
@@ -3579,6 +3609,9 @@ const protCardIndigo =
             <p class="mb-3 text-xs text-rose-100/90">
               Режет мат и искажённые формы по корням, а также подозрительные темы: подработки-скам, казино/ставки и политические обсуждения.
             </p>
+            <p class="mt-2 border-t border-white/10 pt-2 text-[10px] leading-snug text-slate-400">
+              У фильтров «Религия» и «Эзотерика» есть режим «только объявления»: не трогает обычный разговор, режет услуги, цены, призыв в лс/канал и похожий спам.
+            </p>
             <div class="space-y-2">
           <div class="flex items-center justify-between gap-2">
                 <span class="text-xs text-rose-100/90">Мат</span>
@@ -3705,6 +3738,90 @@ const protCardIndigo =
                     :style="{ transform: chat.rule.filter_politics_enabled ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }"
                   />
                 </button>
+              </div>
+              <div class="space-y-2 rounded-xl border border-white/[0.06] bg-white/[0.02] px-2 py-2">
+                <div class="flex items-start justify-between gap-2">
+                  <div class="min-w-0">
+                    <span class="block text-xs text-rose-100/90">Религия (конфессии / обряды / термины)</span>
+                    <span v-if="chat.rule.filter_religion_enabled" class="mt-0.5 block text-[10px] leading-snug text-slate-500">
+                      {{
+                        chat.rule.filter_religion_promo_only
+                          ? 'Мягко: только объявления услуг, цены, призыв в лс/канал.'
+                          : 'Строго: любое срабатывание по словарю.'
+                      }}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    :class="hardDictSwitchClass(chat.rule.filter_religion_enabled)"
+                    class="relative h-[30px] w-[50px] shrink-0 rounded-full border transition duration-200"
+                    @click="toggleReligionHardDict"
+                  >
+                    <span
+                      class="absolute left-[2px] top-1/2 h-[24px] w-[24px] rounded-full bg-white shadow-md transition duration-200"
+                      :style="{ transform: chat.rule.filter_religion_enabled ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }"
+                    />
+                  </button>
+                </div>
+                <div
+                  v-if="chat.rule.filter_religion_enabled"
+                  class="flex items-center justify-between gap-2 border-t border-white/[0.06] pt-2"
+                >
+                  <span class="text-[10px] leading-snug text-slate-400">Только объявления и спам</span>
+                  <button
+                    type="button"
+                    :class="hardDictSwitchClass(chat.rule.filter_religion_promo_only)"
+                    class="relative h-[26px] w-[44px] shrink-0 rounded-full border transition duration-200"
+                    @click="toggleReligionPromoOnly"
+                  >
+                    <span
+                      class="absolute left-[2px] top-1/2 h-[20px] w-[20px] rounded-full bg-white shadow-md transition duration-200"
+                      :style="{ transform: chat.rule.filter_religion_promo_only ? 'translate3d(18px, -50%, 0)' : 'translate3d(0, -50%, 0)' }"
+                    />
+                  </button>
+                </div>
+              </div>
+              <div class="space-y-2 rounded-xl border border-white/[0.06] bg-white/[0.02] px-2 py-2">
+                <div class="flex items-start justify-between gap-2">
+                  <div class="min-w-0">
+                    <span class="block text-xs text-rose-100/90">Эзотерика / магия (таро / ритуалы / оккульт)</span>
+                    <span v-if="chat.rule.filter_esoteric_enabled" class="mt-0.5 block text-[10px] leading-snug text-slate-500">
+                      {{
+                        chat.rule.filter_esoteric_promo_only
+                          ? 'Мягко: только объявления услуг, цены, призыв в лс/канал.'
+                          : 'Строго: любое срабатывание по словарю.'
+                      }}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    :class="hardDictSwitchClass(chat.rule.filter_esoteric_enabled)"
+                    class="relative h-[30px] w-[50px] shrink-0 rounded-full border transition duration-200"
+                    @click="toggleEsotericHardDict"
+                  >
+                    <span
+                      class="absolute left-[2px] top-1/2 h-[24px] w-[24px] rounded-full bg-white shadow-md transition duration-200"
+                      :style="{ transform: chat.rule.filter_esoteric_enabled ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }"
+                    />
+                  </button>
+                </div>
+                <div
+                  v-if="chat.rule.filter_esoteric_enabled"
+                  class="flex items-center justify-between gap-2 border-t border-white/[0.06] pt-2"
+                >
+                  <span class="text-[10px] leading-snug text-slate-400">Только объявления и спам</span>
+                  <button
+                    type="button"
+                    :class="hardDictSwitchClass(chat.rule.filter_esoteric_promo_only)"
+                    class="relative h-[26px] w-[44px] shrink-0 rounded-full border transition duration-200"
+                    @click="toggleEsotericPromoOnly"
+                  >
+                    <span
+                      class="absolute left-[2px] top-1/2 h-[20px] w-[20px] rounded-full bg-white shadow-md transition duration-200"
+                      :style="{ transform: chat.rule.filter_esoteric_promo_only ? 'translate3d(18px, -50%, 0)' : 'translate3d(0, -50%, 0)' }"
+                    />
+                  </button>
+                </div>
               </div>
             </div>
           </div>
