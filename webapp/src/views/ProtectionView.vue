@@ -25,6 +25,7 @@ import {
   verifyPin,
   loadPinHash,
 } from '../utils/settingsSecurity'
+import GuardBlueLoadingState from '../components/GuardBlueLoadingState.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -3185,6 +3186,13 @@ const protCardIndigo =
 
     <div v-else-if="chat?.loadError || error" class="rounded-xl border border-red-200 bg-red-50 p-4 text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300">
       {{ error || 'Не удалось загрузить настройки' }}
+    </div>
+
+    <div
+      v-else-if="chatsListLoading && !chat?.noSelection && !chat?.loadError && !chat?.rule"
+      class="rounded-2xl bg-white/[0.05] py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.07)] backdrop-blur-xl"
+    >
+      <GuardBlueLoadingState />
     </div>
 
     <div v-else-if="chat?.rule" class="space-y-3.5">

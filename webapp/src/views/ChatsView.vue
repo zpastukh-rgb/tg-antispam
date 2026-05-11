@@ -20,7 +20,6 @@ const delegatedChatsOnly = computed(() => String(route.query.cabinet || '').toLo
 const focusThreatOnly = computed(() => String(route.query.threat || '') === '1')
 /** Первый запрос списка: без глобального loading, но не показываем «нет чатов» до ответа API */
 const chatsFirstLoad = ref(true)
-const chatsBg = `${import.meta.env.BASE_URL}app-global-bg.png`
 const chats = ref([])
 const selectedChatId = ref(null)
 const pendingCount = ref(0)
@@ -63,10 +62,31 @@ function managerPermEntries(perms) {
   return out
 }
 
+function extractTelegramIdFromInitUnsafe() {
+  try {
+    const id = window.Telegram?.WebApp?.initDataUnsafe?.user?.id
+    const n = Number(id || 0)
+    return Number.isFinite(n) && n > 0 ? n : 0
+  } catch {
+    return 0
+  }
+}
+
+/** Чужой кабинет (делегирование) для UI: сначала сравниваем owner_user_id с tg текущего пользователя,
+ * при owner=0 оставляем флаг is_shared с бэка (делегат без владельца в строке). */
+function isDelegatedCabinetChat(chat) {
+  if (!chat) return false
+  const oid = Number(chat.owner_user_id || 0)
+  const vid = Number(viewerTelegramId.value || 0)
+  if (oid > 0 && vid > 0 && oid === vid) return false
+  if (oid > 0 && oid !== vid) return true
+  return !!chat.is_shared
+}
+
 /** Для делегированного чата: разрешено ли право `key` (если delegated_permissions
  *  не пришли — старая запись, считаем что разрешено всё). Для своих чатов: всегда true. */
 function delegatedCan(chat, key) {
-  if (!chat || !chat.is_shared) return true
+  if (!chat || !isDelegatedCabinetChat(chat)) return true
   const perms = chat.delegated_permissions
   if (perms == null) return true
   return !!perms[key]
@@ -120,7 +140,7 @@ async function openChannelPostRules(chat) {
     try {
       const freshList = await fetchSilent(() => api.chats(delegatedChatsOnly.value ? 'shared' : 'all', { refreshTelegram: true }))
       const rows = Array.isArray(freshList?.chats) ? freshList.chats : []
-      chats.value = delegatedChatsOnly.value ? rows.filter((c) => !!c.is_shared) : [...rows].sort((a, b) => Number(!!b.is_shared) - Number(!!a.is_shared))
+      chats.value = delegatedChatsOnly.value ? rows : [...rows].sort((a, b) => Number(isDelegatedCabinetChat(b)) - Number(isDelegatedCabinetChat(a)))
       const fresh = (chats.value || []).find((c) => Number(c?.id || 0) === Number(chat.id))
       did = Number(fresh?.linked_discussion_chat_id || 0)
     } catch {
@@ -191,14 +211,15 @@ async function loadChats() {
       fetchSilent(() => api.me()).catch(() => ({ is_premium: false })),
     ])
     const rows = data.chats || []
+    isPremium.value = !!me?.is_premium
+    const fromMe = Number(me?.telegram_id || 0)
+    viewerTelegramId.value = fromMe > 0 ? fromMe : extractTelegramIdFromInitUnsafe()
     chats.value = delegatedChatsOnly.value
-      ? rows.filter((c) => !!c.is_shared)
-      : [...rows].sort((a, b) => Number(!!b.is_shared) - Number(!!a.is_shared))
+      ? rows
+      : [...rows].sort((a, b) => Number(isDelegatedCabinetChat(b)) - Number(isDelegatedCabinetChat(a)))
     if (!delegatedChatsOnly.value && focusThreatOnly.value) {
       cabinetTab.value = 'shared'
     }
-    isPremium.value = !!me?.is_premium
-    viewerTelegramId.value = Number(me?.telegram_id || 0)
     selectedChatId.value = data.selected_chat_id ?? null
     pendingCount.value = Array.isArray(p?.chats) ? p.chats.length : 0
     try {
@@ -311,7 +332,7 @@ function goToReports(chatId) {
   const isPerChat = !(chatId === undefined || chatId === null || chatId === '' || (typeof chatId === 'object' && !('id' in chatId)))
   if (isPerChat) {
     const row = (chats.value || []).find((c) => Number(c.id) === Number(chatId))
-    setCabinetMode(row?.is_shared ? 'delegated' : 'owner')
+    setCabinetMode(isDelegatedCabinetChat(row) ? 'delegated' : 'owner')
     selectChat(chatId).catch(() => {})
     router.push({ path: '/admin', query: { tab: 'overview', open: 'stats_reports', chat_id: String(chatId) } })
     return
@@ -345,7 +366,7 @@ function protectionActive(chat) {
 }
 
 function ownerLabelPlain(chat) {
-  if (!chat?.is_shared) return 'Мой кабинет'
+  if (!isDelegatedCabinetChat(chat)) return 'Мой кабинет'
   const u = (chat.owner_username || '').trim().replace(/^@+/, '')
   if (u) return u
   const n = (chat.owner_first_name || '').trim()
@@ -393,24 +414,24 @@ function isChannelRow(c) {
 const orderedDisplayRows = computed(() => {
   const list = chats.value || []
   if (delegatedChatsOnly.value) {
-    return sortChatsByAvailability(list.filter((c) => !!c.is_shared))
+    return sortChatsByAvailability([...list])
   }
   if (cabinetTab.value === 'mine') {
-    const own = list.filter((c) => !c.is_shared)
+    const own = list.filter((c) => !isDelegatedCabinetChat(c))
     return [
       ...sortChatsByAvailability(own.filter((c) => isChannelRow(c))),
       ...sortChatsByAvailability(own.filter((c) => !isChannelRow(c))),
     ]
   }
   if (cabinetTab.value === 'shared') {
-    const sh = list.filter((c) => !!c.is_shared)
+    const sh = list.filter((c) => isDelegatedCabinetChat(c))
     return [
       ...sortChatsByAvailability(sh.filter((c) => !isChannelRow(c))),
       ...sortChatsByAvailability(sh.filter((c) => isChannelRow(c))),
     ]
   }
-  const shared = list.filter((c) => !!c.is_shared)
-  const own = list.filter((c) => !c.is_shared)
+  const shared = list.filter((c) => isDelegatedCabinetChat(c))
+  const own = list.filter((c) => !isDelegatedCabinetChat(c))
   return [
     ...sortChatsByAvailability(shared),
     ...sortChatsByAvailability(own.filter((c) => isChannelRow(c))),
@@ -425,9 +446,19 @@ const filteredByKindPreset = computed(() => {
   return r
 })
 
-const frameDelegated = computed(() => filteredByKindPreset.value.filter((c) => !!c.is_shared))
-const frameOwnChannels = computed(() => filteredByKindPreset.value.filter((c) => !c.is_shared && isChannelRow(c)))
-const frameOwnGroups = computed(() => filteredByKindPreset.value.filter((c) => !c.is_shared && !isChannelRow(c)))
+const frameDelegated = computed(() => {
+  const list = filteredByKindPreset.value
+  if (delegatedChatsOnly.value) return list
+  return list.filter((c) => isDelegatedCabinetChat(c))
+})
+const frameOwnChannels = computed(() => {
+  if (delegatedChatsOnly.value) return []
+  return filteredByKindPreset.value.filter((c) => !isDelegatedCabinetChat(c) && isChannelRow(c))
+})
+const frameOwnGroups = computed(() => {
+  if (delegatedChatsOnly.value) return []
+  return filteredByKindPreset.value.filter((c) => !isDelegatedCabinetChat(c) && !isChannelRow(c))
+})
 
 const frameDelegatedHasThreat = computed(() => (frameDelegated.value || []).some((c) => !!chatSpikeAlert(c)))
 
@@ -437,22 +468,20 @@ function visibleChatsForThreatScroll() {
 }
 
 function sharedCabinetsCount() {
-  return (chats.value || []).filter((c) => !!c.is_shared).length
+  return (chats.value || []).filter((c) => isDelegatedCabinetChat(c)).length
 }
 
 function chatCardClass(chat) {
   const spike = !!focusThreatOnly.value && !!chatSpikeAlert(chat)
-  const spikeCls = spike ? 'ring-2 ring-yellow-300/70 shadow-[0_0_20px_-10px_rgba(250,204,21,0.95)]' : ''
+  const spikeCls = spike ? 'ring-2 ring-yellow-400/45 shadow-[0_0_18px_-8px_rgba(250,204,21,0.5)]' : ''
+  /** Карточка: прозрачное «стекло» на глобальном фоне, без засветления */
+  const glass = 'rounded-xl bg-black/35 p-2.5 backdrop-blur-md'
   if (isChannelRow(chat)) {
-    const base = chat.is_shared
-      ? 'rounded-xl border border-violet-500/18 bg-violet-950/18 p-2.5 shadow-md ring-1 ring-violet-500/15 backdrop-blur-sm'
-      : 'rounded-xl border border-emerald-500/16 bg-black/40 p-2.5 shadow-md ring-1 ring-emerald-900/20 backdrop-blur-sm dark:bg-black/45'
-    return [base, spikeCls]
+    const tint = isDelegatedCabinetChat(chat) ? 'bg-violet-950/10' : 'bg-emerald-950/10'
+    return [glass, tint, spikeCls]
   }
-  const base = chat.is_shared
-    ? 'rounded-xl border border-violet-500/18 bg-violet-950/18 p-2.5 shadow-md ring-1 ring-violet-500/15 backdrop-blur-sm'
-    : 'rounded-xl border border-slate-700/50 bg-black/40 p-2.5 shadow-md ring-1 ring-black/30 backdrop-blur-sm dark:bg-black/45 dark:ring-slate-700/40'
-  return [base, spikeCls]
+  const tint = isDelegatedCabinetChat(chat) ? 'bg-violet-950/10' : ''
+  return [glass, tint, spikeCls]
 }
 
 async function openManagers(chat) {
@@ -583,7 +612,7 @@ function inviteStatusLabel(s) {
 }
 
 function canOpenManagers(chat) {
-  return !chat?.is_shared && !!isPremium.value
+  return !isDelegatedCabinetChat(chat) && !!isPremium.value
 }
 
 function openDelegatedBroadcast(chatId) {
@@ -605,14 +634,14 @@ function openDelegatedBroadcast(chatId) {
 
 function openChannelBroadcast(chat) {
   if (!chat?.id) return
-  setCabinetMode(chat.is_shared ? 'delegated' : 'owner')
+  setCabinetMode(isDelegatedCabinetChat(chat) ? 'delegated' : 'owner')
   try {
     localStorage.setItem('guard.broadcast.open_channel_id', String(Number(chat.id)))
   } catch {
     //
   }
   const q = { tab: 'broadcasts' }
-  if (chat.is_shared) q.cabinet = 'delegated'
+  if (isDelegatedCabinetChat(chat)) q.cabinet = 'delegated'
   const nav = router.push({ path: '/admin', query: q })
   if (nav && typeof nav.catch === 'function') {
     nav.catch((err) => {
@@ -643,7 +672,7 @@ function openChannelBroadcast(chat) {
     >
       <div class="mx-auto mb-3 inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/8 px-3 py-1.5 text-xs font-semibold text-slate-100 shadow-[0_0_20px_-10px_rgba(255,255,255,0.35)]">
         <span class="inline-block hourglass-flip">⏳</span>
-        {{ delegatedChatsOnly ? 'Загружаю делегированный кабинет…' : 'Загружаю кабинет админа…' }}
+        {{ delegatedChatsOnly ? 'Загружаю делегированный кабинет…' : 'Загружаю список чатов…' }}
       </div>
       <div class="space-y-2.5">
         <div class="mx-auto h-3 w-2/3 max-w-[14rem] animate-pulse rounded bg-white/15" />
@@ -675,18 +704,9 @@ function openChannelBroadcast(chat) {
       </div>
     </div>
 
-    <div
-      v-else
-      class="relative -mx-4 overflow-hidden rounded-2xl border border-white/10 shadow-lg md:-mx-6"
-    >
-      <div
-        class="pointer-events-none absolute inset-0 bg-cover bg-center"
-        :style="{ backgroundImage: `url(${chatsBg})` }"
-        aria-hidden="true"
-      />
-      <div class="absolute inset-0 bg-slate-950/55 dark:bg-black/50" aria-hidden="true" />
-      <div class="relative z-10 space-y-2 px-4 py-3 pb-10 md:px-6 md:pb-12">
-        <div v-if="!delegatedChatsOnly" class="mb-1 flex flex-wrap gap-1">
+    <div v-else class="-mx-4 space-y-3 px-4 pb-10 md:-mx-6 md:px-6">
+      <div class="rounded-xl border border-white/[0.08] bg-black/30 px-2.5 py-2 backdrop-blur-md">
+        <div v-if="!delegatedChatsOnly" class="mb-1.5 flex flex-wrap gap-1">
           <button type="button" class="rounded-lg px-2 py-1 text-[11px] font-semibold"
             :class="cabinetTab==='all' ? 'guard-green-soft' : 'border border-white/20 bg-white/10 text-slate-100'"
             @click="cabinetTab='all'">
@@ -710,7 +730,7 @@ function openChannelBroadcast(chat) {
             i
           </button>
         </div>
-        <div class="mb-2 flex flex-wrap items-center gap-1">
+        <div class="flex flex-wrap items-center gap-1">
           <button
             type="button"
             class="rounded-lg px-2 py-1 text-[10px] font-semibold"
@@ -784,36 +804,45 @@ function openChannelBroadcast(chat) {
             Отчёты по группам
           </button>
         </div>
-        <div v-if="cabinetTab === 'shared' && !delegatedChatsOnly" class="rounded-xl border border-slate-700/55 bg-black/35 p-2.5">
+      </div>
+        <div v-if="cabinetTab === 'shared' && !delegatedChatsOnly" class="rounded-xl border border-white/[0.08] bg-black/30 p-2.5 backdrop-blur-md">
           <div class="flex items-center justify-between gap-2">
             <div>
               <p class="text-sm font-semibold text-white">Админы и доступы</p>
               <p class="text-[11px] text-slate-300">Настройка доступна в Premium и только владельцу кабинета.</p>
             </div>
-            <span class="rounded-full border border-violet-400/35 bg-violet-500/15 px-2 py-0.5 text-[10px] font-semibold text-violet-200">
+            <span class="rounded-full border border-violet-400/25 bg-violet-500/12 px-2 py-0.5 text-[10px] font-semibold text-violet-200/95">
               Доступы: {{ sharedCabinetsCount() }}
             </span>
           </div>
         </div>
         <p
           v-if="chats.length && !frameDelegated.length && !frameOwnChannels.length && !frameOwnGroups.length"
-          class="rounded-lg border border-slate-700/55 bg-black/30 px-2 py-2 text-center text-[11px] text-slate-300"
+          class="rounded-lg border border-white/[0.08] bg-black/35 px-2 py-2 text-center text-[11px] text-slate-300 backdrop-blur-sm"
         >
           Нет сущностей для выбранного пресета. Переключите «Все», «Группы» или «Каналы».
         </p>
 
-        <div v-if="frameDelegated.length" class="space-y-2 rounded-xl border border-slate-700/55 bg-black/35 p-2.5">
+        <div v-if="frameDelegated.length" class="mb-5 space-y-2">
           <div
-            class="flex items-center justify-between rounded-lg border border-violet-400/30 bg-violet-900/25 px-2 py-1 text-[11px] font-semibold text-violet-100"
+            class="relative flex items-center justify-between gap-2 overflow-hidden rounded-xl border border-violet-500/30 bg-gradient-to-r from-violet-950/55 via-black/40 to-transparent px-3 py-2 shadow-[0_0_28px_-10px_rgba(139,92,246,0.4)] backdrop-blur-md"
           >
-            <span>{{ cabinetTab === 'shared' || delegatedChatsOnly ? 'Делегированные чаты и каналы' : 'Делегированные' }}</span>
+            <span
+              class="pointer-events-none absolute left-0 top-0 h-full w-[3px] bg-gradient-to-b from-violet-200/90 via-fuchsia-400/70 to-violet-600/40"
+              aria-hidden="true"
+            />
+            <span
+              class="pl-2 text-[11px] font-extrabold uppercase leading-tight tracking-[0.16em] text-violet-50 drop-shadow-[0_0_14px_rgba(167,139,250,0.55)]"
+            >
+              {{ cabinetTab === 'shared' || delegatedChatsOnly ? 'Делегированные чаты и каналы' : 'Делегированные' }}
+            </span>
             <span
               v-if="frameDelegatedHasThreat"
               class="relative inline-flex items-center justify-center"
               title="В делегированном кабинете есть чат под угрозой"
             >
-              <span class="absolute inline-flex h-4 w-4 animate-ping rounded-full bg-yellow-400/55" />
-              <span class="relative text-[12px] leading-none text-yellow-300">⚠</span>
+              <span class="absolute inline-flex h-3.5 w-3.5 animate-ping rounded-full bg-yellow-400/40" />
+              <span class="relative text-[11px] leading-none text-yellow-300">⚠</span>
             </span>
           </div>
           <div v-for="chat in frameDelegated" :key="'fd-' + chat.id" :data-chat-id="chat.id" :class="chatCardClass(chat)">
@@ -866,7 +895,7 @@ function openChannelBroadcast(chat) {
                 @click="removeChat(chat)"
               >✕</button>
             </div>
-            <div class="mt-2 flex flex-wrap gap-1 border-t border-slate-700/60 pt-2">
+            <div class="mt-2 flex flex-wrap gap-1 border-t border-white/10 pt-2">
               <template v-if="isChannelRow(chat)">
                 <button
                   v-if="!chat.locked_by_limit && delegatedCan(chat, 'broadcast')"
@@ -926,9 +955,17 @@ function openChannelBroadcast(chat) {
           </div>
         </div>
 
-        <div v-if="frameOwnChannels.length" class="space-y-2 rounded-xl border border-slate-700/55 bg-black/35 p-2.5">
-          <div class="rounded-lg border border-emerald-400/30 bg-emerald-950/25 px-2 py-1 text-[11px] font-semibold text-emerald-100">
-            Каналы
+        <div v-if="frameOwnChannels.length" class="mb-5 space-y-2">
+          <div
+            class="relative overflow-hidden rounded-xl border border-lime-400/35 bg-gradient-to-r from-emerald-950/50 via-black/40 to-transparent px-3 py-2 shadow-[0_0_28px_-10px_rgba(163,255,0,0.25)] backdrop-blur-md"
+          >
+            <span
+              class="pointer-events-none absolute left-0 top-0 h-full w-[3px] bg-gradient-to-b from-lime-300/95 via-emerald-400/70 to-lime-600/35"
+              aria-hidden="true"
+            />
+            <span
+              class="block pl-2 text-[11px] font-extrabold uppercase leading-tight tracking-[0.16em] text-lime-50 drop-shadow-[0_0_14px_rgba(163,255,0,0.4)]"
+            >Мои каналы</span>
           </div>
           <div v-for="chat in frameOwnChannels" :key="'oc-' + chat.id" :data-chat-id="chat.id" :class="chatCardClass(chat)">
             <div class="flex items-start gap-2">
@@ -954,7 +991,7 @@ function openChannelBroadcast(chat) {
                 @click="removeChat(chat)"
               >✕</button>
             </div>
-            <div class="mt-2 flex flex-wrap gap-1 border-t border-slate-700/60 pt-2">
+            <div class="mt-2 flex flex-wrap gap-1 border-t border-white/10 pt-2">
               <button
                 v-if="!chat.locked_by_limit"
                 type="button"
@@ -992,9 +1029,17 @@ function openChannelBroadcast(chat) {
           </div>
         </div>
 
-        <div v-if="frameOwnGroups.length" class="space-y-2 rounded-xl border border-slate-700/55 bg-black/35 p-2.5">
-          <div class="rounded-lg border border-cyan-400/25 bg-cyan-900/20 px-2 py-1 text-[11px] font-semibold text-cyan-100">
-            Мои чаты
+        <div v-if="frameOwnGroups.length" class="space-y-2">
+          <div
+            class="relative overflow-hidden rounded-xl border border-cyan-400/35 bg-gradient-to-r from-cyan-950/45 via-black/40 to-transparent px-3 py-2 shadow-[0_0_28px_-10px_rgba(34,211,238,0.28)] backdrop-blur-md"
+          >
+            <span
+              class="pointer-events-none absolute left-0 top-0 h-full w-[3px] bg-gradient-to-b from-cyan-200/90 via-sky-400/65 to-cyan-600/35"
+              aria-hidden="true"
+            />
+            <span
+              class="block pl-2 text-[11px] font-extrabold uppercase leading-tight tracking-[0.16em] text-cyan-50 drop-shadow-[0_0_14px_rgba(34,211,238,0.45)]"
+            >Мои чаты</span>
           </div>
           <div v-for="chat in frameOwnGroups" :key="'og-' + chat.id" :data-chat-id="chat.id" :class="chatCardClass(chat)">
             <div class="flex items-start gap-2">
@@ -1019,7 +1064,7 @@ function openChannelBroadcast(chat) {
                 @click="removeChat(chat)"
               >✕</button>
             </div>
-            <div class="mt-2 flex flex-wrap gap-1 border-t border-slate-700/60 pt-2">
+            <div class="mt-2 flex flex-wrap gap-1 border-t border-white/10 pt-2">
               <button
                 v-if="!chat.locked_by_limit"
                 type="button"
@@ -1056,7 +1101,6 @@ function openChannelBroadcast(chat) {
             </div>
           </div>
         </div>
-      </div>
     </div>
 
     <div

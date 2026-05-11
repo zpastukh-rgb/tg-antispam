@@ -4,6 +4,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { useApi, messageFromApiError } from '../composables/useApi'
 import { api as rawApi } from '../api/client'
 import NavIcon from '../components/NavIcon.vue'
+import GuardBlueLoadingState from '../components/GuardBlueLoadingState.vue'
 import SecurityPinGateModal from '../components/SecurityPinGateModal.vue'
 import SubscriptionManagementPanel from '../components/SubscriptionManagementPanel.vue'
 import { useDashboardSection } from '../composables/useDashboardSection'
@@ -4551,8 +4552,11 @@ async function submitReceipt() {
       </div>
     </div>
 
-    <div v-else-if="loading || (hasInitData && me === null && !error && !bootError)" class="py-10 text-center text-sm text-white/80">
-      Секундочку…
+    <div
+      v-else-if="loading || (hasInitData && me === null && !error && !bootError)"
+      class="py-6"
+    >
+      <GuardBlueLoadingState />
     </div>
 
     <div

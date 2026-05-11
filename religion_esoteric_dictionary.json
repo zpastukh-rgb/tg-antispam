@@ -1,0 +1,137 @@
+{
+  "version": "2026-05-10",
+  "scope": [
+    "религия",
+    "эзотерика",
+    "магия",
+    "гадания",
+    "оккультизм",
+    "мистические практики",
+    "секты",
+    "духовные практики"
+  ],
+  "normalization": {
+    "steps": [
+      "lowercase",
+      "replace_yo",
+      "homoglyph_map",
+      "digit_to_letter_map",
+      "strip_separators",
+      "collapse_spaces",
+      "tokenize_words",
+      "compact_scan"
+    ],
+    "separator_regex": "[\\u200b\\u200c\\u200d\\u2060\\s._\\-/*|,:;]+",
+    "homoglyph_examples": [
+      "tаро -> таро",
+      "маг1я -> магия",
+      "прив0рот -> приворот",
+      "р е л и г и я -> религия",
+      "ру_ны -> руны",
+      "чак*ры -> чакры"
+    ]
+  },
+  "entries": [
+    {"category":"religion","keyword":"религ","aliases":["религия","религиозный","религиозка"],"translit":["relig","religiya","religio"],"regex_safe":"р[еe]л[иi1][гg][иi1]","severity":"medium"},
+    {"category":"religion","keyword":"православ","aliases":["православие","православный"],"translit":["pravoslav","pravoslavie"],"regex_safe":"пр[аa]восл[аa]в","severity":"medium"},
+    {"category":"religion","keyword":"христиан","aliases":["христианство","христианин"],"translit":["hristian","christian"],"regex_safe":"[хx][рr]исти[аa]н","severity":"medium"},
+    {"category":"religion","keyword":"ислам","aliases":["мусульман","коран","умма"],"translit":["islam","muslim","quran","koran"],"regex_safe":"[иiu][сs][лl][аa]м","severity":"medium"},
+    {"category":"religion","keyword":"намаз","aliases":["намазик"],"translit":["namaz"],"regex_safe":"н[аa]м[аa]з","severity":"medium"},
+    {"category":"religion","keyword":"мечет","aliases":["мечеть"],"translit":["mechet","masjid"],"regex_safe":"м[еe]ч[еe]т","severity":"medium"},
+    {"category":"religion","keyword":"иудаизм","aliases":["иудей","тора","талмуд"],"translit":["judaism","iudaizm","torah","talmud"],"regex_safe":"[иi]уд[аa]и[зz]м","severity":"medium"},
+    {"category":"religion","keyword":"синагог","aliases":["синагога"],"translit":["sinagoga","synagogue"],"regex_safe":"с[иi]н[аa]гог","severity":"medium"},
+    {"category":"religion","keyword":"будд","aliases":["буддизм","буддист"],"translit":["buddh","buddhism"],"regex_safe":"будд","severity":"medium"},
+    {"category":"religion","keyword":"индуизм","aliases":["инду","веды","кришна"],"translit":["hindu","hinduism","krishna","veda"],"regex_safe":"[иi]нду[иi]зм","severity":"medium"},
+    {"category":"religion","keyword":"католик","aliases":["католичество","католицизм"],"translit":["catholic"],"regex_safe":"к[аa]толик","severity":"medium"},
+    {"category":"religion","keyword":"протестант","aliases":["протестантизм"],"translit":["protestant"],"regex_safe":"прот[еe]ст[аa]нт","severity":"medium"},
+    {"category":"religion","keyword":"баптист","aliases":["баптизм"],"translit":["baptist"],"regex_safe":"б[аa]пт[иi]ст","severity":"medium"},
+    {"category":"religion","keyword":"свидетел иегов","aliases":["иеговист"],"translit":["jehovah witness","jw"],"regex_safe":"[иеi][еe]гов","severity":"high"},
+    {"category":"religion","keyword":"саентолог","aliases":["саентология"],"translit":["scientology","scientolog"],"regex_safe":"с[аa][еe]нтолог","severity":"high"},
+    {"category":"religion","keyword":"кришнаит","aliases":["харе кришна"],"translit":["krishnait","hare krishna"],"regex_safe":"кришн[аa]ит","severity":"high"},
+    {"category":"religion","keyword":"проповед","aliases":["проповедь","проповедник"],"translit":["propoved","preach"],"regex_safe":"пропов[еe]д","severity":"medium"},
+    {"category":"religion","keyword":"миссионер","aliases":["миссия религиозная"],"translit":["missionary"],"regex_safe":"м[иi]сс[иi]он[еe]р","severity":"high"},
+    {"category":"religion","keyword":"обращение в веру","aliases":["принять веру","прийти к богу"],"translit":["convert to faith","accept god"],"regex_safe":"обр[аa]щ[еe]н[иi][еe]\\s+в\\s+в[еe]ру","severity":"high"},
+    {"category":"religion","keyword":"религиозный спор","aliases":["срач о вере","богосрач"],"translit":["religion flame","faith war"],"regex_safe":"богоср[аa]ч|ср[аa]ч\\s+о\\s+в[еe]р[еe]","severity":"high"},
+
+    {"category":"esoteric","keyword":"эзотер","aliases":["эзотерика","эзотерический"],"translit":["ezoter","esoteric"],"regex_safe":"[эe]зот[еe]р","severity":"medium"},
+    {"category":"magic","keyword":"магия","aliases":["магич","маг"],"translit":["magiya","magic"],"regex_safe":"м[аa][гg][иi1]","severity":"high"},
+    {"category":"magic","keyword":"ведьм","aliases":["ведьма","ведьмовство"],"translit":["vedma","witch","witchcraft"],"regex_safe":"в[еe]дьм","severity":"high"},
+    {"category":"magic","keyword":"колдов","aliases":["колдовать","колдун"],"translit":["koldov","sorcery"],"regex_safe":"колдов","severity":"high"},
+    {"category":"magic","keyword":"чарод","aliases":["чародей","чародейка"],"translit":["charodey"],"regex_safe":"ч[аa]род","severity":"high"},
+    {"category":"magic","keyword":"заклинан","aliases":["заклинание"],"translit":["spell","zaklinanie"],"regex_safe":"з[аa]клин[аa]н","severity":"high"},
+    {"category":"magic","keyword":"приворот","aliases":["приворожу","приворотный"],"translit":["privorot","love spell"],"regex_safe":"пр[иi]в[оo0]р[оo0]т","severity":"high"},
+    {"category":"magic","keyword":"отворот","aliases":["остуда"],"translit":["otvorot"],"regex_safe":"[оo]тв[оo0]р[оo0]т","severity":"high"},
+    {"category":"magic","keyword":"порч","aliases":["порча","навести порчу"],"translit":["porcha","curse"],"regex_safe":"п[оo0]рч","severity":"high"},
+    {"category":"magic","keyword":"сглаз","aliases":["сглазили"],"translit":["sglaz","evil eye"],"regex_safe":"сгл[аa]з","severity":"high"},
+    {"category":"magic","keyword":"снятие негатива","aliases":["снять негатив","чистка негатива"],"translit":["remove negativity"],"regex_safe":"сн[яy]т[иi][еe]\\s+н[еe]г[аa]т[иi]в","severity":"high"},
+    {"category":"magic","keyword":"денежный ритуал","aliases":["денежная практика","ритуал на деньги"],"translit":["money ritual","money practice"],"regex_safe":"д[еe]н[еe]жн\\w*\\s+(риту[аa]л|пр[аa]ктик)","severity":"high"},
+
+    {"category":"divination","keyword":"гадани","aliases":["гадание","гадалка"],"translit":["gadanie","fortune telling"],"regex_safe":"г[аa]д[аa]н[иi]","severity":"high"},
+    {"category":"divination","keyword":"таро","aliases":["карты таро","расклад"],"translit":["taro","tarot"],"regex_safe":"т[аa@]р[оo0]","severity":"high"},
+    {"category":"divination","keyword":"расклад","aliases":["расклад на отношения","расклад на судьбу"],"translit":["rasklad","spread"],"regex_safe":"р[аa]скл[аa]д","severity":"high"},
+    {"category":"divination","keyword":"рун","aliases":["руны","рунолог"],"translit":["runes","runa"],"regex_safe":"р[уu]н","severity":"high"},
+    {"category":"divination","keyword":"астролог","aliases":["астрология","астропрогноз"],"translit":["astrology","astrolog"],"regex_safe":"[аa]стролог","severity":"high"},
+    {"category":"divination","keyword":"гороскоп","aliases":["натальная карта"],"translit":["horoscope","natal chart"],"regex_safe":"г[оo0]р[оo0]ск[оo0]п","severity":"medium"},
+    {"category":"divination","keyword":"нумеролог","aliases":["нумерология","матрица судьбы"],"translit":["numerology","matrix of destiny"],"regex_safe":"нум[еe]ролог","severity":"high"},
+    {"category":"divination","keyword":"матрица судьбы","aliases":["код судьбы","число судьбы"],"translit":["matrix sudby","destiny matrix"],"regex_safe":"м[аa]триц[аa]\\s+судьб","severity":"high"},
+    {"category":"divination","keyword":"родовая программа","aliases":["родовые программы","чистка рода"],"translit":["rodovaya programma","ancestral program"],"regex_safe":"родов\\w*\\s+программ","severity":"high"},
+
+    {"category":"occult","keyword":"оккульт","aliases":["оккультизм","оккультный"],"translit":["occult"],"regex_safe":"[оo]кк[уu]льт","severity":"high"},
+    {"category":"occult","keyword":"сатанизм","aliases":["сатанист","сатанинский"],"translit":["satanism","satanist"],"regex_safe":"с[аa]т[аa]н[иi]зм","severity":"high"},
+    {"category":"occult","keyword":"люцифер","aliases":["люциферианство"],"translit":["lucifer","luciferian"],"regex_safe":"л[юu]ц[иi]ф[еe]р","severity":"high"},
+    {"category":"occult","keyword":"демонолог","aliases":["демонология","вызов демона"],"translit":["demonology","invoke demon"],"regex_safe":"д[еe]монолог","severity":"high"},
+    {"category":"occult","keyword":"пентаграм","aliases":["пентаграмма","пентакль"],"translit":["pentagram","pentacle"],"regex_safe":"п[еe]нт[аa]гр[аa]м","severity":"high"},
+    {"category":"occult","keyword":"печать соломона","aliases":["сигил","сигилы"],"translit":["seal of solomon","sigil"],"regex_safe":"п[еe]ч[аa]ть\\s+соломон[аa]","severity":"high"},
+    {"category":"occult","keyword":"черная магия","aliases":["тёмная магия"],"translit":["black magic","dark magic"],"regex_safe":"ч[еe]рн\\w*\\s+м[аa]г[иi1]","severity":"high"},
+
+    {"category":"mystic_practices","keyword":"чакр","aliases":["чакры","чакральный"],"translit":["chakra","chakra"],"regex_safe":"ч[аa]к\\W*р","severity":"high"},
+    {"category":"mystic_practices","keyword":"аур","aliases":["аура","чистка ауры"],"translit":["aura"],"regex_safe":"[аa][уu]р","severity":"medium"},
+    {"category":"mystic_practices","keyword":"энергопрактик","aliases":["энергетическая практика","практик энергии"],"translit":["energy practice","energo"],"regex_safe":"[еe]н[еe]рг\\w*пр[аa]кт","severity":"high"},
+    {"category":"mystic_practices","keyword":"вибрац","aliases":["вибрации","повысить вибрации"],"translit":["vibration","vibracii"],"regex_safe":"в[иi]бр[аa]ц","severity":"medium"},
+    {"category":"mystic_practices","keyword":"квантов практик","aliases":["квантовое исцеление"],"translit":["quantum practice","quantum healing"],"regex_safe":"кв[аa]нтов\\w*\\s+пр[аa]кт","severity":"high"},
+    {"category":"mystic_practices","keyword":"регресс","aliases":["регрессия в прошлые жизни"],"translit":["regression","past life regression"],"regex_safe":"р[еe]гр[еe]сс","severity":"high"},
+    {"category":"mystic_practices","keyword":"реинкарнац","aliases":["прошлые жизни"],"translit":["reincarnation","past lives"],"regex_safe":"р[еe][иi]нк[аa]рн[аa]ц","severity":"medium"},
+    {"category":"mystic_practices","keyword":"карм","aliases":["карма","кармический"],"translit":["karma","karmic"],"regex_safe":"к[аa]рм","severity":"medium"},
+    {"category":"mystic_practices","keyword":"биоэнерг","aliases":["биоэнергет"],"translit":["bioenergy","bioenergetic"],"regex_safe":"б[иi]о[еe]н[еe]рг","severity":"high"},
+    {"category":"mystic_practices","keyword":"спиритизм","aliases":["спиритический сеанс","медиум"],"translit":["spiritism","medium"],"regex_safe":"сп[иi]р[иi]т[иi]зм","severity":"high"},
+    {"category":"mystic_practices","keyword":"шаманизм","aliases":["шаман","камлание"],"translit":["shaman","shamanism"],"regex_safe":"ш[аa]м[аa]н[иi]зм","severity":"high"},
+
+    {"category":"sects","keyword":"секта","aliases":["сектант","сектантский"],"translit":["sekta","cult"],"regex_safe":"с[еe]кт[аa]","severity":"high"},
+    {"category":"sects","keyword":"культ","aliases":["культовый орден","тайный культ"],"translit":["cult","occult cult"],"regex_safe":"к[уu]льт","severity":"high"},
+    {"category":"sects","keyword":"тоталитарная секта","aliases":["деструктивный культ"],"translit":["destructive cult"],"regex_safe":"тот[аa]л[иi]т[аa]рн\\w*\\s+с[еe]кт","severity":"high"},
+    {"category":"sects","keyword":"духовный наставник за донат","aliases":["инициация за деньги","посвящение платно"],"translit":["guru for donation","paid initiation"],"regex_safe":"н[аa]ст[аa]вн[иi]к\\w*\\s+за\\s+дон[аa]т","severity":"high"},
+
+    {"category":"spiritual_practices","keyword":"медитац","aliases":["медитация","медитировать"],"translit":["meditation"],"regex_safe":"м[еe]д[иi]т[аa]ц","severity":"low"},
+    {"category":"spiritual_practices","keyword":"осознанность","aliases":["практика осознанности"],"translit":["mindfulness"],"regex_safe":"осозн[аa]нн","severity":"low"},
+    {"category":"spiritual_practices","keyword":"практика дыхания","aliases":["дыхательные практики"],"translit":["breathwork"],"regex_safe":"дых[аa]т\\w*\\s+пр[аa]кт","severity":"low"},
+    {"category":"spiritual_practices","keyword":"ретрит","aliases":["духовный ретрит"],"translit":["retreat"],"regex_safe":"р[еe]тр[иi]т","severity":"medium"},
+    {"category":"spiritual_practices","keyword":"инициац","aliases":["инициация"],"translit":["initiation"],"regex_safe":"[иi]н[иi]ц[иi][аa]ц","severity":"medium"},
+    {"category":"spiritual_practices","keyword":"проводник энергии","aliases":["энергопроводник"],"translit":["energy guide"],"regex_safe":"пров[оo]дн[иi]к\\s+[еe]н[еe]рг","severity":"high"}
+  ],
+  "obfuscation_watchlist": [
+    "тар0",
+    "tаро",
+    "маг1я",
+    "р е л и г и я",
+    "прив0рот",
+    "ру_ны",
+    "чак*ры",
+    "эз0терика",
+    "оккул_т",
+    "гад@ние"
+  ],
+  "fuzzy_matching": {
+    "max_distance_short_token": 1,
+    "max_distance_medium_token": 2,
+    "max_distance_long_token": 3,
+    "use_for": [
+      "high_severity_terms_only",
+      "after_normalization",
+      "only_if_regex_or_keyword_not_matched"
+    ],
+    "deny_merge_examples": [
+      "медитация (нейтральный контекст)",
+      "религиоведение (образовательный контекст)"
+    ]
+  }
+}

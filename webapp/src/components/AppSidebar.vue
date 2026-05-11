@@ -59,7 +59,7 @@ function onNavClick(item) {
     >
       <nav class="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto overscroll-contain p-3 pb-8">
         <div
-          class="mb-4 flex flex-col gap-2 rounded-2xl border border-white/18 bg-gradient-to-b from-white/[0.12] to-white/[0.04] px-3 py-4 shadow-inner ring-1 ring-white/10 backdrop-blur-xl dark:from-white/[0.08] dark:to-white/[0.02]"
+          class="mb-4 flex flex-col gap-2 rounded-2xl bg-gradient-to-b from-white/[0.12] to-white/[0.04] px-3 py-4 shadow-inner backdrop-blur-xl dark:from-white/[0.08] dark:to-white/[0.02]"
         >
           <img
             :src="logoSrc"

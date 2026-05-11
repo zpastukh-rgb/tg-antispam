@@ -3,7 +3,10 @@ import './themeBootstrap.js'
 import { createApp } from 'vue'
 import App from './App.vue'
 import router from './router'
+import { installRouteTransitionLoader } from './composables/useRouteTransitionLoader.js'
 import './styles.css'
+
+installRouteTransitionLoader(router)
 
 // До mount: на части клиентов initData появляется только после ready(); иначе первые запросы к API без подписи → 401 и «приложение не открывается».
 const tg = window.Telegram?.WebApp

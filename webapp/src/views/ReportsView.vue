@@ -4,6 +4,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import { openTelegramDeepLink } from '../utils/openTelegramDeepLink'
+import GuardBlueLoadingState from '../components/GuardBlueLoadingState.vue'
 import { useCabinetMode } from '../composables/useCabinetMode'
 
 const router = useRouter()
@@ -22,8 +23,6 @@ const showReportsInfoModal = ref(false)
 const botInfo = ref(null)
 const meProfile = ref(null)
 let stopListen = null
-
-const reportsBg = `${import.meta.env.BASE_URL}app-global-bg.png`
 
 function boolToggleClass(on) {
   return on ? 'guard-green-soft' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'
@@ -245,14 +244,8 @@ function goPremiumFromReports() {
         </button>
       </div>
       <div
-        class="relative -mx-4 overflow-hidden rounded-2xl border border-slate-700/60 shadow-[0_24px_80px_-32px_rgba(0,0,0,0.85)] ring-1 ring-slate-700/40 md:-mx-6"
+        class="relative -mx-4 overflow-hidden rounded-2xl border border-white/[0.1] bg-white/[0.05] shadow-[0_24px_80px_-32px_rgba(0,0,0,0.75),inset_0_1px_0_rgba(255,255,255,0.06)] ring-1 ring-white/[0.06] backdrop-blur-2xl md:-mx-6"
       >
-      <div
-        class="pointer-events-none absolute inset-0 bg-cover bg-center"
-        :style="{ backgroundImage: `url(${reportsBg})` }"
-        aria-hidden="true"
-      />
-      <div class="absolute inset-0 bg-slate-950/60 backdrop-blur-[1px] dark:bg-black/55" aria-hidden="true" />
       <div class="relative z-10 space-y-2.5 px-4 py-3 pb-10 md:px-6 md:pb-12">
         <div class="flex flex-wrap items-center gap-2 text-[11px] leading-snug text-slate-300">
           <span>Группа: <strong class="text-white">{{ chat.title }}</strong></span>
@@ -486,9 +479,9 @@ function goPremiumFromReports() {
 
     <div
       v-else-if="hasInitData"
-      class="rounded-2xl border border-white/10 bg-zinc-950/40 p-8 text-center text-slate-400 ring-1 ring-white/5 backdrop-blur-xl"
+      class="rounded-2xl bg-white/[0.06] py-6 text-center shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-xl"
     >
-      Загрузка…
+      <GuardBlueLoadingState />
     </div>
     <div
       v-if="showReportsInfoModal"
