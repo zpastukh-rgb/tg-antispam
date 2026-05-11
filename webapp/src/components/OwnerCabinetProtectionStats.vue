@@ -5,12 +5,44 @@ import { api } from '../api/client'
 const props = defineProps({
   summary: { type: Object, default: () => ({}) },
   hourlyData: { type: Object, default: () => ({}) },
+  audienceGender: { type: Object, default: () => ({}) },
   loading: { type: Boolean, default: false },
   periodKey: { type: String, default: 'today' },
   mode: { type: String, default: 'protection' },
 })
 
 const emit = defineEmits(['period-change', 'open-groups', 'report-context-change'])
+
+/** Telegram chat id как строка (без потери точности и без NaN при длинных id). */
+function sidChat(v) {
+  if (v == null || v === '') return ''
+  const s = String(v).trim()
+  return /^-?\d+$/.test(s) ? s : ''
+}
+
+/** Если сумма by_hour = 0 при ненулевом total_deleted — собрать часы из by_hour_by_reason. */
+function rebuildByHourIfSparse(merged) {
+  if (!merged || typeof merged !== 'object') return merged
+  const raw = Array.isArray(merged.by_hour) && merged.by_hour.length === 24
+    ? merged.by_hour.map((x) => Math.max(0, Number(x || 0)))
+    : Array.from({ length: 24 }, () => 0)
+  const sum = raw.reduce((a, b) => a + b, 0)
+  const td = Math.max(0, Number(merged.total_deleted || 0))
+  if (sum > 0 || td <= 0) return merged
+  const br = merged.by_hour_by_reason
+  if (!br || typeof br !== 'object') return merged
+  const next = raw.slice()
+  for (let h = 0; h < 24; h += 1) {
+    let acc = 0
+    for (const key of Object.keys(br)) {
+      const bucket = br[key]
+      if (Array.isArray(bucket)) acc += Math.max(0, Number(bucket[h] || 0))
+    }
+    next[h] = acc
+  }
+  if (!next.some((x) => x > 0)) return merged
+  return { ...merged, by_hour: next }
+}
 
 const statsPeriod = ref(props.periodKey || 'today')
 const statsType = ref('all')
@@ -117,16 +149,29 @@ const selectedScopeChatRow = computed(() => {
   if (inScoped) return inScoped
   return chats.value.find((c) => String(c?.id) === id) || null
 })
+
+/** id из ModerationLog (канал + обсуждение и т.д.) для выбранной в пресетах группы. */
+function moderationIdsForSelectedChat() {
+  if (selectedChatId.value === 'all') return null
+  const row = selectedScopeChatRow.value
+  const raw = row?.moderation_chat_ids
+  if (Array.isArray(raw) && raw.length) {
+    return raw.map((x) => sidChat(x)).filter(Boolean)
+  }
+  const one = sidChat(selectedChatId.value)
+  return one ? [one] : null
+}
+
 const reportContextPayload = computed(() => ({
   scope: String(statsScope.value || 'all'),
-  chatId: selectedChatId.value === 'all' ? null : Number(selectedChatId.value || 0),
+  chatId: selectedChatId.value === 'all' ? null : sidChat(selectedChatId.value) || null,
   chatTitle: String(selectedScopeChatRow.value?.title || ''),
+  periodKey: String(statsPeriod.value || 'today'),
+  journalChatIds: moderationIdsForSelectedChat(),
   eligibleChatIds:
     selectedChatId.value === 'all'
-      ? availableScopeChats.value
-        .map((c) => Number(c?.id || 0))
-        .filter((n) => Number.isFinite(n) && n !== 0)
-      : [Number(selectedChatId.value || 0)].filter((n) => Number.isFinite(n) && n !== 0),
+      ? availableScopeChats.value.map((c) => sidChat(c?.id)).filter(Boolean)
+      : [sidChat(selectedChatId.value)].filter(Boolean),
 }))
 
 function normalizeReason(reason) {
@@ -213,15 +258,17 @@ async function loadBreakdown() {
         const retryAll = await api.activityBreakdown(period, 'all', chatId).catch(() => null)
         if (retryAll) scoped = retryAll
       }
-      breakdownData.value = scoped
-        ? {
-            ...base,
-            ...scoped,
-            chats: Array.isArray(base?.chats) ? base.chats : [],
-          }
-        : base
+      breakdownData.value = rebuildByHourIfSparse(
+        scoped
+          ? {
+              ...base,
+              ...scoped,
+              chats: Array.isArray(base?.chats) ? base.chats : [],
+            }
+          : base,
+      )
     } else {
-      breakdownData.value = base
+      breakdownData.value = rebuildByHourIfSparse(base)
     }
   } catch {
     breakdownData.value = null
@@ -337,11 +384,55 @@ const growthTopChat = computed(() => {
   }
 })
 
+const chatRowsForStats = computed(() => {
+  const rows = Array.isArray(breakdownData.value?.chats) && breakdownData.value.chats.length
+    ? breakdownData.value.chats
+    : chats.value
+  return Array.isArray(rows) ? rows : []
+})
+const channelRowsForStats = computed(() => chatRowsForStats.value.filter((c) => isChannelChat(c)))
+const groupRowsForStats = computed(() => chatRowsForStats.value.filter((c) => !isChannelChat(c)))
+const channelMessagesTotal = computed(() =>
+  channelRowsForStats.value.reduce((acc, c) => acc + Math.max(0, toNum(c?.messages || 0)), 0),
+)
+const channelGrowthNet = computed(() =>
+  channelRowsForStats.value.reduce((acc, c) => acc + Math.max(0, toNum(c?.joined || 0)) - Math.max(0, toNum(c?.left || 0)), 0),
+)
+const topChannelByMessages = computed(() => {
+  if (!channelRowsForStats.value.length) return null
+  return [...channelRowsForStats.value].sort((a, b) => toNum(b?.messages || 0) - toNum(a?.messages || 0))[0] || null
+})
+const audienceGenderCard = computed(() => {
+  const g = props.audienceGender || {}
+  const malePct = Math.max(0, Math.min(100, Number(g?.malePct || 0)))
+  const femalePct = Math.max(0, Math.min(100, Number(g?.femalePct || (100 - malePct))))
+  const knownTotal = Math.max(0, Number(g?.knownTotal || 0))
+  return {
+    audience: Math.max(0, Number(g?.audience || 0)),
+    malePct: Number.isFinite(malePct) ? Math.round(malePct * 10) / 10 : 0,
+    femalePct: Number.isFinite(femalePct) ? Math.round(femalePct * 10) / 10 : 0,
+    maleCount: Math.max(0, Number(g?.maleCount || 0)),
+    femaleCount: Math.max(0, Number(g?.femaleCount || 0)),
+    knownTotal,
+    unknownCount: Math.max(0, Number(g?.unknownCount || 0)),
+    hasAny: knownTotal > 0,
+  }
+})
+
 const byHour = computed(() => {
   const arr = isGrowthMode.value
     ? (Array.isArray(breakdownData.value?.by_hour_messages) ? breakdownData.value.by_hour_messages : [])
     : (Array.isArray(breakdownData.value?.by_hour) ? breakdownData.value.by_hour : [])
-  if (arr.length === 24) return arr.map((x) => Math.max(0, Number(x || 0)))
+  if (arr.length === 24) {
+    const out = arr.map((x) => Math.max(0, Number(x || 0)))
+    const sum = out.reduce((a, b) => a + b, 0)
+    const td = Math.max(0, Number(breakdownData.value?.total_deleted || 0))
+    if (!isGrowthMode.value && sum === 0 && td > 0) {
+      const fixed = rebuildByHourIfSparse(breakdownData.value)?.by_hour
+      if (Array.isArray(fixed) && fixed.length === 24) return fixed.map((x) => Math.max(0, Number(x || 0)))
+    }
+    return out
+  }
   return Array.from({ length: 24 }, () => 0)
 })
 const xTickLabels = ['00:00', '06:00', '12:00', '18:00', '24:00']
@@ -423,10 +514,19 @@ const weekdayRows = computed(() => {
       src[d] = (breakdownData.value.heatmap_24x7[d] || []).reduce((a, b) => a + Math.max(0, toNum(b)), 0)
     }
   }
-  const labels = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье']
+  const labels = [
+    { full: 'Понедельник', short: 'Пн' },
+    { full: 'Вторник', short: 'Вт' },
+    { full: 'Среда', short: 'Ср' },
+    { full: 'Четверг', short: 'Чт' },
+    { full: 'Пятница', short: 'Пт' },
+    { full: 'Суббота', short: 'Сб' },
+    { full: 'Воскресенье', short: 'Вс' },
+  ]
   const max = Math.max(1, ...src.map((x) => Number(x || 0)))
   return labels.map((label, i) => ({
-    label,
+    label: label.full,
+    short: label.short,
     n: Math.max(0, Number(src[i] || 0)),
     pct: (Math.max(0, Number(src[i] || 0)) / max) * 100,
   }))
@@ -560,7 +660,7 @@ function onChartLeave() {
 
 function pillActiveClass(on) {
   return on
-    ? 'border border-[#00ff99]/80 bg-[rgba(0,255,150,0.15)] text-emerald-100 shadow-[0_0_18px_-6px_rgba(0,255,153,0.45)]'
+    ? 'border border-[#7dff3a]/80 bg-[rgba(125,255,58,0.14)] text-[#deffbf] shadow-[0_0_18px_-6px_rgba(125,255,58,0.5)]'
     : 'border border-white/10 bg-white/[0.06] text-slate-300'
 }
 function onPeriodPick(key) {
@@ -570,14 +670,14 @@ function onPeriodPick(key) {
 function emitReportContextNow() {
   emit('report-context-change', {
     scope: String(statsScope.value || 'all'),
-    chatId: selectedChatId.value === 'all' ? null : Number(selectedChatId.value || 0),
+    chatId: selectedChatId.value === 'all' ? null : sidChat(selectedChatId.value) || null,
     chatTitle: String(selectedScopeChatRow.value?.title || ''),
+    periodKey: String(statsPeriod.value || 'today'),
+    journalChatIds: moderationIdsForSelectedChat(),
     eligibleChatIds:
       selectedChatId.value === 'all'
-        ? availableScopeChats.value
-          .map((c) => Number(c?.id || 0))
-          .filter((n) => Number.isFinite(n) && n !== 0)
-        : [Number(selectedChatId.value || 0)].filter((n) => Number.isFinite(n) && n !== 0),
+        ? availableScopeChats.value.map((c) => sidChat(c?.id)).filter(Boolean)
+        : [sidChat(selectedChatId.value)].filter(Boolean),
   })
 }
 function pickStatsScope(scopeKey) {
@@ -641,7 +741,7 @@ onUnmounted(() => {
         </button>
       </div>
       <div class="grid grid-cols-3 gap-2">
-        <button v-for="s in SCOPE_TABS" :key="s.key" type="button" class="rounded-xl border px-2.5 py-2 text-[11px] font-semibold transition" :class="statsScope === s.key ? 'border-emerald-400/70 bg-emerald-500/15 text-emerald-100' : 'border-white/10 bg-white/[0.04] text-slate-300'" @click="pickStatsScope(s.key)">
+        <button v-for="s in SCOPE_TABS" :key="s.key" type="button" class="rounded-xl border px-2.5 py-2 text-[11px] font-semibold transition" :class="statsScope === s.key ? 'border-[#7dff3a]/80 bg-[rgba(125,255,58,0.14)] text-[#deffbf]' : 'border-white/10 bg-white/[0.04] text-slate-300'" @click="pickStatsScope(s.key)">
           {{ s.label }}
         </button>
       </div>
@@ -695,6 +795,73 @@ onUnmounted(() => {
               · Отписалось: <span class="font-semibold tabular-nums text-white">{{ growthTopChat.left }}</span>
             </p>
           </div>
+          <div class="rounded-2xl border border-white/10 bg-[#10141a]/95 p-4 backdrop-blur-md">
+            <div class="flex items-center justify-between gap-2">
+              <p class="text-[12px] font-semibold text-white">Статистика чатов и каналов</p>
+              <span class="text-[10px] text-slate-400">всего: {{ chatRowsForStats.length }}</span>
+            </div>
+            <div class="mt-3 grid grid-cols-2 gap-2">
+              <div class="rounded-xl border border-white/10 bg-black/20 p-2.5">
+                <p class="text-[10px] text-slate-300/90">Группы</p>
+                <p class="mt-0.5 text-lg font-black tabular-nums text-white">{{ groupRowsForStats.length }}</p>
+              </div>
+              <div class="rounded-xl border border-cyan-400/20 bg-cyan-950/20 p-2.5">
+                <p class="text-[10px] text-cyan-100/90">Каналы</p>
+                <p class="mt-0.5 text-lg font-black tabular-nums text-cyan-100">{{ channelRowsForStats.length }}</p>
+              </div>
+            </div>
+            <div class="mt-2 grid grid-cols-2 gap-2">
+              <div class="rounded-xl border border-white/10 bg-black/20 p-2.5">
+                <p class="text-[10px] text-slate-300/90">Сообщений в каналах</p>
+                <p class="mt-0.5 text-lg font-black tabular-nums text-white">{{ channelMessagesTotal }}</p>
+              </div>
+              <div class="rounded-xl border border-emerald-400/20 bg-emerald-950/15 p-2.5">
+                <p class="text-[10px] text-emerald-100/90">Прирост каналов</p>
+                <p class="mt-0.5 text-lg font-black tabular-nums" :class="channelGrowthNet >= 0 ? 'text-emerald-200' : 'text-rose-200'">{{ channelGrowthNet >= 0 ? '+' : '' }}{{ channelGrowthNet }}</p>
+              </div>
+            </div>
+            <p class="mt-2 truncate text-[11px] text-slate-400">
+              Топ канал: <span class="font-semibold text-white">{{ topChannelByMessages?.title || '—' }}</span>
+              <span v-if="topChannelByMessages"> · {{ Math.max(0, toNum(topChannelByMessages?.messages || 0)) }} сообщений</span>
+            </p>
+          </div>
+          <div class="rounded-2xl border border-white/10 bg-[#10141a]/95 p-4 backdrop-blur-md">
+            <div class="mb-2 flex items-center justify-between gap-2">
+              <p class="text-[12px] font-semibold text-white">Пол участников</p>
+              <p class="text-[11px] text-slate-400">аудитория: {{ Math.round(audienceGenderCard.audience) }}</p>
+            </div>
+            <div class="flex items-end justify-between gap-3">
+              <div>
+                <p class="text-3xl font-extrabold leading-none text-white">{{ audienceGenderCard.malePct }}%</p>
+                <p class="text-sm font-semibold text-cyan-200">{{ Math.round(audienceGenderCard.maleCount) }}</p>
+                <p class="text-[12px] text-slate-300">мужчины</p>
+              </div>
+              <div class="text-right">
+                <p class="text-3xl font-extrabold leading-none text-white">{{ audienceGenderCard.femalePct }}%</p>
+                <p class="text-sm font-semibold text-rose-200">{{ Math.round(audienceGenderCard.femaleCount) }}</p>
+                <p class="text-[12px] text-slate-300">женщины</p>
+              </div>
+            </div>
+            <div class="mt-3 h-8 overflow-hidden rounded-lg border border-white/10 bg-black/35">
+              <div class="flex h-full w-full">
+                <div
+                  class="flex h-full items-center justify-center bg-cyan-500/75 text-sm font-bold text-white"
+                  :style="{ width: `${audienceGenderCard.malePct}%` }"
+                >
+                  {{ audienceGenderCard.malePct }}%
+                </div>
+                <div
+                  class="flex h-full items-center justify-center bg-rose-500/80 text-sm font-bold text-white"
+                  :style="{ width: `${audienceGenderCard.femalePct}%` }"
+                >
+                  {{ audienceGenderCard.femalePct }}%
+                </div>
+              </div>
+            </div>
+            <p class="mt-2 text-[11px] text-slate-400">
+              Учтено по именам: {{ Math.round(audienceGenderCard.knownTotal) }}, не определено: {{ Math.round(audienceGenderCard.unknownCount) }}
+            </p>
+          </div>
         </template>
         <template v-else>
         <div class="rounded-2xl border border-white/10 bg-[#10141a]/95 p-4 backdrop-blur-md">
@@ -730,7 +897,7 @@ onUnmounted(() => {
               <text x="164" y="126" fill="rgba(148,163,184,0.45)" font-size="9">{{ xTickLabels[2] }}</text>
               <text x="232" y="126" fill="rgba(148,163,184,0.45)" font-size="9">{{ xTickLabels[3] }}</text>
               <text x="286" y="126" fill="rgba(148,163,184,0.45)" font-size="9">{{ xTickLabels[4] }}</text>
-              <path :d="linePath" fill="none" stroke="#8b5cf6" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" />
+              <path :d="linePath" fill="none" stroke="#7dff3a" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" />
             </svg>
             <div class="pointer-events-none absolute right-2 top-2 rounded-lg border border-slate-600/80 bg-slate-900/95 px-2.5 py-1.5 text-[10px] text-slate-200">
               {{ hoverData.hour }} · {{ hoverData.total }} удалений
@@ -819,11 +986,11 @@ onUnmounted(() => {
                   <div
                     v-for="w in weekdayRows"
                     :key="w.label"
-                    class="flex min-w-0 flex-1 items-end justify-center"
+                    class="flex h-full min-w-0 flex-1 items-end justify-center"
                   >
                     <div
-                      class="w-full max-w-[38px] rounded-md bg-gradient-to-t from-violet-700 to-fuchsia-500 shadow-[0_10px_26px_-14px_rgba(168,85,247,0.85)]"
-                      :style="{ height: `${Math.max(12, w.pct)}%` }"
+                      class="w-full max-w-[38px] rounded-md bg-gradient-to-t from-emerald-500 to-cyan-400 shadow-[0_12px_26px_-12px_rgba(16,185,129,0.9)]"
+                      :style="{ height: `${Math.max(14, w.pct)}%` }"
                     />
                   </div>
                 </div>
@@ -833,7 +1000,7 @@ onUnmounted(() => {
                     :key="`lbl-${w.label}`"
                     class="min-w-0 flex-1 text-center text-[10px] text-slate-400"
                   >
-                    {{ w.label.slice(0, 2) }}
+                    {{ w.short }}
                   </span>
                 </div>
               </div>

@@ -36,6 +36,9 @@ export function messageFromApiError(e) {
   if (status === 401 && (String(detail).toLowerCase().includes('init') || String(detail).toLowerCase().includes('telegram'))) {
     return 'Сессия Mini App не подтверждена. Закройте панель и откройте снова через кнопку «Меню» в чате с ботом (не из внешнего браузера). Если открываете другого бота — у этого аккаунта должен быть тот же бот, что и API на сервере.'
   }
+  if (status === 401 && String(detail).toLowerCase().includes('session terminated')) {
+    return 'Эта сессия завершена. Откройте мини-приложение заново из Telegram.'
+  }
   return detail || 'Ошибка запроса'
 }
 

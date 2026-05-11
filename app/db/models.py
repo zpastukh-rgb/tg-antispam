@@ -719,6 +719,28 @@ class UserContext(Base):
 
 
 # =========================================================
+# WEBAPP SESSIONS (сессии Mini App по устройствам)
+# =========================================================
+
+class WebAppSession(Base):
+    __tablename__ = "webapp_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    session_id: Mapped[str] = mapped_column(String(96), unique=True, index=True)
+    device_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        index=True,
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
+
+# =========================================================
 # OWNER JOIN REPORT SETTINGS (дайджест вступлений в группы владельца)
 # =========================================================
 

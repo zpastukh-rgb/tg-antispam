@@ -933,10 +933,13 @@ function partnerReasonRu(reason) {
 }
 
 async function loadPartnerLiteActivity() {
+  const to0 = new Date()
+  const from0 = new Date()
+  from0.setHours(0, 0, 0, 0)
   const [s, b, j, jr] = await Promise.all([
     api.activitySummary(),
     api.activityBreakdown('today', 'all').catch(() => null),
-    api.activityJournal(null, 80),
+    fetchSilent(() => api.activityJournal(null, 150, from0.toISOString(), to0.toISOString())).catch(() => ({ items: [] })),
     api.ownerJoinReportSettings().catch(() => ({ periods: [] })),
   ])
   plActivitySummary.value = s
@@ -1254,7 +1257,80 @@ function onOwnerStatsPeriodChange(payload) {
   else if (key === '1y') partnerHourlyPreset.value = '1y'
   else partnerHourlyPreset.value = '24h'
   void loadPartnerHourlyActivity()
+  if (ownerProtectionReportOpen.value && String(premiumAdmSection.value || '') === 'protection') {
+    void refreshOwnerProtectionJournal()
+  }
 }
+
+function _ownerApiPeriodFromStatsKey(key) {
+  const k = String(key || 'today')
+  if (k === 'custom') return '30d'
+  if (k === '6m') return '180d'
+  if (k === '1y') return '365d'
+  if (k === '7d' || k === '30d' || k === 'today') return k
+  return 'today'
+}
+
+function _ownerJournalIsoRange(periodKey) {
+  const to = new Date()
+  const k = String(periodKey || 'today')
+  if (k === 'custom') {
+    if (partnerHourlyUseCustomRange.value) {
+      const fromIso = _partnerDayBoundsIso(partnerHourlyDateFrom.value, false)
+      const toIso = _partnerDayBoundsIso(partnerHourlyDateTo.value, true)
+      if (fromIso && toIso) return { fromTs: fromIso, toTs: toIso }
+    }
+    const from = new Date(to.getTime() - 30 * 86400000)
+    return { fromTs: from.toISOString(), toTs: to.toISOString() }
+  }
+  if (k === '7d') return { fromTs: new Date(to.getTime() - 7 * 86400000).toISOString(), toTs: to.toISOString() }
+  if (k === '30d') return { fromTs: new Date(to.getTime() - 30 * 86400000).toISOString(), toTs: to.toISOString() }
+  if (k === '6m') return { fromTs: new Date(to.getTime() - 180 * 86400000).toISOString(), toTs: to.toISOString() }
+  if (k === '1y') return { fromTs: new Date(to.getTime() - 365 * 86400000).toISOString(), toTs: to.toISOString() }
+  const from = new Date()
+  from.setHours(0, 0, 0, 0)
+  return { fromTs: from.toISOString(), toTs: to.toISOString() }
+}
+
+async function refreshOwnerProtectionJournal() {
+  if (!hasInitData.value) return
+  const ctx = ownerProtectionReportContext.value || {}
+  const scope = ['all', 'own', 'delegated'].includes(String(ctx.scope || 'all')) ? String(ctx.scope) : 'all'
+  const chatId = sidOwnerCtx(ctx.chatId)
+  const periodKey = String(ownerStatsPeriodKey.value || 'today')
+  const apiPeriod = _ownerApiPeriodFromStatsKey(periodKey)
+  const { fromTs, toTs } = _ownerJournalIsoRange(periodKey)
+  try {
+    const [b, j] = await Promise.all([
+      fetchSilent(() => api.activityBreakdown(apiPeriod, scope, chatId)),
+      fetchSilent(() => api.activityJournal(chatId, 400, fromTs, toTs)),
+    ])
+    if (b) plActivityBreakdown.value = b
+    plActivityJournal.value = Array.isArray(j?.items) ? j.items : []
+  } catch {
+    //
+  }
+}
+
+watch(
+  () => ({
+    open: ownerProtectionReportOpen.value,
+    period: ownerStatsPeriodKey.value,
+    scope: ownerProtectionReportContext.value?.scope,
+    chatId: ownerProtectionReportContext.value?.chatId,
+    eligibleLen: (ownerProtectionReportContext.value?.eligibleChatIds || []).length,
+    journalSig: (() => {
+      const j = ownerProtectionReportContext.value?.journalChatIds
+      if (!Array.isArray(j) || !j.length) return ''
+      return j.join(',')
+    })(),
+  }),
+  () => {
+    if (!ownerProtectionReportOpen.value) return
+    if (String(premiumAdmSection.value || '') !== 'protection') return
+    void refreshOwnerProtectionJournal()
+  },
+)
 
 const showCabinetCrownNav = computed(() => {
   if (!isOwnerCabinet.value || showFullAdminShell.value) return false
@@ -1556,17 +1632,26 @@ function selectPartnerChatFromList(chatId) {
 function closeOwnerProtectionReport() {
   ownerProtectionReportOpen.value = false
 }
+
+/** Telegram chat id в контексте отчёта (строка, без NaN при длинных id). */
+function sidOwnerCtx(v) {
+  if (v == null || v === '') return null
+  const s = String(v).trim()
+  if (!/^-?\d+$/.test(s)) return null
+  return s
+}
+
 function onOwnerProtectionReportContextChange(next) {
   const scope = String(next?.scope || 'all')
-  const chatIdNum = Number(next?.chatId || 0)
   ownerProtectionReportContext.value = {
     scope: ['all', 'own', 'delegated'].includes(scope) ? scope : 'all',
-    chatId: Number.isFinite(chatIdNum) && chatIdNum !== 0 ? chatIdNum : null,
+    chatId: sidOwnerCtx(next?.chatId),
     chatTitle: String(next?.chatTitle || ''),
+    journalChatIds: Array.isArray(next?.journalChatIds)
+      ? next.journalChatIds.map((x) => sidOwnerCtx(x)).filter(Boolean)
+      : null,
     eligibleChatIds: Array.isArray(next?.eligibleChatIds)
-      ? next.eligibleChatIds
-        .map((x) => Number(x || 0))
-        .filter((n) => Number.isFinite(n) && n !== 0)
+      ? next.eligibleChatIds.map((x) => sidOwnerCtx(x)).filter(Boolean)
       : [],
   }
 }
@@ -1579,63 +1664,120 @@ function partnerJournalActionHidden(ev, kind) {
 
 const ownerProtectionChatSharingMap = computed(() => {
   const map = new Map()
-  const rows = Array.isArray(partnerHourlyData.value?.chats) ? partnerHourlyData.value.chats : []
+  const rows = Array.isArray(plActivityBreakdown.value?.chats)
+    ? plActivityBreakdown.value.chats
+    : Array.isArray(partnerHourlyData.value?.chats)
+      ? partnerHourlyData.value.chats
+      : []
   for (const row of rows) {
-    const cid = Number(row?.id || 0)
-    if (!cid) continue
-    map.set(cid, !!(row?.is_delegated || row?.is_shared))
+    const del = !!(row?.is_delegated || row?.is_shared)
+    const ids = Array.isArray(row?.moderation_chat_ids) && row.moderation_chat_ids.length
+      ? row.moderation_chat_ids.map((x) => sidOwnerCtx(x)).filter(Boolean)
+      : [sidOwnerCtx(row?.id)].filter(Boolean)
+    for (const id of ids) map.set(id, del)
   }
   return map
 })
 const ownerProtectionChatIdByTitle = computed(() => {
   const m = new Map()
-  const rows = Array.isArray(partnerHourlyData.value?.chats) ? partnerHourlyData.value.chats : []
+  const rows = Array.isArray(plActivityBreakdown.value?.chats)
+    ? plActivityBreakdown.value.chats
+    : Array.isArray(partnerHourlyData.value?.chats)
+      ? partnerHourlyData.value.chats
+      : []
   for (const row of rows) {
-    const cid = Number(row?.id || 0)
+    const cid = sidOwnerCtx(row?.id)
     const title = String(row?.title || '').trim().toLowerCase()
-    if (cid > 0 && title) m.set(title, cid)
+    if (cid && title) m.set(title, cid)
   }
   return m
 })
+function _moderationPhysicalSetsFromBreakdown(bd) {
+  const own = new Set()
+  const delegated = new Set()
+  const rows = Array.isArray(bd?.chats) ? bd.chats : []
+  for (const row of rows) {
+    const del = !!(row?.is_delegated || row?.is_shared)
+    const ids = Array.isArray(row?.moderation_chat_ids) && row.moderation_chat_ids.length
+      ? row.moderation_chat_ids.map((x) => sidOwnerCtx(x)).filter(Boolean)
+      : [sidOwnerCtx(row?.id)].filter(Boolean)
+    for (const id of ids) {
+      if (del) delegated.add(id)
+      else own.add(id)
+    }
+  }
+  return { own, delegated, hasIds: own.size + delegated.size > 0 }
+}
+
 const ownerProtectionReportEvents = computed(() => {
-  const list = (plActivityJournal.value || []).slice(0, 160)
+  const list = (plActivityJournal.value || []).slice(0, 400)
   const ctx = ownerProtectionReportContext.value || {}
   const scope = String(ctx.scope || 'all')
-  const targetChatIdRaw = Number(ctx.chatId || 0)
-  const eligible = new Set(
-    (ctx.eligibleChatIds || [])
-      .map((x) => Number(x || 0))
-      .filter((n) => Number.isFinite(n) && n !== 0),
-  )
-  const targetChatId = Number.isFinite(targetChatIdRaw) && targetChatIdRaw !== 0
-    ? targetChatIdRaw
-    : (eligible.size === 1 ? Array.from(eligible)[0] : 0)
+  const eligible = new Set((ctx.eligibleChatIds || []).map((x) => sidOwnerCtx(x)).filter(Boolean))
+  const targetKey = sidOwnerCtx(ctx.chatId) || (eligible.size === 1 ? Array.from(eligible)[0] : '')
   const sharing = ownerProtectionChatSharingMap.value
   const titleToId = ownerProtectionChatIdByTitle.value
+  const phys = _moderationPhysicalSetsFromBreakdown(plActivityBreakdown.value)
+  const jids = ctx.journalChatIds
+  const bdRows = Array.isArray(plActivityBreakdown.value?.chats) ? plActivityBreakdown.value.chats : []
+  const breakdownRowForTarget = bdRows.find((r) => sidOwnerCtx(r?.id) === targetKey) || null
+  const breakdownModerationIds = breakdownRowForTarget && Array.isArray(breakdownRowForTarget.moderation_chat_ids)
+    && breakdownRowForTarget.moderation_chat_ids.length
+    ? breakdownRowForTarget.moderation_chat_ids.map((x) => sidOwnerCtx(x)).filter(Boolean)
+    : []
   return list.filter((ev) => {
-    const cidRaw = Number(ev?.chat_id || 0)
     const titleKey = String(ev?.chat_title || '').trim().toLowerCase()
-    const cid = cidRaw > 0 ? cidRaw : Number(titleToId.get(titleKey) || 0)
-    if (targetChatId > 0) return cid === targetChatId
-    if (eligible.size > 0) return eligible.has(cid)
-    if (scope === 'own') return !sharing.get(cid)
-    if (scope === 'delegated') return !!sharing.get(cid)
+    const cidStr = sidOwnerCtx(ev?.chat_id) || (titleKey ? titleToId.get(titleKey) : null)
+    if (!cidStr) return false
+    if (targetKey) {
+      const allow = new Set()
+      if (Array.isArray(jids) && jids.length) for (const x of jids) {
+        const k = sidOwnerCtx(x)
+        if (k) allow.add(k)
+      }
+      allow.add(targetKey)
+      for (const x of breakdownModerationIds) allow.add(x)
+      return allow.has(cidStr)
+    }
+    // Не фильтруем по eligibleChatIds при «все чаты»: /api/activity/journal уже ограничен доступными чатами.
+    if (scope === 'own') {
+      if (phys.hasIds) return phys.own.has(cidStr)
+      return !sharing.get(cidStr)
+    }
+    if (scope === 'delegated') {
+      if (phys.hasIds) return phys.delegated.has(cidStr)
+      return !!sharing.get(cidStr)
+    }
     return true
   })
 })
 const ownerProtectionReportHint = computed(() => {
   const ctx = ownerProtectionReportContext.value || {}
-  const targetChatIdRaw = Number(ctx.chatId || 0)
-  const eligible = (ctx.eligibleChatIds || [])
-    .map((x) => Number(x || 0))
-    .filter((n) => Number.isFinite(n) && n !== 0)
-  const targetChatId = (Number.isFinite(targetChatIdRaw) && targetChatIdRaw !== 0) ? targetChatIdRaw : (eligible.length === 1 ? eligible[0] : 0)
-  if (targetChatId > 0) {
-    return `Выбран чат: ${ctx.chatTitle || `#${targetChatId}`}. Показаны действия только по нему.`
+  const eligible = (ctx.eligibleChatIds || []).map((x) => sidOwnerCtx(x)).filter(Boolean)
+  const targetKey = sidOwnerCtx(ctx.chatId) || (eligible.length === 1 ? eligible[0] : '')
+  if (targetKey) {
+    return `Выбран чат: ${ctx.chatTitle || `#${targetKey}`}. В списке ниже — только действия по этой группе (включая обсуждение канала, если оно привязано).`
   }
   if (ctx.scope === 'own') return 'Фильтр: свои. Показаны все ваши группы и чаты.'
   if (ctx.scope === 'delegated') return 'Фильтр: делегированные. Показаны только делегированные группы и чаты.'
   return 'Фильтр: все. Показаны все группы и чаты.'
+})
+const ownerProtectionReportPeriodLabel = computed(() => {
+  const k = String(ownerStatsPeriodKey.value || 'today')
+  const map = {
+    today: 'текущие сутки',
+    '7d': '7 дней',
+    '30d': '30 дней',
+    '6m': '6 месяцев',
+    '1y': 'год',
+    custom: 'выбранный период',
+  }
+  return map[k] || 'период'
+})
+const ownerProtectionReportDeletedCount = computed(() => {
+  const n = Number(plActivityBreakdown.value?.total_deleted ?? NaN)
+  if (Number.isFinite(n)) return n
+  return Number(plActivitySummary.value?.today?.deleted || 0)
 })
 function ownerProtectionReportTimeLabel(iso) {
   if (!iso) return '—'
@@ -1644,6 +1786,15 @@ function ownerProtectionReportTimeLabel(iso) {
     const s = String(iso)
     const m = s.match(/(\d{2}):(\d{2})/)
     return m ? `${m[1]}:${m[2]}` : s
+  }
+  if (String(ownerStatsPeriodKey.value || 'today') !== 'today') {
+    return dt.toLocaleString('ru-RU', {
+      day: '2-digit',
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    })
   }
   return dt.toLocaleTimeString('ru-RU', {
     hour: '2-digit',
@@ -5736,6 +5887,7 @@ watch(
             <OwnerCabinetProtectionStats
               :summary="plActivitySummary || {}"
               :hourly-data="partnerHourlyData"
+              :audience-gender="partnerAudienceGender"
               :loading="partnerHourlyLoading"
               :period-key="ownerStatsPeriodKey"
               :mode="ownerProtectionStatsMode"
@@ -5758,7 +5910,8 @@ watch(
                 </button>
               </div>
               <p class="mb-2 text-[11px] text-cyan-100/85">
-                Удалений за 24ч: <b>{{ Number(plActivitySummary?.today?.deleted || 0) }}</b>. {{ ownerProtectionReportHint }}
+                Удалений за {{ ownerProtectionReportPeriodLabel }}: <b>{{ ownerProtectionReportDeletedCount }}</b>.
+                {{ ownerProtectionReportHint }}
               </p>
               <div class="max-h-[52vh] space-y-1 overflow-y-auto pr-1">
                 <div

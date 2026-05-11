@@ -8,6 +8,7 @@ import { api } from '../api/client'
 import { useApi, messageFromApiError } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import NavIcon from '../components/NavIcon.vue'
+import SubscriptionManagementPanel from '../components/SubscriptionManagementPanel.vue'
 import { formatDateRu, formatDateTimeShortRu } from '../utils/formatDateTime'
 import {
   GUARD_SECURITY_ACTIONS,
@@ -36,7 +37,6 @@ const LANG_KEY = 'guard.settings.lang'
 const LANG_AUTO_KEY = 'guard.settings.lang_auto'
 const DELEGATION_ON_KEY = 'guard.settings.delegation_enabled'
 const RETENTION_KEY = 'guard.settings.retention_months'
-const SESSIONS_KEY = 'guard.webapp_sessions_v1'
 const LOGIN_HIST_KEY = 'guard.login_history_v1'
 
 /** Экран навигации (не путать с window.screen) */
@@ -130,17 +130,6 @@ const botHandle = computed(() => {
 
 const isPremium = computed(() => !!me.value?.is_premium)
 const subscriptionUntilShort = computed(() => formatDateRu(me.value?.subscription_until))
-/** Строка статуса подписки в том же духе, что блок тарифа на главной */
-const mainScreenSubscriptionSummary = computed(() => {
-  const m = me.value
-  if (!m) return 'Загрузка…'
-  const prem =
-    !!m.is_premium || ['premium', 'pro', 'business'].includes(String(m.tariff || 'free').toLowerCase())
-  if (!prem) return 'Тариф Free · Premium не активен'
-  const until = subscriptionUntilShort.value
-  if (until && until !== '—') return `Premium активна · до ${until}`
-  return 'Premium активна'
-})
 
 /** Инвалидация computed после записи PIN в localStorage */
 const pinStateRev = ref(0)
@@ -160,19 +149,6 @@ const paymentMethodLabel = computed(() => {
   return '—'
 })
 
-function sessionFingerprint() {
-  try {
-    const sw = typeof globalThis !== 'undefined' && globalThis.screen ? globalThis.screen.width : 0
-    const sh = typeof globalThis !== 'undefined' && globalThis.screen ? globalThis.screen.height : 0
-    const raw = `${navigator.userAgent}|${navigator.language}|${sw}x${sh}`
-    let h = 0
-    for (let i = 0; i < raw.length; i++) h = (Math.imul(31, h) + raw.charCodeAt(i)) | 0
-    return `fp_${(h >>> 0).toString(16)}`
-  } catch {
-    return `fp_${Date.now()}`
-  }
-}
-
 function deviceLabelFromUA() {
   const ua = navigator.userAgent || ''
   if (/Telegram/i.test(ua)) {
@@ -189,40 +165,17 @@ function deviceLabelFromUA() {
   return 'Это устройство'
 }
 
-function touchSessions() {
-  const fp = sessionFingerprint()
-  let list = []
+async function loadSessions() {
+  if (!hasInitData.value) {
+    sessions.value = []
+    return
+  }
   try {
-    list = JSON.parse(readLs(SESSIONS_KEY, '[]') || '[]')
-    if (!Array.isArray(list)) list = []
+    const data = await fetchSilent(() => api.sessionsList())
+    sessions.value = Array.isArray(data?.items) ? data.items : []
   } catch {
-    list = []
+    sessions.value = []
   }
-  const now = new Date().toISOString()
-  const label = deviceLabelFromUA()
-  let idx = list.findIndex((s) => s && s.fp === fp)
-  if (idx < 0) {
-    const id =
-      typeof crypto !== 'undefined' && crypto.randomUUID
-        ? crypto.randomUUID()
-        : `s_${Date.now()}_${Math.random().toString(16).slice(2)}`
-    list.unshift({ id, fp, label, lastSeen: now })
-    idx = 0
-  } else {
-    list[idx].lastSeen = now
-    list[idx].label = label
-  }
-  const curFp = fp
-  list = list.slice(0, 14).map((s) => ({
-    ...s,
-    current: s.fp === curFp,
-  }))
-  try {
-    localStorage.setItem(SESSIONS_KEY, JSON.stringify(list))
-  } catch {
-    //
-  }
-  sessions.value = list
 }
 
 function touchLoginHistory() {
@@ -247,16 +200,34 @@ function touchLoginHistory() {
   loginHistory.value = list
 }
 
-function terminateOtherSessions() {
-  const fp = sessionFingerprint()
-  const next = sessions.value.filter((s) => s.fp === fp).map((s) => ({ ...s, current: true }))
+async function terminateOtherSessions() {
   try {
-    localStorage.setItem(SESSIONS_KEY, JSON.stringify(next))
-  } catch {
-    //
+    const r = await fetchSilent(() => api.sessionsTerminateOthers())
+    await loadSessions()
+    showToast(`Завершено сессий: ${Number(r?.removed || 0)}`)
+  } catch (e) {
+    showToast(messageFromApiError(e, 'Не удалось завершить другие сессии'))
   }
-  sessions.value = next
-  showToast('Другие сессии завершены на этом устройстве.')
+}
+
+async function terminateSession(sessionId) {
+  const sid = String(sessionId || '')
+  if (!sid) return
+  try {
+    const r = await fetchSilent(() => api.sessionsTerminate({ id: sid }))
+    if (r?.terminated_current) {
+      showToast('Текущая сессия завершена. Перезапустите мини-приложение.')
+      return
+    }
+    await loadSessions()
+    showToast('Сессия завершена')
+  } catch (e) {
+    showToast(messageFromApiError(e, 'Не удалось завершить сессию'))
+  }
+}
+
+function onSettingsSubscriptionProfileUpdate(next) {
+  if (next && typeof next === 'object') me.value = next
 }
 
 async function loadMe() {
@@ -540,10 +511,6 @@ function goBilling() {
   router.push({ path: '/', query: { section: 'billing' } }).catch(() => {})
 }
 
-function goHistory() {
-  router.push('/history').catch(() => {})
-}
-
 function goChats() {
   router.push('/chats').catch(() => {})
 }
@@ -581,7 +548,7 @@ function back() {
 function panelTitle() {
   const titles = {
     profile: 'Профиль и аккаунт',
-    payment: 'Оплата и подписка',
+    payment: 'Подписка',
     data: 'Данные и статистика',
     delegation: 'Делегирование',
     security: 'Безопасность',
@@ -609,7 +576,7 @@ onMounted(() => {
   confirmMap.value = { ...loadConfirmMap() }
   pinMap.value = { ...loadPinMap() }
   pinEnabled.value = loadPinEnabled()
-  touchSessions()
+  void loadSessions()
   touchLoginHistory()
   loadMe()
 })
@@ -637,9 +604,9 @@ watch(uiLang, (v) => {
       </div>
       <div
         v-else-if="loading"
-        class="rounded-[22px] border border-white/[0.1] bg-white/[0.06] px-4 py-14 text-center text-[14px] text-white/40 backdrop-blur-xl"
+        class="rounded-[22px] bg-white/[0.06] px-4 py-8 text-center text-[14px] text-white/55 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-2xl"
       >
-        Загрузка…
+        Загружаем настройки…
       </div>
       <div
         v-else-if="bootErr"
@@ -652,7 +619,7 @@ watch(uiLang, (v) => {
         <button
           v-for="row in [
             { key: 'profile', title: 'Профиль и аккаунт', sub: 'Язык, тариф и сервисный профиль', icon: 'account' },
-            { key: 'payment', title: 'Оплата и подписка', sub: 'История операций и продление', icon: 'billing' },
+            { key: 'payment', title: 'Подписка', sub: 'История операций и продление', icon: 'billing' },
             { key: 'data', title: 'Данные и статистика', sub: 'Экспорт PDF, хранение, очистка', icon: 'reports' },
             { key: 'delegation', title: 'Делегирование', sub: 'Доступы к вашим чатам без передачи владения', icon: 'chats' },
             { key: 'security', title: 'Безопасность', sub: 'Сессии, подтверждения и код', icon: 'shield' },
@@ -789,52 +756,18 @@ watch(uiLang, (v) => {
 
       <!-- Payment -->
       <div v-if="panel === 'payment'" class="space-y-3 pt-3">
-        <button
-          type="button"
-          class="flex w-full items-center gap-3.5 rounded-[22px] border border-white/[0.11] bg-white/[0.07] px-4 py-4 text-left shadow-[inset_0_1px_0_0_rgba(255,255,255,0.07)] backdrop-blur-2xl transition hover:bg-white/[0.09]"
-          @click="goHistory"
-        >
-          <span class="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-violet-400/25 bg-violet-500/10 text-lg">
-            📜
-          </span>
-          <span class="min-w-0 flex-1">
-            <span class="block text-[16px] font-semibold text-white">История операций</span>
-            <span class="mt-0.5 block text-[13px] text-white/45">Все операции и платежи</span>
-          </span>
-          <NavIcon name="chevron-right" class="h-5 w-5 shrink-0 text-white/25" />
-        </button>
-
+        <SubscriptionManagementPanel
+          v-if="me"
+          :profile="me"
+          variant="embedded"
+          @update:profile="onSettingsSubscriptionProfileUpdate"
+          @open-tariff="goBilling"
+        />
         <div
-          class="rounded-[22px] border border-violet-400/22 bg-gradient-to-br from-violet-500/[0.14] via-indigo-500/[0.07] to-transparent p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.08)] backdrop-blur-2xl"
+          v-else
+          class="rounded-[22px] border border-white/[0.11] bg-white/[0.06] px-4 py-8 text-center text-[14px] text-white/55 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.07)] backdrop-blur-2xl"
         >
-          <div class="flex items-start justify-between gap-2">
-            <div class="flex items-start gap-2">
-              <span class="text-2xl">👑</span>
-              <div>
-                <p class="text-[18px] font-semibold text-white">{{ isPremium ? 'Premium' : 'Free' }}</p>
-                <p class="mt-0.5 text-[13px] text-white/45">
-                  {{ isPremium ? 'Подписка активна' : 'Оформите Premium для расширенных функций' }}
-                </p>
-                <p v-if="isPremium" class="mt-1 text-[14px] text-white/75">до {{ subscriptionUntilShort }}</p>
-              </div>
-            </div>
-            <span
-              class="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide"
-              :class="isPremium ? 'border-emerald-400/35 bg-emerald-400/12 text-emerald-100' : 'border-white/15 bg-white/[0.06] text-white/45'"
-            >
-              {{ isPremium ? 'Активна' : 'Нет' }}
-            </span>
-          </div>
-          <button
-            type="button"
-            class="mt-4 w-full rounded-2xl border border-violet-300/35 bg-violet-500/[0.18] py-3.5 text-[15px] font-semibold text-white shadow-[0_16px_40px_-20px_rgba(139,92,246,0.65)] transition hover:bg-violet-500/[0.26]"
-            @click="goBilling"
-          >
-            Продлить подписку
-          </button>
-          <p class="mt-3 rounded-xl bg-black/25 px-3 py-2.5 text-center text-[13px] leading-snug text-white/80 ring-1 ring-white/[0.06]">
-            {{ mainScreenSubscriptionSummary }}
-          </p>
+          Загружаем подписку…
         </div>
       </div>
 
@@ -1033,7 +966,15 @@ watch(uiLang, (v) => {
                 </p>
                 <p class="text-[11px] text-white/35">Последняя активность · {{ formatDateTimeShortRu(s.lastSeen) }}</p>
               </div>
-              <span class="shrink-0 text-white/25">⋯</span>
+              <button
+                type="button"
+                class="shrink-0 text-[22px] leading-none text-white/55 transition hover:text-white"
+                aria-label="Завершить сессию"
+                title="Завершить сессию"
+                @click="terminateSession(s.id)"
+              >
+                ×
+              </button>
             </div>
           </div>
           <button

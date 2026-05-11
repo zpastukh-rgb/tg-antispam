@@ -6,24 +6,37 @@ import AppSidebar from './components/AppSidebar.vue'
 import AppToast from './components/AppToast.vue'
 import AppBottomNav from './components/AppBottomNav.vue'
 import LegalConsentGate from './components/LegalConsentGate.vue'
+import GuardBlueLoadingState from './components/GuardBlueLoadingState.vue'
 import { useDashboardSection } from './composables/useDashboardSection'
+import { routeTransitionOverlayActive } from './composables/useRouteTransitionLoader.js'
+import { useToast } from './composables/useToast'
 import { api, getInitData } from './api/client'
 
 const route = useRoute()
 const router = useRouter()
 const { dashboardSection, setDashboardSection } = useDashboardSection()
+const { showToast } = useToast()
 
 const sidebarOpen = ref(false)
 let presenceTimer = null
 
-/** Единый фон мини-приложения (public), только под контентом */
+/** Единый фон мини-приложения (public), только под контентом. В админке — свой фон в AdminView. */
 const globalBgSrc = `${import.meta.env.BASE_URL}app-global-bg.png`
+
+const showAppShellBackground = computed(() => String(route.name || '') !== 'Admin')
 
 function onGuardOpenMenu() {
   openMenu()
 }
+function onGuardSessionTerminated() {
+  showToast('Сессия завершена на этом устройстве. Откройте мини-приложение заново.', 4500)
+  if (route.path !== '/connect') {
+    router.replace({ path: '/connect', query: { terminated: '1' } }).catch(() => {})
+  }
+}
 onMounted(() => {
   window.addEventListener('guard-open-menu', onGuardOpenMenu)
+  window.addEventListener('guard:session-terminated', onGuardSessionTerminated)
   if (getInitData()) {
     api.presencePing().catch(() => {})
     presenceTimer = setInterval(() => {
@@ -33,6 +46,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   window.removeEventListener('guard-open-menu', onGuardOpenMenu)
+  window.removeEventListener('guard:session-terminated', onGuardSessionTerminated)
   if (presenceTimer) {
     clearInterval(presenceTimer)
     presenceTimer = null
@@ -72,11 +86,13 @@ function onSubscriptionBackFromHeader() {
 <template>
   <div class="relative min-h-[100dvh] min-h-screen">
     <div
+      v-if="showAppShellBackground"
       aria-hidden="true"
       class="pointer-events-none fixed inset-0 z-0 bg-zinc-950 bg-cover bg-center bg-no-repeat"
       :style="{ backgroundImage: `url(${globalBgSrc})` }"
     />
     <div
+      v-if="showAppShellBackground"
       aria-hidden="true"
       class="pointer-events-none fixed inset-0 z-[1] bg-gradient-to-b from-black/30 via-black/18 to-black/42"
     />
@@ -108,5 +124,33 @@ function onSubscriptionBackFromHeader() {
     </div>
     <!-- Вне z-10 колонки: иначе в Telegram WebView оверлей может оказаться под контентом -->
     <LegalConsentGate />
+
+    <Teleport to="body">
+      <Transition name="guard-route-fade">
+        <div
+          v-if="routeTransitionOverlayActive"
+          class="fixed left-0 right-0 z-[25] flex items-center justify-center bg-zinc-950/70 px-4 backdrop-blur-[3px] supports-[backdrop-filter]:bg-zinc-950/55 top-11 md:top-12"
+          style="bottom: calc(7.35rem + env(safe-area-inset-bottom, 0px))"
+          aria-hidden="true"
+        >
+          <div
+            class="w-full max-w-sm rounded-2xl bg-white/[0.07] px-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_12px_40px_-20px_rgba(0,0,0,0.6)] backdrop-blur-xl"
+          >
+            <GuardBlueLoadingState compact />
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
   </div>
 </template>
+
+<style>
+.guard-route-fade-enter-active,
+.guard-route-fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+.guard-route-fade-enter-from,
+.guard-route-fade-leave-to {
+  opacity: 0;
+}
+</style>

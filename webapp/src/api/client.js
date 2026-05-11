@@ -84,6 +84,61 @@ export function getInitData() {
   }
 }
 
+function getGuardSessionId() {
+  if (typeof window === 'undefined') return ''
+  const key = 'guard.session_id.v1'
+  let sid = ''
+  try {
+    sid = String(localStorage.getItem(key) || '').trim()
+  } catch {
+    sid = ''
+  }
+  if (!sid) {
+    try {
+      sid = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? `s_${crypto.randomUUID().replace(/-/g, '')}`
+        : `s_${Date.now()}_${Math.random().toString(16).slice(2)}`
+      localStorage.setItem(key, sid)
+    } catch {
+      //
+    }
+  }
+  return sid
+}
+
+function resetGuardSessionId() {
+  if (typeof window === 'undefined') return
+  const key = 'guard.session_id.v1'
+  try {
+    localStorage.removeItem(key)
+  } catch {
+    //
+  }
+}
+
+function getGuardSessionLabel() {
+  if (typeof window === 'undefined') return ''
+  try {
+    const ua = navigator.userAgent || ''
+    if (/iPhone|iPad/i.test(ua)) return 'Safari · iOS'
+    if (/Android/i.test(ua)) return 'WebView · Android'
+    if (/Mac OS X/i.test(ua)) return 'Safari · macOS'
+    if (/Windows NT/i.test(ua)) return 'Browser · Windows'
+    return 'Web App'
+  } catch {
+    return 'Web App'
+  }
+}
+
+let guardSessionTerminated = false
+let guardSessionTerminatedNotified = false
+
+function isSessionTerminatedResponse(status, detail) {
+  if (Number(status || 0) !== 401) return false
+  const d = String(detail || '').toLowerCase()
+  return d.includes('session terminated')
+}
+
 async function request(method, path, body = null) {
   const base = getBaseUrl()
   /**
@@ -105,6 +160,8 @@ async function request(method, path, body = null) {
   const headers = {
     'Content-Type': 'application/json',
     ...(initData ? { 'X-Telegram-Init-Data': initData } : {}),
+    ...(getGuardSessionId() ? { 'X-Guard-Session-Id': getGuardSessionId() } : {}),
+    ...(getGuardSessionLabel() ? { 'X-Guard-Session-Label': getGuardSessionLabel() } : {}),
   }
 
   const options = { method, headers }
@@ -137,6 +194,23 @@ async function request(method, path, body = null) {
       err.body = await res.json()
     } catch {
       err.body = { detail: await res.text() }
+    }
+    if (isSessionTerminatedResponse(err.status, err?.body?.detail)) {
+      // Старая сессия отозвана: удаляем id, чтобы при следующем входе/запросе создалась новая.
+      resetGuardSessionId()
+      guardSessionTerminated = true
+      if (!guardSessionTerminatedNotified && typeof window !== 'undefined') {
+        guardSessionTerminatedNotified = true
+        window.dispatchEvent(
+          new CustomEvent('guard:session-terminated', {
+            detail: { message: 'Сессия завершена на этом устройстве' },
+          }),
+        )
+      }
+      // Не держим клиент в "вечном logout" состоянии:
+      // после сброса session_id следующий запрос должен пройти с новым id.
+      guardSessionTerminated = false
+      guardSessionTerminatedNotified = false
     }
     throw err
   }
@@ -224,8 +298,9 @@ export const api = {
     q.set('period', String(period || 'today'))
     const allowedScope = ['all', 'own', 'delegated']
     q.set('scope', allowedScope.includes(String(scope)) ? String(scope) : 'all')
-    if (chatId != null && chatId !== '' && Number.isFinite(Number(chatId))) {
-      q.set('chat_id', String(Number(chatId)))
+    const cidStr = chatId != null && chatId !== '' ? String(chatId).trim() : ''
+    if (cidStr && /^-?\d+$/.test(cidStr)) {
+      q.set('chat_id', cidStr)
     }
     try {
       const tz = -new Date().getTimezoneOffset()
@@ -372,6 +447,9 @@ export const api = {
   yookassaCreatePayment: (months) => api.post('/api/payments/yookassa/create', { months }),
   yookassaReconcilePending: () => api.post('/api/payments/yookassa/reconcile-pending', {}),
   disableAutorenew: () => api.post('/api/payments/autorenew/disable', {}),
+  sessionsList: () => api.get('/api/sessions'),
+  sessionsTerminate: (payload) => api.post('/api/sessions/terminate', payload || {}),
+  sessionsTerminateOthers: () => api.post('/api/sessions/terminate-others', {}),
   /** Только для TG id из TEST_TARIFF_PAYMENT_TELEGRAM_IDS (отдельный путь от продовой оплаты). */
   yookassaCreateTestSubscriptionPayment: (months) =>
     api.post('/api/payments/yookassa/create-test-subscription', { months }),

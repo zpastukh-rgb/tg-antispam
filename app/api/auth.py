@@ -8,8 +8,13 @@ import hashlib
 import json
 import os
 from urllib.parse import parse_qsl
+from datetime import datetime, timezone
 
 from fastapi import Header, HTTPException, status
+from sqlalchemy import select
+
+from app.db.models import WebAppSession
+from app.db.session import get_session
 
 
 def _validate_init_data(init_data: str, bot_token: str) -> dict:
@@ -70,6 +75,9 @@ def get_telegram_user_id(init_data: str) -> int | None:
 
 async def require_init_data_with_profile(
     x_telegram_init_data: str | None = Header(None, alias="X-Telegram-Init-Data"),
+    x_guard_session_id: str | None = Header(None, alias="X-Guard-Session-Id"),
+    x_guard_session_label: str | None = Header(None, alias="X-Guard-Session-Label"),
+    user_agent: str | None = Header(None, alias="User-Agent"),
 ) -> tuple[int, str | None, str | None]:
     """Валидный init data → (telegram_id, username, first_name) из объекта user."""
     if not x_telegram_init_data:
@@ -83,11 +91,20 @@ async def require_init_data_with_profile(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid init data",
         )
+    await _ensure_or_validate_webapp_session(
+        p[0],
+        x_guard_session_id,
+        x_guard_session_label,
+        user_agent,
+    )
     return p
 
 
 async def require_init_data(
     x_telegram_init_data: str | None = Header(None, alias="X-Telegram-Init-Data"),
+    x_guard_session_id: str | None = Header(None, alias="X-Guard-Session-Id"),
+    x_guard_session_label: str | None = Header(None, alias="X-Guard-Session-Label"),
+    user_agent: str | None = Header(None, alias="User-Agent"),
 ) -> int:
     """FastAPI dependency: требует валидный init data и возвращает telegram user_id."""
     if not x_telegram_init_data:
@@ -101,4 +118,59 @@ async def require_init_data(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid init data",
         )
+    await _ensure_or_validate_webapp_session(
+        user_id,
+        x_guard_session_id,
+        x_guard_session_label,
+        user_agent,
+    )
     return user_id
+
+
+async def _ensure_or_validate_webapp_session(
+    telegram_user_id: int,
+    raw_session_id: str | None,
+    raw_label: str | None,
+    raw_user_agent: str | None,
+) -> None:
+    """Если клиент прислал session_id — валидируем/создаём серверную сессию Mini App."""
+    sid = str(raw_session_id or "").strip()
+    if not sid:
+        return
+    if len(sid) > 96:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session")
+    # ограничим символы session_id до безопасного набора.
+    for ch in sid:
+        if not (ch.isalnum() or ch in ("-", "_", ".")):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session")
+    label = str(raw_label or "").strip()[:255] or None
+    ua = str(raw_user_agent or "").strip()[:1024] or None
+
+    session = await get_session()
+    async with session:
+        q = await session.execute(
+            select(WebAppSession).where(
+                WebAppSession.telegram_user_id == int(telegram_user_id),
+                WebAppSession.session_id == sid,
+            ).limit(1)
+        )
+        row = q.scalar_one_or_none()
+        if row is None:
+            session.add(
+                WebAppSession(
+                    telegram_user_id=int(telegram_user_id),
+                    session_id=sid,
+                    device_label=label,
+                    user_agent=ua,
+                )
+            )
+            await session.commit()
+            return
+        if row.revoked_at is not None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session terminated")
+        row.last_seen_at = datetime.now(timezone.utc)
+        if label and not (row.device_label or "").strip():
+            row.device_label = label
+        if ua and not (row.user_agent or "").strip():
+            row.user_agent = ua
+        await session.commit()

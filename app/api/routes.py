@@ -17,7 +17,7 @@ from email.message import EmailMessage
 from time import perf_counter
 
 import aiohttp
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from aiogram import Bot
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, BufferedInputFile
@@ -75,6 +75,7 @@ from app.db.models import (
     ChatManager,
     ChatManagerInvite,
     UserContext,
+    WebAppSession,
     PromoCode,
     PromoCodeRedemption,
     OwnerJoinReportSetting,
@@ -132,6 +133,15 @@ REPUTATION_TOP_LIMIT = 20
 REPUTATION_DEFAULT_WORDS = (
     "спасибо", "thank", "thanks", "tnx", "благодарю", "благодарствую", "++", "+1", "👍", "🤝", "рахмет",
 )
+
+
+def _chat_is_shared_payload(owner_user_id: int | None, viewer_telegram_id: int) -> bool:
+    """Для JSON: «чужой кабинет». owner_user_id=0 раньше давал is_shared=True (0 != viewer) и легаси-чаты уезжали в делегированные."""
+    oid = int(owner_user_id or 0)
+    vid = int(viewer_telegram_id or 0)
+    if oid <= 0:
+        return False
+    return oid != vid
 
 
 def _humanize_yookassa_error(err: Exception) -> str:
@@ -522,6 +532,8 @@ async def _user_subscription_panel_dict(session: AsyncSession, user: User) -> di
     is_premium = _is_user_premium_now(user, now)
     paid_months: int | None = None
     paid_days: int | None = None
+    promo_code: str | None = None
+    promo_days: int | None = None
     if user.id:
         pr = await session.execute(
             select(Payment.months, Payment.tariff)
@@ -542,6 +554,18 @@ async def _user_subscription_panel_dict(session: AsyncSession, user: User) -> di
                 paid_months = mv
             elif tv == "premium_probe" and mv > 0:
                 paid_days = mv
+        pr_promo = await session.execute(
+            select(PromoCode.code, PromoCode.days)
+            .join(PromoCodeRedemption, PromoCode.id == PromoCodeRedemption.promo_code_id)
+            .where(PromoCodeRedemption.telegram_user_id == int(getattr(user, "telegram_id", 0) or 0))
+            .order_by(PromoCodeRedemption.redeemed_at.desc())
+            .limit(1)
+        )
+        row_promo = pr_promo.one_or_none()
+        if row_promo:
+            promo_code = str(row_promo[0] or "").strip().upper() or None
+            _pd = int(row_promo[1] or 0)
+            promo_days = _pd if _pd >= 0 else None
     period_start_at = await _subscription_activated_at_resolved(session, user)
     return {
         "is_premium": is_premium,
@@ -552,6 +576,8 @@ async def _user_subscription_panel_dict(session: AsyncSession, user: User) -> di
         "payment_method_last4": str(getattr(user, "payment_method_last4", "") or ""),
         "subscription_paid_period_months": paid_months,
         "subscription_paid_period_days": paid_days,
+        "subscription_promo_code": promo_code,
+        "subscription_promo_period_days": promo_days,
         "subscription_activated_at": _format_dt(period_start_at),
         "subscription_current_period_start_at": _format_dt(period_start_at),
     }
@@ -970,7 +996,7 @@ async def api_me(
     )
     lifetime_purchased_pack_tokens = round(float(pack_cred_q.scalar() or 0.0), 2)
     managed_shared_count = sum(
-        1 for c in chats if int(getattr(c, "owner_user_id", 0) or 0) != int(user_id)
+        1 for c in chats if _chat_is_shared_payload(getattr(c, "owner_user_id", None), int(user_id))
     )
     # Флаг: есть ли хотя бы один делегированный чат, где у пользователя выдано право на рассылку.
     delegated_bc_q = await session.execute(
@@ -1028,6 +1054,8 @@ async def api_me(
         # Экран «Моя подписка»: срок по последнему тарифу; дата с — первый успешный premium-платёж (не сбрасывается при продлении).
         "subscription_paid_period_months": sub_panel["subscription_paid_period_months"],
         "subscription_paid_period_days": sub_panel["subscription_paid_period_days"],
+        "subscription_promo_code": sub_panel["subscription_promo_code"],
+        "subscription_promo_period_days": sub_panel["subscription_promo_period_days"],
         "subscription_activated_at": sub_panel["subscription_activated_at"],
         "subscription_current_period_start_at": sub_panel["subscription_current_period_start_at"],
         "delegate_broadcast_payer": str(
@@ -1579,7 +1607,7 @@ async def api_chats(
             "master_anti_spam": master_anti_spam_for(int(c.id)),
             "is_active": bool(getattr(c, "is_active", True)) and int(getattr(c, "id", 0) or 0) not in over_limit_ids,
             "owner_user_id": int(getattr(c, "owner_user_id", 0) or 0),
-            "is_shared": int(getattr(c, "owner_user_id", 0) or 0) != int(user_id),
+            "is_shared": _chat_is_shared_payload(getattr(c, "owner_user_id", None), int(user_id)),
             "owner_username": str(getattr(owner_users.get(int(getattr(c, "owner_user_id", 0) or 0)), "username", "") or ""),
             "owner_first_name": str(getattr(owner_users.get(int(getattr(c, "owner_user_id", 0) or 0)), "first_name", "") or ""),
             "locked_by_limit": int(getattr(c, "id", 0) or 0) in over_limit_ids,
@@ -1651,7 +1679,7 @@ async def api_spike_alerts(
         ch = chat_map.get(cid)
         if not ch:
             continue
-        is_shared = int(getattr(ch, "owner_user_id", 0) or 0) != int(user_id)
+        is_shared = _chat_is_shared_payload(getattr(ch, "owner_user_id", None), int(user_id))
         if is_shared:
             active_shared = True
         else:
@@ -2316,7 +2344,7 @@ async def api_chat(
         "log_chat_id": chat.log_chat_id,
         "log_chat_title": log_chat_title,
         "chat_kind": kind,
-        "is_shared": int(getattr(chat, "owner_user_id", 0) or 0) != int(user_id),
+        "is_shared": _chat_is_shared_payload(getattr(chat, "owner_user_id", None), int(user_id)),
         "linked_discussion_chat_id": linked_discussion_chat_id,
         "linked_discussion_title": linked_discussion_title,
         "rule": _rule_to_dict(rule, stopwords_count),
@@ -3830,7 +3858,7 @@ async def api_connect_pending(
                 "id": c.id,
                 "title": (c.title or "").strip() or str(c.id),
                 "chat_kind": str(getattr(c, "chat_kind", "") or "group").strip().lower() or "group",
-                "is_shared": int(getattr(c, "owner_user_id", 0) or 0) != int(user_id),
+                "is_shared": _chat_is_shared_payload(getattr(c, "owner_user_id", None), int(user_id)),
             }
             for c in pending[:100]
         ],
@@ -5874,7 +5902,6 @@ async def api_history_subscription(
         .join(PromoCode, PromoCode.id == PromoCodeRedemption.promo_code_id)
         .where(PromoCodeRedemption.telegram_user_id == int(user_id))
         .order_by(PromoCodeRedemption.redeemed_at.desc())
-        .limit(200)
     )
     for red, promo in promo_q.all():
         days = int(getattr(promo, "days", 0) or 0)
@@ -5891,7 +5918,94 @@ async def api_history_subscription(
         })
 
     out.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
-    return {"items": out[:200]}
+    return {"items": out}
+
+
+@router.get("/sessions")
+async def api_sessions_list(
+    x_guard_session_id: str | None = Header(None, alias="X-Guard-Session-Id"),
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Список сессий Mini App пользователя (устройства)."""
+    q = await session.execute(
+        select(WebAppSession)
+        .where(
+            WebAppSession.telegram_user_id == int(user_id),
+            WebAppSession.revoked_at.is_(None),
+        )
+        .order_by(WebAppSession.last_seen_at.desc(), WebAppSession.created_at.desc())
+        .limit(200)
+    )
+    current_sid = str(x_guard_session_id or "").strip()
+    items: list[dict[str, Any]] = []
+    for row in q.scalars().all():
+        sid = str(getattr(row, "session_id", "") or "")
+        items.append({
+            "id": int(getattr(row, "id", 0) or 0),
+            "session_id": sid,
+            "label": str(getattr(row, "device_label", "") or "Устройство"),
+            "current": bool(current_sid and sid == current_sid),
+            "created_at": _format_dt(getattr(row, "created_at", None)),
+            "last_seen": _format_dt(getattr(row, "last_seen_at", None)),
+        })
+    return {"items": items}
+
+
+@router.post("/sessions/terminate")
+async def api_sessions_terminate_one(
+    body: dict,
+    x_guard_session_id: str | None = Header(None, alias="X-Guard-Session-Id"),
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Завершить одну сессию по id записи (или session_id)."""
+    sid_body = str((body or {}).get("session_id") or "").strip()
+    rec_id = int((body or {}).get("id") or 0)
+    if not sid_body and rec_id <= 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="id or session_id required")
+    q = select(WebAppSession).where(
+        WebAppSession.telegram_user_id == int(user_id),
+        WebAppSession.revoked_at.is_(None),
+    )
+    if rec_id > 0:
+        q = q.where(WebAppSession.id == rec_id)
+    else:
+        q = q.where(WebAppSession.session_id == sid_body)
+    row_q = await session.execute(q.limit(1))
+    row = row_q.scalar_one_or_none()
+    if row is None:
+        return {"ok": True, "terminated_current": False, "removed": 0}
+    row.revoked_at = datetime.now(timezone.utc)
+    await session.commit()
+    cur = str(x_guard_session_id or "").strip()
+    terminated_current = bool(cur and str(getattr(row, "session_id", "") or "") == cur)
+    return {"ok": True, "terminated_current": terminated_current, "removed": 1}
+
+
+@router.post("/sessions/terminate-others")
+async def api_sessions_terminate_others(
+    x_guard_session_id: str | None = Header(None, alias="X-Guard-Session-Id"),
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Завершить все сессии пользователя, кроме текущей."""
+    current_sid = str(x_guard_session_id or "").strip()
+    if not current_sid:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current session is missing")
+    now = datetime.now(timezone.utc)
+    q = await session.execute(
+        select(WebAppSession).where(
+            WebAppSession.telegram_user_id == int(user_id),
+            WebAppSession.revoked_at.is_(None),
+            WebAppSession.session_id != current_sid,
+        )
+    )
+    rows = q.scalars().all()
+    for row in rows:
+        row.revoked_at = now
+    await session.commit()
+    return {"ok": True, "removed": len(rows)}
 
 
 @router.get("/activity/summary")
@@ -6213,23 +6327,28 @@ async def api_activity_breakdown(
             if example:
                 bucket_e = examples_by_reason.setdefault(base, {})
                 bucket_e[example] = bucket_e.get(example, 0) + 1
+            # Часовые ряды должны совпадать с by_reason/total_deleted: при NULL created_at
+            # раньше удаления не попадали в by_hour — «Срабатывания» и «Динамика» расходились.
+            ts_for_hour = created_at if created_at is not None else since_utc
+            if ts_for_hour.tzinfo is None:
+                ts_for_hour = ts_for_hour.replace(tzinfo=timezone.utc)
+            local_dt = ts_for_hour.astimezone(timezone.utc) + tz_offset
+            hour = max(0, min(23, int(local_dt.hour)))
+            by_hour_period[hour] += 1
+            bucket = by_hour_by_reason.setdefault(base, [0] * 24)
+            bucket[hour] += 1
             if created_at is not None:
                 if created_at.tzinfo is None:
                     created_at = created_at.replace(tzinfo=timezone.utc)
-                local_dt = created_at.astimezone(timezone.utc) + tz_offset
-                hour = max(0, min(23, int(local_dt.hour)))
-                by_hour_period[hour] += 1
-                bucket = by_hour_by_reason.setdefault(base, [0] * 24)
-                bucket[hour] += 1
                 if created_at >= today_start_utc:
                     by_hour_today[hour] += 1
                     total_today += 1
-                wd = max(0, min(6, int(local_dt.weekday())))
-                heatmap_24x7[wd][hour] += 1
-                by_weekday[wd] += 1
                 prev = chat_last_at.get(cid_log)
                 if prev is None or created_at > prev:
                     chat_last_at[cid_log] = created_at
+            wd = max(0, min(6, int(local_dt.weekday())))
+            heatmap_24x7[wd][hour] += 1
+            by_weekday[wd] += 1
 
     rules_q = await session.execute(select(Rule).where(Rule.chat_id.in_(chat_ids))) if chat_ids else None
     rules_list = list(rules_q.scalars().all()) if rules_q is not None else []
@@ -6369,13 +6488,23 @@ async def api_activity_breakdown(
         "label": f"{peak_idx:02d}:00",
     } if peak_val > 0 else None
 
+    # id строки в UI → все chat_id, которые могут встречаться в ModerationLog (канал + обсуждение и т.д.).
+    logical_moderation_ids: dict[int, list[int]] = {}
+    for lg in chat_ids:
+        sid = int(lg)
+        acc = {sid}
+        for phys, logv in phys_to_logical.items():
+            if int(logv) == sid:
+                acc.add(int(phys))
+        logical_moderation_ids[sid] = sorted(acc)
+
     chats_meta = []
     for c in active_chats:
         cid = int(c.id)
         username = (str(getattr(c, "username", "") or "").strip().lstrip("@") or None)
         kind = str(getattr(c, "chat_kind", "") or "group").lower()
         last_at = chat_last_at.get(cid)
-        is_delegated = int(getattr(c, "owner_user_id", 0) or 0) != int(user_id)
+        is_delegated = _chat_is_shared_payload(getattr(c, "owner_user_id", None), int(user_id))
         chats_meta.append({
             "id": cid,
             "title": (c.title or "").strip() or str(cid),
@@ -6383,6 +6512,7 @@ async def api_activity_breakdown(
             "kind": "channel" if kind == "channel" else "group",
             "is_active": bool(getattr(c, "is_active", True)),
             "is_delegated": is_delegated,
+            "moderation_chat_ids": logical_moderation_ids.get(cid, [cid]),
             "deleted": int(chat_deleted.get(cid, 0)),
             "joined": int(chat_joined.get(cid, 0)),
             "left": int(chat_left.get(cid, 0)),
@@ -6443,10 +6573,11 @@ async def api_activity_journal(
     session: AsyncSession = Depends(get_db),
 ):
     """Журнал действий защиты в реальном времени."""
-    chats = await get_managed_chats(session, user_id)
+    # Тот же охват чатов, что у /api/activity/breakdown (включая паузу is_active=False),
+    # иначе в «подробном отчёте» пусто при защите на паузе, хотя агрегаты по периоду есть.
+    chats = await get_accessible_chats_any_active(session, user_id)
     active_chat_ids = [int(c.id) for c in chats if not bool(getattr(c, "is_log_chat", False))]
-    # Fallback: если активных нет (или они временно сброшены), всё равно вернём список доступных групп,
-    # чтобы UI отчётов не показывал "Групп пока нет".
+    # Fallback: если список пуст, пробуем менеджерские связи (редкий крайний случай).
     if not active_chat_ids:
         manager_sub = select(ChatManager.chat_id).where(ChatManager.user_id == int(user_id))
         invite_sub = select(ChatManagerInvite.chat_id).where(
@@ -6468,17 +6599,63 @@ async def api_activity_journal(
             {
                 "id": int(c.id),
                 "title": (c.title or "").strip() or str(c.id),
-                "is_shared": int(getattr(c, "owner_user_id", 0) or 0) != int(user_id),
+                "is_shared": _chat_is_shared_payload(getattr(c, "owner_user_id", None), int(user_id)),
             }
             for c in fallback_rows
             if not bool(getattr(c, "is_log_chat", False))
         ]
-        return {"items": [], "chats": chats_out}
-    if chat_id is not None and int(chat_id) not in active_chat_ids:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к чату")
-    q = select(ModerationLog).where(ModerationLog.chat_id.in_(active_chat_ids))
+        chats = [c for c in fallback_rows if not bool(getattr(c, "is_log_chat", False))]
+        active_chat_ids = [int(c.id) for c in chats]
+        if not active_chat_ids:
+            return {"items": [], "chats": chats_out}
+    moderation_log_chat_ids: list[int] | None = None
+    journal_title_source: Chat | None = None
     if chat_id is not None:
-        q = q.where(ModerationLog.chat_id == int(chat_id))
+        tid = int(chat_id)
+        target: Chat | None = None
+        for c in chats:
+            if int(c.id) == tid:
+                target = c
+                break
+            if str(getattr(c, "chat_kind", "") or "").lower() == "channel":
+                ld = getattr(c, "linked_discussion_chat_id", None)
+                if ld is not None and int(ld) == tid:
+                    target = c
+                    break
+        if target is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к чату")
+        journal_title_source = target
+        ids_acc = {int(target.id)}
+        if str(getattr(target, "chat_kind", "") or "").lower() == "channel":
+            ld = getattr(target, "linked_discussion_chat_id", None)
+            if ld is not None:
+                try:
+                    ids_acc.add(int(ld))
+                except (TypeError, ValueError):
+                    pass
+        moderation_log_chat_ids = list(ids_acc)
+    q = select(ModerationLog)
+    if moderation_log_chat_ids is not None:
+        q = q.where(ModerationLog.chat_id.in_(moderation_log_chat_ids))
+    else:
+        # Как в /activity/breakdown: в ModerationLog часто id группы обсуждения, а не строки канала в Chat.
+        chn_by_id: dict[int, Channel] = {}
+        chn_ids = [
+            int(c.id)
+            for c in chats
+            if (not bool(getattr(c, "is_log_chat", False)))
+            and str(getattr(c, "chat_kind", "") or "").lower() == "channel"
+        ]
+        if chn_ids:
+            chn_rows = (await session.execute(select(Channel).where(Channel.id.in_(chn_ids)))).scalars().all()
+            chn_by_id = {int(r.id): r for r in chn_rows}
+        scope_ids: set[int] = {int(c.id) for c in chats if not bool(getattr(c, "is_log_chat", False))}
+        for c in chats:
+            if bool(getattr(c, "is_log_chat", False)):
+                continue
+            for p in _activity_effective_ids_for_chat(c, chn_by_id):
+                scope_ids.add(int(p))
+        q = q.where(ModerationLog.chat_id.in_(sorted(scope_ids) if scope_ids else active_chat_ids))
     from_dt = _parse_query_datetime(from_ts)
     to_dt = _parse_query_datetime(to_ts)
     if from_dt is not None and to_dt is not None:
@@ -6492,6 +6669,13 @@ async def api_activity_journal(
     rows_q = await session.execute(q)
     rows = rows_q.scalars().all()
     chat_title_map = {int(c.id): ((c.title or "").strip() or str(c.id)) for c in chats}
+    if moderation_log_chat_ids and journal_title_source is not None:
+        src_id = int(journal_title_source.id)
+        main_t = chat_title_map.get(src_id, (journal_title_source.title or "").strip() or str(src_id))
+        for lid in moderation_log_chat_ids:
+            ii = int(lid)
+            if ii not in chat_title_map:
+                chat_title_map[ii] = main_t
     uid_set = {int(getattr(r, "user_id", 0) or 0) for r in rows if int(getattr(r, "user_id", 0) or 0) > 0}
     un_map = await _usernames_for_telegram_ids(session, uid_set)
     items = []
@@ -6518,7 +6702,7 @@ async def api_activity_journal(
         {
             "id": int(c.id),
             "title": (c.title or "").strip() or str(c.id),
-            "is_shared": int(getattr(c, "owner_user_id", 0) or 0) != int(user_id),
+            "is_shared": _chat_is_shared_payload(getattr(c, "owner_user_id", None), int(user_id)),
         }
         for c in chats
         if not bool(getattr(c, "is_log_chat", False))
@@ -6884,7 +7068,7 @@ async def api_activity_hours(
                 "id": cid_cur,
                 "title": (c.title or "").strip() or str(c.id),
                 "chat_kind": kind,
-                "is_shared": int(getattr(c, "owner_user_id", 0) or 0) != int(user_id),
+                "is_shared": _chat_is_shared_payload(getattr(c, "owner_user_id", None), int(user_id)),
                 "ui_segment": seg,
                 "parent_channel_id": parent_channel_id,
                 "stats_chat_ids": eff,

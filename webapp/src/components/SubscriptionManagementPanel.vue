@@ -106,6 +106,60 @@ function _monthsLabelRu(months) {
   return `${n} месяцев`
 }
 
+function _daysLabelRu(days) {
+  const n = Number(days || 0)
+  if (n <= 0) return ''
+  if (n % 365 === 0) {
+    const years = Math.floor(n / 365)
+    if (years === 1) return '1 год'
+    if (years >= 2 && years <= 4) return `${years} года`
+    return `${years} лет`
+  }
+  if (n % 30 === 0 && n >= 30) {
+    const months = Math.floor(n / 30)
+    return _monthsLabelRu(months)
+  }
+  if (n === 1) return '1 день'
+  if (n >= 2 && n <= 4) return `${n} дня`
+  return `${n} дней`
+}
+
+function _shortPromoCode(code, head = 7, tail = 4) {
+  const s = String(code || '').trim()
+  if (!s) return ''
+  if (s.length <= head + tail + 1) return s
+  return `${s.slice(0, head)}…${s.slice(-tail)}`
+}
+
+const promoDetailsLabelFull = computed(() => {
+  const code = String(props.profile?.subscription_promo_code || '').trim()
+  if (!code) return ''
+  const days = Number(props.profile?.subscription_promo_period_days || 0)
+  let period = 'бессрочно'
+  if (days > 0) {
+    if (days % 365 === 0) {
+      const years = Math.floor(days / 365)
+      period = years === 1 ? '1 г' : `${years} г`
+    } else if (days % 30 === 0) {
+      const months = Math.floor(days / 30)
+      period = `${months} мес`
+    } else {
+      period = `${days} дн`
+    }
+  }
+  return `${code} · ${period}`
+})
+
+const promoDetailsLabel = computed(() => {
+  const code = String(props.profile?.subscription_promo_code || '').trim()
+  if (!code) return ''
+  const full = promoDetailsLabelFull.value
+  if (!full) return ''
+  const periodPart = full.split(' · ').slice(1).join(' · ')
+  const codeShort = _shortPromoCode(code)
+  return `${codeShort}${periodPart ? ` · ${periodPart}` : ''}`
+})
+
 const subscriptionHistoryView = computed(() =>
   (subscriptionHistoryItems.value || []).map((row) => {
     const kind = String(row?.kind || '')
@@ -129,7 +183,7 @@ const subscriptionHistoryView = computed(() =>
     const bonusParts = []
     if (bonusTokens > 0) bonusParts.push(`+${bonusTokens} ⚡`)
     if (bonusAurum > 0) bonusParts.push(`+${bonusAurum} ✨`)
-    const periodLabel = days > 0 ? `${days} дн.` : 'без срока'
+    const periodLabel = days > 0 ? _daysLabelRu(days) : 'без срока'
     return {
       key: `promo:${code}:${row?.created_at || ''}`,
       title: `Промокод ${code || '—'}`,
@@ -183,13 +237,9 @@ async function toggleAutorenew() {
   }
 }
 
-async function disableAutorenewButton() {
+function renewSubscriptionButton() {
   if (props.readOnly) return
-  if (!autorenewOn.value) {
-    showToast('Автопродление уже отключено.')
-    return
-  }
-  await toggleAutorenew()
+  emit('open-tariff')
 }
 
 watch(
@@ -261,6 +311,10 @@ watch(
           <span class="text-sm text-white/70">Способ оплаты</span>
           <span class="text-sm font-semibold text-white">{{ paymentMethodLabel }}</span>
         </div>
+        <div v-if="promoDetailsLabel" class="flex items-center justify-between px-3 py-3">
+          <span class="text-sm text-white/70">Промокод</span>
+          <span class="min-w-0 flex-1 truncate pl-2 text-right text-[12px] font-semibold leading-tight text-lime-200" :title="promoDetailsLabelFull">{{ promoDetailsLabel }}</span>
+        </div>
         <div class="flex items-center justify-between px-3 py-3">
           <span class="text-sm text-white/70">Подписка с</span>
           <span class="text-sm font-semibold text-white tabular-nums">{{ activationLabel || '—' }}</span>
@@ -316,7 +370,7 @@ watch(
         <p v-else-if="!subscriptionHistoryView.length" class="px-2 py-2 text-[12px] text-white/50">Пока нет операций.</p>
         <div v-else class="space-y-1.5">
           <div
-            v-for="item in subscriptionHistoryView.slice(0, 25)"
+            v-for="item in subscriptionHistoryView"
             :key="item.key"
             class="rounded-xl border border-white/[0.08] bg-black/20 px-2.5 py-2"
           >
@@ -331,16 +385,11 @@ watch(
     <button
       v-if="!readOnly"
       type="button"
-      class="w-full rounded-2xl border border-rose-900/50 bg-gradient-to-b from-rose-900/90 to-rose-950 py-3.5 text-[15px] font-bold text-rose-50 shadow-[0_12px_36px_-14px_rgba(225,29,72,0.55)] transition hover:brightness-110 active:scale-[0.99] disabled:opacity-50"
-      :disabled="autorenewToggleLoading || !autorenewOn"
-      @click="disableAutorenewButton"
+      class="w-full rounded-2xl border border-violet-300/35 bg-violet-500/[0.18] py-3.5 text-[15px] font-bold text-white shadow-[0_16px_40px_-20px_rgba(139,92,246,0.65)] transition hover:bg-violet-500/[0.26] active:scale-[0.99]"
+      @click="renewSubscriptionButton"
     >
-      Отключить автопродление
+      Продлить подписку
     </button>
-
-    <p v-if="!readOnly" class="text-center text-[11px] leading-snug text-white/45">
-      При отмене автопродление остановится в конце текущего периода подписки.
-    </p>
     </div>
   </div>
 </template>
