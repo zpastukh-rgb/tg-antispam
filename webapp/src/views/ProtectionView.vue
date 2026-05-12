@@ -50,6 +50,17 @@ const showMentionsFilterModal = ref(false)
 const showMediaFilterModal = ref(false)
 const showButtonsFilterModal = ref(false)
 const showChannelPostsFilterModal = ref(false)
+const _mentionsDebug = ref('')
+
+function debugOpenMentions() {
+  const before = showMentionsFilterModal.value
+  const hasRule = !!chat.value?.rule
+  showMentionsFilterModal.value = true
+  const after = showMentionsFilterModal.value
+  const msg = `[MENTIONS] before=${before} after=${after} rule=${hasRule} chat=${!!chat.value} id=${chat.value?.id || 'none'}`
+  console.log(msg)
+  _mentionsDebug.value = msg
+}
 
 const newWhitelistDomain = ref('')
 const newWhitelistUserId = ref('')
@@ -3498,11 +3509,11 @@ const protCardIndigo =
             <button
               type="button"
               class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-violet-500/15 to-fuchsia-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-violet-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="showMentionsFilterModal = true"
+              @click="debugOpenMentions()"
             >
               <span class="text-lg leading-none">@</span>
               <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_mentions') }}</span>
-              <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ mentionsSummary }}</span>
+              <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ _mentionsDebug || mentionsSummary }}</span>
             </button>
             <button
               type="button"
