@@ -51,39 +51,6 @@ const showMediaFilterModal = ref(false)
 const showButtonsFilterModal = ref(false)
 const showChannelPostsFilterModal = ref(false)
 
-let _gtX = 0, _gtY = 0, _gtT = 0
-function guardTapStart(e) {
-  const t = e.touches?.[0]
-  if (t) { _gtX = t.clientX; _gtY = t.clientY; _gtT = Date.now() }
-}
-function guardTap(e, fn) {
-  const t = e.changedTouches?.[0]
-  if (!t) return
-  if (Date.now() - _gtT > 700) return
-  if (Math.abs(t.clientX - _gtX) > 20 || Math.abs(t.clientY - _gtY) > 20) return
-  fn()
-}
-
-function openLinksFilterTile() {
-  if (!chat.value?.rule) return
-  showLinksFilterModal.value = true
-}
-function openMentionsFilterTile() {
-  if (!chat.value?.rule) return
-  showMentionsFilterModal.value = true
-}
-function openMediaFilterTile() {
-  if (!chat.value?.rule) return
-  showMediaFilterModal.value = true
-}
-function openButtonsFilterTile() {
-  if (!chat.value?.rule) return
-  showButtonsFilterModal.value = true
-}
-function openChannelPostsFilterTile() {
-  if (!chat.value?.rule) return
-  showChannelPostsFilterModal.value = true
-}
 const newWhitelistDomain = ref('')
 const newWhitelistUserId = ref('')
 const newWhitelistSenderChat = ref('')
@@ -3521,63 +3488,48 @@ const protCardIndigo =
           <div class="grid grid-cols-2 gap-2">
             <button
               type="button"
-              data-guard-no-tap-polyfill
-              class="group relative z-[5] flex touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-sky-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-sky-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="openLinksFilterTile"
-              @touchstart.passive="guardTapStart"
-              @touchend.prevent="guardTap($event, openLinksFilterTile)"
+              class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-sky-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-sky-400/40 hover:shadow-md active:scale-[0.99]"
+              @click="showLinksFilterModal = true"
             >
-              <span class="pointer-events-none text-lg leading-none select-none">🔗</span>
-              <span class="pointer-events-none mt-1.5 select-none text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_links') }}</span>
-              <span class="pointer-events-none mt-0.5 line-clamp-2 select-none text-[10px] text-slate-400">{{ linkModeSummary }}</span>
+              <span class="text-lg leading-none">🔗</span>
+              <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_links') }}</span>
+              <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ linkModeSummary }}</span>
             </button>
             <button
               type="button"
-              data-guard-no-tap-polyfill
-              class="group relative z-[5] flex touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-violet-500/15 to-fuchsia-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-violet-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="openMentionsFilterTile"
-              @touchstart.passive="guardTapStart"
-              @touchend.prevent="guardTap($event, openMentionsFilterTile)"
+              class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-violet-500/15 to-fuchsia-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-violet-400/40 hover:shadow-md active:scale-[0.99]"
+              @click="showMentionsFilterModal = true"
             >
-              <span class="pointer-events-none text-lg leading-none select-none">@</span>
-              <span class="pointer-events-none mt-1.5 select-none text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_mentions') }}</span>
-              <span class="pointer-events-none mt-0.5 line-clamp-2 select-none text-[10px] text-slate-400">{{ mentionsSummary }}</span>
+              <span class="text-lg leading-none">@</span>
+              <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_mentions') }}</span>
+              <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ mentionsSummary }}</span>
             </button>
             <button
               type="button"
-              data-guard-no-tap-polyfill
-              class="group relative z-[5] flex touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-amber-500/15 to-orange-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-amber-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="openMediaFilterTile"
-              @touchstart.passive="guardTapStart"
-              @touchend.prevent="guardTap($event, openMediaFilterTile)"
+              class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-amber-500/15 to-orange-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-amber-400/40 hover:shadow-md active:scale-[0.99]"
+              @click="showMediaFilterModal = true"
             >
-              <span class="pointer-events-none text-lg leading-none select-none">🖼</span>
-              <span class="pointer-events-none mt-1.5 select-none text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_media') }}</span>
-              <span class="pointer-events-none mt-0.5 line-clamp-2 select-none text-[10px] text-slate-400">{{ mediaSummary }}</span>
+              <span class="text-lg leading-none">🖼</span>
+              <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_media') }}</span>
+              <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ mediaSummary }}</span>
             </button>
             <button
               type="button"
-              data-guard-no-tap-polyfill
-              class="group relative z-[5] flex touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-emerald-500/15 to-teal-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-emerald-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="openButtonsFilterTile"
-              @touchstart.passive="guardTapStart"
-              @touchend.prevent="guardTap($event, openButtonsFilterTile)"
+              class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-emerald-500/15 to-teal-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-emerald-400/40 hover:shadow-md active:scale-[0.99]"
+              @click="showButtonsFilterModal = true"
             >
-              <span class="pointer-events-none text-lg leading-none select-none">🔘</span>
-              <span class="pointer-events-none mt-1.5 select-none text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_buttons') }}</span>
-              <span class="pointer-events-none mt-0.5 line-clamp-2 select-none text-[10px] text-slate-400">{{ buttonsSummary }}</span>
+              <span class="text-lg leading-none">🔘</span>
+              <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_buttons') }}</span>
+              <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ buttonsSummary }}</span>
             </button>
             <button
               type="button"
-              data-guard-no-tap-polyfill
-              class="group relative z-[5] col-span-2 flex touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-fuchsia-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-fuchsia-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="openChannelPostsFilterTile"
-              @touchstart.passive="guardTapStart"
-              @touchend.prevent="guardTap($event, openChannelPostsFilterTile)"
+              class="group col-span-2 flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-fuchsia-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-fuchsia-400/40 hover:shadow-md active:scale-[0.99]"
+              @click="showChannelPostsFilterModal = true"
             >
-              <span class="pointer-events-none text-lg leading-none select-none">📣</span>
-              <span class="pointer-events-none mt-1.5 select-none text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_channel_posts') }}</span>
-              <span class="pointer-events-none mt-0.5 line-clamp-2 select-none text-[10px] text-slate-400">{{ channelPostsSummary }}</span>
+              <span class="text-lg leading-none">📣</span>
+              <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_channel_posts') }}</span>
+              <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ channelPostsSummary }}</span>
             </button>
           </div>
           <div class="flex items-center justify-between gap-2 pt-1">
@@ -3910,11 +3862,8 @@ const protCardIndigo =
           <h2 class="text-xs font-medium text-slate-200">{{ tt('protection.ui.welcome_newcomers_title') }}</h2>
           <button
             type="button"
-            data-guard-no-tap-polyfill
             class="rounded-lg border border-white/15 bg-white/10 px-2.5 py-1 text-xs font-semibold text-slate-100 hover:bg-white/15"
             @click="openWelcomeSettings()"
-            @touchstart.passive="guardTapStart"
-            @touchend.prevent="guardTap($event, () => openWelcomeSettings())"
           >
             {{ tt('protection.ui.configure') }}
           </button>
