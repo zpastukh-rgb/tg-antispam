@@ -4480,7 +4480,6 @@ const protCardIndigo =
     </div>
 
     <GuardTeleport>
-    <div class="contents">
     <div
       v-if="showSpamSpikeInfoModal"
       class="fixed inset-0 z-[530] flex items-end justify-center bg-black/60 p-3 md:items-center"
@@ -5030,7 +5029,6 @@ const protCardIndigo =
           </p>
         </div>
       </div>
-    </div>
     </div>
     </GuardTeleport>
     <GuardTeleport>
@@ -6570,7 +6568,6 @@ const protCardIndigo =
       </div>
     </div>
     <GuardTeleport>
-    <div class="contents">
     <div
       v-if="showAntinakrutkaInfoModal"
       class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
@@ -6608,7 +6605,6 @@ const protCardIndigo =
           </p>
         </div>
       </div>
-    </div>
     </div>
     </GuardTeleport>
     <GuardTeleport>
@@ -6678,7 +6674,6 @@ const protCardIndigo =
     </div>
     </GuardTeleport>
     <GuardTeleport>
-    <div class="contents">
     <div
       v-if="showJoinCaptchaInfoModal"
       class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
@@ -6758,7 +6753,6 @@ const protCardIndigo =
           <p>{{ tt('protection.modals.newbie.p4_time') }}</p>
         </div>
       </div>
-    </div>
     </div>
     </GuardTeleport>
     <div
