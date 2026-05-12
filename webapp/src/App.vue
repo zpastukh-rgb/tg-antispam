@@ -139,7 +139,7 @@ function onSubscriptionBackFromHeader() {
       />
       <AppSidebar :open="sidebarOpen" @close="closeSidebar" />
       <main
-        class="min-h-0 flex-1 touch-manipulation scroll-pb-[calc(7.35rem+env(safe-area-inset-bottom,0px))] bg-transparent pb-[calc(7.35rem+env(safe-area-inset-bottom,0px))] md:pb-40 md:pl-64"
+        class="min-h-0 flex-1 scroll-pb-[calc(7.35rem+env(safe-area-inset-bottom,0px))] bg-transparent pb-[calc(7.35rem+env(safe-area-inset-bottom,0px))] md:pb-40 md:pl-64"
       >
         <div
           :class="
