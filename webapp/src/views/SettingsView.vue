@@ -1532,7 +1532,7 @@ onBeforeUnmount(() => {
 
         <div
           v-if="showPurgeConfirm"
-          style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center bg-black/55 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] backdrop-blur-md sm:items-center"
+          style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/55 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] backdrop-blur-md sm:items-center"
           role="dialog"
           aria-modal="true"
           @click.self="showPurgeConfirm = false"
@@ -1923,7 +1923,7 @@ onBeforeUnmount(() => {
     <!-- PDF modal -->
     <div
       v-if="showPdfModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/70 p-4 backdrop-blur-2xl"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/70 p-4 backdrop-blur-2xl"
       role="dialog"
       aria-modal="true"
       @click.self="showPdfModal = false"
@@ -2191,7 +2191,7 @@ onBeforeUnmount(() => {
     <!-- PIN gate modal -->
     <div
       v-if="showPinModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center bg-black/55 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] backdrop-blur-md sm:items-center"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/55 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] backdrop-blur-md sm:items-center"
       role="dialog"
       aria-modal="true"
       @click.self="showPinModal = false"

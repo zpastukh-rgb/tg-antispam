@@ -423,7 +423,7 @@ function goPremiumFromReports() {
 
       <div
         v-if="showChatPicker"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center bg-black/65 p-0 pb-[calc(5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-sm md:pb-6"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/65 p-0 pb-[calc(5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-sm md:pb-6"
         @click="showChatPicker = false"
       >
         <div
@@ -494,7 +494,7 @@ function goPremiumFromReports() {
     </div>
     <div
       v-if="showReportsInfoModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center bg-black/70 p-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] md:items-center md:pb-6"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/70 p-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] md:items-center md:pb-6"
       @click.self="showReportsInfoModal = false"
     >
       <div
