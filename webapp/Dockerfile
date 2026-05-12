@@ -6,6 +6,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
+ARG CACHE_BUST
 ARG VITE_API_BASE_URL
 ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
 # URL API может быть только в рантайме: serve-static.mjs отдаёт /guard-api-config.js из process.env.
