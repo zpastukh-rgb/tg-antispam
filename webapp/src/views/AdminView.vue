@@ -6733,7 +6733,7 @@ watch(
         </ul>
       </div>
 
-      <Teleport to="body">
+      <Teleport to="#guard-modal-root">
         <div
           v-if="guardPulseInfoOpen"
           class="fixed inset-0 z-[200] flex items-end justify-center bg-black/50 p-3 sm:items-center"
@@ -7250,7 +7250,7 @@ watch(
         </div>
       </div>
 
-      <Teleport to="body">
+      <Teleport to="#guard-modal-root">
         <div
           v-if="bcQuickDraftModalOpen"
           class="fixed inset-0 z-[10000] flex min-h-[100dvh] min-w-0 flex-col bg-[#09090b] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
@@ -7388,7 +7388,7 @@ watch(
         </div>
       </Teleport>
 
-      <Teleport to="body">
+      <Teleport to="#guard-modal-root">
         <div
           v-if="bcSendTargetModalOpen"
           class="fixed inset-0 z-[10020] flex min-h-[100dvh] min-w-0 flex-col bg-[#09090b] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
@@ -7484,7 +7484,7 @@ watch(
         </div>
       </Teleport>
 
-      <Teleport to="body">
+      <Teleport to="#guard-modal-root">
       <div
         v-if="bcConfirmModalOpen"
         class="fixed inset-0 z-[10030] flex flex-col overflow-y-auto bg-[#070b12] px-1.5 pb-[max(5.75rem,calc(5.25rem+env(safe-area-inset-bottom,0px)))] pt-[max(0.25rem,calc(env(safe-area-inset-top,0px)+46px))]"
@@ -8066,7 +8066,7 @@ watch(
     </div>
     </template>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
       <div
         v-if="bcCampaignUxOpen"
         class="fixed inset-0 z-[10200] flex h-[100dvh] min-w-0 flex-col overflow-hidden bg-[#05070B] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] text-white"
@@ -8360,7 +8360,7 @@ watch(
       </div>
     </Teleport>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
       <div
         v-if="bcCampaignUxRecipientPickerOpen"
         class="fixed inset-0 z-[10220] flex h-[100dvh] min-w-0 flex-col overflow-hidden bg-[#05070B] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] text-white"
@@ -9021,7 +9021,7 @@ watch(
       </div>
     </div>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
     <div
       v-if="bcAuxModal === 'keyboard'"
       class="fixed inset-0 z-[10080] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
@@ -9085,7 +9085,7 @@ watch(
     </div>
     </Teleport>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
     <div
       v-if="bcAuxModal === 'media'"
       class="fixed inset-0 z-[10080] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
@@ -9898,7 +9898,7 @@ watch(
       </div>
     </div>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
       <div
         v-if="bcSendModalOpen"
         class="fixed inset-0 z-[10100] flex min-h-[100dvh] min-w-0 flex-col bg-[#09090b] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
@@ -10098,7 +10098,7 @@ watch(
       </div>
     </div>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
     <div
       v-if="bcShowGroupsPicker"
       class="fixed inset-0 z-[10040] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
@@ -10150,7 +10150,7 @@ watch(
     </div>
     </Teleport>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
     <div
       v-if="bcShowChannelsPicker"
       class="fixed inset-0 z-[10040] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
@@ -10202,7 +10202,7 @@ watch(
     </div>
     </Teleport>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
     <div
       v-if="bcShowBotsPicker"
       class="fixed inset-0 z-[10040] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"

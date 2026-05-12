@@ -4478,7 +4478,7 @@ const protCardIndigo =
       </div>
     </div>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
     <div class="contents">
     <div
       v-if="showSpamSpikeInfoModal"
@@ -5032,7 +5032,7 @@ const protCardIndigo =
     </div>
     </div>
     </Teleport>
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
       <div
         v-if="showStopwordsModal"
         class="fixed inset-0 z-[400] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -5083,7 +5083,7 @@ const protCardIndigo =
       </div>
     </Teleport>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
       <div
         v-if="showProtectionPinModal"
         class="fixed inset-0 z-[480] flex items-end justify-center bg-black/75 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] backdrop-blur-md md:items-center md:pb-6"
@@ -5121,7 +5121,7 @@ const protCardIndigo =
       </div>
     </Teleport>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
       <div
         v-if="postRulesImagePreviewUrl"
         class="fixed inset-0 z-[270] flex items-center justify-center bg-black/75 p-4 backdrop-blur-[2px]"
@@ -5138,7 +5138,7 @@ const protCardIndigo =
       </div>
     </Teleport>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
       <div
         v-if="welcomeImagePreviewUrl && showWelcomeSettingsModal"
         class="fixed inset-0 z-[270] flex items-center justify-center bg-black/75 p-4 backdrop-blur-[2px]"
@@ -5155,7 +5155,7 @@ const protCardIndigo =
       </div>
     </Teleport>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
       <div
         v-if="showWelcomeSettingsModal && chat?.rule"
         class="fixed inset-0 z-[258] flex items-center justify-center bg-black/55 p-3 sm:p-4 backdrop-blur-[2px]"
@@ -5180,7 +5180,7 @@ const protCardIndigo =
             </div>
             <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-white/10" @click="closeWelcomeSettingsModal()">✕</button>
           </div>
-          <div class="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3 sm:px-4">
+          <div class="min-h-[min(38vh,14rem)] max-h-[min(78vh,42rem)] flex-1 space-y-3 overflow-y-auto px-3 py-3 sm:px-4">
             <div class="glass-panel flex items-center justify-between gap-2 p-3">
               <span class="text-xs text-slate-200">{{ tt('protection.welcome_modal.enable_label') }}</span>
               <button
@@ -5391,7 +5391,7 @@ const protCardIndigo =
       </div>
     </Teleport>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
       <div
         v-if="showPostRulesSettingsModal && chat?.rule"
         class="fixed inset-0 z-[259] flex items-center justify-center bg-black/55 p-3 sm:p-4 backdrop-blur-[2px]"
@@ -5623,7 +5623,7 @@ const protCardIndigo =
       </div>
     </Teleport>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
       <div
         v-if="showPostRulesGroupSendModal && showPostRulesSettingsModal"
         class="fixed inset-0 z-[263] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -5676,7 +5676,7 @@ const protCardIndigo =
       </div>
     </Teleport>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
       <div
         v-if="showPostRulesGroupFullPreview && showPostRulesSettingsModal && postRulesGroupFullPreviewRow"
         class="fixed inset-0 z-[265] flex items-center justify-center bg-black/65 p-4 backdrop-blur-[2px]"
@@ -5726,7 +5726,7 @@ const protCardIndigo =
       </div>
     </Teleport>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
       <div
         v-if="showPostRulesButtonsModal && showPostRulesSettingsModal"
         class="fixed inset-0 z-[262] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -5766,7 +5766,7 @@ const protCardIndigo =
       </div>
     </Teleport>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
       <div
         v-if="postRulesLinkModalOpen && showPostRulesSettingsModal"
         class="fixed inset-0 z-[262] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -5790,7 +5790,7 @@ const protCardIndigo =
       </div>
     </Teleport>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
       <div
         v-if="welcomeInfoModal && showWelcomeSettingsModal"
         class="fixed inset-0 z-[261] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -5837,7 +5837,7 @@ const protCardIndigo =
       </div>
     </Teleport>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
       <div
         v-if="showWelcomeButtonsModal && showWelcomeSettingsModal"
         class="fixed inset-0 z-[262] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -5880,7 +5880,7 @@ const protCardIndigo =
       </div>
     </Teleport>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
       <div
         v-if="welcomeLinkModalOpen"
         class="fixed inset-0 z-[263] flex items-start justify-center bg-black/60 p-4 md:items-center"
@@ -5907,7 +5907,7 @@ const protCardIndigo =
       </div>
     </Teleport>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
       <div
         v-if="showLinksFilterModal && chat?.rule"
         class="fixed inset-0 z-[400] flex items-center justify-center bg-black/45 p-4 backdrop-blur-md"
@@ -5938,7 +5938,7 @@ const protCardIndigo =
             </button>
           </div>
           <div
-            class="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-4 py-4 [-webkit-overflow-scrolling:touch]"
+            class="min-h-[min(42vh,17rem)] max-h-[min(74vh,40rem)] flex-1 space-y-4 overflow-y-auto overscroll-contain px-4 py-4 [-webkit-overflow-scrolling:touch]"
           >
             <div>
               <div class="mb-2 flex items-center justify-between gap-2">
@@ -6257,7 +6257,7 @@ const protCardIndigo =
       </div>
     </Teleport>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
       <div
         v-if="showChannelPostsFilterModal && chat?.rule"
         class="fixed inset-0 z-[400] flex items-center justify-center bg-black/45 p-4 backdrop-blur-md"
@@ -6364,7 +6364,7 @@ const protCardIndigo =
       </div>
     </Teleport>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
       <div
         v-if="showMentionsFilterModal && chat?.rule"
         class="fixed inset-0 z-[400] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -6397,7 +6397,7 @@ const protCardIndigo =
       </div>
     </Teleport>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
       <div
         v-if="showMediaFilterModal && chat?.rule"
         class="fixed inset-0 z-[400] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -6427,7 +6427,7 @@ const protCardIndigo =
       </div>
     </Teleport>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
       <div
         v-if="showButtonsFilterModal && chat?.rule"
         class="fixed inset-0 z-[400] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -6568,7 +6568,7 @@ const protCardIndigo =
         </div>
       </div>
     </div>
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
     <div class="contents">
     <div
       v-if="showAntinakrutkaInfoModal"
@@ -6610,7 +6610,7 @@ const protCardIndigo =
     </div>
     </div>
     </Teleport>
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
     <div
       v-if="showJoinCaptchaSettingsModal && chat?.rule"
       class="fixed inset-0 z-[400] flex items-end justify-center bg-black/65 p-3 md:items-center"
@@ -6676,7 +6676,7 @@ const protCardIndigo =
       </div>
     </div>
     </Teleport>
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
     <div class="contents">
     <div
       v-if="showJoinCaptchaInfoModal"
@@ -6819,7 +6819,7 @@ const protCardIndigo =
       </div>
     </div>
 
-    <Teleport to="body">
+    <Teleport to="#guard-modal-root">
       <div
         v-if="showFreeLimitsPremiumModal"
         class="fixed inset-0 z-[268] flex items-center justify-center bg-black/70 p-4 backdrop-blur-[2px]"

@@ -959,7 +959,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <Teleport to="body">
+  <Teleport to="#guard-modal-root">
     <div
       v-if="modelValue"
       class="fixed inset-0 z-[340] flex items-center justify-center bg-black/55 p-3 sm:p-4 backdrop-blur-[2px]"
@@ -1019,7 +1019,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3 sm:px-4">
+        <div class="min-h-[min(36vh,13rem)] max-h-[min(76vh,44rem)] flex-1 space-y-3 overflow-y-auto px-3 py-3 sm:px-4">
           <div v-if="loadBusy" class="py-8 text-center text-sm text-slate-400">{{ tt('protection.ui.channel_rules_loading') }}</div>
           <div v-else-if="loadError || !rulesChat" class="py-6 text-center text-sm text-rose-300">
             {{ tt('protection.ui.channel_rules_load_error') }}
@@ -1189,7 +1189,7 @@ onBeforeUnmount(() => {
     </div>
   </Teleport>
 
-  <Teleport to="body">
+  <Teleport to="#guard-modal-root">
     <div
       v-if="showButtonsModal && modelValue && rulesChat"
       class="fixed inset-0 z-[345] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -1236,7 +1236,7 @@ onBeforeUnmount(() => {
     </div>
   </Teleport>
 
-  <Teleport to="body">
+  <Teleport to="#guard-modal-root">
     <div
       v-if="linkModalOpen && modelValue"
       class="fixed inset-0 z-[345] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -1260,7 +1260,7 @@ onBeforeUnmount(() => {
     </div>
   </Teleport>
 
-  <Teleport to="body">
+  <Teleport to="#guard-modal-root">
     <div
       v-if="imagePreviewUrl"
       class="fixed inset-0 z-[348] flex items-center justify-center bg-black/75 p-4"
