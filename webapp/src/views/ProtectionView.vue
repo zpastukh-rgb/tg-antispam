@@ -3485,7 +3485,14 @@ const protCardIndigo =
           <p class="text-[11px] leading-relaxed text-slate-500">
             {{ tt('protection.ui.filters_intro') }}
           </p>
-          <button type="button" class="mb-2 w-full rounded-lg bg-red-600 px-3 py-2 text-sm font-bold text-white" @click="showLinksFilterModal = true; $event.target.textContent = 'modal=' + showLinksFilterModal">TAP TEST 2 — открыть модалку</button>
+          <button type="button" class="mb-2 w-full rounded-lg bg-red-600 px-3 py-2 text-sm font-bold text-white" @click="showLinksFilterModal = true; $event.target.textContent = 'modal=' + showLinksFilterModal + ' rule=' + !!chat?.rule">TAP TEST 3</button>
+          <div v-if="showLinksFilterModal" class="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80" style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:99999;background:rgba(0,0,0,0.9);display:flex;align-items:center;justify-content:center;" @click="showLinksFilterModal = false">
+            <div class="rounded-2xl bg-white p-6 text-black text-center" style="background:white;color:black;padding:24px;border-radius:16px;" @click.stop>
+              <p class="text-lg font-bold">Модалка работает!</p>
+              <p class="mt-2 text-sm">Если видишь это — z-index и рендер ОК</p>
+              <button type="button" class="mt-4 rounded-lg bg-red-600 px-4 py-2 text-white font-bold" @click="showLinksFilterModal = false">Закрыть</button>
+            </div>
+          </div>
           <div class="grid grid-cols-2 gap-2">
             <button
               type="button"
