@@ -31,6 +31,10 @@ const emit = defineEmits(['menu-click', 'subscription-back'])
 /** Публичные файлы (logo) через BASE_URL (в проде обычно '/') */
 const logoSrc = `${import.meta.env.BASE_URL}logo.png`
 
+/** Метка сборки в шапке: если после деплоя не меняется — открыт старый бандл или агрессивный кэш. */
+const guardBuildStamp =
+  typeof __GUARD_BUILD_STAMP__ !== 'undefined' ? String(__GUARD_BUILD_STAMP__ || '').slice(0, 16) : ''
+
 const showBack = computed(() => props.subscriptionScreen || (route.path !== '/' && route.name !== 'Dashboard'))
 const canSeeAdmin = computed(() => canOpenAdminEntry(me.value))
 const isBlueAdmActive = computed(() => route.path.startsWith('/admin') && cabinetMode.value !== 'delegated')
@@ -165,8 +169,17 @@ function goBack() {
           class="h-8 w-8 shrink-0 object-contain object-center drop-shadow-[0_0_10px_rgba(143,212,26,0.35)] dark:drop-shadow-[0_0_12px_rgba(143,212,26,0.25)]"
           @dragstart.prevent
         />
-        <span class="truncate text-sm font-bold leading-tight tracking-tight md:text-[0.95rem]">
-          <span class="text-white">AntiSpam </span><span class="text-lime-400">Guard</span>
+        <span class="flex min-w-0 flex-col leading-tight">
+          <span class="truncate text-sm font-bold tracking-tight md:text-[0.95rem]">
+            <span class="text-white">AntiSpam </span><span class="text-lime-400">Guard</span>
+          </span>
+          <span
+            v-if="guardBuildStamp"
+            class="truncate font-mono text-[8px] font-normal text-white/35"
+            title="Время сборки панели (UTC). Должно обновляться после каждого деплоя фронта."
+          >
+            build {{ guardBuildStamp }}
+          </span>
         </span>
       </a>
     </div>

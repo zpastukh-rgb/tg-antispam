@@ -1,5 +1,6 @@
 import './bootstrapLocation.js'
 import './themeBootstrap.js'
+import './telegramTapPolyfill.js'
 import { createApp } from 'vue'
 import App from './App.vue'
 import router from './router'
