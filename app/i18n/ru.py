@@ -853,7 +853,7 @@ MESSAGES: dict[str, dict] = {
                 "🌍 Поменять язык бота `/guard_lang`\n"
                 "🤝 Отблагодарить душевно `/guard_tip`\n\n"
                 "Тариф: *{tariff_label}*\n"
-                "Подключено чатов: *{chats_count} / {chat_limit}*\n"
+                "Групп в учёте защиты: *{chats_count} / {chat_limit}*\n"
                 "Подписка до: *{sub_until}*\n"
                 "AURUM ✨ *{aurum}*\n"
                 "Партнёрские токены *{bonus}* ⚡\n\n"

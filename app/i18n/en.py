@@ -848,7 +848,7 @@ MESSAGES: dict[str, dict] = {
                 "🌍 Change bot language `/guard_lang`\n"
                 "🤝 Send a tip `/guard_tip`\n\n"
                 "Plan: *{tariff_label}*\n"
-                "Connected chats: *{chats_count} / {chat_limit}*\n"
+                "Groups in protection: *{chats_count} / {chat_limit}*\n"
                 "Subscription until: *{sub_until}*\n"
                 "AURUM ✨ *{aurum}*\n"
                 "Partner tokens *{bonus}* ⚡\n\n"

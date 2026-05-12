@@ -83,6 +83,22 @@ async def get_activity_summary_chat_ids(session: AsyncSession, user_id: int) -> 
     return sorted(ids)
 
 
+async def count_chat_ids_by_kind(session: AsyncSession, chat_ids: list[int]) -> tuple[int, int]:
+    """Число групп и каналов среди id — та же логика, что у полей `groups_count` / `channels_count` в `/api/activity/summary`."""
+    if not chat_ids:
+        return 0, 0
+    kinds_q = await session.execute(select(Chat.chat_kind).where(Chat.id.in_(chat_ids)))
+    groups_count = 0
+    channels_count = 0
+    for (kind,) in kinds_q.all():
+        k = str(kind or "group").strip().lower()
+        if k == "channel":
+            channels_count += 1
+        else:
+            groups_count += 1
+    return groups_count, channels_count
+
+
 async def _invite_match_subquery(session: AsyncSession, user_id: int):
     """Подзапрос chat_id по connected-инвайтам делегата (по id и по username)."""
     uid = int(user_id)

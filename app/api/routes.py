@@ -35,6 +35,7 @@ from app.api.api_locale import current_api_locale
 from app.api.auth import require_init_data, require_init_data_with_profile
 from app.api.deps import get_db
 from app.api.service import (
+    count_chat_ids_by_kind,
     get_activity_summary_chat_ids,
     get_accessible_chats_any_active,
     get_managed_chats,
@@ -6219,16 +6220,7 @@ async def api_activity_summary(
             )
         )
         joins_y = int(joins_y_q.scalar() or 0)
-    groups_count = 0
-    channels_count = 0
-    if chat_ids:
-        kinds_q = await session.execute(select(Chat.chat_kind).where(Chat.id.in_(chat_ids)))
-        for (kind,) in kinds_q.all():
-            k = str(kind or "group").strip().lower()
-            if k == "channel":
-                channels_count += 1
-            else:
-                groups_count += 1
+    groups_count, channels_count = await count_chat_ids_by_kind(session, chat_ids)
     _, _, group_limit = await can_add_chat(session, user_id)
     _, _, channel_limit = await can_add_channel(session, user_id)
     # Уровень защиты: есть хотя бы один чат с Guard не на паузе (включая каналы).

@@ -50,6 +50,28 @@ const showMentionsFilterModal = ref(false)
 const showMediaFilterModal = ref(false)
 const showButtonsFilterModal = ref(false)
 const showChannelPostsFilterModal = ref(false)
+
+/** Плитки фильтров в TMA: emoji + сложная вёрстка — полифилл touch→click иногда не даёт @click; открываем по touchend и отключаем полифилл на кнопке. */
+function openLinksFilterTile() {
+  if (!chat.value?.rule) return
+  showLinksFilterModal.value = true
+}
+function openMentionsFilterTile() {
+  if (!chat.value?.rule) return
+  showMentionsFilterModal.value = true
+}
+function openMediaFilterTile() {
+  if (!chat.value?.rule) return
+  showMediaFilterModal.value = true
+}
+function openButtonsFilterTile() {
+  if (!chat.value?.rule) return
+  showButtonsFilterModal.value = true
+}
+function openChannelPostsFilterTile() {
+  if (!chat.value?.rule) return
+  showChannelPostsFilterModal.value = true
+}
 const newWhitelistDomain = ref('')
 const newWhitelistUserId = ref('')
 const newWhitelistSenderChat = ref('')
@@ -3487,8 +3509,10 @@ const protCardIndigo =
           <div class="grid grid-cols-2 gap-2">
             <button
               type="button"
-              class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-sky-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-sky-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="showLinksFilterModal = true"
+              data-guard-no-tap-polyfill
+              class="group relative z-[5] flex touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-sky-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-sky-400/40 hover:shadow-md active:scale-[0.99]"
+              @click="openLinksFilterTile"
+              @touchend.prevent.stop="openLinksFilterTile"
             >
               <span class="text-lg leading-none">🔗</span>
               <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_links') }}</span>
@@ -3496,8 +3520,10 @@ const protCardIndigo =
             </button>
             <button
               type="button"
-              class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-violet-500/15 to-fuchsia-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-violet-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="showMentionsFilterModal = true"
+              data-guard-no-tap-polyfill
+              class="group relative z-[5] flex touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-violet-500/15 to-fuchsia-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-violet-400/40 hover:shadow-md active:scale-[0.99]"
+              @click="openMentionsFilterTile"
+              @touchend.prevent.stop="openMentionsFilterTile"
             >
               <span class="text-lg leading-none">@</span>
               <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_mentions') }}</span>
@@ -3505,8 +3531,10 @@ const protCardIndigo =
             </button>
             <button
               type="button"
-              class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-amber-500/15 to-orange-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-amber-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="showMediaFilterModal = true"
+              data-guard-no-tap-polyfill
+              class="group relative z-[5] flex touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-amber-500/15 to-orange-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-amber-400/40 hover:shadow-md active:scale-[0.99]"
+              @click="openMediaFilterTile"
+              @touchend.prevent.stop="openMediaFilterTile"
             >
               <span class="text-lg leading-none">🖼</span>
               <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_media') }}</span>
@@ -3514,8 +3542,10 @@ const protCardIndigo =
             </button>
             <button
               type="button"
-              class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-emerald-500/15 to-teal-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-emerald-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="showButtonsFilterModal = true"
+              data-guard-no-tap-polyfill
+              class="group relative z-[5] flex touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-emerald-500/15 to-teal-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-emerald-400/40 hover:shadow-md active:scale-[0.99]"
+              @click="openButtonsFilterTile"
+              @touchend.prevent.stop="openButtonsFilterTile"
             >
               <span class="text-lg leading-none">🔘</span>
               <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_buttons') }}</span>
@@ -3523,8 +3553,10 @@ const protCardIndigo =
             </button>
             <button
               type="button"
-              class="group col-span-2 flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-fuchsia-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-fuchsia-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="showChannelPostsFilterModal = true"
+              data-guard-no-tap-polyfill
+              class="group relative z-[5] col-span-2 flex touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-fuchsia-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-fuchsia-400/40 hover:shadow-md active:scale-[0.99]"
+              @click="openChannelPostsFilterTile"
+              @touchend.prevent.stop="openChannelPostsFilterTile"
             >
               <span class="text-lg leading-none">📣</span>
               <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_channel_posts') }}</span>

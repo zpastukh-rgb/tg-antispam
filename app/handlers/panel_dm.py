@@ -33,7 +33,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select, or_, func, update
 
 from app.db.session import get_session
-from app.db.models import Chat, Rule, UserContext, ChatManager, StopWord, Payment, CreditLedger
+from app.db.models import Chat, Rule, UserContext, StopWord, Payment, CreditLedger
 from app.db.ensure_defaults import DEFAULT_PREMIUM7_PROMO_CODE, DEFAULT_PREMIUM14_PROMO_CODE
 from app.services.group_connect_actor import resolve_guard_connect_actor_for_group, telegram_user_is_chat_creator
 from app.services.user_service import (
@@ -43,7 +43,7 @@ from app.services.user_service import (
     effective_chat_limit,
     ensure_user_chat_limit_synced_for_tariff,
 )
-from app.api.service import apply_promo_code
+from app.api.service import apply_promo_code, count_chat_ids_by_kind, get_activity_summary_chat_ids, get_managed_chats
 from app.services.admin_roles import is_full_admin_user
 from app.services.user_locale import get_user_language, lang_from_update
 from app.i18n import t as i18n_t
@@ -364,26 +364,8 @@ async def _set_selected_chat(session, user_id: int, chat_id: Optional[int]) -> N
 
 
 async def _managed_chats(session, user_id: int) -> List[Chat]:
-    """
-    Только защищаемые чаты (не лог-чаты):
-    owner_user_id == user_id или менеджер через ChatManager.
-    """
-    sub = select(ChatManager.chat_id).where(ChatManager.user_id == user_id).subquery()
-    log_targets = select(Chat.log_chat_id).where(Chat.log_chat_id.is_not(None))
-    res = await session.execute(
-        select(Chat)
-        .where(
-            Chat.is_log_chat == False,  # noqa: E712
-            Chat.is_active == True,  # noqa: E712
-            Chat.id.not_in(log_targets),
-            or_(
-                Chat.owner_user_id == user_id,
-                Chat.id.in_(select(sub.c.chat_id)),
-            ),
-        )
-        .order_by(Chat.id.asc())
-    )
-    return list(res.scalars().all())
+    """Активные управляемые чаты — как в Mini App (`get_managed_chats`: владелец, менеджер, принятый инвайт)."""
+    return await get_managed_chats(session, int(user_id))
 
 
 async def _user_log_chats(session, user_id: int) -> List[Chat]:
@@ -976,7 +958,8 @@ async def render_main(bot, user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
         user = await get_or_create_user(session, user_id)
         await ensure_user_chat_limit_synced_for_tariff(session, user)
         await session.refresh(user)
-        chats = await _managed_chats(session, user_id)
+        summary_ids = await get_activity_summary_chat_ids(session, user_id)
+        groups_in_dashboard_scope, _ch_sc = await count_chat_ids_by_kind(session, summary_ids)
         chat_limit_disp = effective_chat_limit(user, user_id)
         tariff_key = (user.tariff or "free").lower()
         is_premium = tariff_key in ("premium", "pro", "business")
@@ -991,7 +974,7 @@ async def render_main(bot, user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
             lang,
             "panel.main.body",
             tariff_label=tariff_label,
-            chats_count=len(chats),
+            chats_count=groups_in_dashboard_scope,
             chat_limit=chat_limit_disp,
             sub_until=sub_until,
             aurum=aurum_credits_str,
