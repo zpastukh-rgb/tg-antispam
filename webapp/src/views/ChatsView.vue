@@ -494,6 +494,19 @@ function chatCardClass(chat) {
   return [glass, tint, spikeCls]
 }
 
+let _gtX = 0, _gtY = 0, _gtT = 0
+function guardTapStart(e) {
+  const t = e.touches?.[0]
+  if (t) { _gtX = t.clientX; _gtY = t.clientY; _gtT = Date.now() }
+}
+function guardTap(e, fn) {
+  const t = e.changedTouches?.[0]
+  if (!t) return
+  if (Date.now() - _gtT > 700) return
+  if (Math.abs(t.clientX - _gtX) > 20 || Math.abs(t.clientY - _gtY) > 20) return
+  fn()
+}
+
 async function openManagers(chat) {
   if (!chat?.id) return
   managersModalChat.value = chat
@@ -964,8 +977,11 @@ function openChannelBroadcast(chat) {
               <button
                 v-if="canOpenManagers(chat)"
                 type="button"
+                data-guard-no-tap-polyfill
                 class="inline-flex min-w-0 max-w-full items-center justify-center gap-1 rounded-lg border border-slate-700/70 bg-zinc-900/75 px-2.5 py-1 text-[11px] font-semibold leading-tight text-slate-100 hover:bg-zinc-800/80"
                 @click="openManagers(chat)"
+                @touchstart.passive="guardTapStart"
+                @touchend.prevent="guardTap($event, () => openManagers(chat))"
               >
                 <span>{{ t('chats.actions.managers') }}</span>
                 <span v-if="(Number(chat.managers_count) || 0) > 0" class="min-w-[1.1rem] shrink-0 tabular-nums text-cyan-200/95">{{ Number(chat.managers_count) || 0 }}</span>
