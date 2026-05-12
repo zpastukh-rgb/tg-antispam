@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 from fastapi import Header, HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.db.models import WebAppSession
 from app.db.session import get_session
@@ -148,13 +149,9 @@ async def _ensure_or_validate_webapp_session(
 
     session = await get_session()
     async with session:
-        q = await session.execute(
-            select(WebAppSession).where(
-                WebAppSession.telegram_user_id == int(telegram_user_id),
-                WebAppSession.session_id == sid,
-            ).limit(1)
-        )
+        q = await session.execute(select(WebAppSession).where(WebAppSession.session_id == sid).limit(1))
         row = q.scalar_one_or_none()
+
         if row is None:
             session.add(
                 WebAppSession(
@@ -164,8 +161,21 @@ async def _ensure_or_validate_webapp_session(
                     user_agent=ua,
                 )
             )
-            await session.commit()
-            return
+            try:
+                await session.commit()
+                return
+            except IntegrityError:
+                await session.rollback()
+                q = await session.execute(select(WebAppSession).where(WebAppSession.session_id == sid).limit(1))
+                row = q.scalar_one_or_none()
+                if row is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Could not persist webapp session",
+                    ) from None
+
+        if int(row.telegram_user_id) != int(telegram_user_id):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session")
         if row.revoked_at is not None:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session terminated")
         row.last_seen_at = datetime.now(timezone.utc)
