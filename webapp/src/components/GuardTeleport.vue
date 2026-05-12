@@ -1,13 +1,15 @@
 <script setup>
 /**
  * Всегда монтируем модалки в #guard-modal-root (внутри #app, над основным контентом).
- * Teleport на document.body в Telegram WebView давал пустые слои; режим «слот на месте»
- * для TMA давал конфликты стекинга/кликов. Единый таргет — предсказуемый z-order.
+ * Контейнер #guard-modal-root — pointer-events-none (см. App.vue), иначе пустой слой с высоким
+ * z-index в Telegram WKWebView перехватывает тапы по странице. Здесь включаем события только для слота.
  */
 </script>
 
 <template>
   <Teleport to="#guard-modal-root">
-    <slot />
+    <div class="pointer-events-auto">
+      <slot />
+    </div>
   </Teleport>
 </template>

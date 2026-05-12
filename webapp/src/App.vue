@@ -136,7 +136,7 @@ function onSubscriptionBackFromHeader() {
       />
       <AppSidebar :open="sidebarOpen" @close="closeSidebar" />
       <main
-        class="min-h-0 flex-1 scroll-pb-[calc(7.35rem+env(safe-area-inset-bottom,0px))] bg-transparent pb-[calc(7.35rem+env(safe-area-inset-bottom,0px))] md:pb-40 md:pl-64"
+        class="min-h-0 flex-1 touch-manipulation scroll-pb-[calc(7.35rem+env(safe-area-inset-bottom,0px))] bg-transparent pb-[calc(7.35rem+env(safe-area-inset-bottom,0px))] md:pb-40 md:pl-64"
       >
         <div
           :class="
@@ -147,11 +147,11 @@ function onSubscriptionBackFromHeader() {
         >
           <router-view />
         </div>
+        <!-- Контейнер поверх main по z-index; pointer-events-none чтобы пустой слой не «съедал» тапы в Telegram WKWebView -->
+        <div id="guard-modal-root" class="pointer-events-none relative z-[850]"></div>
       </main>
 
       <AppBottomNav />
-      <!-- Единая точка монтирования модалок (GuardTeleport). Высокий z-index — над таббаром/шапкой, без body. -->
-      <div id="guard-modal-root" class="relative z-[850]"></div>
     </div>
     <!-- Вне z-10 колонки: иначе в Telegram WebView оверлей может оказаться под контентом -->
     <LegalConsentGate />
