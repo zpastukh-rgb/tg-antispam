@@ -51,7 +51,7 @@ const showMediaFilterModal = ref(false)
 const showButtonsFilterModal = ref(false)
 const showChannelPostsFilterModal = ref(false)
 
-/** Плитки фильтров в TMA: глобальный полифилл делает programmatic click() — Vue часто его не видит; только прямой touchend + исключение из полифилла. */
+/** Плитки фильтров в TMA: прямой touchend + исключение из полифилла; без preventDefault на touchend — иначе не приходит резервный click (WKWebView). */
 const _filterTileOpenedAt = { links: 0, mentions: 0, media: 0, buttons: 0, channelPosts: 0 }
 const _filterTileTouch = new WeakMap()
 
@@ -3548,7 +3548,7 @@ const protCardIndigo =
               @click="openLinksFilterTile"
               @touchstart.passive="guardFilterTileTouchStart"
               @touchcancel.passive="guardFilterTileTouchCancel"
-              @touchend.prevent.stop="(e) => guardFilterTileTouchEnd(e, openLinksFilterTile)"
+              @touchend.stop="(e) => guardFilterTileTouchEnd(e, openLinksFilterTile)"
             >
               <span class="pointer-events-none text-lg leading-none select-none">🔗</span>
               <span class="pointer-events-none mt-1.5 select-none text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_links') }}</span>
@@ -3561,7 +3561,7 @@ const protCardIndigo =
               @click="openMentionsFilterTile"
               @touchstart.passive="guardFilterTileTouchStart"
               @touchcancel.passive="guardFilterTileTouchCancel"
-              @touchend.prevent.stop="(e) => guardFilterTileTouchEnd(e, openMentionsFilterTile)"
+              @touchend.stop="(e) => guardFilterTileTouchEnd(e, openMentionsFilterTile)"
             >
               <span class="pointer-events-none text-lg leading-none select-none">@</span>
               <span class="pointer-events-none mt-1.5 select-none text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_mentions') }}</span>
@@ -3574,7 +3574,7 @@ const protCardIndigo =
               @click="openMediaFilterTile"
               @touchstart.passive="guardFilterTileTouchStart"
               @touchcancel.passive="guardFilterTileTouchCancel"
-              @touchend.prevent.stop="(e) => guardFilterTileTouchEnd(e, openMediaFilterTile)"
+              @touchend.stop="(e) => guardFilterTileTouchEnd(e, openMediaFilterTile)"
             >
               <span class="pointer-events-none text-lg leading-none select-none">🖼</span>
               <span class="pointer-events-none mt-1.5 select-none text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_media') }}</span>
@@ -3587,7 +3587,7 @@ const protCardIndigo =
               @click="openButtonsFilterTile"
               @touchstart.passive="guardFilterTileTouchStart"
               @touchcancel.passive="guardFilterTileTouchCancel"
-              @touchend.prevent.stop="(e) => guardFilterTileTouchEnd(e, openButtonsFilterTile)"
+              @touchend.stop="(e) => guardFilterTileTouchEnd(e, openButtonsFilterTile)"
             >
               <span class="pointer-events-none text-lg leading-none select-none">🔘</span>
               <span class="pointer-events-none mt-1.5 select-none text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_buttons') }}</span>
@@ -3600,7 +3600,7 @@ const protCardIndigo =
               @click="openChannelPostsFilterTile"
               @touchstart.passive="guardFilterTileTouchStart"
               @touchcancel.passive="guardFilterTileTouchCancel"
-              @touchend.prevent.stop="(e) => guardFilterTileTouchEnd(e, openChannelPostsFilterTile)"
+              @touchend.stop="(e) => guardFilterTileTouchEnd(e, openChannelPostsFilterTile)"
             >
               <span class="pointer-events-none text-lg leading-none select-none">📣</span>
               <span class="pointer-events-none mt-1.5 select-none text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_channel_posts') }}</span>
