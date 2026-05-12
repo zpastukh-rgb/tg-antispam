@@ -51,59 +51,24 @@ const showMediaFilterModal = ref(false)
 const showButtonsFilterModal = ref(false)
 const showChannelPostsFilterModal = ref(false)
 
-/** Плитки фильтров в TMA: прямой touchend + исключение из полифилла; без preventDefault на touchend — иначе не приходит резервный click (WKWebView). */
-const _filterTileOpenedAt = { links: 0, mentions: 0, media: 0, buttons: 0, channelPosts: 0 }
-const _filterTileTouch = new WeakMap()
-
-function bumpFilterTile(key) {
-  const now = Date.now()
-  if (now - _filterTileOpenedAt[key] < 320) return false
-  _filterTileOpenedAt[key] = now
-  return true
-}
-
-function guardFilterTileTouchStart(e) {
-  const el = e.currentTarget
-  const t = e.targetTouches?.[0]
-  if (!t || !(el instanceof HTMLElement)) return
-  _filterTileTouch.set(el, { x: t.clientX, y: t.clientY, t: Date.now() })
-}
-
-function guardFilterTileTouchCancel(e) {
-  const el = e.currentTarget
-  if (el instanceof HTMLElement) _filterTileTouch.delete(el)
-}
-
-function guardFilterTileTouchEnd(e, openFn) {
-  const el = e.currentTarget
-  const st = el instanceof HTMLElement ? _filterTileTouch.get(el) : null
-  if (el instanceof HTMLElement) _filterTileTouch.delete(el)
-  if (!st) return
-  const t = e.changedTouches?.[0]
-  if (!t) return
-  if (Date.now() - st.t > 900) return
-  if (Math.abs(t.clientX - st.x) > 28 || Math.abs(t.clientY - st.y) > 28) return
-  openFn()
-}
-
 function openLinksFilterTile() {
-  if (!chat.value?.rule || !bumpFilterTile('links')) return
+  if (!chat.value?.rule) return
   showLinksFilterModal.value = true
 }
 function openMentionsFilterTile() {
-  if (!chat.value?.rule || !bumpFilterTile('mentions')) return
+  if (!chat.value?.rule) return
   showMentionsFilterModal.value = true
 }
 function openMediaFilterTile() {
-  if (!chat.value?.rule || !bumpFilterTile('media')) return
+  if (!chat.value?.rule) return
   showMediaFilterModal.value = true
 }
 function openButtonsFilterTile() {
-  if (!chat.value?.rule || !bumpFilterTile('buttons')) return
+  if (!chat.value?.rule) return
   showButtonsFilterModal.value = true
 }
 function openChannelPostsFilterTile() {
-  if (!chat.value?.rule || !bumpFilterTile('channelPosts')) return
+  if (!chat.value?.rule) return
   showChannelPostsFilterModal.value = true
 }
 const newWhitelistDomain = ref('')
@@ -3543,12 +3508,8 @@ const protCardIndigo =
           <div class="grid grid-cols-2 gap-2">
             <button
               type="button"
-              data-guard-no-tap-polyfill
               class="group relative z-[5] flex touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-sky-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-sky-400/40 hover:shadow-md active:scale-[0.99]"
               @click="openLinksFilterTile"
-              @touchstart.passive="guardFilterTileTouchStart"
-              @touchcancel.passive="guardFilterTileTouchCancel"
-              @touchend.stop="(e) => guardFilterTileTouchEnd(e, openLinksFilterTile)"
             >
               <span class="pointer-events-none text-lg leading-none select-none">🔗</span>
               <span class="pointer-events-none mt-1.5 select-none text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_links') }}</span>
@@ -3556,12 +3517,8 @@ const protCardIndigo =
             </button>
             <button
               type="button"
-              data-guard-no-tap-polyfill
               class="group relative z-[5] flex touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-violet-500/15 to-fuchsia-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-violet-400/40 hover:shadow-md active:scale-[0.99]"
               @click="openMentionsFilterTile"
-              @touchstart.passive="guardFilterTileTouchStart"
-              @touchcancel.passive="guardFilterTileTouchCancel"
-              @touchend.stop="(e) => guardFilterTileTouchEnd(e, openMentionsFilterTile)"
             >
               <span class="pointer-events-none text-lg leading-none select-none">@</span>
               <span class="pointer-events-none mt-1.5 select-none text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_mentions') }}</span>
@@ -3569,12 +3526,8 @@ const protCardIndigo =
             </button>
             <button
               type="button"
-              data-guard-no-tap-polyfill
               class="group relative z-[5] flex touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-amber-500/15 to-orange-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-amber-400/40 hover:shadow-md active:scale-[0.99]"
               @click="openMediaFilterTile"
-              @touchstart.passive="guardFilterTileTouchStart"
-              @touchcancel.passive="guardFilterTileTouchCancel"
-              @touchend.stop="(e) => guardFilterTileTouchEnd(e, openMediaFilterTile)"
             >
               <span class="pointer-events-none text-lg leading-none select-none">🖼</span>
               <span class="pointer-events-none mt-1.5 select-none text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_media') }}</span>
@@ -3582,12 +3535,8 @@ const protCardIndigo =
             </button>
             <button
               type="button"
-              data-guard-no-tap-polyfill
               class="group relative z-[5] flex touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-emerald-500/15 to-teal-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-emerald-400/40 hover:shadow-md active:scale-[0.99]"
               @click="openButtonsFilterTile"
-              @touchstart.passive="guardFilterTileTouchStart"
-              @touchcancel.passive="guardFilterTileTouchCancel"
-              @touchend.stop="(e) => guardFilterTileTouchEnd(e, openButtonsFilterTile)"
             >
               <span class="pointer-events-none text-lg leading-none select-none">🔘</span>
               <span class="pointer-events-none mt-1.5 select-none text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_buttons') }}</span>
@@ -3595,12 +3544,8 @@ const protCardIndigo =
             </button>
             <button
               type="button"
-              data-guard-no-tap-polyfill
               class="group relative z-[5] col-span-2 flex touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-fuchsia-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-fuchsia-400/40 hover:shadow-md active:scale-[0.99]"
               @click="openChannelPostsFilterTile"
-              @touchstart.passive="guardFilterTileTouchStart"
-              @touchcancel.passive="guardFilterTileTouchCancel"
-              @touchend.stop="(e) => guardFilterTileTouchEnd(e, openChannelPostsFilterTile)"
             >
               <span class="pointer-events-none text-lg leading-none select-none">📣</span>
               <span class="pointer-events-none mt-1.5 select-none text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_channel_posts') }}</span>
