@@ -26,6 +26,7 @@ import OwnerCabinetHome from '../components/OwnerCabinetHome.vue'
 import OwnerCabinetProtectionStats from '../components/OwnerCabinetProtectionStats.vue'
 import CabinetPremiumTitleBar from '../components/CabinetPremiumTitleBar.vue'
 import SecurityPinGateModal from '../components/SecurityPinGateModal.vue'
+import GuardTeleport from '../components/GuardTeleport.vue'
 import { useSecurityPinGate } from '../composables/useSecurityPinGate'
 import { shouldAskPinForAction } from '../utils/settingsSecurity'
 
@@ -6733,7 +6734,7 @@ watch(
         </ul>
       </div>
 
-      <Teleport to="body">
+      <GuardTeleport>
         <div
           v-if="guardPulseInfoOpen"
           class="fixed inset-0 z-[200] flex items-end justify-center bg-black/50 p-3 sm:items-center"
@@ -6800,7 +6801,7 @@ watch(
             </section>
           </div>
         </div>
-      </Teleport>
+      </GuardTeleport>
     </div>
 
     <div v-else-if="(showFullAdminShell || isOwnerCabinet) && tab === 'bad_urls'" class="space-y-3">
@@ -7250,7 +7251,7 @@ watch(
         </div>
       </div>
 
-      <Teleport to="body">
+      <GuardTeleport>
         <div
           v-if="bcQuickDraftModalOpen"
           class="fixed inset-0 z-[10000] flex min-h-[100dvh] min-w-0 flex-col bg-[#09090b] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
@@ -7386,9 +7387,9 @@ watch(
             </div>
           </div>
         </div>
-      </Teleport>
+      </GuardTeleport>
 
-      <Teleport to="body">
+      <GuardTeleport>
         <div
           v-if="bcSendTargetModalOpen"
           class="fixed inset-0 z-[10020] flex min-h-[100dvh] min-w-0 flex-col bg-[#09090b] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
@@ -7482,9 +7483,9 @@ watch(
             </div>
           </div>
         </div>
-      </Teleport>
+      </GuardTeleport>
 
-      <Teleport to="body">
+      <GuardTeleport>
       <div
         v-if="bcConfirmModalOpen"
         class="fixed inset-0 z-[10030] flex flex-col overflow-y-auto bg-[#070b12] px-1.5 pb-[max(5.75rem,calc(5.25rem+env(safe-area-inset-bottom,0px)))] pt-[max(0.25rem,calc(env(safe-area-inset-top,0px)+46px))]"
@@ -7542,7 +7543,7 @@ watch(
           </div>
         </div>
       </div>
-      </Teleport>
+      </GuardTeleport>
 
       <div
         v-if="bcShowAllRecentModal"
@@ -8066,7 +8067,7 @@ watch(
     </div>
     </template>
 
-    <Teleport to="body">
+    <GuardTeleport>
       <div
         v-if="bcCampaignUxOpen"
         class="fixed inset-0 z-[10200] flex h-[100dvh] min-w-0 flex-col overflow-hidden bg-[#05070B] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] text-white"
@@ -8358,9 +8359,9 @@ watch(
           <button type="button" class="mt-4 w-full rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-sm font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxScreen = 'manage'">{{ tt('admin.bc_campaign.btn_to_campaign') }}</button>
         </div>
       </div>
-    </Teleport>
+    </GuardTeleport>
 
-    <Teleport to="body">
+    <GuardTeleport>
       <div
         v-if="bcCampaignUxRecipientPickerOpen"
         class="fixed inset-0 z-[10220] flex h-[100dvh] min-w-0 flex-col overflow-hidden bg-[#05070B] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] text-white"
@@ -8393,7 +8394,7 @@ watch(
           <button type="button" class="rounded-xl border border-emerald-400/40 bg-gradient-to-r from-[#27b35f] to-[#36D67A] px-2 py-2 text-xs font-bold text-[#04130a] shadow-[0_16px_28px_-18px_rgba(54,214,122,0.95)] transition hover:brightness-110" @click="bcCampaignUxRecipientPickerOpen = false">{{ tt('admin.bc_campaign.done') }}</button>
         </div>
       </div>
-    </Teleport>
+    </GuardTeleport>
 
     <div
       v-if="bcAutopostingModalOpen"
@@ -9021,7 +9022,7 @@ watch(
       </div>
     </div>
 
-    <Teleport to="body">
+    <GuardTeleport>
     <div
       v-if="bcAuxModal === 'keyboard'"
       class="fixed inset-0 z-[10080] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
@@ -9083,9 +9084,9 @@ watch(
         </div>
       </div>
     </div>
-    </Teleport>
+    </GuardTeleport>
 
-    <Teleport to="body">
+    <GuardTeleport>
     <div
       v-if="bcAuxModal === 'media'"
       class="fixed inset-0 z-[10080] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
@@ -9163,7 +9164,7 @@ watch(
         </div>
       </div>
     </div>
-    </Teleport>
+    </GuardTeleport>
 
     <div
       v-if="bcShowMainHelp"
@@ -9898,7 +9899,7 @@ watch(
       </div>
     </div>
 
-    <Teleport to="body">
+    <GuardTeleport>
       <div
         v-if="bcSendModalOpen"
         class="fixed inset-0 z-[10100] flex min-h-[100dvh] min-w-0 flex-col bg-[#09090b] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
@@ -10061,7 +10062,7 @@ watch(
           </button>
         </div>
       </div>
-    </Teleport>
+    </GuardTeleport>
 
     <div
       v-if="bcMediaViewerOpen && bcMediaViewerItem"
@@ -10098,7 +10099,7 @@ watch(
       </div>
     </div>
 
-    <Teleport to="body">
+    <GuardTeleport>
     <div
       v-if="bcShowGroupsPicker"
       class="fixed inset-0 z-[10040] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
@@ -10148,9 +10149,9 @@ watch(
         </div>
       </div>
     </div>
-    </Teleport>
+    </GuardTeleport>
 
-    <Teleport to="body">
+    <GuardTeleport>
     <div
       v-if="bcShowChannelsPicker"
       class="fixed inset-0 z-[10040] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
@@ -10200,9 +10201,9 @@ watch(
         </div>
       </div>
     </div>
-    </Teleport>
+    </GuardTeleport>
 
-    <Teleport to="body">
+    <GuardTeleport>
     <div
       v-if="bcShowBotsPicker"
       class="fixed inset-0 z-[10040] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
@@ -10252,7 +10253,7 @@ watch(
         </div>
       </div>
     </div>
-    </Teleport>
+    </GuardTeleport>
 
     <div
       v-if="bcShowPreview && bcPreviewItem"
