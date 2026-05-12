@@ -3171,6 +3171,11 @@ const protCardIndigo =
 
 <template>
   <div>
+    <!-- DEBUG PANEL -->
+    <div style="position:fixed;top:44px;left:0;right:0;z-index:999999;background:#1a0505;color:#ff6b6b;font-size:10px;padding:4px 8px;font-family:monospace;line-height:1.3;max-height:80px;overflow:auto;border-bottom:2px solid #ff0000">
+      MEN={{ showMentionsFilterModal }} BTN={{ showButtonsFilterModal }} LNK={{ showLinksFilterModal }} MED={{ showMediaFilterModal }} CH={{ showChannelPostsFilterModal }}<br>
+      rule={{ !!chat?.rule }} id={{ chat?.id || 'none' }}
+    </div>
     <div
       class="relative -mx-4 min-h-0 px-4 pb-8 font-display md:-mx-6 md:px-6 md:pb-10"
     >
@@ -6367,40 +6372,36 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="showMentionsFilterModal && chat?.rule"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;padding:16px"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;background:rgba(255,0,0,0.85);display:flex;align-items:center;justify-content:center;padding:16px"
         @click.self="showMentionsFilterModal = false"
       >
         <div
-          style="background:#0f172a;color:#f1f5f9;padding:16px;border-radius:16px;max-width:400px;width:100%;border:1px solid rgba(255,255,255,0.15);box-shadow:0 25px 50px -12px rgba(0,0,0,0.6)"
+          style="background:white;color:black;padding:20px;border-radius:16px;max-width:400px;width:100%;border:3px solid red"
           @click.stop
         >
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-            <h3 style="font-size:14px;font-weight:600;color:white;margin:0">{{ tt('protection.ui.mentions_modal_title') }}</h3>
-            <button type="button" style="background:transparent;border:none;color:#94a3b8;font-size:12px;padding:4px 8px;cursor:pointer" @click="showMentionsFilterModal = false">✕</button>
-          </div>
-          <p style="font-size:11px;color:#94a3b8;margin:0 0 12px;line-height:1.5">
-            {{ tt('protection.ui.mentions_modal_body') }}
-          </p>
+          <p style="font-weight:bold;font-size:16px;margin:0 0 8px">MENTIONS MODAL TEST</p>
+          <p style="font-size:12px;margin:0 0 16px">Если видишь это — рендер модалки OK!</p>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
             <button
               v-for="opt in policyOptions"
               :key="`men-${opt.value}`"
               type="button"
               :style="{
-                padding: '10px',
+                padding: '12px',
                 borderRadius: '12px',
-                fontSize: '12px',
-                fontWeight: '500',
-                border: 'none',
+                fontSize: '14px',
+                fontWeight: 'bold',
+                border: '2px solid #333',
                 cursor: 'pointer',
-                background: (chat.rule.filter_mentions ? 'forbid' : 'allow') === opt.value ? '#84cc16' : '#1e293b',
-                color: (chat.rule.filter_mentions ? 'forbid' : 'allow') === opt.value ? '#0f172a' : '#e2e8f0',
+                background: (chat.rule.filter_mentions ? 'forbid' : 'allow') === opt.value ? '#22c55e' : '#e5e7eb',
+                color: '#000',
               }"
               @click="updateRule({ filter_mentions: opt.value === 'forbid' })"
             >
               {{ opt.label }}
             </button>
           </div>
+          <button type="button" style="margin-top:12px;width:100%;padding:10px;background:#ef4444;color:white;border:none;border-radius:8px;font-weight:bold;font-size:14px" @click="showMentionsFilterModal = false">ЗАКРЫТЬ</button>
         </div>
       </div>
     </GuardTeleport>
