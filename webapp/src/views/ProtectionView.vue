@@ -50,17 +50,6 @@ const showMentionsFilterModal = ref(false)
 const showMediaFilterModal = ref(false)
 const showButtonsFilterModal = ref(false)
 const showChannelPostsFilterModal = ref(false)
-const _mentionsDebug = ref('')
-
-function debugOpenMentions() {
-  const before = showMentionsFilterModal.value
-  const hasRule = !!chat.value?.rule
-  showMentionsFilterModal.value = true
-  const after = showMentionsFilterModal.value
-  const msg = `[MENTIONS] before=${before} after=${after} rule=${hasRule} chat=${!!chat.value} id=${chat.value?.id || 'none'}`
-  console.log(msg)
-  _mentionsDebug.value = msg
-}
 
 const newWhitelistDomain = ref('')
 const newWhitelistUserId = ref('')
@@ -3509,11 +3498,11 @@ const protCardIndigo =
             <button
               type="button"
               class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-violet-500/15 to-fuchsia-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-violet-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="debugOpenMentions()"
+              @click="showMentionsFilterModal = true"
             >
               <span class="text-lg leading-none">@</span>
               <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_mentions') }}</span>
-              <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ _mentionsDebug || mentionsSummary }}</span>
+              <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ mentionsSummary }}</span>
             </button>
             <button
               type="button"
@@ -6375,38 +6364,37 @@ const protCardIndigo =
       </div>
     </GuardTeleport>
 
-    <GuardTeleport>
+    <div
+      v-if="showMentionsFilterModal && chat?.rule"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:99999"
+      class="flex items-center justify-center bg-black/60 p-4"
+      @click.self="showMentionsFilterModal = false"
+    >
       <div
-        v-if="showMentionsFilterModal && chat?.rule"
-        class="fixed inset-0 z-[400] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
-        @click.self="showMentionsFilterModal = false"
+        class="w-full max-w-md rounded-2xl border border-white/15 bg-gradient-to-b from-slate-900 to-slate-950 p-4 text-slate-100 shadow-2xl ring-1 ring-violet-500/20"
+        @click.stop
       >
-        <div
-          class="w-full max-w-md rounded-2xl border border-white/15 bg-gradient-to-b from-slate-900 to-slate-950 p-4 text-slate-100 shadow-2xl ring-1 ring-violet-500/20"
-          @click.stop
-        >
-          <div class="mb-3 flex items-center justify-between">
-            <h3 class="text-sm font-semibold text-white">{{ tt('protection.ui.mentions_modal_title') }}</h3>
-            <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-white/10" @click="showMentionsFilterModal = false">✕</button>
-          </div>
-          <p class="mb-3 text-[11px] leading-relaxed text-slate-400">
-            {{ tt('protection.ui.mentions_modal_body') }}
-          </p>
-          <div class="grid grid-cols-2 gap-2">
-            <button
-              v-for="opt in policyOptions"
-              :key="`men-${opt.value}`"
-              type="button"
-              :class="policyButtonClass(chat.rule.filter_mentions ? 'forbid' : 'allow', opt.value)"
-              class="rounded-xl px-2.5 py-2.5 text-xs font-medium"
-              @click="updateRule({ filter_mentions: opt.value === 'forbid' })"
-            >
-              {{ opt.label }}
-            </button>
-          </div>
+        <div class="mb-3 flex items-center justify-between">
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.ui.mentions_modal_title') }}</h3>
+          <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-white/10" @click="showMentionsFilterModal = false">✕</button>
+        </div>
+        <p class="mb-3 text-[11px] leading-relaxed text-slate-400">
+          {{ tt('protection.ui.mentions_modal_body') }}
+        </p>
+        <div class="grid grid-cols-2 gap-2">
+          <button
+            v-for="opt in policyOptions"
+            :key="`men-${opt.value}`"
+            type="button"
+            :class="policyButtonClass(chat.rule.filter_mentions ? 'forbid' : 'allow', opt.value)"
+            class="rounded-xl px-2.5 py-2.5 text-xs font-medium"
+            @click="updateRule({ filter_mentions: opt.value === 'forbid' })"
+          >
+            {{ opt.label }}
+          </button>
         </div>
       </div>
-    </GuardTeleport>
+    </div>
 
     <GuardTeleport>
       <div
