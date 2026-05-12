@@ -4649,7 +4649,7 @@ async function submitReceipt() {
 
     <div
       v-if="showAccountHistoryModal"
-      class="fixed inset-0 z-[56] flex items-end justify-center bg-black/40 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-md md:items-center md:pb-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center bg-black/40 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-md md:items-center md:pb-3"
       role="dialog"
       aria-modal="true"
       :aria-label="t('dashboard.home_shell.history_modal.aria')"
@@ -4862,7 +4862,7 @@ async function submitReceipt() {
 
     <div
       v-if="showGroupActivityModal"
-      class="fixed inset-0 z-[60] flex items-end justify-center bg-black/70 p-3 backdrop-blur-[2px] md:items-center"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center bg-black/70 p-3 backdrop-blur-[2px] md:items-center"
       @click.self="closeGroupActivityModal"
     >
       <div
@@ -5013,7 +5013,7 @@ async function submitReceipt() {
 
     <div
       v-if="showUpdatesRoadmapModal"
-      class="fixed inset-0 z-[70] flex items-end justify-center bg-[#03050c]/82 p-3 backdrop-blur-md md:items-center"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center bg-[#03050c]/82 p-3 backdrop-blur-md md:items-center"
       role="presentation"
       @click.self="showUpdatesRoadmapModal = false"
     >
@@ -5069,7 +5069,7 @@ async function submitReceipt() {
 
     <div
       v-if="showFundsMovementModal"
-      class="fixed inset-0 z-[58] flex items-end justify-center bg-black/65 p-3 backdrop-blur-sm md:items-center"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center bg-black/65 p-3 backdrop-blur-sm md:items-center"
       @click.self="closeFundsMovementModal"
     >
       <div
@@ -5218,7 +5218,7 @@ async function submitReceipt() {
 
     <div
       v-if="showAurumHelpModal"
-      class="fixed inset-0 z-[280] flex items-end justify-center bg-black/70 p-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-[3px] md:items-center md:pb-6"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center bg-black/70 p-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-[3px] md:items-center md:pb-6"
       @click.self="showAurumHelpModal = false"
     >
       <div
@@ -5243,7 +5243,7 @@ async function submitReceipt() {
 
     <div
       v-if="showPremiumAurumShowcaseModal"
-      class="fixed inset-0 z-[283] flex items-end justify-center bg-black/75 p-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-[4px] md:items-center md:pb-6"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center bg-black/75 p-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-[4px] md:items-center md:pb-6"
       @click.self="showPremiumAurumShowcaseModal = false"
     >
       <div
@@ -5337,7 +5337,7 @@ async function submitReceipt() {
 
     <div
       v-if="showFreeAurumGateModal"
-      class="fixed inset-0 z-[284] flex items-end justify-center bg-black/75 p-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-[4px] md:items-center md:pb-6"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center bg-black/75 p-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-[4px] md:items-center md:pb-6"
       @click.self="showFreeAurumGateModal = false"
     >
       <div
@@ -5450,7 +5450,7 @@ async function submitReceipt() {
 
     <div
       v-if="showTokensInfoModal"
-      class="fixed inset-0 z-[340] flex items-end justify-center bg-black/70 p-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-[3px] md:items-center md:pb-6"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center bg-black/70 p-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-[3px] md:items-center md:pb-6"
       @click.self="showTokensInfoModal = false"
     >
       <div
@@ -5475,7 +5475,7 @@ async function submitReceipt() {
 
     <div
       v-if="showPremiumPayMethodModal"
-      class="fixed inset-0 z-[282] flex items-end justify-center bg-black/70 p-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-[3px] md:items-center md:pb-6"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center bg-black/70 p-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-[3px] md:items-center md:pb-6"
       @click.self="closePremiumPayMethodModal"
     >
       <div
@@ -5590,7 +5590,7 @@ async function submitReceipt() {
 
     <div
       v-if="showPromoCodeModal"
-      class="fixed inset-0 z-[289] flex items-end justify-center bg-black/78 p-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-[3px] md:items-center md:pb-6"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center bg-black/78 p-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-[3px] md:items-center md:pb-6"
       @click.self="closePromoCodeModal"
     >
       <div
@@ -5633,7 +5633,7 @@ async function submitReceipt() {
 
     <div
       v-if="showPaymentRedirectScreen"
-      class="fixed inset-0 z-[290] flex items-center justify-center bg-black/90 px-4"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/90 px-4"
     >
       <div class="w-full max-w-md rounded-[1.4rem] border border-white/10 bg-gradient-to-b from-zinc-900/95 to-black p-6 text-white shadow-[0_28px_90px_-28px_rgba(0,0,0,0.9)]">
         <div class="mx-auto flex h-28 w-28 items-center justify-center rounded-full border border-violet-500/35 bg-violet-500/10 shadow-[0_0_36px_-8px_rgba(139,92,246,0.55)]">
@@ -5667,7 +5667,7 @@ async function submitReceipt() {
 
     <div
       v-if="showPremiumActivatedModal"
-      class="fixed inset-0 z-[291] flex items-center justify-center bg-black/88 px-4"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/88 px-4"
     >
       <div class="w-full max-w-md rounded-[1.4rem] border border-white/10 bg-gradient-to-b from-zinc-900/95 to-black p-5 text-white shadow-[0_28px_90px_-28px_rgba(0,0,0,0.9)]">
         <div class="mx-auto flex h-28 w-28 items-center justify-center rounded-full border border-emerald-400/45 bg-emerald-500/10 shadow-[0_0_36px_-8px_rgba(16,185,129,0.6)]">

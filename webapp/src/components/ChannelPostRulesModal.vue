@@ -963,7 +963,7 @@ onBeforeUnmount(() => {
   <GuardTeleport>
     <div
       v-if="modelValue"
-      class="fixed inset-0 z-[340] flex items-center justify-center bg-black/55 p-3 sm:p-4 backdrop-blur-[2px]"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/55 p-3 sm:p-4 backdrop-blur-[2px]"
       role="dialog"
       aria-modal="true"
       @click.self="close"
@@ -1193,7 +1193,7 @@ onBeforeUnmount(() => {
   <GuardTeleport>
     <div
       v-if="showButtonsModal && modelValue && rulesChat"
-      class="fixed inset-0 z-[345] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
       role="dialog"
       aria-modal="true"
       @click.self="showButtonsModal = false"
@@ -1240,7 +1240,7 @@ onBeforeUnmount(() => {
   <GuardTeleport>
     <div
       v-if="linkModalOpen && modelValue"
-      class="fixed inset-0 z-[345] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
       role="dialog"
       aria-modal="true"
       @click.self="linkModalOpen = false"
@@ -1264,7 +1264,7 @@ onBeforeUnmount(() => {
   <GuardTeleport>
     <div
       v-if="imagePreviewUrl"
-      class="fixed inset-0 z-[348] flex items-center justify-center bg-black/75 p-4"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/75 p-4"
       @click.self="imagePreviewUrl = ''"
     >
       <div class="max-h-[90vh] max-w-3xl overflow-hidden rounded-xl border border-white/15 bg-zinc-950 p-2" @click.stop>

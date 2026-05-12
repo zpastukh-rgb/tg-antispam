@@ -3171,11 +3171,6 @@ const protCardIndigo =
 
 <template>
   <div>
-    <!-- DEBUG PANEL -->
-    <div style="position:fixed;top:44px;left:0;right:0;z-index:999999;background:#1a0505;color:#ff6b6b;font-size:10px;padding:4px 8px;font-family:monospace;line-height:1.3;max-height:80px;overflow:auto;border-bottom:2px solid #ff0000">
-      MEN={{ showMentionsFilterModal }} BTN={{ showButtonsFilterModal }} LNK={{ showLinksFilterModal }} MED={{ showMediaFilterModal }} CH={{ showChannelPostsFilterModal }}<br>
-      rule={{ !!chat?.rule }} id={{ chat?.id || 'none' }}
-    </div>
     <div
       class="relative -mx-4 min-h-0 px-4 pb-8 font-display md:-mx-6 md:px-6 md:pb-10"
     >
@@ -3275,7 +3270,7 @@ const protCardIndigo =
       <!-- Модалка выбора чата снизу -->
       <div
         v-if="showChatPicker"
-        class="fixed inset-0 z-[300] flex items-end justify-center bg-black/70 p-0 pb-[calc(5rem+env(safe-area-inset-bottom,0px))] md:items-end md:pb-6"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center bg-black/70 p-0 pb-[calc(5rem+env(safe-area-inset-bottom,0px))] md:items-end md:pb-6"
         @click="showChatPicker = false"
       >
         <div
@@ -4351,7 +4346,7 @@ const protCardIndigo =
 
     <div
       v-if="showPublicAlertsSettingsModal && chat?.rule"
-      class="fixed inset-0 z-[262] flex items-end justify-center bg-black/65 p-3 md:items-center"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center bg-black/65 p-3 md:items-center"
       @click.self="showPublicAlertsSettingsModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-cyan-400/20 bg-gradient-to-b from-slate-900/95 via-slate-950/95 to-black/95 p-4 text-slate-100 shadow-[0_24px_80px_-22px_rgba(0,0,0,0.9),inset_0_1px_0_rgba(255,255,255,0.1)] backdrop-blur-2xl ring-1 ring-cyan-300/20">
@@ -4488,7 +4483,7 @@ const protCardIndigo =
     <GuardTeleport>
     <div
       v-if="showSpamSpikeInfoModal"
-      class="fixed inset-0 z-[530] flex items-end justify-center bg-black/60 p-3 md:items-center"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center bg-black/60 p-3 md:items-center"
       @click.self="showSpamSpikeInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-orange-300/35 bg-white p-4 shadow-2xl dark:border-orange-500/35 dark:bg-slate-900">
@@ -4515,7 +4510,7 @@ const protCardIndigo =
     </div>
     <div
       v-if="showSpamSpikeSettingsModal && chat?.rule"
-      class="fixed inset-0 z-[400] flex items-end justify-center bg-black/65 p-3 md:items-center"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center bg-black/65 p-3 md:items-center"
       @click.self="showSpamSpikeSettingsModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-white/12 bg-zinc-950/78 p-4 text-slate-100 shadow-[0_26px_90px_-24px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-2xl">
@@ -4608,7 +4603,7 @@ const protCardIndigo =
     </div>
     <div
       v-if="showCleanupInfoModal"
-      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/65 p-3"
       @click.self="showCleanupInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
@@ -4625,7 +4620,7 @@ const protCardIndigo =
     </div>
     <div
       v-if="showFiltersInfoModal"
-      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/65 p-3"
       @click.self="showFiltersInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
@@ -4643,7 +4638,7 @@ const protCardIndigo =
     </div>
     <div
       v-if="showSilenceInfoModal"
-      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/65 p-3"
       @click.self="showSilenceInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
@@ -4660,7 +4655,7 @@ const protCardIndigo =
     </div>
     <div
       v-if="showPublicAlertsHelpModal"
-      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/65 p-3"
       @click.self="showPublicAlertsHelpModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-lime-400/35 bg-white p-4 shadow-2xl dark:border-lime-500/30 dark:bg-slate-900">
@@ -4696,7 +4691,7 @@ const protCardIndigo =
     </div>
     <div
       v-if="showPublicAlertsStyleHelpModal"
-      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/65 p-3"
       @click.self="showPublicAlertsStyleHelpModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-400/30 bg-white p-4 shadow-2xl dark:border-sky-500/30 dark:bg-slate-900">
@@ -4726,7 +4721,7 @@ const protCardIndigo =
     </div>
     <div
       v-if="showGuardianPeriodicHelpModal"
-      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/65 p-3"
       @click.self="showGuardianPeriodicHelpModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-emerald-400/30 bg-white p-4 shadow-2xl dark:border-emerald-500/30 dark:bg-slate-900">
@@ -4754,7 +4749,7 @@ const protCardIndigo =
     </div>
     <div
       v-if="showSilencePickerModal"
-      class="fixed inset-0 z-[400] flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/65 p-3"
       @click.self="showSilencePickerModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
@@ -4786,7 +4781,7 @@ const protCardIndigo =
     </div>
     <div
       v-if="showStopwordsInfoModal"
-      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/65 p-3"
       @click.self="showStopwordsInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
@@ -4803,7 +4798,7 @@ const protCardIndigo =
     </div>
     <div
       v-if="showHardDictInfoModal"
-      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/65 p-3"
       @click.self="showHardDictInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-red-300/60 bg-white p-4 shadow-2xl dark:border-red-700/60 dark:bg-gray-800">
@@ -4820,7 +4815,7 @@ const protCardIndigo =
     </div>
     <div
       v-if="showReputationInfoModal"
-      class="fixed inset-0 z-[530] flex items-end justify-center bg-black/70 p-3 backdrop-blur-[3px] md:items-center"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center bg-black/70 p-3 backdrop-blur-[3px] md:items-center"
       @click.self="showReputationInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-white/12 bg-gradient-to-b from-zinc-900/80 to-zinc-950/95 p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.9)] ring-1 ring-inset ring-white/[0.06] backdrop-blur-2xl">
@@ -4839,7 +4834,7 @@ const protCardIndigo =
     </div>
     <div
       v-if="showReputationSettingsModal"
-      class="fixed inset-0 z-[400] flex items-center justify-center bg-black/70 p-3 backdrop-blur-[3px]"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/70 p-3 backdrop-blur-[3px]"
       @click.self="showReputationSettingsModal = false"
     >
       <div class="flex max-h-[84vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-white/12 bg-gradient-to-b from-zinc-900/85 to-zinc-950/95 p-3 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.9)] ring-1 ring-inset ring-white/[0.06] backdrop-blur-2xl">
@@ -4937,7 +4932,7 @@ const protCardIndigo =
     </div>
     <div
       v-if="showMainInfoModal"
-      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/65 p-3"
       @click.self="showMainInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
@@ -4963,7 +4958,7 @@ const protCardIndigo =
     </div>
     <div
       v-if="showReputationWordsModal"
-      class="fixed inset-0 z-[410] flex items-center justify-center bg-black/70 p-3 backdrop-blur-[3px]"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/70 p-3 backdrop-blur-[3px]"
       @click.self="showReputationWordsModal = false"
     >
       <div class="flex max-h-[84vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-white/12 bg-gradient-to-b from-zinc-900/85 to-zinc-950/95 p-3 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.9)] ring-1 ring-inset ring-white/[0.06] backdrop-blur-2xl">
@@ -4985,7 +4980,7 @@ const protCardIndigo =
     </div>
     <div
       v-if="showReputationTopModal"
-      class="fixed inset-0 z-[410] flex items-center justify-center bg-black/70 p-3 backdrop-blur-[3px]"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/70 p-3 backdrop-blur-[3px]"
       @click.self="showReputationTopModal = false"
     >
       <div class="flex max-h-[84vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-white/12 bg-gradient-to-b from-zinc-900/85 to-zinc-950/95 p-3 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.9)] ring-1 ring-inset ring-white/[0.06] backdrop-blur-2xl">
@@ -5013,7 +5008,7 @@ const protCardIndigo =
     </div>
     <div
       v-if="showChatSwitchInfoModal"
-      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/65 p-3"
       @click.self="showChatSwitchInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
@@ -5040,7 +5035,7 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="showStopwordsModal"
-        class="fixed inset-0 z-[400] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         role="dialog"
         aria-modal="true"
         aria-labelledby="stopwords-modal-title"
@@ -5091,7 +5086,7 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="showProtectionPinModal"
-        class="fixed inset-0 z-[480] flex items-end justify-center bg-black/75 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] backdrop-blur-md md:items-center md:pb-6"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center bg-black/75 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] backdrop-blur-md md:items-center md:pb-6"
         role="dialog"
         aria-modal="true"
         @click.self="cancelProtectionPin"
@@ -5129,7 +5124,7 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="postRulesImagePreviewUrl"
-        class="fixed inset-0 z-[270] flex items-center justify-center bg-black/75 p-4 backdrop-blur-[2px]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/75 p-4 backdrop-blur-[2px]"
         role="dialog"
         aria-modal="true"
         @click.self="postRulesImagePreviewUrl = ''"
@@ -5146,7 +5141,7 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="welcomeImagePreviewUrl && showWelcomeSettingsModal"
-        class="fixed inset-0 z-[270] flex items-center justify-center bg-black/75 p-4 backdrop-blur-[2px]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/75 p-4 backdrop-blur-[2px]"
         role="dialog"
         aria-modal="true"
         @click.self="welcomeImagePreviewUrl = ''"
@@ -5163,7 +5158,7 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="showWelcomeSettingsModal && chat?.rule"
-        class="fixed inset-0 z-[258] flex items-center justify-center bg-black/55 p-3 sm:p-4 backdrop-blur-[2px]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/55 p-3 sm:p-4 backdrop-blur-[2px]"
         role="dialog"
         aria-modal="true"
         @click.self="closeWelcomeSettingsModal()"
@@ -5399,7 +5394,7 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="showPostRulesSettingsModal && chat?.rule"
-        class="fixed inset-0 z-[259] flex items-center justify-center bg-black/55 p-3 sm:p-4 backdrop-blur-[2px]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/55 p-3 sm:p-4 backdrop-blur-[2px]"
         role="dialog"
         aria-modal="true"
         @click.self="closePostRulesSettingsModal()"
@@ -5631,7 +5626,7 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="showPostRulesGroupSendModal && showPostRulesSettingsModal"
-        class="fixed inset-0 z-[263] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         role="dialog"
         aria-modal="true"
         @click.self="showPostRulesGroupSendModal = false"
@@ -5684,7 +5679,7 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="showPostRulesGroupFullPreview && showPostRulesSettingsModal && postRulesGroupFullPreviewRow"
-        class="fixed inset-0 z-[265] flex items-center justify-center bg-black/65 p-4 backdrop-blur-[2px]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/65 p-4 backdrop-blur-[2px]"
         role="dialog"
         aria-modal="true"
         @click.self="postRulesGroupCloseFullPreview()"
@@ -5734,7 +5729,7 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="showPostRulesButtonsModal && showPostRulesSettingsModal"
-        class="fixed inset-0 z-[262] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         role="dialog"
         aria-modal="true"
         @click.self="showPostRulesButtonsModal = false"
@@ -5774,7 +5769,7 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="postRulesLinkModalOpen && showPostRulesSettingsModal"
-        class="fixed inset-0 z-[262] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         role="dialog"
         aria-modal="true"
         @click.self="postRulesLinkModalOpen = false"
@@ -5798,7 +5793,7 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="welcomeInfoModal && showWelcomeSettingsModal"
-        class="fixed inset-0 z-[261] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         role="dialog"
         aria-modal="true"
         @click.self="welcomeInfoModal = ''"
@@ -5845,7 +5840,7 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="showWelcomeButtonsModal && showWelcomeSettingsModal"
-        class="fixed inset-0 z-[262] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         role="dialog"
         aria-modal="true"
         @click.self="showWelcomeButtonsModal = false"
@@ -5888,7 +5883,7 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="welcomeLinkModalOpen"
-        class="fixed inset-0 z-[263] flex items-start justify-center bg-black/60 p-4 md:items-center"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-start justify-center bg-black/60 p-4 md:items-center"
         role="dialog"
         aria-modal="true"
         @click.self="welcomeLinkModalOpen = false"
@@ -5915,7 +5910,7 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="showLinksFilterModal && chat?.rule"
-        class="fixed inset-0 z-[400] flex items-center justify-center bg-black/45 p-4 backdrop-blur-md"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/45 p-4 backdrop-blur-md"
         role="dialog"
         aria-modal="true"
         @click.self="showLinksFilterModal = false"
@@ -6265,7 +6260,7 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="showChannelPostsFilterModal && chat?.rule"
-        class="fixed inset-0 z-[400] flex items-center justify-center bg-black/45 p-4 backdrop-blur-md"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/45 p-4 backdrop-blur-md"
         role="dialog"
         aria-modal="true"
         @click.self="showChannelPostsFilterModal = false"
@@ -6372,36 +6367,33 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="showMentionsFilterModal && chat?.rule"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;background:rgba(255,0,0,0.85);display:flex;align-items:center;justify-content:center;padding:16px"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999"
+        class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         @click.self="showMentionsFilterModal = false"
       >
         <div
-          style="background:white;color:black;padding:20px;border-radius:16px;max-width:400px;width:100%;border:3px solid red"
+          class="w-full max-w-md rounded-2xl border border-white/15 bg-gradient-to-b from-slate-900 to-slate-950 p-4 text-slate-100 shadow-2xl ring-1 ring-violet-500/20"
           @click.stop
         >
-          <p style="font-weight:bold;font-size:16px;margin:0 0 8px">MENTIONS MODAL TEST</p>
-          <p style="font-size:12px;margin:0 0 16px">Если видишь это — рендер модалки OK!</p>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          <div class="mb-3 flex items-center justify-between">
+            <h3 class="text-sm font-semibold text-white">{{ tt('protection.ui.mentions_modal_title') }}</h3>
+            <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-white/10" @click="showMentionsFilterModal = false">✕</button>
+          </div>
+          <p class="mb-3 text-[11px] leading-relaxed text-slate-400">
+            {{ tt('protection.ui.mentions_modal_body') }}
+          </p>
+          <div class="grid grid-cols-2 gap-2">
             <button
               v-for="opt in policyOptions"
               :key="`men-${opt.value}`"
               type="button"
-              :style="{
-                padding: '12px',
-                borderRadius: '12px',
-                fontSize: '14px',
-                fontWeight: 'bold',
-                border: '2px solid #333',
-                cursor: 'pointer',
-                background: (chat.rule.filter_mentions ? 'forbid' : 'allow') === opt.value ? '#22c55e' : '#e5e7eb',
-                color: '#000',
-              }"
+              :class="policyButtonClass(chat.rule.filter_mentions ? 'forbid' : 'allow', opt.value)"
+              class="rounded-xl px-2.5 py-2.5 text-xs font-medium"
               @click="updateRule({ filter_mentions: opt.value === 'forbid' })"
             >
               {{ opt.label }}
             </button>
           </div>
-          <button type="button" style="margin-top:12px;width:100%;padding:10px;background:#ef4444;color:white;border:none;border-radius:8px;font-weight:bold;font-size:14px" @click="showMentionsFilterModal = false">ЗАКРЫТЬ</button>
         </div>
       </div>
     </GuardTeleport>
@@ -6409,7 +6401,7 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="showMediaFilterModal && chat?.rule"
-        class="fixed inset-0 z-[400] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         @click.self="showMediaFilterModal = false"
       >
         <div
@@ -6439,7 +6431,7 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="showButtonsFilterModal && chat?.rule"
-        class="fixed inset-0 z-[400] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         @click.self="showButtonsFilterModal = false"
       >
         <div
@@ -6471,7 +6463,7 @@ const protCardIndigo =
 
     <div
       v-if="showAntinakrutkaSettingsModal && chat?.rule"
-      class="fixed inset-0 z-[400] flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/65 p-3"
       @click.self="showAntinakrutkaSettingsModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-cyan-400/22 bg-gradient-to-b from-slate-900/95 via-slate-950/95 to-black/95 p-4 text-slate-100 shadow-[0_26px_90px_-24px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,255,255,0.1)] backdrop-blur-2xl ring-1 ring-cyan-300/20">
@@ -6580,7 +6572,7 @@ const protCardIndigo =
     <GuardTeleport>
     <div
       v-if="showAntinakrutkaInfoModal"
-      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/65 p-3"
       @click.self="showAntinakrutkaInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
@@ -6620,7 +6612,7 @@ const protCardIndigo =
     <GuardTeleport>
     <div
       v-if="showJoinCaptchaSettingsModal && chat?.rule"
-      class="fixed inset-0 z-[400] flex items-end justify-center bg-black/65 p-3 md:items-center"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center bg-black/65 p-3 md:items-center"
       @click.self="showJoinCaptchaSettingsModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-indigo-400/22 bg-gradient-to-b from-slate-900/95 via-slate-950/95 to-black/95 p-4 text-slate-100 shadow-[0_26px_90px_-24px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,255,255,0.1)] backdrop-blur-2xl ring-1 ring-indigo-300/20">
@@ -6686,7 +6678,7 @@ const protCardIndigo =
     <GuardTeleport>
     <div
       v-if="showJoinCaptchaInfoModal"
-      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/65 p-3"
       @click.self="showJoinCaptchaInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
@@ -6718,7 +6710,7 @@ const protCardIndigo =
     </div>
     <div
       v-if="showAntispamInfoModal"
-      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/65 p-3"
       @click.self="showAntispamInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
@@ -6742,7 +6734,7 @@ const protCardIndigo =
     </div>
     <div
       v-if="showNewbieInfoModal"
-      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/65 p-3"
       @click.self="showNewbieInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
@@ -6767,7 +6759,7 @@ const protCardIndigo =
     </GuardTeleport>
     <div
       v-if="showAntispamListModal"
-      class="fixed inset-0 z-[400] flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/65 p-3"
       @click.self="showAntispamListModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-cyan-400/22 bg-gradient-to-b from-slate-900/95 via-slate-950/95 to-black/95 p-4 text-slate-100 shadow-[0_26px_90px_-24px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,255,255,0.1)] backdrop-blur-2xl ring-1 ring-cyan-300/20">
@@ -6827,7 +6819,7 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="showFreeLimitsPremiumModal"
-        class="fixed inset-0 z-[268] flex items-center justify-center bg-black/70 p-4 backdrop-blur-[2px]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/70 p-4 backdrop-blur-[2px]"
         role="dialog"
         aria-modal="true"
         aria-labelledby="free-limits-premium-title"

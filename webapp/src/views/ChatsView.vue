@@ -1131,7 +1131,7 @@ function openChannelBroadcast(chat) {
     <GuardTeleport>
     <div
       v-if="managersModalChat"
-      class="fixed inset-0 z-[300] flex items-end justify-center bg-black/70 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center bg-black/70 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
       @click.self="closeManagers"
     >
       <div class="w-full max-w-4xl rounded-3xl bg-gradient-to-b from-[#0c1523]/96 via-[#0a111d]/97 to-[#070d17]/99 p-4 text-slate-100 shadow-[0_32px_90px_-30px_rgba(0,0,0,0.95)] backdrop-blur-2xl ring-1 ring-sky-500/15">
@@ -1254,7 +1254,7 @@ function openChannelBroadcast(chat) {
     <GuardTeleport>
     <div
       v-if="managersModalChat && addManagerPermsOpen"
-      class="fixed inset-0 z-[315] flex items-center justify-center bg-black/75 px-4"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-center justify-center bg-black/75 px-4"
       @click.self="addManagerPermsOpen = false"
     >
       <form
@@ -1305,7 +1305,7 @@ function openChannelBroadcast(chat) {
     <GuardTeleport>
     <div
       v-if="showCabinetInfoModal"
-      class="fixed inset-0 z-[320] flex items-end justify-center overscroll-none bg-black/70 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center overscroll-none bg-black/70 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
       @click.self="showCabinetInfoModal = false"
       @wheel.self.prevent
       @touchmove.self.prevent
@@ -1368,7 +1368,7 @@ function openChannelBroadcast(chat) {
     <GuardTeleport>
     <div
       v-if="showDelegatedInfoModal"
-      class="fixed inset-0 z-[320] flex items-end justify-center overscroll-none bg-black/70 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center overscroll-none bg-black/70 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
       @click.self="showDelegatedInfoModal = false"
       @wheel.self.prevent
       @touchmove.self.prevent
@@ -1386,7 +1386,7 @@ function openChannelBroadcast(chat) {
     <GuardTeleport>
     <div
       v-if="showManagersInfoModal"
-      class="fixed inset-0 z-[330] flex items-end justify-center overscroll-none bg-black/70 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999" class="flex items-end justify-center overscroll-none bg-black/70 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
       @click.self="showManagersInfoModal = false"
       @wheel.self.prevent
       @touchmove.self.prevent
