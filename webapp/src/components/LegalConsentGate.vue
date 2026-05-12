@@ -1,6 +1,9 @@
 <script setup>
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { api } from '../api/client'
+
+const { t } = useI18n()
 
 /**
  * Публичные PDF на Яндекс.Диске (AI Guard).
@@ -17,16 +20,14 @@ const LEGAL_DOC_LINKS = {
   marketing: 'https://disk.yandex.ru/i/tHT7Mr-xTautBg',
 }
 
-/** Список документов блока «принимаю условия» — каждый пункт строкой, без кривых переносов запятых. */
-const LEGAL_BUNDLE_DOCS = [
-  { title: 'Политика конфиденциальности', url: LEGAL_DOC_LINKS.privacy },
-  { title: 'Политика хранения и удаления данных', url: LEGAL_DOC_LINKS.storagePolicy },
-  { title: 'Положение о хранении персональных данных', url: LEGAL_DOC_LINKS.storagePd },
-  { title: 'Положение об уничтожении персональных данных', url: LEGAL_DOC_LINKS.destroyPd },
-  { title: 'Пользовательское соглашение', url: LEGAL_DOC_LINKS.terms },
-  { title: 'Публичная оферта', url: LEGAL_DOC_LINKS.offer },
-]
-
+const legalBundleDocs = computed(() => [
+  { title: t('legal.doc_privacy'), url: LEGAL_DOC_LINKS.privacy },
+  { title: t('legal.doc_storage_policy'), url: LEGAL_DOC_LINKS.storagePolicy },
+  { title: t('legal.doc_storage_pd'), url: LEGAL_DOC_LINKS.storagePd },
+  { title: t('legal.doc_destroy_pd'), url: LEGAL_DOC_LINKS.destroyPd },
+  { title: t('legal.doc_terms'), url: LEGAL_DOC_LINKS.terms },
+  { title: t('legal.doc_offer'), url: LEGAL_DOC_LINKS.offer },
+])
 /**
  * true — окно при каждом открытии Mini App (для настройки текстов).
  * false — один раз на устройстве (ключ в localStorage), смените LEGAL_CONSENT_STORAGE_KEY при обновлении пакета документов.
@@ -134,10 +135,10 @@ onBeforeUnmount(() => {
           class="mx-auto w-full max-w-md rounded-2xl border border-white/12 bg-zinc-950/95 p-4 shadow-[0_24px_64px_-16px_rgba(0,0,0,0.95)] ring-1 ring-inset ring-lime-500/15 sm:p-5"
         >
           <h1 id="legal-gate-title" class="text-center text-lg font-extrabold leading-tight tracking-tight text-white">
-            Документы AI&nbsp;Guard
+            {{ t('legal.title') }}
           </h1>
           <p class="mt-2 text-left text-[11px] leading-relaxed text-white/55 sm:text-[12px]">
-            Перед использованием сервиса подтвердите ознакомление с документами и согласие на обработку персональных данных.
+            {{ t('legal.intro') }}
           </p>
 
           <div class="mt-4 space-y-2.5 text-left text-[11px] leading-relaxed text-white/[0.88] sm:text-[12px] sm:space-y-3">
@@ -146,9 +147,9 @@ onBeforeUnmount(() => {
             >
               <input v-model="acceptBundle" type="checkbox" class="mt-0.5 h-4 w-4 shrink-0 rounded border-white/25 bg-black/50 text-lime-500 focus:ring-lime-500/40" />
               <span class="min-w-0 flex-1 text-left">
-                <span class="block text-white/[0.92]">Ознакомлен(а) и принимаю условия:</span>
+                <span class="block text-white/[0.92]">{{ t('legal.bundle_checkbox_lead') }}</span>
                 <ul class="mt-2 list-none space-y-1.5 border-l-2 border-lime-500/25 pl-3">
-                  <li v-for="(doc, idx) in LEGAL_BUNDLE_DOCS" :key="idx" class="leading-snug">
+                  <li v-for="(doc, idx) in legalBundleDocs" :key="idx" class="leading-snug">
                     <button
                       type="button"
                       class="inline-block max-w-full text-left font-semibold text-lime-400 underline decoration-lime-500/40 underline-offset-[3px] transition hover:text-lime-300"
@@ -166,11 +167,11 @@ onBeforeUnmount(() => {
             >
               <input v-model="acceptPd" type="checkbox" class="mt-0.5 h-4 w-4 shrink-0 rounded border-white/25 bg-black/50 text-lime-500 focus:ring-lime-500/40" />
               <span class="min-w-0 flex-1 text-left leading-snug text-white/[0.92]">
-                Даю&nbsp;<button
+                {{ t('legal.pd_i_give') }}<button
                   type="button"
                   class="inline appearance-none border-0 bg-transparent p-0 align-baseline font-semibold text-lime-400 underline decoration-lime-500/40 underline-offset-[3px] hover:text-lime-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-lime-500/40 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
                   @click.prevent="openDoc(LEGAL_DOC_LINKS.pdProcessing)"
-                >согласие на обработку персональных данных</button>.
+                >{{ t('legal.pd_link') }}</button>{{ t('legal.pd_after_link') }}
               </span>
             </label>
 
@@ -179,12 +180,12 @@ onBeforeUnmount(() => {
             >
               <input v-model="acceptMarketing" type="checkbox" class="mt-0.5 h-4 w-4 shrink-0 rounded border-white/25 bg-black/50 text-lime-500 focus:ring-lime-500/40" />
               <span class="min-w-0 flex-1 text-left leading-snug text-white/[0.92]">
-                <span class="block text-white/[0.92]">Даю</span>
+                <span class="block text-white/[0.92]">{{ t('legal.mkt_i_give') }}</span>
                 <button
                   type="button"
                   class="mt-0.5 block min-w-0 w-full appearance-none border-0 bg-transparent p-0 text-left font-semibold text-lime-400 underline decoration-lime-500/40 underline-offset-[3px] hover:text-lime-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-lime-500/40 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 whitespace-nowrap overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
                   @click.prevent="openDoc(LEGAL_DOC_LINKS.marketing)"
-                >согласие на получение скидок и предложений<span class="font-normal text-white/[0.92] no-underline decoration-transparent">.</span></button>
+                >{{ t('legal.mkt_link') }}</button><span class="font-normal text-white/[0.92]">{{ t('legal.mkt_after_link') }}</span>
               </span>
             </label>
           </div>
@@ -195,7 +196,7 @@ onBeforeUnmount(() => {
             :disabled="!canContinue"
             @click="onContinue"
           >
-            Продолжить
+            {{ t('legal.btn_continue') }}
           </button>
         </div>
       </div>

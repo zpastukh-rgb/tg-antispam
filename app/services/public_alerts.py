@@ -7,108 +7,10 @@ import secrets
 from datetime import datetime, timezone
 
 from aiogram.types import Message
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.texts.guardian_billing import SPAM_DELETED_WITH_PREMIUM_HINT
-
-# --- Стиль «Guard» (фирменный: жёстко, саркастично; плюс отдельные фразы ниже) ---
-SPAM_GUARD = [
-    "😈 Guard зачистил спам. Чат дышит свободнее.",
-    "🧹 Спам снесён. Помойка закрыта.",
-    "🚫 Ещё пачка мусора уничтожена.",
-    SPAM_DELETED_WITH_PREMIUM_HINT,
-    "😈 Очередной «гений маркетинга» отправился в корзину к предыдущим.",
-    "🗑 Спам? Guard уже кормит рыбок. Тебе не досталось.",
-    "⚰ Мусорное сообщение лежит там, где ему и положено — вне чата.",
-    "🧨 Ещё одна попытка засорить эфир растворилась с саркастичной улыбкой Guard.",
-    "🔥 Шум отключён. Тишина — золото, а ты был бронзой.",
-]
-LINK_GUARD = [
-    "🔗 Левые ссылки срезаны. Проход закрыт.",
-    "⚔ Guard распилил очередную партию ссылок.",
-    "🚫 Ссылочный мусор ликвидирован.",
-    "🔗 Ссылку? Сюда. С контентом? Нет. Иди лечить кликбейт.",
-    "🪚 Реклама под видом «полезной» ссылки — Guard срежет без анестезии.",
-    "🚷 Этот URL не пропустят даже с подкупом. Дорога закрыта.",
-    "💀 Левый домен ушёл в никуда. Скажи спасибо, что не тебя.",
-]
-BAD_GUARD = [
-    "🤬 Матершинник был снесён. Следи за языком.",
-    "🪓 Грязный язык зачищен.",
-    "😈 Guard не любит словесную помойку.",
-    "🤭 Словечки выбирал с душой? Guard вернул эстетику: молчание.",
-    "🥶 Мат — не аргумент. Это стало твоим уроком на сегодня.",
-    "👋 Грязный словарный запас отправлен в отпуск без содержания.",
-    "🙃 Вульгарность выключена админом по умолчанию — то есть нами.",
-]
-MUTE_GUARD = [
-    "🔇 Нарушитель притих. В чате снова порядок.",
-    "⛓ Один шумный пассажир отправлен остывать.",
-    "🔇 Пора поговорить с тишиной один на один. Она умнее.",
-    "⏸ Режим «подумаешь» включён. Выйдешь, когда выйдешь.",
-    "🤐 Теперь ты аудитория. Сиди красиво.",
-]
-BAN_GUARD = [
-    "☠ Спамер выброшен за борт.",
-    "🚪 Ещё один мусорный гость вылетел из чата.",
-    "🚁 Вылет конечной: не сюда, не к нам, вообще никуда обратно.",
-    "📦 Упаковали и выставили за дверь. Без возврата и обмена.",
-]
-GEN_GUARD = [
-    "😈 Guard продолжает зачистку.",
-    "🛡 Порядок восстановлен.",
-    "🚫 Ещё одна партия мусора уничтожена.",
-    "😏 Правила не спорят с нарушителями — они их пылесосят.",
-    "🛡 Guard снова взял в руки веник. Кто следующий в швабру?",
-]
-
-# --- Стиль «средне» ---
-SPAM_MED = [
-    "Спам удалён. Спасибо за порядок в чате.",
-    "Лишнее сообщение убрано модерацией.",
-    "Сообщение не прошло фильтр и было удалено.",
-]
-LINK_MED = [
-    "Сообщение со ссылкой удалено по правилам чата.",
-    "Ссылка не разрешена — сообщение снято.",
-]
-BAD_MED = [
-    "Сообщение с ненормативной лексикой удалено.",
-    "Нарушение правил по языку — пост убран.",
-]
-MUTE_MED = [
-    "Участник ограничен по правилам чата.",
-    "Применено временное ограничение.",
-]
-BAN_MED = [
-    "Участник исключён из чата по правилам.",
-    "Доступ участника к чату прекращён.",
-]
-GEN_MED = [
-    "Сообщение обработано модерацией.",
-    "Правила чата применены.",
-]
-
-# --- Стиль «мягко» ---
-SPAM_SOFT = [
-    "Мы убрали сообщение, которое не подошло по правилам. Если вопросы — напишите админам.",
-    "Одно сообщение удалено, чтобы чат оставался комфортным.",
-]
-LINK_SOFT = [
-    "Сообщение со ссылкой снято — так настроена защита чата.",
-]
-BAD_SOFT = [
-    "Сообщение снято: в чате действует фильтр по выражениям.",
-]
-MUTE_SOFT = [
-    "Участнику временно ограничили отправку сообщений.",
-]
-BAN_SOFT = [
-    "Участник покинул чат по решению защиты.",
-]
-GEN_SOFT = [
-    "Защита чата обработала нарушение.",
-    "Сообщение не прошло проверку и было убрано.",
-]
+from app.services.chat_owner_locale import owner_locale_for_chat
+from app.texts.guard_group_messages import public_alert_pools
 
 REASON_TO_CATEGORY = {
     "stopword": "spam",
@@ -163,34 +65,51 @@ def _style(rule) -> str:
 
 
 def _pick(
+    locale: str,
     rule,
-    soft_l: list[str],
-    med_l: list[str],
-    guard_l: list[str],
+    key_soft: str,
+    key_med: str,
+    key_guard: str,
     *,
     chat_id: int = 0,
     category: str = "generic",
     action: str = "delete",
 ) -> str:
     st = _style(rule)
-    pool = soft_l if st == "soft" else med_l if st == "medium" else guard_l
+    pools = public_alert_pools(locale)
+    if st == "soft":
+        pool = pools.get(key_soft, [])
+    elif st == "medium":
+        pool = pools.get(key_med, [])
+    else:
+        pool = pools.get(key_guard, [])
+    if not pool:
+        pool = pools.get(key_guard, []) or pools.get(key_med, []) or pools.get(key_soft, [])
     key = (int(chat_id or 0), st, category, action)
     return _choice_from_pool(pool, chat_id=chat_id, key=key)
 
 
-def _get_phrase(rule, reason: str, action: str = "delete", *, chat_id: int = 0) -> str:
+def _get_phrase(locale: str, rule, reason: str, action: str = "delete", *, chat_id: int = 0) -> str:
     if action == "mute":
-        return _pick(rule, MUTE_SOFT, MUTE_MED, MUTE_GUARD, chat_id=chat_id, category="mute", action="mute")
+        return _pick(
+            locale, rule, "mute_soft", "mute_med", "mute_guard", chat_id=chat_id, category="mute", action="mute"
+        )
     if action == "ban":
-        return _pick(rule, BAN_SOFT, BAN_MED, BAN_GUARD, chat_id=chat_id, category="ban", action="ban")
+        return _pick(locale, rule, "ban_soft", "ban_med", "ban_guard", chat_id=chat_id, category="ban", action="ban")
     cat = REASON_TO_CATEGORY.get(reason, "generic")
     if cat == "spam":
-        return _pick(rule, SPAM_SOFT, SPAM_MED, SPAM_GUARD, chat_id=chat_id, category="spam", action=action)
+        return _pick(
+            locale, rule, "spam_soft", "spam_med", "spam_guard", chat_id=chat_id, category="spam", action=action
+        )
     if cat == "link":
-        return _pick(rule, LINK_SOFT, LINK_MED, LINK_GUARD, chat_id=chat_id, category="link", action=action)
+        return _pick(
+            locale, rule, "link_soft", "link_med", "link_guard", chat_id=chat_id, category="link", action=action
+        )
     if cat == "bad_words":
-        return _pick(rule, BAD_SOFT, BAD_MED, BAD_GUARD, chat_id=chat_id, category="bad_words", action=action)
-    return _pick(rule, GEN_SOFT, GEN_MED, GEN_GUARD, chat_id=chat_id, category="generic", action=action)
+        return _pick(
+            locale, rule, "bad_soft", "bad_med", "bad_guard", chat_id=chat_id, category="bad_words", action=action
+        )
+    return _pick(locale, rule, "gen_soft", "gen_med", "gen_guard", chat_id=chat_id, category="generic", action=action)
 
 
 async def maybe_send_public_alert(
@@ -199,7 +118,7 @@ async def maybe_send_public_alert(
     rule,
     reason: str,
     action: str,
-    session,
+    session: AsyncSession,
     *,
     source_message: Message | None = None,
 ) -> None:
@@ -227,7 +146,8 @@ async def maybe_send_public_alert(
         if delta < min_interval_sec:
             return
 
-    phrase = _get_phrase(rule, reason, action, chat_id=chat_id)
+    locale = await owner_locale_for_chat(session, int(chat_id))
+    phrase = _get_phrase(locale, rule, reason, action, chat_id=chat_id)
     send_kwargs: dict = {}
     if source_message is not None:
         try:

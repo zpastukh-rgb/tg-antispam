@@ -9,6 +9,9 @@ import {
   deleteChatRulesPhoto,
 } from '../api/client'
 import { normalizeHtmlForTelegram } from '../utils/telegramHtmlForTg'
+import { useI18n } from 'vue-i18n'
+
+const { t: tt, locale: i18nLocale } = useI18n()
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -271,7 +274,9 @@ async function loadDraftsStorage() {
 
 function draftTitleById(id) {
   const sid = String(id || '')
-  return String((channelDrafts.value || []).find((d) => String(d?.id || '') === sid)?.name || 'Черновик')
+  return String(
+    (channelDrafts.value || []).find((d) => String(d?.id || '') === sid)?.name || tt('channel_rules_modal.draft_default'),
+  )
 }
 
 function fileToDataUrl(file) {
@@ -334,10 +339,11 @@ async function recompressDataUrl(dataUrl, maxSide = 1280, quality = 0.72) {
   })
 }
 
-function currentFormToDraft(name = 'Черновик') {
+function currentFormToDraft(name) {
+  const nm = name != null ? String(name) : tt('channel_rules_modal.draft_default')
   return {
     id: `d-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    name: String(name || 'Черновик').slice(0, 48),
+    name: nm.slice(0, 48),
     enabled: !!form.value.enabled,
     text: String(form.value.text || '').slice(0, 4000),
     deleteWindowSec: Math.max(0, Math.min(600, Number(form.value.deleteWindowSec || 0))),
@@ -373,7 +379,7 @@ function upsertEditingDraftSnapshot() {
           ...currentFormToDraft(draftTitleById(eid)),
           id: eid,
           isActive: String(activeDraftId.value || '') === eid,
-          name: String(d?.name || draftTitleById(eid) || 'Черновик'),
+          name: String(d?.name || draftTitleById(eid) || tt('channel_rules_modal.draft_default')),
         }
       : d,
   )
@@ -390,17 +396,21 @@ async function saveCurrentAsDraft() {
         : d,
     )
   } else {
-    const base = currentFormToDraft(channelDrafts.value.length ? `Черновик ${channelDrafts.value.length + 1}` : 'Черновик 1')
+    const base = currentFormToDraft(
+      channelDrafts.value.length
+        ? tt('channel_rules_modal.draft_numbered', { n: channelDrafts.value.length + 1 })
+        : tt('channel_rules_modal.draft_numbered', { n: 1 }),
+    )
     channelDrafts.value = [base, ...(channelDrafts.value || [])].slice(0, 20)
     editingDraftId.value = String(base.id)
   }
   try {
     await saveDraftsStorageNow()
-    setLocalNotice('Черновик сохранён', 'ok')
-    showToast('Черновик сохранён')
+    setLocalNotice(tt('channel_rules_modal.notice_draft_saved'), 'ok')
+    showToast(tt('channel_rules_modal.notice_draft_saved'))
   } catch {
-    setLocalNotice(error.value || 'Не удалось сохранить черновик', 'err')
-    showToast(error.value || 'Не удалось сохранить черновик')
+    setLocalNotice(error.value || tt('channel_rules_modal.err_draft_save'), 'err')
+    showToast(error.value || tt('channel_rules_modal.err_draft_save'))
   } finally {
     draftSaveBusy.value = false
   }
@@ -411,7 +421,7 @@ function createDraft() {
   const nextNum = (channelDrafts.value || []).length + 1
   const base = {
     id: `d-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    name: `Черновик ${nextNum}`,
+    name: tt('channel_rules_modal.draft_numbered', { n: nextNum }),
     enabled: false,
     text: '',
     deleteWindowSec: 0,
@@ -442,7 +452,7 @@ function beginRenameDraft(d) {
 function confirmRenameDraft(d) {
   const id = String(d?.id || '')
   if (!id) return
-  const title = String(renameDraftTitle.value || '').trim().slice(0, 48) || 'Черновик'
+  const title = String(renameDraftTitle.value || '').trim().slice(0, 48) || tt('channel_rules_modal.draft_default')
   channelDrafts.value = (channelDrafts.value || []).map((x) => (String(x.id) === id ? { ...x, name: title, updatedAt: Date.now() } : x))
   renameDraftId.value = ''
   renameDraftTitle.value = ''
@@ -482,7 +492,7 @@ function deleteDraft(d) {
     }
   }
   saveDraftsStorage(true)
-  setLocalNotice('Черновик удалён', 'ok')
+  setLocalNotice(tt('channel_rules_modal.notice_draft_deleted'), 'ok')
 }
 
 async function toggleRunDraft(d) {
@@ -499,7 +509,7 @@ async function toggleRunDraft(d) {
       activeDraftId.value = ''
       channelDrafts.value = (channelDrafts.value || []).map((x) => ({ ...x, isActive: false }))
       saveDraftsStorage(true)
-      setLocalNotice('Запуск черновика выключен', 'ok')
+      setLocalNotice(tt('channel_rules_modal.notice_run_off'), 'ok')
       if (photoChangedInForm.value) scheduleDeferredPhotoSave()
       return
     }
@@ -510,7 +520,7 @@ async function toggleRunDraft(d) {
     activeDraftId.value = id
     channelDrafts.value = (channelDrafts.value || []).map((x) => ({ ...x, isActive: String(x.id) === id }))
     saveDraftsStorage(true)
-    setLocalNotice(`Запущен: ${draftTitleById(id)}`, 'ok')
+    setLocalNotice(tt('channel_rules_modal.notice_started', { title: draftTitleById(id) }), 'ok')
     if (photoChangedInForm.value) scheduleDeferredPhotoSave()
   } finally {
     runDraftBusyId.value = ''
@@ -639,7 +649,7 @@ function formatLink() {
   const range = sel && sel.rangeCount ? sel.getRangeAt(0).cloneRange() : savedRange.value
   const selectedText = String(range?.toString() || '').trim()
   if (!selectedText) {
-    showToast('Сначала выдели текст для ссылки')
+    showToast(tt('channel_rules_modal.toast_select_link_text'))
     return
   }
   linkRange.value = range || null
@@ -655,12 +665,12 @@ function applyLinkModal() {
   const sel = window.getSelection?.()
   const range = linkRange.value || savedRange.value || (sel && sel.rangeCount ? sel.getRangeAt(0) : null)
   if (!range) {
-    showToast('Сначала выдели текст для ссылки')
+    showToast(tt('channel_rules_modal.toast_select_link_text'))
     return
   }
   const text = String(range.toString() || '').trim()
   if (!text) {
-    showToast('Сначала выдели текст для ссылки')
+    showToast(tt('channel_rules_modal.toast_select_link_text'))
     return
   }
   const safeText = text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
@@ -789,9 +799,9 @@ async function onPhotoPicked(event) {
     photoChangedInForm.value = true
     upsertEditingDraftSnapshot()
     saveDraftsStorage()
-    showToast('Фото добавлено в черновик')
+    showToast(tt('channel_rules_modal.toast_photo_added'))
   } catch {
-    showToast(error.value || 'Не удалось прочитать фото')
+    showToast(error.value || tt('channel_rules_modal.toast_photo_read_fail'))
   } finally {
     photoUploadBusy.value = false
   }
@@ -806,7 +816,7 @@ function removePhoto() {
   photoChangedInForm.value = true
   upsertEditingDraftSnapshot()
   saveDraftsStorage()
-  showToast('Фото удалено из черновика')
+  showToast(tt('channel_rules_modal.toast_photo_removed'))
 }
 
 async function save(opts = {}) {
@@ -858,18 +868,18 @@ async function save(opts = {}) {
         if (photoDataUrl) draftPhotoDataUrl.value = photoDataUrl
         photoChangedInForm.value = false
       } catch {
-        setLocalNotice('Текст/кнопки сохранены, но фото не удалось загрузить (даже после сжатия)', 'err')
+        setLocalNotice(tt('channel_rules_modal.notice_saved_partial_photo'), 'err')
       }
     }
     rulesChat.value.rule = data.rule
     if (!silent) {
-      setLocalNotice('Правила сохранены', 'ok')
-      showToast('Правила сохранены')
+      setLocalNotice(tt('channel_rules_modal.notice_rules_saved'), 'ok')
+      showToast(tt('channel_rules_modal.notice_rules_saved'))
     }
     return true
   } catch {
-    setLocalNotice(error.value || 'Не удалось сохранить', 'err')
-    showToast(error.value || 'Не удалось сохранить')
+    setLocalNotice(error.value || tt('channel_rules_modal.err_save'), 'err')
+    showToast(error.value || tt('channel_rules_modal.err_save'))
     return false
   } finally {
     saveBusy.value = false
@@ -885,7 +895,7 @@ async function sendNow() {
   await refreshRulesPanelData()
   const threadId = Number(manualThreadId.value || 0)
   if (!Number.isFinite(threadId) || threadId <= 0) {
-    showToast('Укажи ID треда комментариев')
+    showToast(tt('channel_rules_modal.toast_thread_id'))
     return
   }
   if (isDirty.value) {
@@ -900,9 +910,9 @@ async function sendNow() {
         message_thread_id: Math.floor(threadId),
       }),
     )
-    showToast('Правила отправлены в комментарии')
+    showToast(tt('channel_rules_modal.toast_sent_comments'))
   } catch {
-    showToast(error.value || 'Не удалось отправить в комментарии')
+    showToast(error.value || tt('channel_rules_modal.err_send_comments'))
   } finally {
     sendBusy.value = false
   }
@@ -915,8 +925,17 @@ async function saveButtonsFromModal() {
 }
 
 const discussionTitle = computed(() => String(rulesChat.value?.title || '').trim() || `ID ${props.discussionChatId}`)
-const draftStatusLabel = computed(() => (isDirty.value ? 'Черновик не сохранён' : 'Черновик сохранён'))
-const editingDraftLabel = computed(() => `${draftTitleById(editingDraftId.value)} · ${isDirty.value ? 'не сохранён' : 'сохранён'}`)
+const draftStatusLabel = computed(() => {
+  void i18nLocale.value
+  return isDirty.value ? tt('channel_rules_modal.status_draft_dirty') : tt('channel_rules_modal.status_draft_clean')
+})
+const editingDraftLabel = computed(() => {
+  void i18nLocale.value
+  const suf = isDirty.value
+    ? tt('channel_rules_modal.status_editing_suffix_dirty')
+    : tt('channel_rules_modal.status_editing_suffix_clean')
+  return `${draftTitleById(editingDraftId.value)} · ${suf}`
+})
 
 watch(
   () => [
@@ -955,7 +974,7 @@ onBeforeUnmount(() => {
         <div class="flex items-center justify-between border-b border-white/6 bg-gradient-to-r from-white/[0.04] to-transparent px-4 py-3">
           <div>
             <div class="flex items-center gap-2">
-              <h3 class="text-sm font-semibold text-white">⚙️ Настройки канала · правила в комментариях</h3>
+              <h3 class="text-sm font-semibold text-white">{{ tt('channel_rules_modal.header') }}</h3>
               <span
                 v-if="rulesChat && !loadBusy && activePanel === 'rules'"
                 class="inline-flex h-2.5 w-2.5 rounded-full"
@@ -969,27 +988,27 @@ onBeforeUnmount(() => {
         </div>
         <div v-if="rulesChat && !loadBusy && activePanel === 'rules'" class="space-y-2 px-4 pt-2">
           <div class="flex items-center justify-between gap-2">
-            <button type="button" class="whitespace-nowrap rounded-lg border border-white/15 bg-white/10 px-2 py-1 text-[11px] text-slate-200 hover:bg-white/15" @click="activePanel = 'menu'">← К разделам</button>
+            <button type="button" class="whitespace-nowrap rounded-lg border border-white/15 bg-white/10 px-2 py-1 text-[11px] text-slate-200 hover:bg-white/15" @click="activePanel = 'menu'">{{ tt('protection.ui.channel_rules_back_menu') }}</button>
             <div class="flex items-center gap-1.5">
-              <button type="button" class="inline-flex h-5 min-w-5 items-center justify-center rounded-full border border-cyan-400/35 bg-cyan-950/30 px-1 text-[10px] font-extrabold text-cyan-200" @click="postRulesInfoOpen = !postRulesInfoOpen">i</button>
+              <button type="button" class="inline-flex h-5 min-w-5 items-center justify-center rounded-full border border-cyan-400/35 bg-cyan-950/30 px-1 text-[10px] font-extrabold text-cyan-200" :aria-label="tt('protection.ui.info_group_rules_telegram_aria')" @click="postRulesInfoOpen = !postRulesInfoOpen">i</button>
               <button
                 type="button"
                 :class="boolToggleClass(!!form.enabled)"
                 class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium"
                 @click="form.enabled = !form.enabled"
               >
-                {{ form.enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+                {{ form.enabled ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}
               </button>
             </div>
           </div>
           <div v-if="postRulesInfoOpen" class="rounded-lg border border-cyan-400/20 bg-cyan-950/20 px-2.5 py-2 text-[11px] text-cyan-100">
-            <p class="mb-1 font-semibold text-cyan-50">Как это работает (Guard)</p>
-            <p>• <b>Запуск</b> включает выбранный черновик как активный для новых постов канала.</p>
-            <p>• Бот публикует в комментариях: фото (если есть), затем текст правил и кнопки.</p>
-            <p>• Источник отправки всегда один — <b>активный</b> черновик.</p>
-            <p>• <b>Сохранить черновик</b> — сохраняет текущий вариант в список черновиков.</p>
-            <p>• <b>Сохранить</b> — применяет изменения для отправки в Telegram (текст/кнопки/фото).</p>
-            <p>• Если ВКЛ выключить, автокомментарий с правилами под новыми постами не отправляется.</p>
+            <p class="mb-1 font-semibold text-cyan-50">{{ tt('protection.ui.channel_rules_help_title') }}</p>
+            <p>{{ tt('protection.ui.channel_rules_help_1') }}</p>
+            <p>{{ tt('protection.ui.channel_rules_help_2') }}</p>
+            <p>{{ tt('protection.ui.channel_rules_help_3') }}</p>
+            <p>{{ tt('protection.ui.channel_rules_help_4') }}</p>
+            <p>{{ tt('protection.ui.channel_rules_help_5') }}</p>
+            <p>{{ tt('protection.ui.channel_rules_help_6') }}</p>
           </div>
           <div
             v-if="localNotice"
@@ -1001,11 +1020,9 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3 sm:px-4">
-          <div v-if="loadBusy" class="py-8 text-center text-sm text-slate-400">Загрузка…</div>
+          <div v-if="loadBusy" class="py-8 text-center text-sm text-slate-400">{{ tt('protection.ui.channel_rules_loading') }}</div>
           <div v-else-if="loadError || !rulesChat" class="py-6 text-center text-sm text-rose-300">
-            Не удалось загрузить настройки. Нужен доступ в Mini App к этому чату: владелец/админ канала в списке «Админы» на
-            <span class="text-slate-200">канале</span> достаточно; в Telegram у бота должны быть права админа в
-            <span class="text-slate-200">канале и группе обсуждения</span> (чтобы слать правила в треды). Обнови список чатов и открой снова.
+            {{ tt('protection.ui.channel_rules_load_error') }}
           </div>
           <template v-else>
             <template v-if="activePanel === 'menu'">
@@ -1017,7 +1034,7 @@ onBeforeUnmount(() => {
                     @click="openRulesPanel"
                   >
                     <span>
-                      <span class="block text-sm font-semibold text-slate-100">Правила в комментариях</span>
+                      <span class="block text-sm font-semibold text-slate-100">{{ tt('channel_rules_modal.menu_row_title') }}</span>
                     </span>
                     <span class="text-slate-300">→</span>
                   </button>
@@ -1027,11 +1044,11 @@ onBeforeUnmount(() => {
             <template v-else>
             <div class="glass-panel p-3">
               <div class="mb-2 flex items-center justify-between">
-                <p class="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Черновики</p>
-                <button type="button" class="rounded-lg border border-emerald-400/40 bg-emerald-500/15 px-2 py-1 text-[11px] font-semibold text-emerald-100 hover:bg-emerald-500/25" @click="createDraft">Создать черновик</button>
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ tt('channel_rules_modal.drafts_heading') }}</p>
+                <button type="button" class="rounded-lg border border-emerald-400/40 bg-emerald-500/15 px-2 py-1 text-[11px] font-semibold text-emerald-100 hover:bg-emerald-500/25" @click="createDraft">{{ tt('channel_rules_modal.create_draft') }}</button>
               </div>
-              <p v-if="editingDraftId" class="mb-2 text-[11px] text-cyan-200">Сейчас правим: {{ draftTitleById(editingDraftId) }}</p>
-              <p v-if="draftSyncBusy" class="mb-2 text-[10px] text-slate-400">Синхронизация черновиков…</p>
+              <p v-if="editingDraftId" class="mb-2 text-[11px] text-cyan-200">{{ tt('channel_rules_modal.editing_now', { name: draftTitleById(editingDraftId) }) }}</p>
+              <p v-if="draftSyncBusy" class="mb-2 text-[10px] text-slate-400">{{ tt('channel_rules_modal.sync_busy') }}</p>
               <div class="space-y-1.5">
                 <div
                   v-for="d in channelDrafts"
@@ -1045,8 +1062,8 @@ onBeforeUnmount(() => {
                     <button type="button" class="rounded border border-emerald-400/35 bg-emerald-500/20 px-1.5 py-0.5 text-[10px] text-emerald-100" @click="confirmRenameDraft(d)">✓</button>
                   </template>
                   <template v-else>
-                    <span class="min-w-[8rem] flex-1 truncate text-[11px] text-slate-100">{{ d.name || 'Черновик' }}</span>
-                    <button type="button" class="rounded border border-white/20 bg-white/[0.08] px-1.5 py-0.5 text-[10px] text-slate-200" title="Изменить название" @click="beginRenameDraft(d)">✍️</button>
+                    <span class="min-w-[8rem] flex-1 truncate text-[11px] text-slate-100">{{ d.name || tt('channel_rules_modal.draft_default') }}</span>
+                    <button type="button" class="rounded border border-white/20 bg-white/[0.08] px-1.5 py-0.5 text-[10px] text-slate-200" :title="tt('channel_rules_modal.rename_title')" @click="beginRenameDraft(d)">✍️</button>
                   </template>
                   <button
                     type="button"
@@ -1054,7 +1071,7 @@ onBeforeUnmount(() => {
                     :class="String(editingDraftId || '') === String(d.id) ? 'border-cyan-300/60 bg-cyan-400/30 text-cyan-50 shadow-[0_0_18px_rgba(34,211,238,0.25)]' : 'border-cyan-400/35 bg-cyan-500/20 text-cyan-100'"
                     @click="editDraft(d)"
                   >
-                    Править
+                    {{ tt('channel_rules_modal.btn_edit') }}
                   </button>
                   <button
                     type="button"
@@ -1063,44 +1080,44 @@ onBeforeUnmount(() => {
                     :class="String(activeDraftId || '') === String(d.id) ? 'border border-rose-400/35 bg-rose-500/20 text-rose-100' : 'border border-emerald-400/35 bg-emerald-500/20 text-emerald-100'"
                     @click="toggleRunDraft(d)"
                   >
-                    {{ String(runDraftBusyId || '') === String(d.id) ? '...' : (String(activeDraftId || '') === String(d.id) ? 'ВЫКЛ' : 'Запуск') }}
+                    {{ String(runDraftBusyId || '') === String(d.id) ? tt('channel_rules_modal.btn_busy') : (String(activeDraftId || '') === String(d.id) ? tt('channel_rules_modal.btn_stop') : tt('channel_rules_modal.btn_run')) }}
                   </button>
                   <button
                     type="button"
                     class="rounded border border-rose-400/25 bg-rose-500/15 px-1 py-0.5 text-[10px] text-rose-100 hover:bg-rose-500/25"
-                    title="Удалить черновик"
+                    :title="tt('channel_rules_modal.delete_draft_title')"
                     @click="deleteDraft(d)"
                   >
                     🗑
                   </button>
                 </div>
-                <p v-if="!channelDrafts.length" class="text-[11px] text-slate-500">Черновиков пока нет.</p>
+                <p v-if="!channelDrafts.length" class="text-[11px] text-slate-500">{{ tt('channel_rules_modal.drafts_empty') }}</p>
               </div>
             </div>
             <div class="glass-panel p-3">
-              <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Текст правил для комментариев</p>
+              <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ tt('channel_rules_modal.rules_text_heading') }}</p>
               <div class="mb-1.5 flex flex-wrap gap-1.5">
-                <button type="button" class="post-rules-tool-btn font-semibold" :class="formatState.bold ? 'border-cyan-400/50 bg-cyan-500/15' : ''" @mousedown.prevent @click="exec('bold')">Ж</button>
-                <button type="button" class="post-rules-tool-btn italic" :class="formatState.italic ? 'border-cyan-400/50 bg-cyan-500/15' : ''" @mousedown.prevent @click="exec('italic')">К</button>
-                <button type="button" class="post-rules-tool-btn underline" :class="formatState.underline ? 'border-cyan-400/50 bg-cyan-500/15' : ''" @mousedown.prevent @click="exec('underline')">Ч</button>
-                <button type="button" class="post-rules-tool-btn line-through" :class="formatState.strike ? 'border-cyan-400/50 bg-cyan-500/15' : ''" @mousedown.prevent @click="exec('strikeThrough')">З</button>
-                <button type="button" class="post-rules-tool-btn" @mousedown.prevent @click="formatLink">🔗 Ссылка</button>
-                <button type="button" class="post-rules-tool-btn" @mousedown.prevent @click="clearFormatting">× Сбросить</button>
+                <button type="button" class="post-rules-tool-btn font-semibold" :class="formatState.bold ? 'border-cyan-400/50 bg-cyan-500/15' : ''" @mousedown.prevent @click="exec('bold')">{{ tt('channel_rules_modal.fmt_bold') }}</button>
+                <button type="button" class="post-rules-tool-btn italic" :class="formatState.italic ? 'border-cyan-400/50 bg-cyan-500/15' : ''" @mousedown.prevent @click="exec('italic')">{{ tt('channel_rules_modal.fmt_italic') }}</button>
+                <button type="button" class="post-rules-tool-btn underline" :class="formatState.underline ? 'border-cyan-400/50 bg-cyan-500/15' : ''" @mousedown.prevent @click="exec('underline')">{{ tt('channel_rules_modal.fmt_underline') }}</button>
+                <button type="button" class="post-rules-tool-btn line-through" :class="formatState.strike ? 'border-cyan-400/50 bg-cyan-500/15' : ''" @mousedown.prevent @click="exec('strikeThrough')">{{ tt('channel_rules_modal.fmt_strike') }}</button>
+                <button type="button" class="post-rules-tool-btn" @mousedown.prevent @click="formatLink">{{ tt('channel_rules_modal.link_btn') }}</button>
+                <button type="button" class="post-rules-tool-btn" @mousedown.prevent @click="clearFormatting">{{ tt('channel_rules_modal.clear_fmt') }}</button>
               </div>
               <div class="mb-1.5 flex flex-wrap gap-1.5">
-                <button type="button" class="post-rules-tool-btn px-2.5 text-zinc-200" :class="!canUndo() ? 'opacity-40' : ''" :disabled="!canUndo()" @mousedown.prevent @click="undo">↶ Назад</button>
-                <button type="button" class="post-rules-tool-btn px-2.5 text-zinc-200" :class="!canRedo() ? 'opacity-40' : ''" :disabled="!canRedo()" @mousedown.prevent @click="redo">↷ Вперёд</button>
+                <button type="button" class="post-rules-tool-btn px-2.5 text-zinc-200" :class="!canUndo() ? 'opacity-40' : ''" :disabled="!canUndo()" @mousedown.prevent @click="undo">{{ tt('channel_rules_modal.undo') }}</button>
+                <button type="button" class="post-rules-tool-btn px-2.5 text-zinc-200" :class="!canRedo() ? 'opacity-40' : ''" :disabled="!canRedo()" @mousedown.prevent @click="redo">{{ tt('channel_rules_modal.redo') }}</button>
                 <label class="post-rules-tool-btn cursor-pointer">
-                  {{ photoUploadBusy ? 'Загрузка фото…' : 'Файл' }}
+                  {{ photoUploadBusy ? tt('channel_rules_modal.photo_uploading') : tt('channel_rules_modal.file_btn') }}
                   <input type="file" accept="image/*" class="hidden" :disabled="busy || photoUploadBusy" @change="onPhotoPicked" />
                 </label>
                 <button type="button" class="post-rules-tool-btn" :disabled="busy || photoUploadBusy || !previewUrl" @click="removePhoto">🗑</button>
-                <span v-if="photoUploadBusy" class="text-[10px] text-cyan-300">Подгружаю изображение…</span>
+                <span v-if="photoUploadBusy" class="text-[10px] text-cyan-300">{{ tt('channel_rules_modal.photo_processing') }}</span>
                 <button v-if="previewUrl" type="button" class="h-8 w-8 overflow-hidden rounded-lg border border-white/12 bg-black/40" @click="imagePreviewUrl = previewUrl">
                   <img :src="previewUrl" alt="" class="h-full w-full object-cover" />
                 </button>
                 <div class="flex items-center gap-1">
-                  <button type="button" class="post-rules-tool-btn" @click="showButtonsModal = true">＋ Кнопки</button>
+                  <button type="button" class="post-rules-tool-btn" @click="showButtonsModal = true">{{ tt('channel_rules_modal.buttons_btn') }}</button>
                   <span v-if="inlineButtonCount > 0" class="rounded-md border border-cyan-400/25 bg-cyan-500/15 px-1.5 py-0.5 text-[10px] font-bold text-cyan-100">{{ inlineButtonCount }}</span>
                 </div>
               </div>
@@ -1108,19 +1125,19 @@ onBeforeUnmount(() => {
                 ref="bodyRef"
                 contenteditable="true"
                 class="post-rules-rich-editor max-h-56 min-h-[8rem] w-full overflow-y-auto rounded-xl border border-white/12 bg-slate-950/90 px-3 py-2 text-sm leading-relaxed text-slate-100 focus-within:border-cyan-400/50 focus-within:ring-1 focus-within:ring-cyan-500/30"
-                data-placeholder="Текст правил для комментариев канала..."
+                :data-placeholder="tt('channel_rules_modal.editor_placeholder')"
                 @input="onBodyInput"
                 @mouseup="updateFormatState"
                 @keyup="updateFormatState"
               />
               <div class="mt-2">
                 <button type="button" class="rounded-lg border border-violet-400/45 bg-violet-500/20 px-2 py-1 text-[11px] font-semibold text-violet-100 hover:bg-violet-500/30 disabled:opacity-60" :disabled="draftSaveBusy" @click="saveCurrentAsDraft">
-                  {{ draftSaveBusy ? 'Сохраняю черновик…' : 'Сохранить черновик' }}
+                  {{ draftSaveBusy ? tt('channel_rules_modal.save_draft_busy') : tt('channel_rules_modal.save_draft') }}
                 </button>
               </div>
             </div>
             <div class="glass-panel p-3">
-              <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Первые сообщения удалять (сек)</p>
+              <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ tt('channel_rules_modal.delete_window_heading') }}</p>
               <div class="flex flex-wrap gap-1.5">
                 <button
                   v-for="sec in [0, 10, 30, 60, 180]"
@@ -1130,18 +1147,18 @@ onBeforeUnmount(() => {
                   :class="Number(form.deleteWindowSec || 0) === sec ? 'guard-green-soft text-slate-900' : protToggleOff"
                   @click="form.deleteWindowSec = sec"
                 >
-                  {{ sec === 0 ? 'нет' : `${sec}с` }}
+                  {{ sec === 0 ? tt('channel_rules_modal.delete_window_none') : tt('channel_rules_modal.delete_window_sec', { n: sec }) }}
                 </button>
               </div>
             </div>
             <div class="glass-panel p-3">
-              <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Ручная отправка в тред</p>
+              <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ tt('channel_rules_modal.manual_thread_heading') }}</p>
               <input
                 v-model.trim="manualThreadId"
                 type="text"
                 inputmode="numeric"
                 class="w-full rounded-lg border border-white/14 bg-white/[0.06] px-2 py-1 text-xs"
-                placeholder="ID треда комментариев (message_thread_id)"
+                :placeholder="tt('channel_rules_modal.manual_thread_ph')"
               />
             </div>
             </template>
@@ -1150,10 +1167,10 @@ onBeforeUnmount(() => {
 
         <div class="post-rules-footer flex flex-col gap-1 border-t border-white/10 px-3 py-2 sm:px-4">
           <p v-if="rulesChat && !loadBusy && activePanel === 'rules'" class="text-[10px] text-slate-500">
-            Черновик сохраняется сам через ~2,5 с после правок; перед «Отправить в комментарии» несохранённое тоже уходит на сервер.
+            {{ tt('channel_rules_modal.footer_autosave_hint') }}
           </p>
           <div class="flex flex-wrap items-center justify-end gap-2">
-          <button type="button" class="post-rules-action-btn post-rules-action-btn--cancel" @click="close">Закрыть</button>
+          <button type="button" class="post-rules-action-btn post-rules-action-btn--cancel" @click="close">{{ tt('channel_rules_modal.close') }}</button>
           <button
             v-if="activePanel === 'rules'"
             type="button"
@@ -1161,10 +1178,10 @@ onBeforeUnmount(() => {
             :disabled="sendBusy || saveBusy || !rulesChat || !String(manualThreadId || '').trim()"
             @click="sendNow()"
           >
-            {{ sendBusy ? 'Отправка…' : 'Отправить в комментарии' }}
+            {{ sendBusy ? tt('channel_rules_modal.send_busy') : tt('channel_rules_modal.send_to_comments') }}
           </button>
           <button v-if="activePanel === 'rules'" type="button" class="post-rules-action-btn post-rules-action-btn--save" :disabled="saveBusy || !rulesChat" @click="save()">
-            {{ saveBusy ? 'Сохранение…' : 'Сохранить' }}
+            {{ saveBusy ? tt('channel_rules_modal.save_busy') : tt('channel_rules_modal.save') }}
           </button>
           </div>
         </div>
@@ -1182,37 +1199,37 @@ onBeforeUnmount(() => {
     >
       <div class="w-full max-w-2xl overflow-hidden rounded-[1.25rem] border border-white/15 bg-zinc-950/90 text-zinc-100 shadow-2xl backdrop-blur-xl ring-1 ring-white/10" @click.stop>
         <div class="flex items-center justify-between border-b border-white/10 bg-gradient-to-r from-white/[0.06] to-transparent px-4 py-2.5">
-          <h4 class="text-sm font-semibold text-white">Кнопки под постом</h4>
+          <h4 class="text-sm font-semibold text-white">{{ tt('channel_rules_modal.post_buttons_title') }}</h4>
           <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="showButtonsModal = false">✕</button>
         </div>
         <div class="max-h-[70vh] overflow-y-auto px-4 py-3">
           <div v-for="(row, ri) in buttonRows" :key="`chb-row-${ri}`" class="mb-3 rounded-xl border border-white/10 bg-white/[0.04] p-3">
-            <p class="mb-2 text-xs font-semibold text-slate-200">Ряд {{ ri + 1 }}</p>
+            <p class="mb-2 text-xs font-semibold text-slate-200">{{ tt('channel_rules_modal.row_n', { n: ri + 1 }) }}</p>
             <div
               v-for="(btn, bi) in row"
               :key="`chb-btn-${ri}-${bi}`"
               class="mb-2 grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto]"
             >
-              <input v-model="btn.text" type="text" class="rounded-lg border border-white/14 bg-white/[0.06] px-2.5 py-1.5 text-xs" placeholder="Текст кнопки" />
+              <input v-model="btn.text" type="text" class="rounded-lg border border-white/14 bg-white/[0.06] px-2.5 py-1.5 text-xs" :placeholder="tt('channel_rules_modal.btn_text_ph')" />
               <input v-model="btn.url" type="text" class="rounded-lg border border-white/14 bg-white/[0.06] px-2.5 py-1.5 text-xs" placeholder="https://..." />
-              <button type="button" class="rounded-lg border border-rose-400/35 bg-rose-500/20 px-2.5 py-1.5 text-xs text-rose-100" @click="removeButton(ri, bi)">Удалить</button>
+              <button type="button" class="rounded-lg border border-rose-400/35 bg-rose-500/20 px-2.5 py-1.5 text-xs text-rose-100" @click="removeButton(ri, bi)">{{ tt('channel_rules_modal.remove') }}</button>
               <button
                 type="button"
                 class="rounded-lg border border-emerald-400/35 bg-emerald-500/20 px-2.5 py-1.5 text-xs font-semibold text-emerald-100"
                 :disabled="saveBusy"
                 @click="saveButtonsFromModal()"
               >
-                Сохранить
+                {{ tt('channel_rules_modal.save') }}
               </button>
             </div>
-            <button type="button" class="text-xs font-semibold text-violet-300" @click="addButton(ri)">+ Кнопка в этот ряд</button>
+            <button type="button" class="text-xs font-semibold text-violet-300" @click="addButton(ri)">{{ tt('channel_rules_modal.add_btn_row') }}</button>
           </div>
-          <button type="button" class="w-full rounded-lg border border-violet-500/40 py-2 text-sm font-semibold text-violet-200" @click="addRow">+ Ряд</button>
+          <button type="button" class="w-full rounded-lg border border-violet-500/40 py-2 text-sm font-semibold text-violet-200" @click="addRow">{{ tt('channel_rules_modal.add_row') }}</button>
         </div>
         <div class="flex items-center justify-end gap-2 border-t border-white/10 px-4 py-3">
-          <button type="button" class="rounded-lg border border-white/15 bg-white/10 px-3 py-2 text-xs font-semibold text-slate-200 hover:bg-white/15" @click="showButtonsModal = false">Закрыть</button>
+          <button type="button" class="rounded-lg border border-white/15 bg-white/10 px-3 py-2 text-xs font-semibold text-slate-200 hover:bg-white/15" @click="showButtonsModal = false">{{ tt('channel_rules_modal.close') }}</button>
           <button type="button" class="guard-green-soft rounded-lg px-3 py-2 text-xs font-semibold text-slate-900 disabled:opacity-50" :disabled="saveBusy" @click="saveButtonsFromModal()">
-            {{ saveBusy ? 'Сохранение…' : 'Сохранить кнопки' }}
+            {{ saveBusy ? tt('channel_rules_modal.save_busy') : tt('channel_rules_modal.save_buttons') }}
           </button>
         </div>
       </div>
@@ -1229,15 +1246,15 @@ onBeforeUnmount(() => {
     >
       <div class="w-full max-w-md overflow-hidden rounded-[1.1rem] border border-white/15 bg-zinc-950/90 text-zinc-100 shadow-2xl backdrop-blur-xl ring-1 ring-white/10" @click.stop>
         <div class="flex items-center justify-between border-b border-white/10 px-4 py-2.5">
-          <h4 class="text-sm font-semibold text-white">Ссылка</h4>
+          <h4 class="text-sm font-semibold text-white">{{ tt('channel_rules_modal.link_title') }}</h4>
           <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="linkModalOpen = false">✕</button>
         </div>
         <div class="space-y-2 px-4 py-3">
           <input v-model.trim="linkUrl" type="text" class="w-full rounded-lg border border-white/15 bg-white/[0.06] px-3 py-2 text-sm" placeholder="https://..." />
         </div>
         <div class="flex items-center justify-end gap-2 border-t border-white/10 px-4 py-3">
-          <button type="button" class="rounded-lg border border-white/15 px-3 py-2 text-sm text-slate-200 hover:bg-white/10" @click="linkModalOpen = false">Отмена</button>
-          <button type="button" class="guard-green-soft rounded-lg px-3 py-2 text-sm font-semibold" @click="applyLinkModal()">Применить</button>
+          <button type="button" class="rounded-lg border border-white/15 px-3 py-2 text-sm text-slate-200 hover:bg-white/10" @click="linkModalOpen = false">{{ tt('channel_rules_modal.cancel') }}</button>
+          <button type="button" class="guard-green-soft rounded-lg px-3 py-2 text-sm font-semibold" @click="applyLinkModal()">{{ tt('channel_rules_modal.apply') }}</button>
         </div>
       </div>
     </div>

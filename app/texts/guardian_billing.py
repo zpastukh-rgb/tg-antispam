@@ -1,9 +1,15 @@
 # app/texts/guardian_billing.py
-"""Полный пакет текстов Guard Premium: подписка, кнопки оплаты, напоминания, блокировки."""
+"""Полный пакет текстов Guard Premium: подписка, кнопки оплаты, напоминания, блокировки.
+
+Сообщения пользователю по оплате и датам подписки берутся из app.i18n (ru/en).
+Ниже остаются legacy-константы для совместимости и необработанных веток кода.
+"""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
+
+from app.i18n import normalize_locale, t as _t
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 🛡 ОПИСАНИЕ ПОДПИСКИ (экран выбора периода)
@@ -40,7 +46,7 @@ PREMIUM_PLANS = [
 ]
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 💬 ПОСЛЕ ПОКУПКИ
+# 💬 ПОСЛЕ ПОКУПКИ (legacy)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 PREMIUM_ACTIVATED = (
@@ -54,7 +60,7 @@ PREMIUM_ACTIVATED = (
     "Guard усилил защиту группы."
 )
 
-_MONTHS_GENITIVE = (
+_MONTHS_GENITIVE_RU = (
     "января",
     "февраля",
     "марта",
@@ -69,29 +75,61 @@ _MONTHS_GENITIVE = (
     "декабря",
 )
 
+_MONTHS_LONG_EN = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
 
-def format_subscription_until_ru(dt: datetime | None) -> str:
+
+def format_subscription_until(dt: datetime | None, lang: str | None = None) -> str:
     """Дата окончания подписки для текста пользователю (UTC)."""
+    loc = normalize_locale(lang)
     if dt is None:
-        return "—"
+        return _t(loc, "billing.guardian.subscription_until_none")
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     else:
         dt = dt.astimezone(timezone.utc)
+    if loc == "en":
+        return (
+            f"{_MONTHS_LONG_EN[dt.month - 1]} {dt.day}, {dt.year}, "
+            f"{dt.strftime('%H:%M')} UTC"
+        )
     return (
-        f"{dt.day} {_MONTHS_GENITIVE[dt.month - 1]} {dt.year}, "
+        f"{dt.day} {_MONTHS_GENITIVE_RU[dt.month - 1]} {dt.year}, "
         f"{dt.strftime('%H:%M')} UTC"
     )
 
 
-def months_period_label_ru(n: int) -> str:
-    """«1 месяц» / «3 месяца» / «12 месяцев»."""
-    n = int(n)
+def format_subscription_until_ru(dt: datetime | None) -> str:
+    """Совместимость: всегда русская локаль даты."""
+    return format_subscription_until(dt, "ru")
+
+
+def months_period_label(months: int, lang: str | None = None) -> str:
+    """«1 месяц» / «3 месяца» / «12 месяцев» — из billing_panel.*."""
+    loc = normalize_locale(lang)
+    n = int(months)
     if n == 1:
-        return "1 месяц"
-    if 2 <= n <= 4:
-        return f"{n} месяца"
-    return f"{n} месяцев"
+        return _t(loc, "billing_panel.months_singular")
+    if loc == "ru" and 2 <= n <= 4:
+        return _t(loc, "billing_panel.months_few").format(n=n)
+    return _t(loc, "billing_panel.months_many").format(n=n)
+
+
+def months_period_label_ru(n: int) -> str:
+    """Совместимость: русские подписи периода."""
+    return months_period_label(n, "ru")
 
 
 def build_premium_payment_success_text(
@@ -102,10 +140,12 @@ def build_premium_payment_success_text(
     gift_aurum: float = 0.0,
     aurum_balance: float = 0.0,
     bonus_credits: float | int = 0,
+    lang: str | None = None,
 ) -> str:
     """Сообщение в ЛС после успешной оплаты ЮKassa (Markdown как в остальном боте)."""
-    period = months_period_label_ru(months)
-    until = format_subscription_until_ru(subscription_until)
+    loc = normalize_locale(lang)
+    period = months_period_label(months, loc)
+    until = format_subscription_until(subscription_until, loc)
     ar = float(amount_rub)
     amt = str(int(ar)) if ar == int(ar) else f"{ar:.2f}"
     ga = float(gift_aurum)
@@ -114,18 +154,15 @@ def build_premium_payment_success_text(
     aurum_str = str(int(ab)) if ab == int(ab) else f"{ab:.2f}"
     bb = float(bonus_credits)
     bonus_str = str(int(bb)) if bb == int(bb) else f"{bb:.2f}"
-    return (
-        "✅ *Оплата прошла успешно*\n\n"
-        f"Тариф *Guard Premium* активирован на *{period}*\n"
-        f"Сумма: *{amt}* ₽\n"
-        f"Подписка действует до: *{until}*\n\n"
-        f"Подарок к подписке (AURUM ✨): *{gift_str}*\n"
-        f"Баланс AURUM: *{aurum_str}* ✨\n"
-        f"Партнёрские токены: *{bonus_str}* ⚡\n\n"
-        "Теперь доступны:\n"
-        "👶 режим новичков · 🔕 режим тишины\n"
-        "📊 расширенные фильтры · 📈 антинакрутка\n"
-        "📡 до *20 чатов* и гибкие настройки защиты"
+    return _t(
+        loc,
+        "billing.guardian.payment_success",
+        period=period,
+        amount=amt,
+        until=until,
+        gift_aurum=gift_str,
+        aurum_balance=aurum_str,
+        bonus_tokens=bonus_str,
     )
 
 

@@ -1,6 +1,9 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { api } from '../api/client'
+
+const { t: tt, te } = useI18n()
 
 const props = defineProps({
   summary: { type: Object, default: () => ({}) },
@@ -59,66 +62,36 @@ watch(() => props.periodKey, (k) => {
   if (k && k !== statsPeriod.value) statsPeriod.value = k
 })
 
-const PERIOD_ROWS = [
-  { key: 'today', label: 'Сегодня' },
-  { key: '7d', label: '7 дней' },
-  { key: '30d', label: '30 дней' },
-  { key: '6m', label: '6 месяцев' },
-  { key: '1y', label: 'Год' },
-]
-const TYPE_TABS = [
-  { key: 'all', label: 'Все действия' },
-  { key: 'deletions', label: 'Удаления' },
-  { key: 'connections', label: 'Подключения' },
-]
-const SCOPE_TABS = [
-  { key: 'all', label: 'Все' },
-  { key: 'own', label: 'Свои' },
-  { key: 'delegated', label: 'Делегированные' },
-]
-const SUB_TABS = [
-  { key: 'timeline', label: 'Динамика' },
-  { key: 'types', label: 'Типы' },
-  { key: 'hours', label: 'Часы' },
-  { key: 'weekdays', label: 'Дни недели' },
-]
+const PERIOD_ROWS = computed(() => [
+  { key: 'today', label: tt('cabinet_stats.period.today') },
+  { key: '7d', label: tt('cabinet_stats.period.d7') },
+  { key: '30d', label: tt('cabinet_stats.period.d30') },
+  { key: '6m', label: tt('cabinet_stats.period.m6') },
+  { key: '1y', label: tt('cabinet_stats.period.y1') },
+])
+const TYPE_TABS = computed(() => [
+  { key: 'all', label: tt('cabinet_stats.type_tabs.all') },
+  { key: 'deletions', label: tt('cabinet_stats.type_tabs.deletions') },
+  { key: 'connections', label: tt('cabinet_stats.type_tabs.connections') },
+])
+const SCOPE_TABS = computed(() => [
+  { key: 'all', label: tt('cabinet_stats.scope.all') },
+  { key: 'own', label: tt('cabinet_stats.scope.own') },
+  { key: 'delegated', label: tt('cabinet_stats.scope.delegated') },
+])
+const SUB_TABS = computed(() => [
+  { key: 'timeline', label: tt('cabinet_stats.sub_tabs.timeline') },
+  { key: 'types', label: tt('cabinet_stats.sub_tabs.types') },
+  { key: 'hours', label: tt('cabinet_stats.sub_tabs.hours') },
+  { key: 'weekdays', label: tt('cabinet_stats.sub_tabs.weekdays') },
+])
 const typeTabs = computed(() =>
-  TYPE_TABS.map((t) => (isGrowthMode.value && t.key === 'deletions' ? { ...t, label: 'Рост' } : t)),
+  TYPE_TABS.value.map((t) =>
+    isGrowthMode.value && t.key === 'deletions' ? { ...t, label: tt('cabinet_stats.type_tabs.growth') } : t,
+  ),
 )
 
 const COLOR_POOL = ['#ef4444', '#3b82f6', '#f59e0b', '#f97316', '#60a5fa', '#dc2626', '#fb923c']
-const REASON_LABEL_MAP = {
-  ads: 'Реклама',
-  vulgar: 'Вульгарность',
-  nazi: 'Нацизм',
-  insult: 'Оскорбления',
-  racism: 'Расизм',
-  profanity: 'Мат',
-  stopword: 'Запретные слова',
-  media: 'Медиа',
-  link: 'Ссылки',
-  mention: 'Упоминания',
-  casino: 'Казино / ставки',
-  jobs: 'Подработки',
-  politics: 'Анти-политика',
-  religion: 'Религия',
-  esoteric: 'Эзотерика / магия',
-  buttons: 'Кнопки',
-  antinakrutka: 'Анти-накрутка',
-  flood: 'Флуд',
-  raid: 'Рейд',
-  captcha: 'Капча',
-  global_antispam: 'Глобальный антиспам',
-  forward: 'Репосты',
-  nationalism: 'Национализм',
-  extremism: 'Экстремизм',
-  terror: 'Терроризм',
-  global_url: 'Глобальные URL',
-  url: 'URL',
-  hate: 'Ненависть',
-  abuse: 'Абьюз',
-  spam: 'Спам',
-}
 
 const totals = computed(() => props.hourlyData?.totals || {})
 const chats = computed(() => (Array.isArray(props.hourlyData?.chats) ? props.hourlyData.chats : []))
@@ -223,8 +196,9 @@ function hasAnyBreakdownDetails(payload) {
 }
 function prettifyReason(reason) {
   const k = normalizeReason(reason)
-  if (!k) return 'Неизвестно'
-  if (REASON_LABEL_MAP[k]) return REASON_LABEL_MAP[k]
+  if (!k) return tt('cabinet_stats.reasons.unknown')
+  const path = `cabinet_stats.reasons.${k}`
+  if (te(path)) return tt(path)
   return k.replace(/_/g, ' ')
 }
 function reasonColor(reason) {
@@ -344,7 +318,7 @@ const deletedTotal = computed(() => {
 const filtersTriggered = computed(() => reasonRows.value.length)
 const donutSlices = computed(() => {
   if (!reasonRows.value.length && deletedTotal.value > 0) {
-    return [{ reason: 'fallback', label: 'Без детализации', n: deletedTotal.value, color: '#334155', pct: 100, start: 0, end: 100 }]
+    return [{ reason: 'fallback', label: tt('cabinet_stats.reasons.fallback'), n: deletedTotal.value, color: '#334155', pct: 100, start: 0, end: 100 }]
   }
   const total = Math.max(1, deletedTotal.value)
   let acc = 0
@@ -367,17 +341,17 @@ const growthMessages = computed(() => Math.max(0, toNum(breakdownData.value?.tot
 const growthTopChat = computed(() => {
   if (selectedScopeChatRow.value) {
     return {
-      title: String(selectedScopeChatRow.value?.title || selectedScopeChatRow.value?.id || 'Чат'),
+      title: String(selectedScopeChatRow.value?.title || selectedScopeChatRow.value?.id || tt('cabinet_stats.reasons.chat_fallback')),
       messages: Math.max(0, toNum(selectedScopeChatRow.value?.messages || 0)),
       joins: Math.max(0, toNum(selectedScopeChatRow.value?.joined || 0)),
       left: Math.max(0, toNum(selectedScopeChatRow.value?.left || 0)),
     }
   }
   const rows = Array.isArray(connectionsRows.value) ? connectionsRows.value : []
-  if (!rows.length) return { title: 'Нет данных', messages: 0, joins: 0, left: 0 }
+  if (!rows.length) return { title: tt('cabinet_stats.reasons.no_data'), messages: 0, joins: 0, left: 0 }
   const best = [...rows].sort((a, b) => Number(b?.messages || 0) - Number(a?.messages || 0))[0]
   return {
-    title: String(best?.title || best?.id || 'Чат'),
+    title: String(best?.title || best?.id || tt('cabinet_stats.reasons.chat_fallback')),
     messages: Math.max(0, toNum(best?.messages || 0)),
     joins: Math.max(0, toNum(best?.joined || 0)),
     left: Math.max(0, toNum(best?.left || 0)),
@@ -460,10 +434,10 @@ const linePath = computed(() => linePathFor(byHour.value))
 const top3Reasons = computed(() => reasonRows.value.slice(0, 6))
 const growthTypeRows = computed(() => {
   const rows = [
-    { reason: 'joined', label: 'Подписались', n: growthJoined.value, color: '#10b981' },
-    { reason: 'left', label: 'Отписались', n: growthLeft.value, color: '#f97316' },
-    { reason: 'net', label: 'Чистый рост', n: Math.abs(growthNet.value), color: growthNet.value >= 0 ? '#34d399' : '#fb7185' },
-    { reason: 'messages', label: 'Сообщения', n: growthMessages.value, color: '#8b5cf6' },
+    { reason: 'joined', label: tt('cabinet_stats.growth.row_joined'), n: growthJoined.value, color: '#10b981' },
+    { reason: 'left', label: tt('cabinet_stats.growth.row_left'), n: growthLeft.value, color: '#f97316' },
+    { reason: 'net', label: tt('cabinet_stats.growth.row_net'), n: Math.abs(growthNet.value), color: growthNet.value >= 0 ? '#34d399' : '#fb7185' },
+    { reason: 'messages', label: tt('cabinet_stats.growth.row_messages'), n: growthMessages.value, color: '#8b5cf6' },
   ]
   return rows.filter((r) => r.n > 0 || r.reason === 'net')
 })
@@ -478,9 +452,9 @@ const byHourByReason = computed(() => {
 const timelineMultiSeries = computed(() =>
   isGrowthMode.value
     ? [
-      { reason: 'joined', label: 'Подписки', color: '#10b981', vals: Array.isArray(breakdownData.value?.by_hour_joins) ? breakdownData.value.by_hour_joins.map((x) => Math.max(0, toNum(x))) : Array.from({ length: 24 }, () => 0) },
-      { reason: 'left', label: 'Отписки', color: '#f97316', vals: Array.isArray(breakdownData.value?.by_hour_leaves) ? breakdownData.value.by_hour_leaves.map((x) => Math.max(0, toNum(x))) : Array.from({ length: 24 }, () => 0) },
-      { reason: 'messages', label: 'Сообщения', color: '#8b5cf6', vals: Array.isArray(breakdownData.value?.by_hour_messages) ? breakdownData.value.by_hour_messages.map((x) => Math.max(0, toNum(x))) : Array.from({ length: 24 }, () => 0) },
+      { reason: 'joined', label: tt('cabinet_stats.reasons.subscriptions'), color: '#10b981', vals: Array.isArray(breakdownData.value?.by_hour_joins) ? breakdownData.value.by_hour_joins.map((x) => Math.max(0, toNum(x))) : Array.from({ length: 24 }, () => 0) },
+      { reason: 'left', label: tt('cabinet_stats.reasons.unsubscriptions'), color: '#f97316', vals: Array.isArray(breakdownData.value?.by_hour_leaves) ? breakdownData.value.by_hour_leaves.map((x) => Math.max(0, toNum(x))) : Array.from({ length: 24 }, () => 0) },
+      { reason: 'messages', label: tt('cabinet_stats.growth.row_messages'), color: '#8b5cf6', vals: Array.isArray(breakdownData.value?.by_hour_messages) ? breakdownData.value.by_hour_messages.map((x) => Math.max(0, toNum(x))) : Array.from({ length: 24 }, () => 0) },
     ].map((r) => ({ ...r, path: linePathFor(r.vals) }))
     : top3Reasons.value.map((r) => ({
       ...r,
@@ -515,13 +489,13 @@ const weekdayRows = computed(() => {
     }
   }
   const labels = [
-    { full: 'Понедельник', short: 'Пн' },
-    { full: 'Вторник', short: 'Вт' },
-    { full: 'Среда', short: 'Ср' },
-    { full: 'Четверг', short: 'Чт' },
-    { full: 'Пятница', short: 'Пт' },
-    { full: 'Суббота', short: 'Сб' },
-    { full: 'Воскресенье', short: 'Вс' },
+    { full: tt('cabinet_stats.weekdays.mon_full'), short: tt('cabinet_stats.weekdays.mon_short') },
+    { full: tt('cabinet_stats.weekdays.tue_full'), short: tt('cabinet_stats.weekdays.tue_short') },
+    { full: tt('cabinet_stats.weekdays.wed_full'), short: tt('cabinet_stats.weekdays.wed_short') },
+    { full: tt('cabinet_stats.weekdays.thu_full'), short: tt('cabinet_stats.weekdays.thu_short') },
+    { full: tt('cabinet_stats.weekdays.fri_full'), short: tt('cabinet_stats.weekdays.fri_short') },
+    { full: tt('cabinet_stats.weekdays.sat_full'), short: tt('cabinet_stats.weekdays.sat_short') },
+    { full: tt('cabinet_stats.weekdays.sun_full'), short: tt('cabinet_stats.weekdays.sun_short') },
   ]
   const max = Math.max(1, ...src.map((x) => Number(x || 0)))
   return labels.map((label, i) => ({
@@ -557,7 +531,15 @@ const heatGrid = computed(() => {
   return Array.from({ length: 8 }, () => Array.from({ length: 7 }, () => 0))
 })
 const heatMax = computed(() => Math.max(1, ...heatGrid.value.flat()))
-const heatDayLabels = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
+const heatDayLabels = computed(() => [
+  tt('cabinet_stats.weekdays.mon_short'),
+  tt('cabinet_stats.weekdays.tue_short'),
+  tt('cabinet_stats.weekdays.wed_short'),
+  tt('cabinet_stats.weekdays.thu_short'),
+  tt('cabinet_stats.weekdays.fri_short'),
+  tt('cabinet_stats.weekdays.sat_short'),
+  tt('cabinet_stats.weekdays.sun_short'),
+])
 const heatRowLabels = ['0', '3', '6', '9', '12', '15', '18', '21']
 function heatCellStyle(v) {
   const a = 0.1 + (Math.max(0, Number(v || 0)) / heatMax.value) * 0.85
@@ -702,7 +684,7 @@ function onTouchEnd(e) {
   const dx = x - touchStartX.value
   touchStartX.value = null
   if (Math.abs(dx) < 48) return
-  const order = TYPE_TABS.map((t) => t.key)
+  const order = TYPE_TABS.value.map((t) => t.key)
   const i = order.indexOf(statsType.value)
   if (dx < 0 && i < order.length - 1) statsType.value = order[i + 1]
   else if (dx > 0 && i > 0) statsType.value = order[i - 1]
@@ -747,7 +729,7 @@ onUnmounted(() => {
       </div>
       <div v-if="statsScope !== 'all' && availableScopeChats.length" class="flex gap-2 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         <button type="button" class="shrink-0 rounded-full px-3 py-1.5 text-[11px] font-semibold transition" :class="pillActiveClass(selectedChatId === 'all')" @click="pickScopeAllChats()">
-          Все группы
+          {{ tt('cabinet_stats.all_groups') }}
         </button>
         <button
           v-for="c in availableScopeChats"
@@ -760,86 +742,84 @@ onUnmounted(() => {
           {{ c.title || c.id }}
         </button>
       </div>
-      <p v-if="false && (loading || breakdownLoading)" class="px-0.5 text-[11px] text-emerald-300/80">Обновление…</p>
+      <p v-if="false && (loading || breakdownLoading)" class="px-0.5 text-[11px] text-emerald-300/80">{{ tt('cabinet_stats.updating') }}</p>
     </div>
 
     <div class="min-h-0 flex-1 touch-pan-y overflow-y-auto overscroll-contain px-1 pb-4 pt-3" @touchstart.passive="onTouchStart" @touchend="onTouchEnd">
       <div v-if="statsType === 'all'" class="space-y-3">
         <template v-if="isGrowthMode">
           <div class="rounded-2xl border border-white/10 bg-[#10141a]/95 p-4 backdrop-blur-md">
-            <p class="text-[12px] font-semibold text-white">Рост аудитории</p>
+            <p class="text-[12px] font-semibold text-white">{{ tt('cabinet_stats.growth.audience_title') }}</p>
             <div class="mt-3 grid grid-cols-2 gap-2">
               <div class="rounded-xl border border-white/10 bg-black/20 p-2.5">
-                <p class="text-[10px] text-emerald-200/85">Подписалось</p>
+                <p class="text-[10px] text-emerald-200/85">{{ tt('cabinet_stats.growth.joined') }}</p>
                 <p class="mt-0.5 text-lg font-black tabular-nums text-white">{{ growthJoined }}</p>
               </div>
               <div class="rounded-xl border border-white/10 bg-black/20 p-2.5">
-                <p class="text-[10px] text-orange-200/85">Отписалось</p>
+                <p class="text-[10px] text-orange-200/85">{{ tt('cabinet_stats.growth.left') }}</p>
                 <p class="mt-0.5 text-lg font-black tabular-nums text-white">{{ growthLeft }}</p>
               </div>
             </div>
             <div class="mt-2 rounded-xl border border-violet-400/25 bg-violet-950/20 p-2.5">
-              <p class="text-[10px] text-violet-200/85">Чистый рост</p>
+              <p class="text-[10px] text-violet-200/85">{{ tt('cabinet_stats.growth.net') }}</p>
               <p class="mt-0.5 text-lg font-black tabular-nums" :class="growthNet >= 0 ? 'text-emerald-200' : 'text-rose-200'">
                 {{ growthNet >= 0 ? '+' : '' }}{{ growthNet }}
               </p>
-              <p class="mt-1 text-[10px] text-violet-100/80">Сообщений: {{ growthMessages }}</p>
+              <p class="mt-1 text-[10px] text-violet-100/80">{{ tt('cabinet_stats.growth.messages_n', { n: growthMessages }) }}</p>
             </div>
           </div>
           <div class="rounded-2xl border border-white/10 bg-[#10141a]/95 p-4 backdrop-blur-md">
-            <p class="text-[12px] font-semibold text-white">Самый активный чат</p>
+            <p class="text-[12px] font-semibold text-white">{{ tt('cabinet_stats.growth.top_chat_title') }}</p>
             <p class="mt-2 truncate text-[14px] font-bold text-white">{{ growthTopChat.title }}</p>
             <p class="mt-1 text-[11px] text-slate-300">
-              Сообщений: <span class="font-semibold tabular-nums text-white">{{ growthTopChat.messages }}</span>
-              · Подписалось: <span class="font-semibold tabular-nums text-white">{{ growthTopChat.joins }}</span>
-              · Отписалось: <span class="font-semibold tabular-nums text-white">{{ growthTopChat.left }}</span>
+              {{ tt('cabinet_stats.growth.top_chat_line', { messages: growthTopChat.messages, joins: growthTopChat.joins, left: growthTopChat.left }) }}
             </p>
           </div>
           <div class="rounded-2xl border border-white/10 bg-[#10141a]/95 p-4 backdrop-blur-md">
             <div class="flex items-center justify-between gap-2">
-              <p class="text-[12px] font-semibold text-white">Статистика чатов и каналов</p>
-              <span class="text-[10px] text-slate-400">всего: {{ chatRowsForStats.length }}</span>
+              <p class="text-[12px] font-semibold text-white">{{ tt('cabinet_stats.growth.chats_channels_title') }}</p>
+              <span class="text-[10px] text-slate-400">{{ tt('cabinet_stats.growth.total_n', { n: chatRowsForStats.length }) }}</span>
             </div>
             <div class="mt-3 grid grid-cols-2 gap-2">
               <div class="rounded-xl border border-white/10 bg-black/20 p-2.5">
-                <p class="text-[10px] text-slate-300/90">Группы</p>
+                <p class="text-[10px] text-slate-300/90">{{ tt('cabinet_stats.growth.groups') }}</p>
                 <p class="mt-0.5 text-lg font-black tabular-nums text-white">{{ groupRowsForStats.length }}</p>
               </div>
               <div class="rounded-xl border border-cyan-400/20 bg-cyan-950/20 p-2.5">
-                <p class="text-[10px] text-cyan-100/90">Каналы</p>
+                <p class="text-[10px] text-cyan-100/90">{{ tt('cabinet_stats.growth.channels') }}</p>
                 <p class="mt-0.5 text-lg font-black tabular-nums text-cyan-100">{{ channelRowsForStats.length }}</p>
               </div>
             </div>
             <div class="mt-2 grid grid-cols-2 gap-2">
               <div class="rounded-xl border border-white/10 bg-black/20 p-2.5">
-                <p class="text-[10px] text-slate-300/90">Сообщений в каналах</p>
+                <p class="text-[10px] text-slate-300/90">{{ tt('cabinet_stats.growth.channel_messages') }}</p>
                 <p class="mt-0.5 text-lg font-black tabular-nums text-white">{{ channelMessagesTotal }}</p>
               </div>
               <div class="rounded-xl border border-emerald-400/20 bg-emerald-950/15 p-2.5">
-                <p class="text-[10px] text-emerald-100/90">Прирост каналов</p>
+                <p class="text-[10px] text-emerald-100/90">{{ tt('cabinet_stats.growth.channel_net') }}</p>
                 <p class="mt-0.5 text-lg font-black tabular-nums" :class="channelGrowthNet >= 0 ? 'text-emerald-200' : 'text-rose-200'">{{ channelGrowthNet >= 0 ? '+' : '' }}{{ channelGrowthNet }}</p>
               </div>
             </div>
             <p class="mt-2 truncate text-[11px] text-slate-400">
-              Топ канал: <span class="font-semibold text-white">{{ topChannelByMessages?.title || '—' }}</span>
-              <span v-if="topChannelByMessages"> · {{ Math.max(0, toNum(topChannelByMessages?.messages || 0)) }} сообщений</span>
+              {{ tt('cabinet_stats.growth.top_channel', { title: topChannelByMessages?.title || '—' }) }}
+              <span v-if="topChannelByMessages">{{ tt('cabinet_stats.growth.top_channel_msgs', { n: Math.max(0, toNum(topChannelByMessages?.messages || 0)) }) }}</span>
             </p>
           </div>
           <div class="rounded-2xl border border-white/10 bg-[#10141a]/95 p-4 backdrop-blur-md">
             <div class="mb-2 flex items-center justify-between gap-2">
-              <p class="text-[12px] font-semibold text-white">Пол участников</p>
-              <p class="text-[11px] text-slate-400">аудитория: {{ Math.round(audienceGenderCard.audience) }}</p>
+              <p class="text-[12px] font-semibold text-white">{{ tt('cabinet_stats.growth.gender_title') }}</p>
+              <p class="text-[11px] text-slate-400">{{ tt('cabinet_stats.growth.audience_n', { n: Math.round(audienceGenderCard.audience) }) }}</p>
             </div>
             <div class="flex items-end justify-between gap-3">
               <div>
                 <p class="text-3xl font-extrabold leading-none text-white">{{ audienceGenderCard.malePct }}%</p>
                 <p class="text-sm font-semibold text-cyan-200">{{ Math.round(audienceGenderCard.maleCount) }}</p>
-                <p class="text-[12px] text-slate-300">мужчины</p>
+                <p class="text-[12px] text-slate-300">{{ tt('cabinet_stats.growth.men') }}</p>
               </div>
               <div class="text-right">
                 <p class="text-3xl font-extrabold leading-none text-white">{{ audienceGenderCard.femalePct }}%</p>
                 <p class="text-sm font-semibold text-rose-200">{{ Math.round(audienceGenderCard.femaleCount) }}</p>
-                <p class="text-[12px] text-slate-300">женщины</p>
+                <p class="text-[12px] text-slate-300">{{ tt('cabinet_stats.growth.women') }}</p>
               </div>
             </div>
             <div class="mt-3 h-8 overflow-hidden rounded-lg border border-white/10 bg-black/35">
@@ -859,19 +839,19 @@ onUnmounted(() => {
               </div>
             </div>
             <p class="mt-2 text-[11px] text-slate-400">
-              Учтено по именам: {{ Math.round(audienceGenderCard.knownTotal) }}, не определено: {{ Math.round(audienceGenderCard.unknownCount) }}
+              {{ tt('cabinet_stats.growth.gender_breakdown', { known: Math.round(audienceGenderCard.knownTotal), unknown: Math.round(audienceGenderCard.unknownCount) }) }}
             </p>
           </div>
         </template>
         <template v-else>
         <div class="rounded-2xl border border-white/10 bg-[#10141a]/95 p-4 backdrop-blur-md">
-          <p class="text-[12px] font-semibold text-white">Срабатывания фильтров</p>
+          <p class="text-[12px] font-semibold text-white">{{ tt('cabinet_stats.protection.filter_hits') }}</p>
           <div class="mt-4 flex gap-3">
             <div class="relative h-28 w-28 shrink-0">
               <div class="absolute inset-0 rounded-full" :style="{ background: donutGradient }" />
               <div class="absolute inset-[20%] flex flex-col items-center justify-center rounded-full bg-[#0b0e11] text-center">
                 <p class="text-xl font-black tabular-nums text-white">{{ deletedTotal }}</p>
-                <p class="mt-0.5 text-[9px] font-semibold text-slate-500">Всего</p>
+                <p class="mt-0.5 text-[9px] font-semibold text-slate-500">{{ tt('cabinet_stats.protection.total') }}</p>
               </div>
             </div>
             <div class="min-w-0 flex-1 space-y-1.5">
@@ -887,7 +867,7 @@ onUnmounted(() => {
         </div>
 
         <div class="rounded-2xl border border-white/10 bg-[#10141a]/95 p-4 backdrop-blur-md">
-          <p class="text-[12px] font-semibold text-white">Динамика удалений</p>
+          <p class="text-[12px] font-semibold text-white">{{ tt('cabinet_stats.protection.deletion_trend') }}</p>
           <div class="relative mt-3 overflow-hidden rounded-xl border border-white/[0.06] bg-[#0b0e11] px-2 py-3" @mousemove="onChartMove" @mouseleave="onChartLeave" @touchmove.prevent="onChartMove" @touchend="onChartLeave">
             <svg class="h-[148px] w-full" viewBox="0 0 320 132" preserveAspectRatio="none">
               <line x1="28" y1="114" x2="312" y2="114" stroke="rgba(148,163,184,0.15)" stroke-width="1" />
@@ -900,23 +880,23 @@ onUnmounted(() => {
               <path :d="linePath" fill="none" stroke="#7dff3a" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" />
             </svg>
             <div class="pointer-events-none absolute right-2 top-2 rounded-lg border border-slate-600/80 bg-slate-900/95 px-2.5 py-1.5 text-[10px] text-slate-200">
-              {{ hoverData.hour }} · {{ hoverData.total }} удалений
+              {{ tt('cabinet_stats.protection.hover_deletions', { hour: hoverData.hour, count: hoverData.total }) }}
             </div>
           </div>
         </div>
 
         <div class="rounded-2xl border border-white/10 bg-[#10141a]/95 p-4 backdrop-blur-md">
           <div class="flex items-center justify-between gap-2">
-            <p class="text-[12px] font-semibold text-white">Под угрозой</p>
+            <p class="text-[12px] font-semibold text-white">{{ tt('cabinet_stats.protection.at_risk') }}</p>
             <button type="button" class="rounded-lg border border-rose-500/40 bg-rose-500/10 px-2.5 py-1 text-[11px] font-semibold text-rose-200" @click="toggleThreatSection">
-              {{ threatOpen ? 'Скрыть' : 'Показать' }}
+              {{ threatOpen ? tt('cabinet_stats.protection.hide') : tt('cabinet_stats.protection.show') }}
             </button>
           </div>
           <div v-if="threatOpen" class="mt-3 space-y-2">
             <div v-for="c in threatTopChats" :key="`th-${c.id}`" class="rounded-xl border border-white/10 bg-black/20 p-2.5">
               <div class="flex items-center justify-between gap-2">
                 <p class="truncate text-[12px] font-semibold text-white">{{ c.title || c.id }}</p>
-                <span class="text-[11px] font-bold tabular-nums text-rose-200">{{ c._risk }} удалений</span>
+                <span class="text-[11px] font-bold tabular-nums text-rose-200">{{ tt('cabinet_stats.protection.deletions_n', { n: c._risk }) }}</span>
               </div>
               <div class="mt-1.5 flex flex-wrap gap-1.5">
                 <span v-for="r in threatTopThree(c.id)" :key="`th-${c.id}-${r.reason}`" class="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] text-slate-200">
@@ -924,9 +904,9 @@ onUnmounted(() => {
                   {{ r.label }}: {{ r.n }}
                 </span>
               </div>
-              <div v-if="threatLoadingId === String(c.id)" class="mt-1 text-[10px] text-slate-400">Обновляем фильтры…</div>
+              <div v-if="threatLoadingId === String(c.id)" class="mt-1 text-[10px] text-slate-400">{{ tt('cabinet_stats.protection.refreshing_filters') }}</div>
               <details class="mt-2">
-                <summary class="cursor-pointer text-[11px] font-semibold text-cyan-200">Раскрыть все фильтры</summary>
+                <summary class="cursor-pointer text-[11px] font-semibold text-cyan-200">{{ tt('cabinet_stats.protection.expand_filters') }}</summary>
                 <div class="mt-1.5 space-y-1">
                   <div
                     v-for="r in (threatDetails[c.id] || [])"
@@ -942,7 +922,7 @@ onUnmounted(() => {
                 </div>
               </details>
             </div>
-            <p v-if="!threatTopChats.length" class="text-[11px] text-slate-400">Сейчас нет групп с повышенным количеством удалений.</p>
+            <p v-if="!threatTopChats.length" class="text-[11px] text-slate-400">{{ tt('cabinet_stats.protection.no_elevated') }}</p>
           </div>
         </div>
         </template>
@@ -951,7 +931,7 @@ onUnmounted(() => {
       <div v-else-if="statsType === 'deletions'" class="space-y-3">
         <template v-if="statsSubView === 'timeline'">
           <div class="rounded-2xl border border-white/10 bg-[#10141a]/95 p-4 backdrop-blur-md">
-            <p class="text-[12px] font-semibold text-white">{{ isGrowthMode ? 'Динамика роста и сообщений' : 'Удаления по времени' }}</p>
+            <p class="text-[12px] font-semibold text-white">{{ isGrowthMode ? tt('cabinet_stats.protection.title_growth_time') : tt('cabinet_stats.protection.title_del_time') }}</p>
             <div class="mt-3 overflow-hidden rounded-xl border border-white/[0.06] bg-[#0b0e11] px-2 py-3" @mousemove="onChartMove" @mouseleave="onChartLeave" @touchmove.prevent="onChartMove" @touchend="onChartLeave">
               <svg class="h-[150px] w-full" viewBox="0 0 320 132" preserveAspectRatio="none">
                 <line x1="28" y1="114" x2="312" y2="114" stroke="rgba(148,163,184,0.15)" stroke-width="1" />
@@ -974,7 +954,7 @@ onUnmounted(() => {
             </div>
           </div>
           <div class="rounded-2xl border border-white/10 bg-[#10141a]/95 p-4 backdrop-blur-md">
-            <p class="mb-3 text-[12px] font-semibold text-white">{{ isGrowthMode ? 'Активность по дням' : 'Удаления по дням' }}</p>
+            <p class="mb-3 text-[12px] font-semibold text-white">{{ isGrowthMode ? tt('cabinet_stats.protection.title_growth_day') : tt('cabinet_stats.protection.title_del_day') }}</p>
             <div class="grid grid-cols-[34px_1fr] gap-2">
               <div class="flex h-44 flex-col justify-between pb-5 text-[10px] text-slate-500">
                 <span>{{ Math.max(...weekdayRows.map((w) => w.n)) }}</span>
@@ -1027,7 +1007,7 @@ onUnmounted(() => {
 
         <template v-else-if="statsSubView === 'hours'">
           <div class="rounded-2xl border border-white/10 bg-[#10141a]/95 p-3 backdrop-blur-md">
-            <p class="mb-2 text-[12px] font-semibold text-white">{{ isGrowthMode ? 'Сообщения по часам' : 'Удаления по часам' }}</p>
+            <p class="mb-2 text-[12px] font-semibold text-white">{{ isGrowthMode ? tt('cabinet_stats.protection.title_growth_hour') : tt('cabinet_stats.protection.title_del_hour') }}</p>
             <div class="grid grid-cols-[18px_repeat(7,minmax(0,1fr))] gap-1 text-[10px]">
               <span />
               <span v-for="d in heatDayLabels" :key="`hd-${d}`" class="text-center text-slate-400">{{ d }}</span>
@@ -1037,16 +1017,16 @@ onUnmounted(() => {
               </template>
             </div>
             <div class="mt-3 flex items-center justify-between text-[10px] text-slate-400">
-              <span>Меньше</span>
+              <span>{{ tt('cabinet_stats.protection.less') }}</span>
               <div class="mx-2 h-2 flex-1 rounded-full bg-gradient-to-r from-violet-950 to-violet-500" />
-              <span>Больше</span>
+              <span>{{ tt('cabinet_stats.protection.more') }}</span>
             </div>
           </div>
         </template>
 
         <template v-else-if="statsSubView === 'weekdays'">
           <div class="rounded-2xl border border-white/10 bg-[#10141a]/95 p-4 backdrop-blur-md">
-            <p class="mb-3 text-[12px] font-semibold text-white">{{ isGrowthMode ? 'Активность по дням недели' : 'Удаления по дням недели' }}</p>
+            <p class="mb-3 text-[12px] font-semibold text-white">{{ isGrowthMode ? tt('cabinet_stats.protection.title_growth_week') : tt('cabinet_stats.protection.title_del_week') }}</p>
             <div class="space-y-2.5">
               <div v-for="w in weekdayRows" :key="w.label" class="grid grid-cols-[1fr_2.5fr_auto] items-center gap-2">
                 <span class="text-[12px] text-slate-300">{{ w.label }}</span>
@@ -1066,13 +1046,18 @@ onUnmounted(() => {
           <div class="min-w-0 flex-1">
             <p class="truncate text-[14px] font-semibold text-white">{{ c.title || c.id }}</p>
             <p class="text-[11px] text-slate-500">
-              {{ isGrowthMode ? `Подписались: ${Number(c.joined || 0)} · Отписались: ${Number(c.left || 0)} · Сообщений: ${Number(c.messages || 0)}` : `Удалений: ${Number(c.deleted || c.moderation || 0)} · Сообщений: ${Number(c.messages || 0)}` }}
+              <template v-if="isGrowthMode">
+                {{ tt('cabinet_stats.protection.conn_growth', { joined: Number(c.joined || 0), left: Number(c.left || 0), messages: Number(c.messages || 0) }) }}
+              </template>
+              <template v-else>
+                {{ tt('cabinet_stats.protection.conn_mod', { deleted: Number(c.deleted || c.moderation || 0), messages: Number(c.messages || 0) }) }}
+              </template>
             </p>
           </div>
-          <span class="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-bold" :class="Number((isGrowthMode ? c.messages : (c.deleted || c.moderation)) || 0) > 0 ? 'border-emerald-400/40 text-emerald-200' : 'border-white/15 text-slate-400'">{{ Number((isGrowthMode ? c.messages : (c.deleted || c.moderation)) || 0) > 0 ? 'Активен' : 'Тихо' }}</span>
+          <span class="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-bold" :class="Number((isGrowthMode ? c.messages : (c.deleted || c.moderation)) || 0) > 0 ? 'border-emerald-400/40 text-emerald-200' : 'border-white/15 text-slate-400'">{{ Number((isGrowthMode ? c.messages : (c.deleted || c.moderation)) || 0) > 0 ? tt('cabinet_stats.protection.active') : tt('cabinet_stats.protection.quiet') }}</span>
         </div>
-        <p v-if="!connectionsRows.length" class="py-8 text-center text-[13px] text-slate-500">Нет данных за период.</p>
-        <button type="button" class="w-full rounded-2xl border border-cyan-400/35 bg-cyan-500/10 py-3 text-[13px] font-semibold text-cyan-100" @click="emit('open-groups')">Показать все чаты</button>
+        <p v-if="!connectionsRows.length" class="py-8 text-center text-[13px] text-slate-500">{{ tt('cabinet_stats.protection.no_data_period') }}</p>
+        <button type="button" class="w-full rounded-2xl border border-cyan-400/35 bg-cyan-500/10 py-3 text-[13px] font-semibold text-cyan-100" @click="emit('open-groups')">{{ tt('cabinet_stats.protection.show_all_chats') }}</button>
       </div>
     </div>
   </div>

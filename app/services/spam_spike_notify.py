@@ -24,6 +24,8 @@ from app.db.models import (
     SpamSpikeNotifySent,
     User,
 )
+from app.i18n import t
+from app.services.chat_owner_locale import owner_locale_for_chat, user_locale
 from app.services.telegram_notify import send_user_dm
 
 logger = logging.getLogger(__name__)
@@ -54,22 +56,23 @@ def _utc_bucket_key(now: datetime) -> str:
     return now.astimezone(timezone.utc).strftime("%Y%m%d%H")
 
 
-def _settings_hint_lines(rule: Rule | None) -> list[str]:
+def _settings_hint_lines(rule: Rule | None, locale: str) -> list[str]:
+    loc = locale
     if not rule:
-        return ["• Включите основные фильтры в разделе «Защита» и проверьте режим наказания (удаление/мут)."]
+        return [t(loc, "guard.spam_spike.hint_default")]
     lines: list[str] = []
     if not bool(getattr(rule, "newbie_enabled", False)):
-        lines.append("• Режим новичка — жёстче к первым сообщениям после входа.")
+        lines.append(t(loc, "guard.spam_spike.hint_newbie"))
     if int(getattr(rule, "silence_minutes", 0) or 0) <= 0:
-        lines.append("• Режим тишины после входа — ограничить спам в первые минуты.")
+        lines.append(t(loc, "guard.spam_spike.hint_silence"))
     if not bool(getattr(rule, "antinakrutka_enabled", False)):
-        lines.append("• Антинакрутка — реакция на массовый вход участников.")
+        lines.append(t(loc, "guard.spam_spike.hint_antinakrutka"))
     if not bool(getattr(rule, "use_global_antispam_db", False)):
-        lines.append("• Антиспам-база при входе — отсекать известных нарушителей.")
+        lines.append(t(loc, "guard.spam_spike.hint_antispam_db"))
     if not bool(getattr(rule, "first_message_captcha_enabled", False)):
-        lines.append("• Капча на первое сообщение — для рейдов и ботов.")
+        lines.append(t(loc, "guard.spam_spike.hint_captcha"))
     if not lines:
-        lines.append("• Проверьте пороги стоп-слов и ссылки в «Защита» — всплеск уже ловится фильтрами.")
+        lines.append(t(loc, "guard.spam_spike.hint_fallback"))
     return lines[:5]
 
 
@@ -182,16 +185,13 @@ async def trigger_spam_spike_for_chat(
     if str(getattr(chat_row, "chat_kind", "group") or "group").lower() != "channel":
         human_admins = await _human_telegram_admin_count(bot, cid)
 
-    group_ping_line = ""
     admins_notified_in_chat = False
     if human_admins > 0:
         if await _already_group_ping(session, cid, bucket):
             admins_notified_in_chat = True
         else:
-            ping_text = (
-                "⚠️ <b>Guard</b>: зафиксирован всплеск <b>спам-активности</b> (фильтры сработали много раз за короткий срок).\n"
-                "💀 Хозяин чата уже уведомлён. Guard держит периметр и дожимает спам-волны."
-            )
+            owner_loc = await owner_locale_for_chat(session, cid)
+            ping_text = t(owner_loc, "guard.spam_spike.group_ping")
             try:
                 await bot.send_message(cid, ping_text, parse_mode="HTML", disable_web_page_preview=True)
                 session.add(SpamSpikeGroupPingSent(chat_id=cid, bucket_key=bucket))
@@ -201,13 +201,7 @@ async def trigger_spam_spike_for_chat(
                 logger.debug("spam_spike group ping chat=%s: %s", cid, e)
                 await session.rollback()
                 admins_notified_in_chat = False
-    if admins_notified_in_chat:
-        group_ping_line = (
-            "\n\nКороткое уведомление также отправлено <b>в чат группы</b> — "
-            "локальные администраторы Telegram увидят его в ленте."
-        )
 
-    hints = "\n".join(_settings_hint_lines(rule))
     owner_tid_raw = int(getattr(chat_row, "owner_user_id", 0) or 0)
 
     mgr_rows = (
@@ -297,19 +291,27 @@ async def trigger_spam_spike_for_chat(
         if await _already_sent_dm(session, recipient_tid, cid, bucket):
             continue
 
+        loc = await user_locale(session, recipient_tid)
+        hints = "\n".join(_settings_hint_lines(rule, loc))
+        group_ping_line = t(loc, "guard.spam_spike.dm_group_ping_footer") if admins_notified_in_chat else ""
+        who_line = (
+            t(
+                loc,
+                "guard.spam_spike.dm_stats",
+                chat_title=title_h,
+                window_min=window_min,
+                spam_cnt=int(spam_cnt),
+                joins_cnt=int(joins_cnt),
+                hints=hints,
+            )
+            + group_ping_line
+        )
+        text = t(loc, "guard.spam_spike.dm_title") + who_line
         open_url = protection_url
-        btn_label = "🛡 Защита"
+        btn_label = t(loc, "guard.spam_spike.btn_protection")
         kb = InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text=btn_label, url=open_url)]]
         )
-        who_line = (
-            f"Чат: <b>{title_h}</b>\n"
-            f"За последние ~{window_min} мин: спам-фильтры сработали <b>{int(spam_cnt)}</b> раз, "
-            f"новых участников — <b>{int(joins_cnt)}</b>.\n\n"
-            f"<b>Что усилить в настройках:</b>\n{hints}"
-            f"{group_ping_line}"
-        )
-        text = "⚠️ <b>Всплеск спама</b>\n\n" + who_line
         try:
             await bot.send_message(
                 int(recipient_tid),

@@ -1,4 +1,5 @@
 <script setup>
+import { useI18n } from 'vue-i18n'
 /**
  * Общая загрузка: песочные часы + «стекло» на глобальном фоне (без бейджа ADM — он только для шапки).
  */
@@ -6,6 +7,7 @@ defineProps({
   /** Меньше отступы — для оверлея при смене маршрута */
   compact: { type: Boolean, default: false },
 })
+const { t } = useI18n()
 </script>
 
 <template>
@@ -43,7 +45,7 @@ defineProps({
         />
       </svg>
     </div>
-    <p class="text-center text-sm font-medium tracking-tight text-white/82">Секундочку…</p>
+    <p class="text-center text-sm font-medium tracking-tight text-white/82">{{ t('common.loading_pause') }}</p>
   </div>
 </template>
 

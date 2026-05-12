@@ -40,6 +40,9 @@ from app.services.admin_roles import is_full_admin_user
 from app.services.spam_spike_notify import run_spam_spike_owner_manager_alerts
 from app.services.chat_supergroup_migrate import parse_migrate_to_supergroup_id, remap_group_chat_ids
 from app.texts.guardian_billing import PREMIUM_PLANS
+from app.texts.guard_group_messages import guardian_periodic_texts
+from app.i18n import DEFAULT_LOCALE, normalize_locale, t
+from app.services.chat_owner_locale import owner_locale_for_chat, user_locale
 from app.services.payments_yookassa import (
     autorenew_window_hours,
     run_yookassa_autorenew_batch,
@@ -85,93 +88,6 @@ EXPIRED_WARNING_PHOTO_PATH = _STATIC_DIR / "trial_warning.jpg"
 EXPIRED_WARNING_FALLBACK_PATH = Path(__file__).resolve().parent.parent.parent / "webapp" / "public" / "logo.png"
 EXPIRED_WARNING_PHOTO_FILE_ID = (os.getenv("TRIAL_WARNING_PHOTO_FILE_ID") or "").strip()
 TRIAL_PREVIEW_GUARD_PHOTO_PATH = _STATIC_DIR / "trial_preview_guard.jpg"
-EXPIRED_WARNING_TEXT = (
-    "Эх 🥹\n\n"
-    "🔔 Здравствуйте!\n"
-    "Сообщаем, что срок действия вашей подписки Guard истёк.\n\n"
-    "Чтобы снова получить полный доступ ко всем инструментам защиты,\n"
-    "пожалуйста, продлите подписку в приложении по кнопке ниже 😇"
-)
-TRIAL_PREVIEW_GUARD_TEXT = (
-    "⚠ *Guard: подписка завершилась*\n\n"
-    "Guard остаётся в чате, но без активной подписки не сможет держать полный автоматический режим.\n"
-    "Часть опасного контента придётся чистить вручную.\n\n"
-    "Без активной защиты в ленте чаще появляются\n"
-    "⛔ реклама казино, мошенников и крипто-схем\n"
-    "❌ сообщения о запрещённых веществах\n"
-    "👎 ссылки на нелегальный контент\n\n"
-    "*Важно по закону:* ст. 6.13 КоАП и ст. 228.1 УК РФ.\n"
-    "Если админ знал о таких публикациях и не удалил их, возможна ответственность.\n"
-    "Примеры из [судебной практики](https://dzen.ru/a/Z4-D4Y6bG07j33Kc) уже есть.\n\n"
-    "Продлите подписку и верните Guard в полный боевой режим."
-)
-# Истёк оплаченный период (не промо): без формулировок про «неудачное списание» — период просто закончился.
-GUARD_PAYMENT_SUB_EXPIRED_TEXT = (
-    "🛡 *Guard: оплаченный период Premium закончился*\n\n"
-    "Бот в чатах *остаётся*, но без активной подписки Guard держит только *базовый* режим: лимиты и часть правил будут уже не те, "
-    "что на полном Premium.\n\n"
-    "Автопродление с карты ЮKassa срабатывает только если вы сохраняли способ оплаты и на стороне сервиса включены попытки списания. "
-    "Если период просто истёк — это не обязательно «ошибка банка»: чаще всего достаточно *продлить вручную* в мини-приложении.\n\n"
-    "Без полной защиты в ленте чаще проскакивают\n"
-    "⛔ казино и мошенники\n"
-    "❌ запрещённые темы\n"
-    "👎 сомнительные ссылки\n\n"
-    "*По закону:* ст. 6.13 КоАП и ст. 228.1 УК РФ — модератору важно не оставлять опасный контент без реакции.\n\n"
-    "Верните Premium одним нажатием — кнопка ниже."
-)
-GUARD_25_DAYS_TEXT = (
-    "🛡 *Guard рядом уже 25 дней* — и вот что мы сделали вместе:\n\n"
-    "• Остановлено и удалено: *{moderation_count}*\n"
-    "• Под защитой сейчас: *{chats_count}* чатов\n"
-    "• Подключились в ваши чаты: *{joins_count}* участников\n\n"
-    "Если бы это делалось вручную,\n"
-    f"это заняло бы примерно *{{hours_saved}} ч* и стоило около *{{human_cost_rub}} ₽*.\n\n"
-    "Спасибо, что доверяете Guard безопасность ваших сообществ 💚"
-)
-SUB_END_5D_TEXT = (
-    "Хай 👋\n\n"
-    "До окончания периода *Guard Premium* осталось *5 дней*.\n\n"
-    "Если у вас привязана карта ЮKassa, автосписание мы *по очереди пытаемся провести* в течение "
-    "*последних {charge_window_hours} ч.* до конца периода (сервер обходит подписчиков по расписанию — не строго в последний час).\n\n"
-    "Проверьте, что на карте достаточно средств.\n\n"
-    "💡 Если продлевать сразу на *12 месяцев*, экономия составляет примерно *{discount_percent}%*.\n\n"
-    "Все настройки — в разделе «Тариф и оплата»."
-)
-# Менее чем за час до конца периода: совпадает с «последним шансом» попасть в окно реального автосписания
-SUB_END_1H_TEXT_AUTORENEW = (
-    "Напомним бережно 💛\n\n"
-    "До окончания *Guard Premium* осталось *меньше часа*.\n\n"
-    "Если карта привязана, в ближайшее время сервис *попытается списать продление* "
-    "— это та же механика, что и фоновые попытки ЮKassa (окно до *{charge_window_hours} ч.* до срока уже могло начаться ранее).\n\n"
-    "Проверьте баланс карты. Отключить автосписание — в «Тариф и оплата».\n\n"
-    "Спасибо, что вы с Guard 🛡"
-)
-SUB_END_1H_TEXT_MANUAL = (
-    "Напомним бережно 💛\n\n"
-    "До окончания *Guard Premium* осталось *меньше часа*.\n\n"
-    "Автосписание по карте сейчас недоступно (нет сохранённого способа оплаты) — "
-    "продлите подписку вручную в разделе «Тариф и оплата», чтобы защита не прерывалась.\n\n"
-    "Спасибо, что вы с Guard 🛡"
-)
-PROMO_ENDED_TEXT = (
-    "Промокодный период *Guard Premium* завершился.\n\n"
-    "Если у вас есть новый промокод — активируйте его в разделе «Аккаунт → Промокод».\n"
-    "Или подключите Premium в «Тариф и оплата», чтобы снова получить:\n"
-    "• рассылку\n"
-    "• AI-функции\n"
-    "• гибкие настройки управления\n"
-    "• подключение админов к управлению группой через своего бота."
-)
-AUTOPAY_FAIL_TEXT = (
-    "Попытка автосписания за продление Guard через ЮKassa *не прошла* (ответ банка или ЮKassa).\n\n"
-    "Мы дали ещё *1 день* доступа и сможем повторить попытку позже (не чаще, чем раз в сутки по правилам сервиса).\n\n"
-    "Если и повторная попытка не удастся, расширенные функции Premium отключатся — можно продлить вручную."
-)
-AUTOPAY_RETRY_FAIL_TEXT = (
-    "К сожалению, повторная попытка автосписания за Guard тоже не удалась 💛\n\n"
-    "Чтобы не потерять Premium-защиту,\n"
-    "продлите подписку вручную — по кнопке ниже."
-)
 
 
 def _is_topic_closed_error(exc: Exception) -> bool:
@@ -204,48 +120,6 @@ def _annual_discount_percent() -> int:
         return 50
     pct = int(round(((base - p12) / base) * 100.0))
     return max(1, min(95, pct))
-
-# Тексты напоминаний (ТЗ)
-REMINDER_12H_TEXT = (
-    "😈 AntiSpam Guard напоминает.\n\n"
-    "Вы запустили бота, но ещё не подключили ни одной группы.\n\n"
-    "Я могу защищать чат от:\n"
-    "• спама\n"
-    "• ссылочного мусора\n"
-    "• рейдов\n"
-    "• ботов\n\n"
-    "Подключение занимает 10 секунд."
-)
-REMINDER_24H_TEXT = (
-    "😈 Я всё ещё жду.\n\n"
-    "Пока я не подключён — спамеры чувствуют себя спокойно.\n"
-    "Подключите группу и я начну работу."
-)
-REMINDER_3D_TEXT = (
-    "😈 Последнее напоминание.\n\n"
-    "Я могу защищать ваши чаты автоматически.\n"
-    "Добавьте меня администратором и я начну работу."
-)
-
-REPORTS_REMINDER_TEXT = (
-    "😈 *AntiSpam Guard*\n\n"
-    "Подключи чат отчётов, чтобы не пропускать важное:\n"
-    "• 🧹 удаления сообщений\n"
-    "• 🔇 муты\n"
-    "• ⛔ баны\n"
-    "• ✅ кнопки размута\n\n"
-    "Так в одном месте видно, кого и за что остановил Guard."
-)
-
-# Guard сообщения в группе раз в 3 дня (ТЗ, случайный выбор)
-GUARDIAN_PERIODIC_TEXTS = [
-    "😈 AntiSpam Guard на месте.\nПока всё спокойно.\nСпамеров не обнаружено.\nНо если появятся — разберусь.",
-    "🛡 AntiSpam Guard проверил чат.\nСпам не обнаружен.\nМожно продолжать общаться спокойно.",
-    "😈 Я здесь.\nСлежу за ссылками,\nботами\nи подозрительными сообщениями.\nЕсли кто-то решит спамить — долго не проживёт.",
-    "🛡 Guard проверяет чат.\nЕсли заметите странные ссылки — можете не переживать.\nЯ их тоже вижу.",
-    "😈 AntiSpam Guard на дежурстве.\nПорядок в чате поддерживается автоматически.",
-]
-
 
 def _parse_admin_ids() -> set[int]:
     out: set[int] = set()
@@ -439,28 +313,26 @@ def _expired_reminder_threshold_days(n: int) -> int:
     return total
 
 
-def _expired_warning_text_for(display_name: str | None = None) -> str:
+def _expired_warning_text_for(display_name: str | None, locale: str) -> str:
     name = (display_name or "").strip()
+    loc = normalize_locale(locale)
     if not name:
-        return EXPIRED_WARNING_TEXT
-    return (
-        "Эх 🥹\n\n"
-        f"🔔 Здравствуйте, {name}!\n"
-        "Сообщаем, что срок действия вашей подписки Guard истёк.\n\n"
-        "Чтобы снова получить полный доступ ко всем инструментам защиты,\n"
-        "пожалуйста, продлите подписку в приложении по кнопке ниже 😇"
-    )
+        return t(loc, "reminders.expired_warning")
+    return t(loc, "reminders.expired_warning_named", name=name)
 
 
-def _guard_payment_sub_expired_text_for(display_name: str | None = None) -> str:
+def _guard_payment_sub_expired_text_for(display_name: str | None, locale: str) -> str:
     name = (display_name or "").strip()
-    if not name:
-        return GUARD_PAYMENT_SUB_EXPIRED_TEXT
-    return GUARD_PAYMENT_SUB_EXPIRED_TEXT.replace(
-        "🛡 *Guard: оплаченный период Premium закончился*\n\n",
-        f"🛡 *Guard: оплаченный период Premium закончился*\n\nЗдравствуйте, {name}.\n\n",
-        1,
-    )
+    loc = normalize_locale(locale)
+    block = t(loc, "reminders.payment_name_block", name=name) if name else ""
+    return t(loc, "reminders.guard_payment_sub_expired", name_block=block)
+
+
+def _trial_preview_guard_text_for(display_name: str | None, locale: str) -> str:
+    name = (display_name or "").strip()
+    loc = normalize_locale(locale)
+    block = t(loc, "reminders.trial_name_block", name=name) if name else ""
+    return t(loc, "reminders.trial_preview_guard", name_block=block)
 
 
 async def send_expired_guard_payment(bot, user_id: int) -> None:
@@ -469,14 +341,17 @@ async def send_expired_guard_payment(bot, user_id: int) -> None:
     from aiogram.types import FSInputFile
     from aiogram.exceptions import TelegramBadRequest
 
+    async with await get_session() as session:
+        loc = await user_locale(session, int(user_id))
+
     billing_link = await _startapp_link_for_bot(bot, "billing")
     kb = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="✅ Продлить Premium", url=billing_link)]]
+        inline_keyboard=[[InlineKeyboardButton(text=t(loc, "reminders.btn_extend_premium"), url=billing_link)]]
     )
-    text = _guard_payment_sub_expired_text_for(None)
+    text = _guard_payment_sub_expired_text_for(None, loc)
     try:
         chat = await bot.get_chat(user_id)
-        text = _guard_payment_sub_expired_text_for(getattr(chat, "first_name", None))
+        text = _guard_payment_sub_expired_text_for(getattr(chat, "first_name", None), loc)
     except Exception:
         pass
     photo = None
@@ -526,14 +401,18 @@ async def send_expired_warning(bot, user_id: int) -> None:
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
     from aiogram.types import FSInputFile
     from aiogram.exceptions import TelegramBadRequest
+
+    async with await get_session() as session:
+        loc = await user_locale(session, int(user_id))
+
     billing_link = await _startapp_link_for_bot(bot, "billing")
     kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Продлить защиту", url=billing_link),
+        InlineKeyboardButton(text=t(loc, "reminders.btn_extend_protection"), url=billing_link),
     ]])
-    text = EXPIRED_WARNING_TEXT
+    text = _expired_warning_text_for(None, loc)
     try:
         chat = await bot.get_chat(user_id)
-        text = _expired_warning_text_for(getattr(chat, "first_name", None))
+        text = _expired_warning_text_for(getattr(chat, "first_name", None), loc)
     except Exception:
         pass
 
@@ -593,13 +472,23 @@ async def send_expired_warning(bot, user_id: int) -> None:
             )
 
 
-async def send_expired_warning_preview(bot, chat_id: int, *, display_name: str | None = None) -> None:
+async def send_expired_warning_preview(
+    bot,
+    chat_id: int,
+    *,
+    display_name: str | None = None,
+    locale: str | None = None,
+) -> None:
     """Предпросмотр сообщения об истечении подписки в любом чате."""
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
     from aiogram.types import FSInputFile
+
+    loc = normalize_locale(locale) if locale is not None else DEFAULT_LOCALE
     billing_link = await _startapp_link_for_bot(bot, "billing")
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Продлить защиту", url=billing_link)]])
-    text = _expired_warning_text_for(display_name)
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=t(loc, "reminders.btn_extend_protection"), url=billing_link)]]
+    )
+    text = _expired_warning_text_for(display_name, loc)
     photo = FSInputFile(str(EXPIRED_WARNING_PHOTO_PATH)) if EXPIRED_WARNING_PHOTO_PATH.exists() else None
     if photo is not None:
         await bot.send_photo(chat_id=chat_id, photo=photo, caption=text, parse_mode="Markdown", reply_markup=kb)
@@ -607,14 +496,23 @@ async def send_expired_warning_preview(bot, chat_id: int, *, display_name: str |
         await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
 
 
-async def send_trial_warning_preview_guard(bot, chat_id: int, *, display_name: str | None = None) -> None:
+async def send_trial_warning_preview_guard(
+    bot,
+    chat_id: int,
+    *,
+    display_name: str | None = None,
+    locale: str | None = None,
+) -> None:
     """Предпросмотр guard-версии сообщения об истечении подписки с ссылкой на практику."""
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
     from aiogram.types import FSInputFile
+
+    loc = normalize_locale(locale) if locale is not None else DEFAULT_LOCALE
     billing_link = await _startapp_link_for_bot(bot, "billing")
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Продлить подписку", url=billing_link)]])
-    name = (display_name or "").strip()
-    text = TRIAL_PREVIEW_GUARD_TEXT if not name else TRIAL_PREVIEW_GUARD_TEXT.replace("⚠ *Guard: подписка завершилась*", f"⚠ *Guard: подписка завершилась*\n\nЗдравствуйте, {name}.")
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=t(loc, "reminders.btn_extend_sub"), url=billing_link)]]
+    )
+    text = _trial_preview_guard_text_for(display_name, loc)
     photo = FSInputFile(str(TRIAL_PREVIEW_GUARD_PHOTO_PATH)) if TRIAL_PREVIEW_GUARD_PHOTO_PATH.exists() else None
     if photo is not None:
         await bot.send_photo(chat_id=chat_id, photo=photo, caption=text, parse_mode="Markdown", reply_markup=kb)
@@ -630,6 +528,7 @@ async def _run_reminders_no_group(bot, session: AsyncSession, now: datetime, tpl
     users = list(res.scalars().all())
     for user in users:
         try:
+            loc = normalize_locale(getattr(user, "language", None))
             started_at = user.first_start_at
             if not started_at:
                 continue
@@ -648,8 +547,8 @@ async def _run_reminders_no_group(bot, session: AsyncSession, now: datetime, tpl
                     user.reminder_stage = 4
                     await session.commit()
                     continue
-                text = _tpl_text(tpl, "reminder_12h", REMINDER_12H_TEXT)
-                button_text = "➕ Подключить группу"
+                text = _tpl_text(tpl, "reminder_12h", t(loc, "reminders.no_group_12h"))
+                button_text = t(loc, "reminders.btn_connect_group")
                 user.reminder_stage = 1
             elif stage == 1 and elapsed >= d24:
                 count = await count_protected_chats(session, user.telegram_id)
@@ -657,8 +556,8 @@ async def _run_reminders_no_group(bot, session: AsyncSession, now: datetime, tpl
                     user.reminder_stage = 4
                     await session.commit()
                     continue
-                text = _tpl_text(tpl, "reminder_24h", REMINDER_24H_TEXT)
-                button_text = "🛡 Подключить группу"
+                text = _tpl_text(tpl, "reminder_24h", t(loc, "reminders.no_group_24h"))
+                button_text = t(loc, "reminders.btn_connect_group_shield")
                 user.reminder_stage = 2
             elif stage == 2 and elapsed >= d3d:
                 count = await count_protected_chats(session, user.telegram_id)
@@ -666,8 +565,8 @@ async def _run_reminders_no_group(bot, session: AsyncSession, now: datetime, tpl
                     user.reminder_stage = 4
                     await session.commit()
                     continue
-                text = _tpl_text(tpl, "reminder_3d", REMINDER_3D_TEXT)
-                button_text = "➕ Подключить группу"
+                text = _tpl_text(tpl, "reminder_3d", t(loc, "reminders.no_group_3d"))
+                button_text = t(loc, "reminders.btn_connect_group")
                 user.reminder_stage = 4
             else:
                 continue
@@ -698,6 +597,7 @@ async def _run_reminders_reports_chat(bot, session: AsyncSession, now: datetime,
     users = list(res.scalars().all())
     for user in users:
         try:
+            loc = normalize_locale(getattr(user, "language", None))
             count = await count_protected_chats(session, user.telegram_id)
             if count == 0:
                 continue
@@ -722,11 +622,11 @@ async def _run_reminders_reports_chat(bot, session: AsyncSession, now: datetime,
             me = await bot.get_me()
             reports_link = _startapp_link(str(me.username or ""), "reports")
             kb = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="📊 Подключить чат отчётов", url=reports_link),
+                InlineKeyboardButton(text=t(loc, "reminders.btn_reports_connect"), url=reports_link),
             ]])
             await bot.send_message(
                 user.telegram_id,
-                _tpl_text(tpl, "reports_reminder", REPORTS_REMINDER_TEXT),
+                _tpl_text(tpl, "reports_reminder", t(loc, "reminders.reports_reminder")),
                 parse_mode="Markdown",
                 reply_markup=kb,
             )
@@ -748,7 +648,11 @@ async def _run_guardian_periodic_messages(bot, session: AsyncSession, now: datet
             Rule.guardian_periodic_enabled,
             Rule.guardian_periodic_interval_hours,
             Rule.last_guardian_message_at,
-        ).join(Rule, Chat.id == Rule.chat_id).where(
+            User.language,
+        )
+        .join(Rule, Chat.id == Rule.chat_id)
+        .outerjoin(User, User.telegram_id == Chat.owner_user_id)
+        .where(
             Chat.is_log_chat == False,  # noqa: E712
             Chat.is_active == True,  # noqa: E712
             # Каналы (рассылка / Mini App) — не группы: туда нельзя слать «проверил чат» (лезет в ленту канала).
@@ -756,7 +660,17 @@ async def _run_guardian_periodic_messages(bot, session: AsyncSession, now: datet
         )
     )
     for row in res.all():
-        chat_id, last_activity, rule_chat_id, guardian_enabled, periodic_enabled, periodic_hours, last_sent = row
+        (
+            chat_id,
+            last_activity,
+            rule_chat_id,
+            guardian_enabled,
+            periodic_enabled,
+            periodic_hours,
+            last_sent,
+            owner_lang,
+        ) = row
+        loc = normalize_locale(owner_lang)
         if not bool(guardian_enabled) or not bool(periodic_enabled):
             continue
         interval_h = max(6, min(168, int(periodic_hours or 24)))
@@ -773,7 +687,7 @@ async def _run_guardian_periodic_messages(bot, session: AsyncSession, now: datet
                 continue
         # Если last_activity_at нет — всё равно шлём по текущему интервалу (упрощение)
         try:
-            guard_msg = random.choice(GUARDIAN_PERIODIC_TEXTS)
+            guard_msg = random.choice(guardian_periodic_texts(loc))
             await bot.send_message(int(chat_id), guard_msg)
             await session.execute(
                 update(Rule)
@@ -791,7 +705,7 @@ async def _run_guardian_periodic_messages(bot, session: AsyncSession, now: datet
                     await session.rollback()
                     if await remap_group_chat_ids(int(chat_id), int(new_cid)):
                         try:
-                            await bot.send_message(int(new_cid), random.choice(GUARDIAN_PERIODIC_TEXTS))
+                            await bot.send_message(int(new_cid), random.choice(guardian_periodic_texts(loc)))
                             async with await get_session() as s2:
                                 await s2.execute(
                                     update(Rule)
@@ -843,12 +757,8 @@ async def _run_auto_reports(bot, session: AsyncSession, now: datetime) -> None:
         total = cnt.scalar() or 0
         try:
             title = (chat_row.title or "").strip() or str(chat_row.id)
-            text = (
-                "📊 *Автоотчёт Guard*\n\n"
-                f"Чат: *{title}*\n"
-                f"За последние 24 ч: зафиксировано действий — *{total}*\n\n"
-                "_Подробные отчёты приходят сюда при каждом удалении/муте/бане._"
-            )
+            loc = await owner_locale_for_chat(session, int(chat_row.id))
+            text = t(loc, "reminders.auto_report", title=title, total=int(total))
             await bot.send_message(log_chat_id, text, parse_mode="Markdown")
             rule.last_auto_report_at = now
             await session.commit()
@@ -883,23 +793,12 @@ async def _run_owner_daily_report(bot, session: AsyncSession, now: datetime, tpl
             PartnerCommission.created_at >= since
         ).group_by(PartnerCommission.level).order_by(PartnerCommission.level.asc())
     )
-    lvl_lines = []
-    for row in lvl_q.all():
-        lvl_lines.append(f"• L{int(row.level or 0)}: оплат {int(row.payments_count or 0)} / продажи {round(float(row.sales_sum or 0.0), 2):.2f} ₽")
-    if not lvl_lines:
-        lvl_lines.append("• Нет оплат по реферальным уровням")
-
+    lvl_rows = list(lvl_q.all())
     pay_count, pay_sum = pays_q.one_or_none() or (0, 0.0)
-    text_head = _tpl_text(tpl, "owner_daily_report", "📊 Ежесуточная сводка Guard")
-    msg = (
-        f"{text_head}\n\n"
-        f"За {window_h} ч.:\n"
-        f"• Вступлений в группы: {int(joins_q.scalar() or 0)}\n"
-        f"• Нажали /start: {int(starts_q.scalar() or 0)}\n"
-        f"• Оплат: {int(pay_count or 0)} на {round(float(pay_sum or 0.0), 2):.2f} ₽\n"
-        f"• Шеров рефералки: {int(shares_q.scalar() or 0)}\n\n"
-        f"Реферальные уровни ({window_h}ч):\n" + "\n".join(lvl_lines)
-    )
+    joins_n = int(joins_q.scalar() or 0)
+    starts_n = int(starts_q.scalar() or 0)
+    shares_n = int(shares_q.scalar() or 0)
+    pay_sum_f = float(pay_sum or 0.0)
 
     ids = await _owner_admin_target_ids(session)
     if not ids:
@@ -907,6 +806,33 @@ async def _run_owner_daily_report(bot, session: AsyncSession, now: datetime, tpl
 
     for tid in sorted(ids):
         try:
+            loc = await user_locale(session, int(tid))
+            lvl_lines_loc: list[str] = []
+            for row in lvl_rows:
+                lvl_lines_loc.append(
+                    t(
+                        loc,
+                        "reminders.owner_daily_lvl_line",
+                        level=int(row.level or 0),
+                        payments_count=int(row.payments_count or 0),
+                        sales_sum=float(row.sales_sum or 0.0),
+                    )
+                )
+            if not lvl_lines_loc:
+                lvl_lines_loc.append(t(loc, "reminders.owner_daily_no_lvl"))
+            text_head = _tpl_text(tpl, "owner_daily_report", t(loc, "reminders.owner_daily_head"))
+            msg = t(
+                loc,
+                "reminders.owner_daily_block",
+                head=text_head,
+                window_h=window_h,
+                joins=joins_n,
+                starts=starts_n,
+                pay_count=int(pay_count or 0),
+                pay_sum=pay_sum_f,
+                shares=shares_n,
+                lvl_block="\n".join(lvl_lines_loc),
+            )
             if trow:
                 if not await _template_can_send_now(session, trow, int(tid), now, bucket=f"owner_daily:{day_key}"):
                     continue
@@ -971,11 +897,20 @@ async def _run_owner_join_reports(bot, session: AsyncSession, now: datetime) -> 
                 )
             )
             joins = int(joins_q.scalar() or 0)
-            label = "день" if p == "day" else "3 дня" if p == "3d" else "неделю" if p == "week" else "месяц"
-            msg = (
-                "📈 Короткий отчёт Guard\n\n"
-                f"За {label} в ваши группы подключились: *{joins}* чел.\n"
-                f"Активных ваших групп: *{active_groups}*"
+            loc = await user_locale(session, tid)
+            period_i18n_key = {
+                "day": "owner_join_period_day",
+                "3d": "owner_join_period_3d",
+                "week": "owner_join_period_week",
+                "month": "owner_join_period_month",
+            }[p]
+            label = t(loc, f"reminders.{period_i18n_key}")
+            msg = t(loc, "reminders.owner_join_title") + t(
+                loc,
+                "reminders.owner_join_body",
+                period=label,
+                joins=joins,
+                groups=active_groups,
             )
             try:
                 await bot.send_message(tid, msg, parse_mode="Markdown")
@@ -996,22 +931,28 @@ def _render_template_text(raw: str, ctx: dict[str, str]) -> str:
 
 async def _run_flexible_templates(bot, session: AsyncSession, now: datetime, tpl: dict[str, AdminMessageTemplate]) -> None:
     """Гибкие сообщения по событиям в окне: joins/starts/payments/referral shares."""
-    events = {
-        "window_group_joins": "Вступления в группы",
-        "window_starts": "Нажали /start",
-        "window_payments": "Оплаты",
-        "window_referral_shares": "Шеры рефералки",
-    }
+    events = (
+        "window_group_joins",
+        "window_starts",
+        "window_payments",
+        "window_referral_shares",
+    )
     targets = await _owner_admin_target_ids(session)
     if not targets:
         return
-    for t in tpl.values():
-        event_key = str(getattr(t, "event_key", "") or "manual")
+    default_tpl_key = {
+        "window_group_joins": "reminders.flex_default_window_joins",
+        "window_starts": "reminders.flex_default_window_starts",
+        "window_payments": "reminders.flex_default_window_payments",
+        "window_referral_shares": "reminders.flex_default_window_referral",
+    }
+    for tpl_row in tpl.values():
+        event_key = str(getattr(tpl_row, "event_key", "") or "manual")
         if event_key not in events:
             continue
-        if not bool(getattr(t, "enabled", True)):
+        if not bool(getattr(tpl_row, "enabled", True)):
             continue
-        hours = max(1, min(168, int(getattr(t, "trigger_hours", 24) or 24)))
+        hours = max(1, min(168, int(getattr(tpl_row, "trigger_hours", 24) or 24)))
         since = now - timedelta(hours=hours)
         count = 0
         amount = 0.0
@@ -1035,29 +976,32 @@ async def _run_flexible_templates(bot, session: AsyncSession, now: datetime, tpl
             q = await session.execute(select(func.count(ReferralShareHit.id)).where(ReferralShareHit.created_at >= since))
             count = int(q.scalar() or 0)
 
-        if count < max(1, int(getattr(t, "min_count", 1) or 1)):
+        if count < max(1, int(getattr(tpl_row, "min_count", 1) or 1)):
             continue
-        ctx = {
-            "count": str(count),
-            "hours": str(hours),
-            "payments_sum": f"{round(amount, 2):.2f}",
-            "event_label": events[event_key],
-            "date": now.date().isoformat(),
-        }
-        default_text = (
-            f"🔔 {events[event_key]}\n\n"
-            f"За {{hours}} ч: {{count}}\n"
-            + ("Сумма оплат: {{payments_sum}} ₽\n" if event_key == "window_payments" else "")
-            + "Дата: {{date}}"
-        )
-        text_msg = _render_template_text(str(getattr(t, "body_text", "") or default_text), ctx)
         bucket = f"{event_key}:{now.date().isoformat()}:{hours}:c{count}"
         for tid in targets:
             try:
-                if not await _template_can_send_now(session, t, int(tid), now, bucket=bucket):
+                loc = await user_locale(session, int(tid))
+                ev_k = f"reminders.flex_event.{event_key}"
+                ev_label = t(loc, ev_k)
+                if ev_label == ev_k:
+                    alt = "en" if loc == "ru" else "ru"
+                    ev_label = t(alt, ev_k)
+                if ev_label == ev_k:
+                    ev_label = event_key
+                ctx = {
+                    "count": str(count),
+                    "hours": str(hours),
+                    "payments_sum": f"{round(amount, 2):.2f}",
+                    "event_label": ev_label,
+                    "date": now.date().isoformat(),
+                }
+                default_text = t(loc, default_tpl_key[event_key], **ctx)
+                text_msg = _render_template_text(str(getattr(tpl_row, "body_text", "") or default_text), ctx)
+                if not await _template_can_send_now(session, tpl_row, int(tid), now, bucket=bucket):
                     continue
-                await bot.send_message(int(tid), text_msg, parse_mode=str(getattr(t, "parse_mode", "") or "Markdown"))
-                await _mark_template_sent(session, t, int(tid), bucket=bucket)
+                await bot.send_message(int(tid), text_msg, parse_mode=str(getattr(tpl_row, "parse_mode", "") or "Markdown"))
+                await _mark_template_sent(session, tpl_row, int(tid), bucket=bucket)
             except Exception as e:
                 logger.warning("flex_template %s to %s: %s", event_key, tid, e)
 
@@ -1079,6 +1023,7 @@ async def _run_subscription_expired(bot, session: AsyncSession, now: datetime) -
             if uid and is_full_admin_user(user, uid):
                 continue
             src = str(getattr(user, "subscription_source", "") or "").strip().lower()
+            loc = normalize_locale(getattr(user, "language", None))
             user.tariff = Tariff.FREE.value
             user.chat_limit = TARIFF_CHAT_LIMITS[Tariff.FREE.value]
             user.group_limit = TARIFF_GROUP_LIMITS[Tariff.FREE.value]
@@ -1095,9 +1040,9 @@ async def _run_subscription_expired(bot, session: AsyncSession, now: datetime) -
                 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
                 billing_link = await _startapp_link_for_bot(bot, "billing")
                 kb = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text="💳 Тариф и оплата", url=billing_link),
+                    InlineKeyboardButton(text=t(loc, "reminders.btn_billing"), url=billing_link),
                 ]])
-                await bot.send_message(uid, PROMO_ENDED_TEXT, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
+                await bot.send_message(uid, t(loc, "reminders.promo_ended"), parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
             elif src == "payment":
                 await send_expired_guard_payment(bot, uid)
             else:
@@ -1138,10 +1083,12 @@ async def _run_subscription_expired_followups(bot, session: AsyncSession, now: d
             next_threshold = _expired_reminder_threshold_days(followups_sent + 1)
             if elapsed_days < next_threshold:
                 continue
+            loc = await user_locale(session, tid)
             await send_trial_warning_preview_guard(
                 bot,
                 tid,
                 display_name=first_name,
+                locale=loc,
             )
             await session.execute(update(User).where(User.id == int(user_id)).values(reminder_stage=stage + 1))
             await session.commit()
@@ -1227,11 +1174,13 @@ async def _run_guard_25_days_story(bot, session: AsyncSession, now: datetime) ->
     ).scalars().all()
     billing_link = await _startapp_link_for_bot(bot, "billing")
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="🛡 Открыть Guard Premium", url=billing_link)]]
-    )
+
     for u in users:
         try:
+            loc = normalize_locale(getattr(u, "language", None))
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text=t(loc, "reminders.btn_open_guard_premium"), url=billing_link)]]
+            )
             uid = int(getattr(u, "telegram_id", 0) or 0)
             if uid <= 0:
                 continue
@@ -1287,7 +1236,9 @@ async def _run_guard_25_days_story(bot, session: AsyncSession, now: datetime) ->
             # ставка модератора ~600 ₽/ч.
             hours_saved = round((moderation_count * 35.0) / 3600.0, 1)
             human_cost_rub = int(round(hours_saved * 600))
-            msg = GUARD_25_DAYS_TEXT.format(
+            msg = t(
+                loc,
+                "reminders.guard_25_days",
                 moderation_count=moderation_count,
                 chats_count=chats_count,
                 joins_count=joins_count,
@@ -1305,9 +1256,6 @@ async def _run_subscription_renewal_reminders(bot, session: AsyncSession, now: d
     """Напоминания перед продлением: за 5 дней и за 1 час до окончания."""
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
     billing_link = await _startapp_link_for_bot(bot, "billing")
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="💳 Тариф и оплата", url=billing_link)]]
-    )
     users = (
         await session.execute(
             select(User).where(
@@ -1322,6 +1270,10 @@ async def _run_subscription_renewal_reminders(bot, session: AsyncSession, now: d
             uid = int(getattr(u, "telegram_id", 0) or 0)
             if uid <= 0:
                 continue
+            loc = normalize_locale(getattr(u, "language", None))
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text=t(loc, "reminders.btn_billing"), url=billing_link)]]
+            )
             src = str(getattr(u, "subscription_source", "") or "").strip().lower()
             if src != "payment":
                 logger.info("renewal_reminder skip user=%s reason=source_%s", uid, src or "unknown")
@@ -1344,7 +1296,9 @@ async def _run_subscription_renewal_reminders(bot, session: AsyncSession, now: d
                 if await _claim_dispatch_bucket(session, uid, bucket):
                     await bot.send_message(
                         uid,
-                        SUB_END_5D_TEXT.format(
+                        t(
+                            loc,
+                            "reminders.sub_end_5d",
                             discount_percent=_annual_discount_percent(),
                             charge_window_hours=autorenew_window_hours(),
                         ),
@@ -1359,11 +1313,13 @@ async def _run_subscription_renewal_reminders(bot, session: AsyncSession, now: d
                 if await _claim_dispatch_bucket(session, uid, bucket):
                     pm_stored = bool(str(getattr(u, "yookassa_payment_method_id", "") or "").strip())
                     if yookassa_autorenew_worker_enabled() and pm_stored:
-                        body = SUB_END_1H_TEXT_AUTORENEW.format(
+                        body = t(
+                            loc,
+                            "reminders.sub_end_1h_autorenew",
                             charge_window_hours=autorenew_window_hours(),
                         )
                     else:
-                        body = SUB_END_1H_TEXT_MANUAL
+                        body = t(loc, "reminders.sub_end_1h_manual")
                     await bot.send_message(uid, body, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
                 else:
                     logger.info("renewal_reminder skip user=%s reason=duplicate_bucket bucket=%s", uid, bucket)
@@ -1385,9 +1341,7 @@ async def _run_autorenew_retries(bot, session: AsyncSession, now: datetime) -> N
         return
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
     billing_link = await _startapp_link_for_bot(bot, "billing")
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="💳 Перейти к тарифам", url=billing_link)]]
-    )
+
     users = (
         await session.execute(
             select(User).where(
@@ -1402,6 +1356,10 @@ async def _run_autorenew_retries(bot, session: AsyncSession, now: datetime) -> N
             uid = int(getattr(u, "telegram_id", 0) or 0)
             if uid <= 0:
                 continue
+            loc = normalize_locale(getattr(u, "language", None))
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text=t(loc, "reminders.btn_go_tariffs"), url=billing_link)]]
+            )
             src = str(getattr(u, "subscription_source", "") or "").strip().lower()
             if src != "payment":
                 logger.info("autorenew_retries skip user=%s reason=source_%s", uid, src or "unknown")
@@ -1431,7 +1389,7 @@ async def _run_autorenew_retries(bot, session: AsyncSession, now: datetime) -> N
             if await _claim_dispatch_bucket(session, uid, fail_bucket):
                 u.subscription_until = now + timedelta(days=1)
                 await session.commit()
-                await bot.send_message(uid, AUTOPAY_FAIL_TEXT, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
+                await bot.send_message(uid, t(loc, "reminders.autopay_fail"), parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
                 continue
             logger.info("autorenew_retries skip user=%s reason=duplicate_bucket bucket=%s", uid, fail_bucket)
             if now >= sub_until and await _claim_dispatch_bucket(session, uid, retry_bucket):
@@ -1444,7 +1402,7 @@ async def _run_autorenew_retries(bot, session: AsyncSession, now: datetime) -> N
                 await enforce_owner_active_chat_limit(session, int(uid), int(TARIFF_CHAT_LIMITS[Tariff.FREE.value]))
                 u.reminder_stage = max(int(getattr(u, "reminder_stage", 0) or 0), 100)
                 await session.commit()
-                await bot.send_message(uid, AUTOPAY_RETRY_FAIL_TEXT, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
+                await bot.send_message(uid, t(loc, "reminders.autopay_retry_fail"), parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
             elif now >= sub_until:
                 logger.info("autorenew_retries skip user=%s reason=duplicate_bucket bucket=%s", uid, retry_bucket)
         except Exception as e:

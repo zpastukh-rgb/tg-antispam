@@ -71,6 +71,8 @@ from app.db.ensure_defaults import (
     ensure_moderation_logs_detail_column,
     ensure_user_post_rules_drafts_json_column,
     ensure_users_delegate_broadcast_payer_column,
+    ensure_users_language_column,
+    ensure_profanity_lang_column,
     ensure_admin_incident_feed_schema,
 )
 from app.db.session import engine
@@ -331,6 +333,8 @@ async def on_startup() -> None:
     await ensure_moderation_logs_detail_column(engine)
     await ensure_user_post_rules_drafts_json_column(engine)
     await ensure_users_delegate_broadcast_payer_column(engine)
+    await ensure_users_language_column(engine)
+    await ensure_profanity_lang_column(engine)
     await ensure_admin_incident_feed_schema(engine)
     try:
         from app.services.pii_user_store import ensure_pii_schema

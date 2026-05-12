@@ -16,6 +16,8 @@ const apiBase = String(
   .trim()
   .replace(/\/$/, '')
 
+const logHttp = String(process.env.GUARD_LOG_HTTP || '').trim() === '1'
+
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
@@ -47,9 +49,13 @@ function send(res, status, headers, body) {
 
 http
   .createServer((req, res) => {
+    const started = Date.now()
+    let pathLog = String(req.url || '/').split('?')[0]
     try {
       const u = new URL(req.url || '/', `http://127.0.0.1`)
-      if (u.pathname === '/guard-api-config.js') {
+      pathLog = u.pathname
+      const pathLast = u.pathname.split('/').filter(Boolean).pop() || ''
+      if (pathLast === 'guard-api-config.js') {
         send(res, 200, { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-store' }, `window.__GUARD_API_BASE__=${JSON.stringify(apiBase)};`)
         return
       }
@@ -60,18 +66,35 @@ http
       if (filePath && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
         const ext = path.extname(filePath)
         const body = fs.readFileSync(filePath)
-        send(res, 200, { 'Content-Type': MIME[ext] || 'application/octet-stream' }, body)
+        const base = { 'Content-Type': MIME[ext] || 'application/octet-stream' }
+        if (ext === '.html') base['Cache-Control'] = 'no-store'
+        else if (rel.startsWith('assets/')) base['Cache-Control'] = 'public, max-age=31536000, immutable'
+        send(res, 200, base, body)
         return
       }
 
       const idx = path.join(root, 'index.html')
       if (fs.existsSync(idx)) {
-        send(res, 200, { 'Content-Type': 'text/html; charset=utf-8' }, fs.readFileSync(idx))
+        send(
+          res,
+          200,
+          {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store',
+          },
+          fs.readFileSync(idx),
+        )
         return
       }
       send(res, 404, { 'Content-Type': 'text/plain' }, 'not found')
     } catch (e) {
       send(res, 500, { 'Content-Type': 'text/plain' }, String(e?.message || e))
+    } finally {
+      if (logHttp) {
+        const ms = Date.now() - started
+        // eslint-disable-next-line no-console
+        console.log('[http]', req.method || 'GET', pathLog, res.statusCode, `${ms}ms`)
+      }
     }
   })
   .listen(port, '0.0.0.0', () => {

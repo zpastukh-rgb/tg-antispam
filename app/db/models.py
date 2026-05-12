@@ -113,6 +113,9 @@ class User(Base):
     # Кто платит AURUM за рассылку, когда постит делегат (менеджер) в чужие чаты: owner | delegate | delegate_first
     delegate_broadcast_payer: Mapped[str] = mapped_column(String(24), default="delegate_first")
 
+    # Язык интерфейса Mini App / бота (ru | en). При первом /start fallback идёт от Telegram language_code.
+    language: Mapped[str] = mapped_column(String(8), nullable=False, default="ru", server_default="ru")
+
 
 # =========================================================
 # REFERRAL SHARE EVENTS (события «поделился рефералкой»)
@@ -549,6 +552,9 @@ class ProfanityWord(Base):
     __tablename__ = "profanity_words"
 
     word: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # Локаль слова: 'ru' | 'en' | 'any'. Помогает фильтрам активировать EN-словарь
+    # только при наличии латиницы в нормализованном тексте.
+    lang: Mapped[str] = mapped_column(String(8), nullable=False, default="any", server_default="any")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -738,6 +744,25 @@ class WebAppSession(Base):
         index=True,
     )
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
+
+# =========================================================
+# PDF EXPORTS (журнал сформированных PDF-отчётов)
+# =========================================================
+
+class PdfExport(Base):
+    __tablename__ = "pdf_exports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    report_type: Mapped[str] = mapped_column(String(32), default="protection")
+    period_key: Mapped[str] = mapped_column(String(32), default="30d")
+    scope: Mapped[str] = mapped_column(String(32), default="all")
+    chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    from_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    to_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
 # =========================================================

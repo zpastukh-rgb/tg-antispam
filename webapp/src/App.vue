@@ -1,6 +1,7 @@
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import AppHeader from './components/AppHeader.vue'
 import AppSidebar from './components/AppSidebar.vue'
 import AppToast from './components/AppToast.vue'
@@ -10,12 +11,14 @@ import GuardBlueLoadingState from './components/GuardBlueLoadingState.vue'
 import { useDashboardSection } from './composables/useDashboardSection'
 import { routeTransitionOverlayActive } from './composables/useRouteTransitionLoader.js'
 import { useToast } from './composables/useToast'
-import { api, getInitData } from './api/client'
+import { api, getInitData, hasConfiguredApiBase } from './api/client'
+import { setLocale, getLocale, normalizeLocale } from './i18n'
 
 const route = useRoute()
 const router = useRouter()
 const { dashboardSection, setDashboardSection } = useDashboardSection()
 const { showToast } = useToast()
+const { t } = useI18n()
 
 const sidebarOpen = ref(false)
 let presenceTimer = null
@@ -23,17 +26,33 @@ let presenceTimer = null
 /** Единый фон мини-приложения (public), только под контентом. В админке — свой фон в AdminView. */
 const globalBgSrc = `${import.meta.env.BASE_URL}app-global-bg.png`
 
+const showApiConfigWarning = computed(() => !hasConfiguredApiBase())
+
 const showAppShellBackground = computed(() => String(route.name || '') !== 'Admin')
 
 function onGuardOpenMenu() {
   openMenu()
 }
 function onGuardSessionTerminated() {
-  showToast('Сессия завершена на этом устройстве. Откройте мини-приложение заново.', 4500)
+  showToast(t('app.session_terminated'), 4500)
   if (route.path !== '/connect') {
     router.replace({ path: '/connect', query: { terminated: '1' } }).catch(() => {})
   }
 }
+
+async function syncLocaleFromProfile() {
+  if (!getInitData()) return
+  try {
+    const me = await api.me()
+    if (me?.language) {
+      const norm = normalizeLocale(me.language)
+      if (getLocale() !== norm) setLocale(norm)
+    }
+  } catch {
+    //
+  }
+}
+
 onMounted(() => {
   window.addEventListener('guard-open-menu', onGuardOpenMenu)
   window.addEventListener('guard:session-terminated', onGuardSessionTerminated)
@@ -42,6 +61,9 @@ onMounted(() => {
     presenceTimer = setInterval(() => {
       api.presencePing().catch(() => {})
     }, 30000)
+    void nextTick(() => {
+      void syncLocaleFromProfile()
+    })
   }
 })
 onBeforeUnmount(() => {
@@ -97,6 +119,13 @@ function onSubscriptionBackFromHeader() {
       class="pointer-events-none fixed inset-0 z-[1] bg-gradient-to-b from-black/30 via-black/18 to-black/42"
     />
     <div class="relative z-10 flex min-h-[100dvh] min-h-screen flex-col bg-transparent">
+      <div
+        v-if="showApiConfigWarning"
+        class="border-b border-rose-500/40 bg-rose-950/90 px-3 py-2 text-center text-[11px] font-semibold leading-snug text-rose-100"
+        role="alert"
+      >
+        {{ t('app.api_base_missing_runtime') }}
+      </div>
       <AppToast />
       <AppHeader
         :sidebar-open="sidebarOpen"
@@ -129,12 +158,12 @@ function onSubscriptionBackFromHeader() {
       <Transition name="guard-route-fade">
         <div
           v-if="routeTransitionOverlayActive"
-          class="fixed left-0 right-0 z-[25] flex items-center justify-center bg-zinc-950/70 px-4 backdrop-blur-[3px] supports-[backdrop-filter]:bg-zinc-950/55 top-11 md:top-12"
+          class="pointer-events-none fixed left-0 right-0 z-[1200] flex items-center justify-center bg-zinc-950/70 px-4 backdrop-blur-[3px] supports-[backdrop-filter]:bg-zinc-950/55 top-11 md:top-12"
           style="bottom: calc(7.35rem + env(safe-area-inset-bottom, 0px))"
           aria-hidden="true"
         >
           <div
-            class="w-full max-w-sm rounded-2xl bg-white/[0.07] px-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_12px_40px_-20px_rgba(0,0,0,0.6)] backdrop-blur-xl"
+            class="pointer-events-auto w-full max-w-sm rounded-2xl bg-white/[0.07] px-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_12px_40px_-20px_rgba(0,0,0,0.6)] backdrop-blur-xl"
           >
             <GuardBlueLoadingState compact />
           </div>

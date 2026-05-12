@@ -24,7 +24,13 @@ function guardApiConfigPlugin() {
     name: 'guard-api-config',
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
-        if (req.url === '/guard-api-config.js' || req.url?.startsWith('/guard-api-config.js?')) {
+        const url = req.url || ''
+        if (url === '/guard-api-config.js' || url.startsWith('/guard-api-config.js?')) {
+          send(res)
+          return
+        }
+        const base = url.split('?')[0].split('/').pop() || ''
+        if (base === 'guard-api-config.js') {
           send(res)
           return
         }
@@ -33,7 +39,13 @@ function guardApiConfigPlugin() {
     },
     configurePreviewServer(server) {
       server.middlewares.use((req, res, next) => {
-        if (req.url === '/guard-api-config.js' || req.url?.startsWith('/guard-api-config.js?')) {
+        const url = req.url || ''
+        if (url === '/guard-api-config.js' || url.startsWith('/guard-api-config.js?')) {
+          send(res)
+          return
+        }
+        const base = url.split('?')[0].split('/').pop() || ''
+        if (base === 'guard-api-config.js') {
           send(res)
           return
         }
@@ -43,9 +55,26 @@ function guardApiConfigPlugin() {
   }
 }
 
+/** Комментарий в dist/index.html — по View Source видно, что выкатили новый билд. */
+function guardBuildStampPlugin() {
+  const stamp = new Date().toISOString()
+  return {
+    name: 'guard-build-stamp',
+    transformIndexHtml(html) {
+      return html.replace('</head>', `  <!-- guard-build-stamp: ${stamp} -->\n  </head>`)
+    },
+  }
+}
+
 export default defineConfig({
+  define: {
+    __GUARD_BUILD_STAMP__: JSON.stringify(
+      `${new Date().toISOString().slice(0, 19)}Z`,
+    ),
+  },
   plugins: [
     guardApiConfigPlugin(),
+    guardBuildStampPlugin(),
     vue({
       template: {
         compilerOptions: {
@@ -54,7 +83,7 @@ export default defineConfig({
       },
     }),
   ],
-  // Абсолютный base надёжнее в Telegram WebView и при деплое на корень домена (Railway).
+  // Корень домена (Railway и т.п.). Подкаталог — задайте base: '/prefix/' и тот же префикс на static-сервере.
   base: '/',
   build: {
     outDir: 'dist',

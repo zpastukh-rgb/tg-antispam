@@ -1,9 +1,12 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import { api as rawApi } from '../api/client'
 import { formatDateRu, formatDateTimeRu } from '../utils/formatDateTime'
+
+const { t } = useI18n()
 
 const props = defineProps({
   /** Объект /api/me */
@@ -32,24 +35,11 @@ const isPremium = computed(() => !!props.profile?.is_premium)
 
 const tariffRowLabel = computed(() => {
   const m = Number(props.profile?.subscription_paid_period_months || 0)
-  if (m > 0) {
-    const mod10 = m % 10
-    const mod100 = m % 100
-    let suf = 'месяцев'
-    if (mod100 < 11 || mod100 > 14) {
-      if (mod10 === 1) suf = 'месяц'
-      else if (mod10 >= 2 && mod10 <= 4) suf = 'месяца'
-    }
-    return `${m} ${suf}`
-  }
+  if (m > 0) return _monthsLabel(m)
   const d = Number(props.profile?.subscription_paid_period_days || 0)
-  if (d > 0) {
-    if (d === 1) return '1 день'
-    if (d >= 2 && d <= 4) return `${d} дня`
-    return `${d} дней`
-  }
+  if (d > 0) return _daysLabel(d)
   if (isPremium.value) return '—'
-  return 'Free'
+  return t('subscription.plan_free')
 })
 
 /** Первый успешный платёж за подписку (не дата последнего теста/докупа). */
@@ -69,13 +59,13 @@ const nextChargeLabelLong = computed(() => {
 
 const paymentMethodLabel = computed(() => {
   const source = String(props.profile?.subscription_source || '').toLowerCase()
-  if (source === 'promo') return 'Промокод'
+  if (source === 'promo') return t('billing.method.promo')
   const p = String(props.profile?.payment_method_type || '').toLowerCase()
-  if (p.includes('card')) return 'ЮKassa (карта)'
-  if (p.includes('sbp')) return 'ЮKassa (СБП)'
-  if (p.includes('yoo_money')) return 'ЮKassa'
-  if (p) return `ЮKassa (${p})`
-  return 'ЮKassa'
+  if (p.includes('card')) return t('billing.method.yookassa_card')
+  if (p.includes('sbp')) return t('billing.method.yookassa_sbp')
+  if (p.includes('yoo_money')) return t('billing.method.yookassa')
+  if (p) return `${t('billing.method.yookassa')} (${p})`
+  return t('billing.method.yookassa')
 })
 
 const autorenewOn = computed(() => !!props.profile?.payment_method_bound)
@@ -94,9 +84,12 @@ function pushProfile(next) {
   emit('update:profile', next)
 }
 
-function _monthsLabelRu(months) {
+function _monthsLabel(months) {
   const n = Number(months || 0)
   if (n <= 0) return ''
+  if (t('common.locale_code') === 'en') {
+    return n === 1 ? `${n} month` : `${n} months`
+  }
   const mod10 = n % 10
   const mod100 = n % 100
   if (mod100 < 11 || mod100 > 14) {
@@ -106,9 +99,20 @@ function _monthsLabelRu(months) {
   return `${n} месяцев`
 }
 
-function _daysLabelRu(days) {
+function _daysLabel(days) {
   const n = Number(days || 0)
   if (n <= 0) return ''
+  if (t('common.locale_code') === 'en') {
+    if (n % 365 === 0) {
+      const years = Math.floor(n / 365)
+      return years === 1 ? `${years} year` : `${years} years`
+    }
+    if (n % 30 === 0 && n >= 30) {
+      const months = Math.floor(n / 30)
+      return _monthsLabel(months)
+    }
+    return n === 1 ? `${n} day` : `${n} days`
+  }
   if (n % 365 === 0) {
     const years = Math.floor(n / 365)
     if (years === 1) return '1 год'
@@ -117,7 +121,7 @@ function _daysLabelRu(days) {
   }
   if (n % 30 === 0 && n >= 30) {
     const months = Math.floor(n / 30)
-    return _monthsLabelRu(months)
+    return _monthsLabel(months)
   }
   if (n === 1) return '1 день'
   if (n >= 2 && n <= 4) return `${n} дня`
@@ -135,16 +139,19 @@ const promoDetailsLabelFull = computed(() => {
   const code = String(props.profile?.subscription_promo_code || '').trim()
   if (!code) return ''
   const days = Number(props.profile?.subscription_promo_period_days || 0)
-  let period = 'бессрочно'
+  const isEn = t('common.locale_code') === 'en'
+  let period = isEn ? 'forever' : 'бессрочно'
   if (days > 0) {
     if (days % 365 === 0) {
       const years = Math.floor(days / 365)
-      period = years === 1 ? '1 г' : `${years} г`
+      period = isEn
+        ? years === 1 ? '1 y' : `${years} y`
+        : years === 1 ? '1 г' : `${years} г`
     } else if (days % 30 === 0) {
       const months = Math.floor(days / 30)
-      period = `${months} мес`
+      period = isEn ? `${months} mo` : `${months} мес`
     } else {
-      period = `${days} дн`
+      period = isEn ? `${days} d` : `${days} дн`
     }
   }
   return `${code} · ${period}`
@@ -170,24 +177,25 @@ const subscriptionHistoryView = computed(() =>
     const bonusTokens = Number(row?.grant_tokens || 0)
     const bonusAurum = Number(row?.grant_aurum || 0)
     const dateLabel = formatDateTimeRu(row?.created_at)
+    const isEn = t('common.locale_code') === 'en'
     if (kind === 'payment') {
-      const amountLabel = amount ? `${Math.round(amount)} ₽` : '—'
-      const periodLabel = months > 0 ? _monthsLabelRu(months) : (days > 0 ? `${days} дн.` : '—')
+      const amountLabel = amount ? `${Math.round(amount)} ${isEn ? 'RUB' : '₽'}` : '—'
+      const periodLabel = months > 0 ? _monthsLabel(months) : (days > 0 ? _daysLabel(days) : '—')
       return {
         key: `pay:${row?.created_at || ''}:${amountLabel}:${periodLabel}`,
-        title: `Оплата ${amountLabel}`,
-        subtitle: `Период: ${periodLabel}`,
+        title: isEn ? `Payment ${amountLabel}` : `Оплата ${amountLabel}`,
+        subtitle: isEn ? `Period: ${periodLabel}` : `Период: ${periodLabel}`,
         dateLabel,
       }
     }
     const bonusParts = []
     if (bonusTokens > 0) bonusParts.push(`+${bonusTokens} ⚡`)
     if (bonusAurum > 0) bonusParts.push(`+${bonusAurum} ✨`)
-    const periodLabel = days > 0 ? _daysLabelRu(days) : 'без срока'
+    const periodLabel = days > 0 ? _daysLabel(days) : (isEn ? 'no expiry' : 'без срока')
     return {
       key: `promo:${code}:${row?.created_at || ''}`,
-      title: `Промокод ${code || '—'}`,
-      subtitle: `Период: ${periodLabel}${bonusParts.length ? ` · ${bonusParts.join(', ')}` : ''}`,
+      title: isEn ? `Promo ${code || '—'}` : `Промокод ${code || '—'}`,
+      subtitle: (isEn ? 'Period: ' : 'Период: ') + periodLabel + (bonusParts.length ? ` · ${bonusParts.join(', ')}` : ''),
       dateLabel,
     }
   }),
@@ -221,7 +229,11 @@ async function toggleAutorenew() {
   if (props.readOnly) return
   if (autorenewToggleLoading.value) return
   if (!autorenewOn.value) {
-    showToast('Чтобы включить автопродление, оплатите подписку картой через ЮKassa.')
+    showToast(
+      t('common.locale_code') === 'en'
+        ? 'To enable auto-renew, pay the subscription by card via YooKassa.'
+        : 'Чтобы включить автопродление, оплатите подписку картой через ЮKassa.',
+    )
     return
   }
   autorenewToggleLoading.value = true
@@ -229,9 +241,9 @@ async function toggleAutorenew() {
     await fetchSilent(() => rawApi.disableAutorenew())
     const fresh = await fetchSilent(() => rawApi.me())
     pushProfile(fresh)
-    showToast('Автопродление отключено')
+    showToast(t('subscription.toasts.autorenew_off_done'))
   } catch (e) {
-    showToast(String(e?.body?.detail || e?.message || 'Не удалось изменить автопродление'))
+    showToast(String(e?.body?.detail || e?.message || t('subscription.toasts.autorenew_off_failed')))
   } finally {
     autorenewToggleLoading.value = false
   }
@@ -277,60 +289,60 @@ watch(
             <p
               class="text-[1.32rem] font-extrabold leading-tight tracking-tight text-lime-400/95 drop-shadow-sm"
             >
-              {{ isPremium ? 'Premium активен' : 'Free' }}
+              {{ isPremium ? t('billing.active') : t('subscription.plan_free') }}
             </p>
             <p class="mt-1 text-sm text-zinc-300/90">
-              Следующее списание {{ nextChargeLabel }}
+              {{ t('subscription.next_charge', { date: nextChargeLabel }) }}
             </p>
           </div>
         </div>
         <span
           v-if="isPremium"
           class="absolute bottom-3 right-3 rounded-md border border-lime-500/30 bg-lime-500/10 px-2 py-0.5 text-[9px] font-bold uppercase leading-tight tracking-wide text-lime-200/90"
-        >Активна</span>
+        >{{ t('subscription.status_active') }}</span>
       </div>
     </div>
 
     <div>
-      <p class="px-0.5 pb-2 text-[12px] font-semibold uppercase tracking-wide text-white/55">Детали подписки</p>
+      <p class="px-0.5 pb-2 text-[12px] font-semibold uppercase tracking-wide text-white/55">{{ t('subscription.status_title') }}</p>
       <div :class="variant === 'embedded' ? 'divide-y divide-white/[0.07] rounded-2xl bg-zinc-900/40' : 'divide-y divide-white/[0.08] rounded-2xl border border-lime-500/10 bg-zinc-900/45'">
         <div class="flex items-center justify-between gap-2 px-3 py-3">
-          <span class="text-sm text-white/70">Тариф</span>
+          <span class="text-sm text-white/70">{{ t('subscription.plan_label') }}</span>
           <div class="flex min-w-0 items-center gap-1">
             <span class="truncate text-sm font-semibold text-lime-100/90">{{ tariffRowLabel }}</span>
             <button
               v-if="variant === 'page' && isPremium && !readOnly"
               type="button"
               class="shrink-0 rounded-lg px-1.5 py-0.5 text-lg font-bold leading-none text-lime-400/90 transition hover:bg-white/10 hover:text-lime-300"
-              aria-label="Сменить тариф"
+              :aria-label="t('subscription.extend')"
               @click="emit('open-tariff')"
             >&gt;</button>
           </div>
         </div>
         <div class="flex items-center justify-between px-3 py-3">
-          <span class="text-sm text-white/70">Способ оплаты</span>
+          <span class="text-sm text-white/70">{{ t('subscription.method_label') }}</span>
           <span class="text-sm font-semibold text-white">{{ paymentMethodLabel }}</span>
         </div>
         <div v-if="promoDetailsLabel" class="flex items-center justify-between px-3 py-3">
-          <span class="text-sm text-white/70">Промокод</span>
+          <span class="text-sm text-white/70">{{ t('subscription.payment_method.promo') }}</span>
           <span class="min-w-0 flex-1 truncate pl-2 text-right text-[12px] font-semibold leading-tight text-lime-200" :title="promoDetailsLabelFull">{{ promoDetailsLabel }}</span>
         </div>
         <div class="flex items-center justify-between px-3 py-3">
-          <span class="text-sm text-white/70">Подписка с</span>
+          <span class="text-sm text-white/70">{{ t('common.locale_code') === 'en' ? 'Subscriber since' : 'Подписка с' }}</span>
           <span class="text-sm font-semibold text-white tabular-nums">{{ activationLabel || '—' }}</span>
         </div>
         <div class="flex items-center justify-between px-3 py-3">
-          <span class="text-sm text-white/70">Следующее списание</span>
+          <span class="text-sm text-white/70">{{ t('common.locale_code') === 'en' ? 'Next charge' : 'Следующее списание' }}</span>
           <span class="max-w-[min(100%,16rem)] truncate text-right text-sm font-semibold text-white">{{ nextChargeLabelLong }}</span>
         </div>
         <div class="flex min-h-9 items-center justify-between px-3 py-1.5">
-          <span class="text-sm leading-5 text-white/70">Автопродление</span>
+          <span class="text-sm leading-5 text-white/70">{{ t('subscription.autorenew') }}</span>
           <div v-if="readOnly" class="text-sm font-semibold leading-5" :class="autorenewOn ? 'text-lime-400' : 'text-white/50'">
-            {{ autorenewOn ? 'Включено' : 'Выключено' }}
+            {{ autorenewOn ? t('common.enabled') : t('common.disabled') }}
           </div>
           <div v-else class="flex min-h-7 items-center justify-end gap-2">
             <span class="shrink-0 text-sm font-semibold leading-5" :class="autorenewOn ? 'text-lime-400' : 'text-white/50'">
-              {{ autorenewOn ? 'Включено' : 'Выключено' }}
+              {{ autorenewOn ? t('common.enabled') : t('common.disabled') }}
             </span>
             <button
               type="button"
@@ -362,12 +374,12 @@ watch(
         :aria-expanded="subscriptionHistoryOpen ? 'true' : 'false'"
         @click="toggleSubscriptionHistory"
       >
-        <span>История подписки</span>
+        <span>{{ t('subscription.paid_history') }}</span>
         <span class="shrink-0 text-[11px] font-bold text-lime-300/80 tabular-nums">{{ subscriptionHistoryOpen ? '▲' : '▼' }}</span>
       </button>
       <div v-show="subscriptionHistoryOpen" :class="variant === 'embedded' ? 'mt-2 rounded-2xl bg-zinc-900/40 p-2' : 'mt-2 rounded-2xl border border-lime-500/10 bg-zinc-900/45 p-2'">
-        <p v-if="subscriptionHistoryLoading" class="px-2 py-2 text-[12px] text-white/55">Загружаем историю…</p>
-        <p v-else-if="!subscriptionHistoryView.length" class="px-2 py-2 text-[12px] text-white/50">Пока нет операций.</p>
+        <p v-if="subscriptionHistoryLoading" class="px-2 py-2 text-[12px] text-white/55">{{ t('loading.history') }}</p>
+        <p v-else-if="!subscriptionHistoryView.length" class="px-2 py-2 text-[12px] text-white/50">{{ t('history.empty') }}</p>
         <div v-else class="space-y-1.5">
           <div
             v-for="item in subscriptionHistoryView"
@@ -388,7 +400,7 @@ watch(
       class="w-full rounded-2xl border border-violet-300/35 bg-violet-500/[0.18] py-3.5 text-[15px] font-bold text-white shadow-[0_16px_40px_-20px_rgba(139,92,246,0.65)] transition hover:bg-violet-500/[0.26] active:scale-[0.99]"
       @click="renewSubscriptionButton"
     >
-      Продлить подписку
+      {{ t('subscription.extend') }}
     </button>
     </div>
   </div>

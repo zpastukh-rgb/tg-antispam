@@ -1,7 +1,9 @@
 # Mini App (Vite). Контекст сборки — корень репозитория (Railway: Root Directory пустой).
-# Настройка: Config-as-code → railway.frontend.json (или RAILWAY_DOCKERFILE_PATH=Dockerfile.webapp при пустом root).
-# Не смешивать с Root Directory=webapp — иначе COPY webapp/ не найдёт файлы.
-# Variables: VITE_API_BASE_URL=https://<твой-api>.up.railway.app
+# Variables: VITE_API_BASE_URL или GUARD_API_BASE_URL (рантайм для /guard-api-config.js).
+# Опционально GUARD_LOG_HTTP=1 — строка лога на каждый HTTP-запрос (отладка в Railway).
+#
+# Раньше здесь был `serve -s`: он НЕ подставляет URL API в рантайме — панель «молча» ломалась
+# при пустом public/guard-api-config.js. Используем тот же serve-static.mjs, что и webapp/Dockerfile.
 FROM node:20-alpine AS build
 WORKDIR /app
 COPY webapp/package.json webapp/package-lock.json ./
@@ -13,11 +15,9 @@ RUN npm run build
 
 FROM node:20-alpine AS run
 WORKDIR /app
-RUN npm install -g serve@14
 COPY --from=build /app/dist ./dist
+COPY webapp/serve-static.mjs ./serve-static.mjs
 EXPOSE 3000
-# Node вместо wget: в Alpine BusyBox wget -T и редиректы часто ломают HEALTHCHECK.
 HEALTHCHECK --interval=30s --timeout=15s --start-period=40s --retries=5 \
   CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.PORT||3000)+'/',(r)=>{r.resume();r.on('end',()=>process.exit(r.statusCode>=200&&r.statusCode<500?0:1))}).on('error',()=>process.exit(1))"
-# Явно 0.0.0.0 — иначе часть платформ не достучится с edge до контейнера.
-CMD ["sh", "-c", "exec serve -s dist -l tcp://0.0.0.0:${PORT:-3000}"]
+CMD ["node", "serve-static.mjs"]

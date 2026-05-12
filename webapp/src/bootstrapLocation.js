@@ -40,6 +40,19 @@ if (typeof window !== 'undefined') {
       targetPath = '/chats'
       nextParams.set('cabinet', 'delegated')
       nextParams.delete('section')
+    } else if (
+      rawStart === 'tokens' ||
+      rawStart === 'subscription' ||
+      rawStart === 'account' ||
+      rawStart === 'panel' ||
+      rawStart === 'home'
+    ) {
+      targetPath = '/'
+      if (rawStart === 'panel' || rawStart === 'home') {
+        nextParams.set('section', 'account')
+      } else {
+        nextParams.set('section', rawStart === 'subscription' ? 'subscription' : rawStart)
+      }
     } else {
       targetPath = '/'
     }

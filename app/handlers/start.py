@@ -15,6 +15,8 @@ from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.texts.bot_intro import START_INTRO_TEXT
+from app.i18n import t as _i18n_t
+from app.services.user_locale import lang_from_update as _lang_from_update, get_user_language as _get_user_lang
 from app.db.models import User, ChatManagerInvite, ChatManager
 
 router = Router()
@@ -153,52 +155,37 @@ def _should_skip_duplicate_start(user_id: int) -> bool:
 
 START_TEXT = START_INTRO_TEXT
 
-CONNECT_TEXT = (
-    "➕ *Подключение защиты*\n\n"
-    "Сделай 2 шага:\n\n"
-    "1️⃣ Добавь бота в группу\n\n"
-    "2️⃣ Дай права администратора:\n"
-    "✅ удалять сообщения\n"
-    "➕ желательно банить участников\n\n"
-    "После этого группа появится в мини-приложении автоматически."
-)
 
-RULES_TEXT = (
-    "📜 *Guard*\n\n"
-    "Инструкция и описание функций находятся в приложении под знаком *i*."
-)
-
-# =========================================================
-# KEYBOARDS
-# =========================================================
+async def _start_text_for(message_or_user) -> str:
+    """Локализованный приветственный текст. Берёт язык из БД с TTL-кэшем."""
+    try:
+        lang = await _lang_from_update(message_or_user)
+    except Exception:
+        lang = "ru"
+    val = _i18n_t(lang, "bot.welcome.intro")
+    if not val or val == "bot.welcome.intro":
+        return START_INTRO_TEXT
+    return val
 
 
-def start_kb():
+# Путь к скриншотам (положите addgroup_step1.png и addgroup_step2.png в static/ в корне проекта)
+_STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
 
+
+def start_kb(lang: str = "ru"):
+    st = "bot.start"
     kb = InlineKeyboardBuilder()
-
-    kb.button(
-        text="➕ Добавить бота в группу",
-        callback_data=CB_ADDGROUP,
-    )
-
-    kb.button(
-        text="➕ Подключить защиту",
-        callback_data=CB_CONNECT,
-    )
-
-    kb.button(
-        text="🧨 Панель управления",
-        callback_data=CB_PANEL,
-    )
-
-    kb.button(
-        text="📜 Что я умею",
-        callback_data=CB_RULES,
-    )
-
+    kb.button(text=_i18n_t(lang, f"{st}.btn_add_bot"), callback_data=CB_ADDGROUP)
+    kb.button(text=_i18n_t(lang, f"{st}.btn_connect"), callback_data=CB_CONNECT)
+    kb.button(text=_i18n_t(lang, f"{st}.btn_panel"), callback_data=CB_PANEL)
+    kb.button(text=_i18n_t(lang, f"{st}.btn_rules"), callback_data=CB_RULES)
     kb.adjust(1)
+    return kb.as_markup()
 
+
+def back_kb(lang: str = "ru"):
+    kb = InlineKeyboardBuilder()
+    kb.button(text=_i18n_t(lang, "bot.start.btn_back"), callback_data=CB_BACK)
     return kb.as_markup()
 
 
@@ -258,18 +245,6 @@ async def _activate_pending_manager_invites(message: Message) -> int:
     return connected
 
 
-def back_kb():
-
-    kb = InlineKeyboardBuilder()
-
-    kb.button(
-        text="⬅️ Назад",
-        callback_data=CB_BACK,
-    )
-
-    return kb.as_markup()
-
-
 # =========================================================
 # SAFE SEND / EDIT
 # =========================================================
@@ -308,17 +283,25 @@ async def _edit_or_send(message: Message, text: str, kb):
 # START
 # =========================================================
 
-ADDGROUP_TEXT = (
-    "➕ *Добавить бота в группу*\n\n"
-    "Нажмите *кнопку под полем ввода* — откроется выбор группы, затем Telegram предложит выдать боту права администратора.\n"
-)
-
-# Путь к скриншотам (положите addgroup_step1.png и addgroup_step2.png в static/ в корне проекта)
-_STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
-ADDGROUP_SCREENSHOTS = (
-    (_STATIC_DIR / "addgroup_step1.png", "1️⃣ Нажмите *кнопку под полем ввода* — откроется выбор группы."),
-    (_STATIC_DIR / "addgroup_step2.png", "2️⃣ Выберите группу и выдайте боту права администратора."),
-)
+async def _send_addgroup_screenshots(bot, chat_id: int, lang: str = "ru") -> None:
+    """Отправить 2 скриншота-подсказки, если файлы есть."""
+    from aiogram.types import FSInputFile
+    shots = (
+        (_STATIC_DIR / "addgroup_step1.png", _i18n_t(lang, "bot.start.addgroup_step1")),
+        (_STATIC_DIR / "addgroup_step2.png", _i18n_t(lang, "bot.start.addgroup_step2")),
+    )
+    for path, caption in shots:
+        if not path.exists():
+            continue
+        try:
+            await bot.send_photo(
+                chat_id,
+                FSInputFile(path),
+                caption=caption,
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
 
 
 def _group_start_payload(message: Message) -> str | None:
@@ -337,23 +320,6 @@ def _is_plain_group_start(message: Message) -> bool:
     return bool(re.match(r"^/start(?:@[A-Za-z0-9_]+)?\s*$", t, re.I))
 
 
-async def _send_addgroup_screenshots(bot, chat_id: int) -> None:
-    """Отправить 2 скриншота-подсказки, если файлы есть."""
-    from aiogram.types import FSInputFile
-    for path, caption in ADDGROUP_SCREENSHOTS:
-        if not path.exists():
-            continue
-        try:
-            await bot.send_photo(
-                chat_id,
-                FSInputFile(path),
-                caption=caption,
-                parse_mode="Markdown",
-            )
-        except Exception:
-            pass
-
-
 async def _send_welcome_banner_if_any(bot, chat_id: int) -> None:
     """Дублирующее фото после /start; по умолчанию выкл. Картинка до «Старт» — через BotFather Description Picture."""
     from aiogram.types import FSInputFile
@@ -362,10 +328,15 @@ async def _send_welcome_banner_if_any(bot, chat_id: int) -> None:
     if not WELCOME_BANNER_PATH.is_file():
         return
     try:
+        lang = await _get_user_lang(int(chat_id))
+    except Exception:
+        lang = "ru"
+    caption = _i18n_t(lang, "bot.profile.welcome_banner_caption") or WELCOME_BANNER_CAPTION
+    try:
         await bot.send_photo(
             chat_id,
             FSInputFile(WELCOME_BANNER_PATH),
-            caption=WELCOME_BANNER_CAPTION,
+            caption=caption,
         )
     except Exception:
         pass
@@ -385,6 +356,10 @@ async def cmd_start(message: Message):
         if payload is None and _is_plain_group_start(message):
             payload = "connect"
         if payload:
+            lang = await _get_user_lang(
+                int(message.from_user.id),
+                fallback_tg_language_code=getattr(message.from_user, "language_code", None),
+            )
             # ?startgroup=reportschat_CHATID → эта группа становится чатом отчётов для CHATID
             if payload.startswith("reportschat_"):
                 try:
@@ -427,8 +402,9 @@ async def cmd_start(message: Message):
                     except Exception:
                         pass
                     await message.answer(
-                        f"✅ Чат отчётов подключён.\n"
-                        f"Сюда будут приходить отчёты для «{protected_title or protected_chat_id}».",
+                        _i18n_t(lang, "bot.start.group_reports_connected").format(
+                            title=protected_title or protected_chat_id
+                        ),
                     )
                 except Exception:
                     pass
@@ -448,16 +424,11 @@ async def cmd_start(message: Message):
                     me = await message.bot.get_me()
                     m = await message.bot.get_chat_member(chat_id, me.id)
                     if m.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
-                        await message.answer(
-                            "Чтобы включить защиту, назначьте меня администратором в этой группе."
-                        )
+                        await message.answer(_i18n_t(lang, "bot.start.group_need_bot_admin"))
                         return
                     if not await actor_may_init_group_connect_from_group(message.bot, chat_id, message):
                         await message.answer(
-                            "Подключить защиту из группы может только *администратор* "
-                            "или сообщение *от привязанного канала* (если группа — обсуждение канала).\n\n"
-                            "Если включено «анонимное сообщение» не от канала — выключите анонимность для админов "
-                            "или отправьте /start с личного Telegram (создатель группы).",
+                            _i18n_t(lang, "bot.start.group_actor_denied"),
                             parse_mode="Markdown",
                         )
                         return
@@ -466,10 +437,7 @@ async def cmd_start(message: Message):
                         message.bot, chat_id, message.from_user
                     )
                     if int(uid or 0) <= 0:
-                        await message.answer(
-                            "Не удалось определить создателя группы для привязки к Guard. "
-                            "Откройте панель из лички с ботом или попробуйте снова после выдачи боту прав администратора."
-                        )
+                        await message.answer(_i18n_t(lang, "bot.start.group_creator_resolve_fail"))
                         return
                     ok, fail = await connect_chat_after_bot_added(
                         message.bot,
@@ -482,41 +450,42 @@ async def cmd_start(message: Message):
                     if ok:
                         return
                     if fail == "limit":
-                        await message.answer(
-                            "❌ Достигнут лимит подключённых чатов по тарифу.\n"
-                            "Откройте панель → «Тариф и оплата» или отключите лишние группы в «Подключённые чаты»."
-                        )
+                        await message.answer(_i18n_t(lang, "bot.start.group_limit_reached"))
                     elif fail == "owner":
                         await message.answer(
-                            "ℹ️ Эта группа в Guard уже подключена к другому кабинету (не к создателю этой группы).\n\n"
-                            "Если нужна передача прав — только владелец текущего кабинета: раздел *Админы и доступы*.",
+                            _i18n_t(lang, "bot.start.group_owner_conflict"),
                             parse_mode="Markdown",
                         )
                     elif fail == "log":
-                        await message.answer(
-                            "ℹ️ Эта группа используется как чат отчётов или недоступна для защиты. См. сообщения в личке."
-                        )
+                        await message.answer(_i18n_t(lang, "bot.start.group_log_conflict"))
                     else:
-                        await message.answer(
-                            "Не удалось включить защиту. Откройте панель из личного чата с ботом или повторите позже."
-                        )
+                        await message.answer(_i18n_t(lang, "bot.start.group_connect_fail"))
                 except Exception as e:
                     import logging
                     logging.getLogger(__name__).warning("startgroup=connect error: %s", e)
-                    await message.answer(
-                        "Не удалось включить защиту. Откройте панель из личного чата с ботом или повторите позже."
-                    )
+                    await message.answer(_i18n_t(lang, "bot.start.group_connect_fail"))
                 return
         return
     if not message.from_user:
         return
-    if _should_skip_duplicate_start(message.from_user.id):
-        return
+
+    dm_lang = await _get_user_lang(
+        int(message.from_user.id),
+        fallback_tg_language_code=getattr(message.from_user, "language_code", None),
+    )
 
     args = (message.text or "").strip().split()
     plain_start_only = len(args) == 1 and bool(
         re.match(r"^/start(?:@[A-Za-z0-9_]+)?$", (args[0] or "").strip(), re.I)
     )
+    # Дедуп только голого /start: повтор за 5 с не должен «молчать» — обновляем панель.
+    if plain_start_only and _should_skip_duplicate_start(message.from_user.id):
+        try:
+            from app.handlers.panel_dm import show_panel
+            await show_panel(message.bot, message.from_user.id)
+        except Exception:
+            pass
+        return
     # Deep link из Mini App: t.me/bot?start=cleandeleted_CHATID — запуск очистки от удалённых в группе
     # Реферальный deep link: /start ref_<telegram_id>
     if len(args) >= 2 and (args[1] or "").lower().startswith("ref_"):
@@ -566,13 +535,15 @@ async def cmd_start(message: Message):
                     try:
                         kicked, checked = await clean_deleted_accounts(message.bot, session, chat_id)
                         await message.answer(
-                            f"🧹 *Очистка от удалённых*\n\nПроверено: {checked}\nИсключено удалённых аккаунтов: {kicked}",
+                            _i18n_t(dm_lang, "bot.start.cleanup_done").format(checked=checked, kicked=kicked),
                             parse_mode="Markdown",
                         )
                     except Exception as e:
-                        await message.answer(f"Ошибка при очистке: {e}")
+                        await message.answer(
+                            _i18n_t(dm_lang, "bot.start.cleanup_error").format(error=e),
+                        )
                 else:
-                    await message.answer("Нет доступа к этой группе.")
+                    await message.answer(_i18n_t(dm_lang, "bot.start.no_access_chat"))
         return
 
     # Deep link из Mini App: t.me/bot?start=reportschat или reportschat_<chat_id>
@@ -590,7 +561,7 @@ async def cmd_start(message: Message):
                         selected = int(m.group(1))
                         if not await user_can_access_chat(session, uid, selected):
                             await message.answer(
-                                "Нет доступа к этой группе. Открой *Отчёты* в панели для нужного чата.",
+                                _i18n_t(dm_lang, "bot.start.reports_no_access"),
                                 parse_mode="Markdown",
                             )
                             return
@@ -598,8 +569,7 @@ async def cmd_start(message: Message):
                         selected = await get_selected_chat_id(session, uid)
                 if not selected:
                     await message.answer(
-                        "Сначала выберите группу в приложении: *Подключённые чаты* → *Отчёты*, "
-                        "либо *Выбрать* у нужной группы, затем снова «Подключить чат отчётов».",
+                        _i18n_t(dm_lang, "bot.start.reports_select_group_first"),
                         parse_mode="Markdown",
                     )
                 else:
@@ -609,18 +579,16 @@ async def cmd_start(message: Message):
                     pick_url = f"https://t.me/{username}?startgroup=reportschat_{selected}"
                     await message.answer("\u2063", reply_markup=ReplyKeyboardRemove())
                     kb = InlineKeyboardBuilder()
-                    kb.button(text="📋 Выбрать чат отчётов", url=pick_url)
+                    kb.button(text=_i18n_t(dm_lang, "bot.start.reports_pick_btn"), url=pick_url)
                     kb.adjust(1)
                     await message.answer(
-                        "⬅️ *Управляй Guard через кнопку «Меню» сверху.*\n\n"
-                        "Кнопка под полем ввода отключена.\n"
-                        "Нажми кнопку ниже и выбери группу для отчётов.",
+                        _i18n_t(dm_lang, "bot.start.reports_pick_hint"),
                         parse_mode="Markdown",
                         reply_markup=kb.as_markup(),
                     )
             except Exception:
                 await message.answer(
-                    "Не удалось открыть выбор чата отчётов. Открой раздел *Отчёты* в приложении и попробуйте снова.",
+                    _i18n_t(dm_lang, "bot.start.reports_pick_open_fail"),
                     parse_mode="Markdown",
                 )
             return
@@ -628,23 +596,15 @@ async def cmd_start(message: Message):
     # Deep link из Mini App: t.me/bot?start=addgroup — Reply-кнопка (выбор группы + права) + инлайн на случай превью
     if len(args) >= 2 and args[1].lower() == "addgroup":
         try:
-            from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
             from app.handlers.panel_dm import _kb_connect_request_chat_with_admin
-            me = await message.bot.get_me()
-            username = me.username or "bot"
-            add_url = f"https://t.me/{username}?start=addgroup"
-            inline_kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📋 Выбрать группу и выдать права", url=add_url)],
-            ])
-            # Сначала сообщение с Reply-кнопкой (под полем ввода); под текстом — инлайн (видна в превью)
             await message.answer(
-                ADDGROUP_TEXT,
+                _i18n_t(dm_lang, "bot.start.addgroup_text"),
                 parse_mode="Markdown",
-                reply_markup=_kb_connect_request_chat_with_admin(),
+                reply_markup=_kb_connect_request_chat_with_admin(lang=dm_lang),
             )
-            await _send_addgroup_screenshots(message.bot, message.chat.id)
+            await _send_addgroup_screenshots(message.bot, message.chat.id, dm_lang)
         except Exception:
-            await message.answer(ADDGROUP_TEXT, parse_mode="Markdown")
+            await message.answer(_i18n_t(dm_lang, "bot.start.addgroup_text"), parse_mode="Markdown")
         return
 
     # ТЗ Напоминания: при первом /start записываем время для напоминаний (12ч, 24ч, 3д)
@@ -693,18 +653,22 @@ async def cmd_start(message: Message):
         from app.handlers.panel_dm import show_panel
         await show_panel(message.bot, message.from_user.id)
     except Exception:
-        await _edit_or_send(message, START_TEXT, start_kb())
+        await _edit_or_send(message, await _start_text_for(message), start_kb(dm_lang))
     if connected_shared_cabinets > 0:
         try:
             from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
             me = await message.bot.get_me()
             await message.answer(
-                f"✅ Вас добавили админом в кабинет(ы): *{connected_shared_cabinets}*.\n"
-                "Откройте общий кабинет и переключитесь на вкладку *Доступы*.",
+                _i18n_t(dm_lang, "bot.start.cabinet_added").format(n=connected_shared_cabinets),
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [InlineKeyboardButton(text="🚀 Открыть общий кабинет", url=_mini_app_chats_startapp_link(me.username or "bot"))]
+                        [
+                            InlineKeyboardButton(
+                                text=_i18n_t(dm_lang, "bot.start.cabinet_open_btn"),
+                                url=_mini_app_chats_startapp_link(me.username or "bot"),
+                            )
+                        ]
                     ]
                 ),
             )
@@ -722,23 +686,25 @@ async def cb_back(cb: CallbackQuery):
 
     await cb.answer()
 
+    lang = await _lang_from_update(cb)
     await cb.message.edit_text(
-        START_TEXT,
+        await _start_text_for(cb),
         parse_mode="Markdown",
-        reply_markup=start_kb(),
+        reply_markup=start_kb(lang),
     )
 
 
 async def _send_addgroup_keyboard(bot, user_id: int):
     """Отправить сообщение с Reply-кнопкой «выбор группы + выдача прав» (видна в обычном чате)."""
     from app.handlers.panel_dm import _kb_connect_request_chat_with_admin
+    lang = await _get_user_lang(int(user_id))
     await bot.send_message(
         user_id,
-        ADDGROUP_TEXT,
+        _i18n_t(lang, "bot.start.addgroup_text"),
         parse_mode="Markdown",
-        reply_markup=_kb_connect_request_chat_with_admin(),
+        reply_markup=_kb_connect_request_chat_with_admin(lang=lang),
     )
-    await _send_addgroup_screenshots(bot, user_id)
+    await _send_addgroup_screenshots(bot, user_id, lang)
 
 
 @router.callback_query(F.data == CB_ADDGROUP)
@@ -750,7 +716,8 @@ async def cb_addgroup(cb: CallbackQuery):
     try:
         await _send_addgroup_keyboard(cb.bot, cb.from_user.id)
     except Exception:
-        await cb.message.answer(ADDGROUP_TEXT, parse_mode="Markdown")
+        lang = await _get_user_lang(int(cb.from_user.id))
+        await cb.message.answer(_i18n_t(lang, "bot.start.addgroup_text"), parse_mode="Markdown")
 
 
 @router.callback_query(F.data == CB_CONNECT)
@@ -758,10 +725,11 @@ async def cb_connect(cb: CallbackQuery):
 
     await cb.answer()
 
+    lang = await _lang_from_update(cb)
     await cb.message.edit_text(
-        CONNECT_TEXT,
+        _i18n_t(lang, "bot.start.connect_text"),
         parse_mode="Markdown",
-        reply_markup=back_kb(),
+        reply_markup=back_kb(lang),
     )
 
 
@@ -770,10 +738,11 @@ async def cb_rules(cb: CallbackQuery):
 
     await cb.answer()
 
+    lang = await _lang_from_update(cb)
     await cb.message.edit_text(
-        RULES_TEXT,
+        _i18n_t(lang, "bot.start.rules_text"),
         parse_mode="Markdown",
-        reply_markup=back_kb(),
+        reply_markup=back_kb(lang),
     )
 
 
@@ -788,8 +757,9 @@ async def cb_panel(cb: CallbackQuery):
         await show_panel(cb.bot, cb.from_user.id)
     except Exception as e:
         try:
+            lang = await _lang_from_update(cb)
             await cb.message.answer(
-                f"❌ Не удалось открыть панель. Напиши /panel или попробуй позже.\n\nОшибка: {e!r}"
+                _i18n_t(lang, "bot.start.panel_open_fail").format(error=repr(e)),
             )
         except Exception:
             pass
@@ -805,12 +775,18 @@ async def cmd_preview_commands(message: Message):
     if not message.from_user:
         return
     try:
+        from app.db.session import get_session
+        from app.services.chat_owner_locale import user_locale
+
+        async with await get_session() as session:
+            preview_loc = await user_locale(session, int(message.from_user.id))
         if is_trial:
             from app.services.reminders import send_trial_warning_preview_guard
             await send_trial_warning_preview_guard(
                 message.bot,
                 message.from_user.id,
                 display_name=getattr(message.from_user, "first_name", None),
+                locale=preview_loc,
             )
         else:
             from app.services.reminders import send_expired_warning_preview
@@ -818,6 +794,8 @@ async def cmd_preview_commands(message: Message):
                 message.bot,
                 message.chat.id,
                 display_name=getattr(message.from_user, "first_name", None),
+                locale=preview_loc,
             )
     except Exception as e:
-        await message.answer(f"Не удалось отправить предпросмотр: {e}")
+        loc = await _get_user_lang(int(message.from_user.id))
+        await message.answer(_i18n_t(loc, "bot.start.preview_fail").format(error=e))

@@ -30,6 +30,8 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+from app.api.api_locale import err_detail
+from app.api.api_locale import current_api_locale
 from app.api.auth import require_init_data, require_init_data_with_profile
 from app.api.deps import get_db
 from app.api.service import (
@@ -76,6 +78,7 @@ from app.db.models import (
     ChatManagerInvite,
     UserContext,
     WebAppSession,
+    PdfExport,
     PromoCode,
     PromoCodeRedemption,
     OwnerJoinReportSetting,
@@ -122,7 +125,8 @@ from app.services.chat_cleanup import clean_deleted_accounts
 from app.services.credit_policy import REFERRAL_LEVEL_RATES, PARTNER_TOKEN_RUB_RATE
 from app.services.admin_roles import is_full_admin_user as _is_full_admin_user
 from app.services.chat_limit_enforcer import enforce_owner_active_chat_limit
-from app.texts.guardian_billing import format_subscription_until_ru
+from app.i18n import normalize_locale, t as i18n_t
+from app.texts.guardian_billing import format_subscription_until
 
 router = APIRouter(prefix="/api", tags=["webapp"])
 _log = logging.getLogger(__name__)
@@ -144,12 +148,21 @@ def _chat_is_shared_payload(owner_user_id: int | None, viewer_telegram_id: int) 
     return oid != vid
 
 
+def _t_api_ui(key: str, **kwargs: object) -> str:
+    return i18n_t(current_api_locale(), f"api.ui.{key}", **kwargs)
+
+
+def _t_api_ui_user(user: User | None, key: str, **kwargs: object) -> str:
+    loc = normalize_locale(getattr(user, "language", None) if user else None)
+    return i18n_t(loc, f"api.ui.{key}", **kwargs)
+
+
 def _humanize_yookassa_error(err: Exception) -> str:
     msg = str(err or "").strip()
     low = msg.lower()
     if "can't make recurring payments" in low or "recurring payments" in low:
-        return "Для LIVE-магазина пока не включены рекуррентные платежи в ЮKassa. Оплата проведена как обычная, а автосписание станет доступно после активации recurring."
-    return msg or "Ошибка платёжной системы"
+        return err_detail("yookassa_recurring_disabled")
+    return msg or err_detail("payment_provider_error")
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -471,24 +484,25 @@ def _chat_open_link(chat_id: int | None, username: str | None) -> str | None:
     return f"https://t.me/{cid}"
 
 
-def _spike_recommendations(rule: Rule | None) -> list[str]:
+def _spike_recommendations(rule: Rule | None, lang: str | None) -> list[str]:
+    loc = normalize_locale(lang)
     if not rule:
         return [
-            "Включите режим новичков.",
-            "Включите режим тишины после входа.",
-            "Проверьте наказание: delete/mute/ban.",
+            i18n_t(loc, "api.ui.spike_rec_no_rule_1"),
+            i18n_t(loc, "api.ui.spike_rec_no_rule_2"),
+            i18n_t(loc, "api.ui.spike_rec_no_rule_3"),
         ]
     rec: list[str] = []
     if not bool(getattr(rule, "newbie_enabled", False)):
-        rec.append("Включите режим новичков (усиление первых сообщений).")
+        rec.append(i18n_t(loc, "api.ui.spike_rec_newbie"))
     if int(getattr(rule, "silence_minutes", 0) or 0) <= 0:
-        rec.append("Задайте режим тишины после вступления.")
+        rec.append(i18n_t(loc, "api.ui.spike_rec_silence"))
     if not bool(getattr(rule, "first_message_captcha_enabled", False)):
-        rec.append("Включите капчу на первое сообщение.")
+        rec.append(i18n_t(loc, "api.ui.spike_rec_captcha"))
     if not bool(getattr(rule, "antinakrutka_enabled", False)):
-        rec.append("Включите антинакрутку на массовые входы.")
+        rec.append(i18n_t(loc, "api.ui.spike_rec_antinakrutka"))
     if not rec:
-        rec.append("Проверьте пороги стоп-слов, ссылок и медиа-фильтра.")
+        rec.append(i18n_t(loc, "api.ui.spike_rec_fallback"))
     return rec[:4]
 
 
@@ -613,7 +627,7 @@ async def _user_manages_foreign_owned_chat(session: AsyncSession, telegram_id: i
 async def _require_admin_user(session: AsyncSession, user_id: int) -> User:
     user = await get_or_create_user(session, user_id)
     if not _is_full_admin_user(user, int(user_id)):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access denied")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("admin_access_denied"))
     return user
 
 
@@ -626,7 +640,7 @@ async def _require_premium_or_full_admin_personal_global(session: AsyncSession, 
         return user
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
-        detail="Нужен Premium или полный доступ администратора",
+        detail=err_detail("premium_or_admin"),
     )
 
 
@@ -645,7 +659,7 @@ async def _require_broadcast_access(session: AsyncSession, user_id: int) -> tupl
         return user, False
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
-        detail="Нужен Premium, полный доступ администратора или менеджерство в чужом чате",
+        detail=err_detail("premium_admin_or_manager"),
     )
 
 
@@ -655,20 +669,22 @@ def _broadcast_viewer_can_scope_all(user: User) -> bool:
     return _is_full_admin_user(user, tid)
 
 
-def _is_suspicious_payout(amount_rub: float, requisites: str) -> tuple[bool, str]:
+def _is_suspicious_payout(amount_rub: float, requisites: str, lang: str | None) -> tuple[bool, str]:
+    loc = normalize_locale(lang)
     if amount_rub >= 30000:
-        return True, "Большая сумма для ручной проверки"
+        return True, i18n_t(loc, "api.ui.partner_risk_large_amount")
     req = (requisites or "").strip().lower()
     digits = "".join(ch for ch in req if ch.isdigit())
     if len(digits) < 10:
-        return True, "Неполные реквизиты"
+        return True, i18n_t(loc, "api.ui.partner_risk_incomplete_requisites")
     return False, ""
 
 
 async def _partner_payout_duplicate_requisites(
-    session: AsyncSession, user_internal_id: int, requisites: str
+    session: AsyncSession, user_internal_id: int, requisites: str, lang: str | None
 ) -> tuple[bool, str]:
     """Те же реквизиты у другого user_id — сигнал мультиаккаунтов / общий кошелёк."""
+    loc = normalize_locale(lang)
     req = (requisites or "").strip()
     if len(req) < 6:
         return False, ""
@@ -682,7 +698,7 @@ async def _partner_payout_duplicate_requisites(
         )
     )
     if int(dup_q.scalar() or 0) > 0:
-        return True, "Реквизиты уже использовались другим аккаунтом"
+        return True, i18n_t(loc, "api.ui.partner_risk_duplicate_requisites")
     return False, ""
 
 
@@ -930,7 +946,7 @@ async def api_bot_info(
     """Username бота для ссылки «Добавить в группу» (t.me/username?startgroup)."""
     username = await _get_bot_username()
     if not username:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Bot username not available")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=err_detail("bot_username_unavailable"))
     # Нативный выбор чата с выдачей прав (Telegram 9.6+); иначе фронт откроет deep link.
     prepared_id = await tg_save_prepared_add_group_button(user_id)
     admin_q = "delete_messages+restrict_members+invite_users+pin_messages"
@@ -1061,7 +1077,52 @@ async def api_me(
         "delegate_broadcast_payer": str(
             getattr(user, "delegate_broadcast_payer", None) or "delegate_first"
         ).strip().lower(),
+        "language": _normalize_user_language(getattr(user, "language", None)),
     }
+
+
+def _normalize_user_language(value: object) -> str:
+    """Возвращает 'ru' или 'en' для ответа Mini App; всё иное — 'ru'."""
+    s = str(value or "ru").strip().lower()
+    if s.startswith("en"):
+        return "en"
+    return "ru"
+
+
+@router.patch("/me/language")
+async def api_me_set_language(
+    payload: dict,
+    init_profile: tuple[int, str | None, str | None] = Depends(require_init_data_with_profile),
+    session: AsyncSession = Depends(get_db),
+):
+    """Сохранить язык интерфейса (ru | en) для текущего пользователя.
+
+    Поведение:
+    - валидация: только 'ru' или 'en';
+    - идемпотентно обновляет users.language;
+    - инвалидирует кэш user_locale, чтобы бот сразу подхватил новую локаль.
+    """
+    user_id, init_username, init_first_name = init_profile
+    raw = (payload or {}).get("language") if isinstance(payload, dict) else None
+    candidate = str(raw or "").strip().lower()
+    if candidate not in ("ru", "en"):
+        raise HTTPException(status_code=400, detail=err_detail("language_ru_en_only"))
+    user = await get_or_create_user(
+        session, user_id, username=init_username, first_name=init_first_name
+    )
+    try:
+        user.language = candidate
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise HTTPException(status_code=500, detail=err_detail("db_error"))
+    try:
+        from app.services.user_locale import invalidate as invalidate_locale
+
+        invalidate_locale(int(user_id))
+    except Exception:
+        pass
+    return {"ok": True, "language": candidate}
 
 
 @router.post("/me/legal-consent")
@@ -1078,7 +1139,7 @@ async def api_me_legal_consent(
     if not accept_bundle or not accept_pd:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Требуются accept_bundle и accept_pd",
+            detail=err_detail("accept_bundle_pd"),
         )
     user = await get_or_create_user(
         session, user_id, username=init_username, first_name=init_first_name
@@ -1163,13 +1224,13 @@ async def api_billing_aurum_transfer_to_delegate(
 
     target_tid = int((body or {}).get("target_telegram_id") or 0)
     if target_tid <= 0 or int(target_tid) == int(user_id):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Укажите другой Telegram id менеджера")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("manager_other_tid"))
     try:
         amount = round(float((body or {}).get("amount") or 0.0), 2)
     except (TypeError, ValueError):
         amount = 0.0
     if amount < 0.01 or amount > 1_000_000_000:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Сумма от 0.01 до 1 000 000 000 AURUM")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("aurum_amount_range"))
 
     link_q = await session.execute(
         select(ChatManager.id)
@@ -1180,7 +1241,7 @@ async def api_billing_aurum_transfer_to_delegate(
     if link_q.scalar_one_or_none() is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Пользователь не найден среди менеджеров ваших чатов",
+            detail=err_detail("manager_not_in_list"),
         )
 
     sender = await get_or_create_user(session, user_id)
@@ -1189,7 +1250,7 @@ async def api_billing_aurum_transfer_to_delegate(
     if s_bal + 1e-9 < amount:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Недостаточно AURUM: нужно {amount:g} ✨, у вас {round(s_bal, 2)} ✨",
+            detail=err_detail("aurum_insufficient", need=f"{amount:g}", have=f"{round(s_bal, 2)}"),
         )
     idem = uuid.uuid4().hex[:24]
     sender.aurum_credits = round(s_bal - amount, 4)
@@ -1254,14 +1315,14 @@ async def api_me_global_bad_urls_add(
     if int(cnt_q.scalar() or 0) >= USER_GLOBAL_BAD_URL_MAX:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Не более {USER_GLOBAL_BAD_URL_MAX} шаблонов в личной базе",
+            detail=err_detail("user_global_url_limit", max=USER_GLOBAL_BAD_URL_MAX),
         )
     raw_in = str(body.get("pattern") or "")
     pat = normalize_trusted_link_pattern(raw_in)
     if not pat or not is_valid_trusted_pattern(raw_in):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Некорректный шаблон. Примеры: evil.com, t.me/spam_channel",
+            detail=err_detail("url_template_invalid"),
         )
     note = (str(body.get("note") or "").strip() or None)[:255]
     session.add(UserGlobalBadUrlPattern(owner_telegram_id=int(user_id), pattern=pat, note=note))
@@ -1269,7 +1330,7 @@ async def api_me_global_bad_urls_add(
         await session.commit()
     except IntegrityError:
         await session.rollback()
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Шаблон уже в вашей базе")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=err_detail("user_url_template_duplicate"))
     res = await session.execute(
         select(UserGlobalBadUrlPattern.pattern, UserGlobalBadUrlPattern.note)
         .where(UserGlobalBadUrlPattern.owner_telegram_id == int(user_id))
@@ -1289,7 +1350,7 @@ async def api_me_global_bad_urls_delete(
     await _require_premium_or_full_admin_personal_global(session, int(user_id))
     pat = normalize_trusted_link_pattern(pattern or "")
     if not pat:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Query param pattern required")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("query_pattern_required"))
     await session.execute(
         delete(UserGlobalBadUrlPattern).where(
             UserGlobalBadUrlPattern.owner_telegram_id == int(user_id),
@@ -1304,7 +1365,7 @@ _POST_RULES_DRAFTS_MAX_ITEMS = 80
 _POST_RULES_DRAFTS_MAX_BYTES = 480_000
 
 
-def _normalize_post_rules_drafts_incoming(raw: object) -> list[dict]:
+def _normalize_post_rules_drafts_incoming(raw: object, *, default_name: str) -> list[dict]:
     if not isinstance(raw, list):
         return []
     out: list[dict] = []
@@ -1321,7 +1382,7 @@ def _normalize_post_rules_drafts_incoming(raw: object) -> list[dict]:
         mode = str(item.get("mode") or "group").strip().lower() or "group"
         if mode not in ("group", "channel"):
             mode = "group"
-        name = str(item.get("name") or "Шаблон").strip()[:160]
+        name = str(item.get("name") or default_name).strip()[:160]
         try:
             saved_at = int(item.get("savedAt") if item.get("savedAt") is not None else item.get("saved_at") or 0)
         except (TypeError, ValueError):
@@ -1385,13 +1446,16 @@ async def api_me_post_rules_drafts_put(
     user_id: int = Depends(require_init_data),
     session: AsyncSession = Depends(get_db),
 ):
-    incoming = _normalize_post_rules_drafts_incoming(body.get("drafts"))
+    incoming = _normalize_post_rules_drafts_incoming(
+        body.get("drafts"),
+        default_name=_t_api_ui("rules_draft_template_default"),
+    )
     shrunk = _shrink_post_rules_drafts_for_storage(incoming)
     blob = json.dumps(shrunk, ensure_ascii=False).encode("utf-8")
     if len(blob) > _POST_RULES_DRAFTS_MAX_BYTES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Черновики слишком объёмные: сократите текст или удалите встроенные изображения из шаблонов.",
+            detail=err_detail("drafts_too_large"),
         )
     user = await get_or_create_user(session, int(user_id))
     user.post_rules_drafts_json = json.dumps(shrunk, ensure_ascii=False)
@@ -1669,6 +1733,8 @@ async def api_spike_alerts(
     ).scalars().all()
     if not rows:
         return {"active": False, "active_owner": False, "active_shared": False, "items": []}
+    viewer = await get_or_create_user(session, user_id)
+    ui_lang = getattr(viewer, "language", None)
     rule_rows = (await session.execute(select(Rule).where(Rule.chat_id.in_([int(r.chat_id) for r in rows])))).scalars().all()
     rule_by_chat = {int(r.chat_id): r for r in rule_rows}
     items = []
@@ -1695,7 +1761,7 @@ async def api_spike_alerts(
                 "window_min": int(getattr(r, "window_min", 35) or 35),
                 "last_triggered_at": _format_dt(getattr(r, "last_triggered_at", None)),
                 "expires_at": _format_dt(getattr(r, "expires_at", None)),
-                "recommendations": _spike_recommendations(rule_by_chat.get(cid)),
+                "recommendations": _spike_recommendations(rule_by_chat.get(cid), ui_lang),
             }
         )
     return {
@@ -1715,10 +1781,10 @@ async def api_chat_managers(
     await _touch_user_presence(session, user_id)
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     chat = await session.get(Chat, int(chat_id))
     if not chat:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     managers = await _chat_managers_payload(session, int(chat_id))
     owner_uid = int(getattr(chat, "owner_user_id", 0) or 0)
     owner_user = (await session.execute(select(User).where(User.telegram_id == owner_uid).limit(1))).scalar_one_or_none()
@@ -1746,17 +1812,17 @@ async def api_chat_managers_add(
     await _touch_user_presence(session, user_id)
     chat = await session.get(Chat, int(chat_id))
     if not chat:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     if int(getattr(chat, "owner_user_id", 0) or 0) != int(user_id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only owner can manage admins")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("only_owner_manage_admins"))
     owner_user = (await session.execute(select(User).where(User.telegram_id == int(user_id)).limit(1))).scalar_one_or_none()
     if not (owner_user and _is_user_premium_now(owner_user, datetime.now(timezone.utc))):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Функция доступна только на Premium")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("premium_only"))
 
     target_id = int(body.get("telegram_id") or 0)
     username_raw = body.get("username")
     if target_id <= 0 and not str(username_raw or "").strip():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Need telegram_id or username")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("need_telegram_id_or_username"))
 
     # Права делегата (нормализуем по типу чата).
     perms_raw = body.get("permissions") or {}
@@ -1780,7 +1846,7 @@ async def api_chat_managers_add(
     if not any(perms.values()):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Выберите хотя бы одно право для админа.",
+            detail=err_detail("admin_pick_right"),
         )
 
     target_user: User | None = None
@@ -1798,12 +1864,12 @@ async def api_chat_managers_add(
         else:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Пользователь не найден в Guard. Пусть сначала запустит бота (/start), затем повторите приглашение.",
+                detail=err_detail("invite_user_start_first"),
             )
 
     owner_uid = int(getattr(chat, "owner_user_id", 0) or 0)
     if target_id > 0 and target_id == owner_uid:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Owner already has full access")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("owner_already_full_access"))
 
     created_status = "sent"
     if target_id > 0 and target_user:
@@ -1813,7 +1879,7 @@ async def api_chat_managers_add(
         if role not in ("administrator", "creator"):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Пользователь не админ в этом чате/канале. Сначала выдайте ему админку в Telegram.",
+                detail=err_detail("invite_target_not_tg_admin"),
             )
         existing = (
             await session.execute(
@@ -1868,24 +1934,26 @@ async def api_chat_managers_add(
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Нельзя пригласить: пользователь не распознан. Нужен действующий Telegram ID или @username пользователя, который уже запускал Guard.",
+            detail=err_detail("invite_unrecognized"),
         )
     await session.commit()
     # Личное уведомление приглашённому (если диалог с ботом уже открыт).
     if target_id > 0:
         try:
             delegated_url = await _delegated_chats_webapp_url()
+            tgt_u = (
+                await session.execute(select(User).where(User.telegram_id == int(target_id)).limit(1))
+            ).scalar_one_or_none()
             kb = None
             if delegated_url:
                 kb = {
-                    "inline_keyboard": [[{"text": "🛡 Открыть доступы Guard", "url": delegated_url}]]
+                    "inline_keyboard": [
+                        [{"text": _t_api_ui_user(tgt_u, "manager_invite_open_access"), "url": delegated_url}]
+                    ]
                 }
             await send_user_dm(
                 int(target_id),
-                (
-                    "✅ Вас добавили админом в кабинет Guard.\n\n"
-                    "Откройте Mini App и перейдите в «Подключённые чаты» → «Доступы»."
-                ),
+                _t_api_ui_user(tgt_u, "manager_invite_dm"),
                 parse_mode="Markdown",
                 reply_markup=kb,
             )
@@ -1910,14 +1978,14 @@ async def api_chat_managers_remove(
     await _touch_user_presence(session, user_id)
     chat = await session.get(Chat, int(chat_id))
     if not chat:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     if int(getattr(chat, "owner_user_id", 0) or 0) != int(user_id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only owner can manage admins")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("only_owner_manage_admins"))
     owner_user = (await session.execute(select(User).where(User.telegram_id == int(user_id)).limit(1))).scalar_one_or_none()
     if not (owner_user and _is_user_premium_now(owner_user, datetime.now(timezone.utc))):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Функция доступна только на Premium")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("premium_only"))
     if int(manager_user_id) <= 0:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Bad manager id")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("bad_manager_id"))
     await session.execute(
         delete(ChatManager).where(ChatManager.chat_id == int(chat_id), ChatManager.user_id == int(manager_user_id))
     )
@@ -1948,14 +2016,14 @@ async def api_chat_managers_patch(
     await _touch_user_presence(session, user_id)
     chat = await session.get(Chat, int(chat_id))
     if not chat:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     if int(getattr(chat, "owner_user_id", 0) or 0) != int(user_id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only owner can manage admins")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("only_owner_manage_admins"))
     owner_user = (await session.execute(select(User).where(User.telegram_id == int(user_id)).limit(1))).scalar_one_or_none()
     if not (owner_user and _is_user_premium_now(owner_user, datetime.now(timezone.utc))):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Функция доступна только на Premium")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("premium_only"))
     if int(manager_user_id) <= 0:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Bad manager id")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("bad_manager_id"))
 
     row = (
         await session.execute(
@@ -1963,7 +2031,7 @@ async def api_chat_managers_patch(
         )
     ).scalar_one_or_none()
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Manager not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("manager_not_found"))
 
     perms_raw = body.get("permissions") or {}
     if not isinstance(perms_raw, dict):
@@ -2027,13 +2095,13 @@ async def api_chat_manager_invite_cancel(
     await _touch_user_presence(session, user_id)
     chat = await session.get(Chat, int(chat_id))
     if not chat:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     owner_uid = int(getattr(chat, "owner_user_id", 0) or 0)
     if owner_uid != int(user_id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only owner can manage invites")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("only_owner_manage_invites"))
     owner_user = (await session.execute(select(User).where(User.telegram_id == int(user_id)).limit(1))).scalar_one_or_none()
     if not (owner_user and _is_user_premium_now(owner_user, datetime.now(timezone.utc))):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Функция доступна только на Premium")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("premium_only"))
     await session.execute(
         delete(ChatManagerInvite).where(
             ChatManagerInvite.id == int(invite_id),
@@ -2075,7 +2143,7 @@ async def api_chats_select(
     if chat_id != 0:
         ok = await user_can_access_chat(session, user_id, chat_id)
         if not ok:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Chat not found or access denied")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("chat_not_found_or_denied"))
     await set_selected_chat(session, user_id, chat_id if chat_id != 0 else None)
     return {"selected_chat_id": chat_id if chat_id != 0 else None}
 
@@ -2094,12 +2162,12 @@ async def api_chat_set_active(
         # поэтому отдельно разрешаем владельцу своего чата.
         row = await session.get(Chat, int(chat_id))
         if not row or int(getattr(row, "owner_user_id", 0) or 0) != int(user_id):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     chat = await session.get(Chat, int(chat_id))
     if not chat:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     if int(getattr(chat, "owner_user_id", 0) or 0) != int(user_id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only chat owner can toggle active state")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("only_owner_toggle_active"))
 
     active = bool((body or {}).get("active", True))
     owner = await get_or_create_user(session, int(user_id))
@@ -2122,7 +2190,7 @@ async def api_chat_set_active(
         connected_ids = [int(r.id) for r in rows if int(r.id) in {int(x) for x in rr.scalars().all()} or bool(getattr(r, "is_active", False))]
         if int(chat_id) not in set(connected_ids[:free_limit]):
             await session.commit()
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Для этого чата нужен Premium")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("chat_needs_premium"))
 
     chat.is_active = bool(active)
     if not bool(active):
@@ -2144,10 +2212,10 @@ async def api_chat_remove(
 
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     chat = await session.get(Chat, int(chat_id))
     if not chat:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
 
     title = (chat.title or "").strip() or str(chat.id)
     chat.is_active = False
@@ -2268,10 +2336,10 @@ async def api_chat(
     """Один чат и его правило (настройки защиты)."""
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     chat = await session.get(Chat, int(chat_id))
     if not chat:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     from app.services.telegram_bot_api import refresh_chat_from_telegram, refresh_chat_title_in_db
 
     snap_main: dict | None = None
@@ -2402,7 +2470,7 @@ def _normalize_rules_photo_bytes(data: bytes) -> bytes:
             # fallback: return the smallest quality pass
             return out
     except (UnidentifiedImageError, OSError, ValueError) as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Не удалось обработать изображение: {e}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("image_process_failed", error=str(e)))
 
 
 @router.get("/chat/{chat_id}/welcome/photo")
@@ -2413,17 +2481,17 @@ async def api_chat_welcome_photo(
 ):
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     rule = await get_or_create_rule(session, int(chat_id))
     rel = str(getattr(rule, "welcome_photo_path", "") or "").strip()
     if not rel:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Welcome photo not set")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("welcome_photo_not_set"))
     fp = (_welcome_media_root() / rel).resolve()
     root = _welcome_media_root().resolve()
     if root not in fp.parents and fp != root:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Bad welcome photo path")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("bad_welcome_photo_path"))
     if not fp.exists() or not fp.is_file():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Welcome photo file not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("welcome_photo_file_not_found"))
     return FileResponse(path=str(fp))
 
 
@@ -2436,16 +2504,16 @@ async def api_chat_welcome_photo_upload(
 ):
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     rule = await get_or_create_rule(session, int(chat_id))
     ctype = str(getattr(file, "content_type", "") or "").lower()
     if not ctype.startswith("image/"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Нужен image-файл")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("need_image_file"))
     data = await file.read()
     if not data:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Пустой файл")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("empty_file"))
     if len(data) > 8 * 1024 * 1024:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Файл слишком большой (до 8MB)")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("file_too_big_8mb"))
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in (".jpg", ".jpeg", ".png", ".webp"):
         suffix = ".jpg"
@@ -2475,7 +2543,7 @@ async def api_chat_welcome_photo_delete(
 ):
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     rule = await get_or_create_rule(session, int(chat_id))
     rel = str(getattr(rule, "welcome_photo_path", "") or "").strip()
     rule.welcome_photo_path = None
@@ -2499,20 +2567,20 @@ async def api_chat_rules_photo(
 ):
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     mode = str(target or "group").strip().lower()
     if mode not in ("group", "channel"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target must be group or channel")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("rules_target_group_or_channel"))
     rule = await get_or_create_rule(session, int(chat_id))
     rel = str(getattr(rule, "rules_group_photo_path" if mode == "group" else "rules_channel_photo_path", "") or "").strip()
     if not rel:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rules photo not set")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("rules_photo_not_set"))
     fp = (_rules_media_root() / rel).resolve()
     root = _rules_media_root().resolve()
     if root not in fp.parents and fp != root:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Bad rules photo path")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("bad_rules_photo_path"))
     if not fp.exists() or not fp.is_file():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rules photo file not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("rules_photo_file_not_found"))
     return FileResponse(path=str(fp))
 
 
@@ -2526,26 +2594,26 @@ async def api_chat_rules_photo_upload(
 ):
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     mode = str(target or "group").strip().lower()
     if mode not in ("group", "channel"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target must be group or channel")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("rules_target_group_or_channel"))
     rule = await get_or_create_rule(session, int(chat_id))
     ctype = str(getattr(file, "content_type", "") or "").lower()
     if not ctype.startswith("image/"):
         log.warning("rules_photo_upload_reject chat=%s target=%s reason=bad_content_type ctype=%s name=%s", int(chat_id), mode, ctype, str(getattr(file, "filename", "") or ""))
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Нужен image-файл")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("need_image_file"))
     data = await file.read()
     if not data:
         log.warning("rules_photo_upload_reject chat=%s target=%s reason=empty_file ctype=%s name=%s", int(chat_id), mode, ctype, str(getattr(file, "filename", "") or ""))
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Пустой файл")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("empty_file"))
     if len(data) > 20 * 1024 * 1024:
         log.warning("rules_photo_upload_reject chat=%s target=%s reason=too_large_raw bytes=%s name=%s", int(chat_id), mode, len(data), str(getattr(file, "filename", "") or ""))
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Файл слишком большой (до 20MB)")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("file_too_big_20mb"))
     normalized = _normalize_rules_photo_bytes(data)
     if len(normalized) > 9 * 1024 * 1024:
         log.warning("rules_photo_upload_reject chat=%s target=%s reason=too_large_normalized bytes=%s name=%s", int(chat_id), mode, len(normalized), str(getattr(file, "filename", "") or ""))
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Изображение слишком тяжелое после обработки")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("image_too_heavy_after_process"))
     folder = _rules_media_root() / str(int(chat_id))
     folder.mkdir(parents=True, exist_ok=True)
     old_rel = str(getattr(rule, "rules_group_photo_path" if mode == "group" else "rules_channel_photo_path", "") or "").strip()
@@ -2600,10 +2668,10 @@ async def api_chat_rules_photo_delete(
 ):
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     mode = str(target or "group").strip().lower()
     if mode not in ("group", "channel"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target must be group or channel")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("rules_target_group_or_channel"))
     rule = await get_or_create_rule(session, int(chat_id))
     rel = str(getattr(rule, "rules_group_photo_path" if mode == "group" else "rules_channel_photo_path", "") or "").strip()
     if mode == "group":
@@ -2623,11 +2691,11 @@ async def api_chat_rules_photo_delete(
     return {"ok": True, "target": mode}
 
 
-def _sanitize_channel_rule_draft(raw: dict) -> dict:
+def _sanitize_channel_rule_draft(raw: dict, *, default_name: str) -> dict:
     rid = str(raw.get("id") or "").strip()[:96]
     if not rid:
         rid = uuid4().hex
-    name = (str(raw.get("name") or "").strip() or "Черновик")[:48]
+    name = (str(raw.get("name") or "").strip() or default_name)[:48]
     text_v = str(raw.get("text") or "")[:4000]
     manual_thread_id = str(raw.get("manualThreadId") or "")[:64]
     photo_data_url = str(raw.get("photoDataUrl") or "")
@@ -2688,7 +2756,8 @@ async def api_chat_channel_rule_drafts_get(
 ):
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
+    draft_default = _t_api_ui("channel_rule_draft_default")
     q = text(
         """
         SELECT draft_id, name, enabled, text_value, delete_window_sec, buttons_json,
@@ -2711,7 +2780,7 @@ async def api_chat_channel_rule_drafts_get(
         out.append(
             {
                 "id": str(r.get("draft_id") or ""),
-                "name": str(r.get("name") or "Черновик"),
+                "name": str(r.get("name") or draft_default),
                 "enabled": bool(r.get("enabled")),
                 "text": str(r.get("text_value") or ""),
                 "deleteWindowSec": int(r.get("delete_window_sec") or 0),
@@ -2734,10 +2803,13 @@ async def api_chat_channel_rule_drafts_set(
 ):
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
+    draft_default = _t_api_ui("channel_rule_draft_default")
     raw = body.get("drafts")
     incoming_raw = raw if isinstance(raw, list) else []
-    incoming = [_sanitize_channel_rule_draft(d) for d in incoming_raw[:20] if isinstance(d, dict)]
+    incoming = [
+        _sanitize_channel_rule_draft(d, default_name=draft_default) for d in incoming_raw[:20] if isinstance(d, dict)
+    ]
     # Read current server state and merge by draft id using "newer updatedAt wins".
     sel = text(
         """
@@ -2758,7 +2830,7 @@ async def api_chat_channel_rule_drafts_set(
             btns = []
         d = {
             "id": str(r.get("draft_id") or ""),
-            "name": str(r.get("name") or "Черновик"),
+            "name": str(r.get("name") or draft_default),
             "enabled": bool(r.get("enabled")),
             "text": str(r.get("text_value") or ""),
             "deleteWindowSec": int(r.get("delete_window_sec") or 0),
@@ -2831,11 +2903,11 @@ async def api_chat_clean_deleted(
     """Запустить очистку удалённых аккаунтов для выбранного чата (без выхода из Mini App)."""
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
 
     token = (os.getenv("BOT_TOKEN") or "").strip()
     if not token:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="BOT_TOKEN not set")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=err_detail("bot_token_not_configured"))
 
     bot = Bot(token=token)
     try:
@@ -2855,17 +2927,17 @@ async def api_chat_member_unban(
 ):
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     row = await session.get(Chat, int(chat_id))
     if not row or bool(getattr(row, "is_log_chat", False)):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректный чат")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("invalid_chat"))
     uid = int(body.get("user_id") or 0)
     if uid <= 0:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="user_id required")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("user_id_required"))
     if not await tg_unban_chat_member(int(chat_id), uid):
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Не удалось выполнить разбан в Telegram (права бота или пользователь не в бане).",
+            detail=err_detail("telegram_unban_failed"),
         )
     return {"ok": True}
 
@@ -2880,17 +2952,17 @@ async def api_chat_member_unmute(
 ):
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     row = await session.get(Chat, int(chat_id))
     if not row or bool(getattr(row, "is_log_chat", False)):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректный чат")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("invalid_chat"))
     uid = int(body.get("user_id") or 0)
     if uid <= 0:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="user_id required")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("user_id_required"))
     if not await tg_restrict_chat_member_unmute(int(chat_id), uid):
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Не удалось снять ограничения в Telegram (права бота или статус участника).",
+            detail=err_detail("telegram_unrestrict_failed"),
         )
     return {"ok": True}
 
@@ -2906,7 +2978,7 @@ async def api_chat_rule(
     """Частичное обновление правил чата."""
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     rule = await get_or_create_rule(session, int(chat_id))
     chat = await session.get(Chat, int(chat_id))
     owner_premium = await _is_chat_owner_premium(session, chat) if chat else False
@@ -3246,10 +3318,10 @@ async def api_chat_rules_send_now(
 ):
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     row = await session.get(Chat, int(chat_id))
     if not row or bool(getattr(row, "is_log_chat", False)):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректный чат")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("invalid_chat"))
     rule = await get_or_create_rule(session, int(chat_id))
     target = str(body.get("target") or "group").strip().lower()
     pin_message = bool(body.get("pin"))
@@ -3258,7 +3330,7 @@ async def api_chat_rules_send_now(
     )
     thread_id = int(body.get("message_thread_id") or 0)
     if target not in ("group", "channel_comments"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target должен быть group или channel_comments")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("rules_target_type_invalid"))
     async def _send_with_optional_photo(
         dest_chat_id: int,
         text: str,
@@ -3294,7 +3366,7 @@ async def api_chat_rules_send_now(
             )
         token = (os.getenv("BOT_TOKEN") or "").strip()
         if not token:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="BOT_TOKEN not set")
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=err_detail("bot_token_not_configured"))
         rm = InlineKeyboardMarkup.model_validate(markup_dict) if markup_dict else None
         bot = Bot(token=token)
         try:
@@ -3331,7 +3403,7 @@ async def api_chat_rules_send_now(
     if target == "group":
         text = str(getattr(rule, "rules_group_text", "") or "").strip()
         if not text:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Текст правил для группы пуст")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("rules_group_text_empty"))
         markup = _rules_reply_markup_from_json(getattr(rule, "rules_group_buttons_json", None))
         rel = str(getattr(rule, "rules_group_photo_path", "") or "").strip()
         fid = str(getattr(rule, "rules_group_photo_file_id", "") or "").strip()
@@ -3339,15 +3411,15 @@ async def api_chat_rules_send_now(
     else:
         text = str(getattr(rule, "rules_channel_text", "") or "").strip()
         if not text:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Текст правил для комментариев пуст")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("rules_comments_text_empty"))
         if thread_id <= 0:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="message_thread_id обязателен для channel_comments")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("message_thread_required"))
         markup = _rules_reply_markup_from_json(getattr(rule, "rules_channel_buttons_json", None))
         rel = str(getattr(rule, "rules_channel_photo_path", "") or "").strip()
         fid = str(getattr(rule, "rules_channel_photo_file_id", "") or "").strip()
         sent = await _send_with_optional_photo(int(chat_id), text, markup, rel, fid, message_thread_id=int(thread_id))
     if not sent:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Не удалось отправить правила в Telegram")
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=err_detail("rules_telegram_send_failed"))
     message_id = int((sent or {}).get("message_id") or 0)
     if pin_message and message_id > 0 and target == "group":
         await tg_pin_chat_message(int(chat_id), message_id, disable_notification=True)
@@ -3369,16 +3441,16 @@ async def api_set_reports_chat(
     """
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     log_chat_id = body.get("log_chat_id")
     chat = await session.get(Chat, int(chat_id))
     if not chat:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     if log_chat_id is not None:
         log_chat_id = int(log_chat_id)
         ok2 = await user_can_access_chat(session, user_id, log_chat_id)
         if not ok2:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to target chat")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("no_access_target_chat"))
         log_chat_row = await session.get(Chat, log_chat_id)
         if log_chat_row:
             log_chat_row.is_log_chat = True
@@ -3404,7 +3476,7 @@ async def api_chat_reputation(
 ):
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
 
     rule = await get_or_create_rule(session, int(chat_id))
     words_q = await session.execute(
@@ -3480,21 +3552,21 @@ async def api_add_reputation_word(
 ):
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     raw = body.get("word")
     word = _normalize_reputation_word(raw)
     if not word:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="word required")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("reputation_word_required"))
     if len(word) < 2:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="word too short")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("reputation_word_too_short"))
     if word in REPUTATION_DEFAULT_WORDS:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="already in defaults")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("reputation_already_in_defaults"))
     count_q = await session.execute(
         text("SELECT COUNT(*) FROM chat_reputation_words WHERE chat_id = :cid"),
         {"cid": int(chat_id)},
     )
     if int(count_q.scalar_one() or 0) >= REPUTATION_CUSTOM_WORDS_MAX:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="limit reached")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("reputation_limit_reached"))
     await session.execute(
         text(
             """
@@ -3519,10 +3591,10 @@ async def api_delete_reputation_word(
 ):
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     norm = _normalize_reputation_word(word)
     if not norm:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="word required")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("reputation_word_required"))
     await session.execute(
         text("DELETE FROM chat_reputation_words WHERE chat_id = :cid AND word = :word"),
         {"cid": int(chat_id), "word": norm},
@@ -3542,13 +3614,13 @@ async def api_add_stopword(
     """Добавить стоп-слово или фразу (пробелы сохраняются). Body: { "word": "не звоните" } или { "words": ["a", "b c"] }."""
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     word = (body.get("word") or "").strip()
     words = body.get("words")
     if word:
         words = [word] if not words else list(words) + [word]
     elif not words:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Need 'word' or 'words'")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("need_word_or_words"))
     else:
         words = list(words) if isinstance(words, (list, tuple)) else [str(words)]
     added = []
@@ -3570,9 +3642,9 @@ async def api_delete_stopword(
     """Удалить стоп-слово. Query: ?word=казино"""
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     if not (word or "").strip():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Need query param 'word'")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("need_query_param_word"))
     await delete_stopword(session, int(chat_id), word)
     return {"stopwords": await list_stopwords(session, int(chat_id))}
 
@@ -3590,30 +3662,30 @@ async def api_whitelist_domain_add(
 
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     chat = await session.get(Chat, int(chat_id))
     if not chat:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     raw_in = str(body.get("domain") or "")
     domain = normalize_trusted_link_pattern(raw_in)
     if not domain or not is_valid_trusted_pattern(raw_in):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Некорректная запись. Примеры: vk.com, youtube.com, t.me/your_channel",
+            detail=err_detail("trusted_domain_invalid"),
         )
     max_d, _max_u = await _whitelist_limits_for_chat(session, chat)
     cnt_q = await session.execute(select(func.count()).select_from(WhitelistDomain).where(WhitelistDomain.chat_id == int(chat_id)))
     if int(cnt_q.scalar_one() or 0) >= max_d:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Лимит доверенных ссылок для этого чата: {max_d}. С Premium у владельца — до 100.",
+            detail=err_detail("trusted_domain_limit", max_d=max_d),
         )
     session.add(WhitelistDomain(chat_id=int(chat_id), domain=domain))
     try:
         await session.commit()
     except IntegrityError:
         await session.rollback()
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Домен уже в списке")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=err_detail("trusted_domain_duplicate"))
     invalidate_whitelist_cache(int(chat_id))
     return await _whitelist_lists_for_chat(session, int(chat_id))
 
@@ -3630,10 +3702,10 @@ async def api_whitelist_domain_delete(
 
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     dom = normalize_trusted_link_pattern(domain or "")
     if not dom:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Need query param domain")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("need_query_param_domain"))
     await session.execute(delete(WhitelistDomain).where(WhitelistDomain.chat_id == int(chat_id), WhitelistDomain.domain == dom))
     await session.commit()
     invalidate_whitelist_cache(int(chat_id))
@@ -3651,10 +3723,10 @@ async def api_whitelist_user_add(
 
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     chat = await session.get(Chat, int(chat_id))
     if not chat:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     raw_ref = body.get("user_ref")
     if raw_ref is None:
         raw_ref = body.get("user_id")
@@ -3683,21 +3755,21 @@ async def api_whitelist_user_add(
     if target_uid <= 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Не удалось распознать пользователя. Укажите Telegram ID или @username (пользователь должен хотя бы раз запустить Guard).",
+            detail=err_detail("trusted_user_resolve_failed"),
         )
     _max_d, max_u = await _whitelist_limits_for_chat(session, chat)
     cnt_q = await session.execute(select(func.count()).select_from(WhitelistUser).where(WhitelistUser.chat_id == int(chat_id)))
     if int(cnt_q.scalar_one() or 0) >= max_u:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Лимит доверенных пользователей: {max_u}. Premium у владельца — до 100.",
+            detail=err_detail("trusted_user_limit", max_u=max_u),
         )
     session.add(WhitelistUser(chat_id=int(chat_id), user_id=target_uid))
     try:
         await session.commit()
     except IntegrityError:
         await session.rollback()
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Пользователь уже в списке")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=err_detail("trusted_user_duplicate"))
     invalidate_whitelist_cache(int(chat_id))
     return await _whitelist_lists_for_chat(session, int(chat_id))
 
@@ -3713,9 +3785,9 @@ async def api_whitelist_user_delete(
 
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     if target_user_id <= 0:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректный target_user_id")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("target_user_id_invalid"))
     await session.execute(
         delete(WhitelistUser).where(WhitelistUser.chat_id == int(chat_id), WhitelistUser.user_id == int(target_user_id))
     )
@@ -3735,18 +3807,18 @@ async def api_whitelist_sender_chat_add(
 
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     raw_ref = str(body.get("channel") or body.get("username") or "").strip().lstrip("@").lower()
     if not raw_ref:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Нужен @username канала")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("channel_username_required"))
     if not raw_ref.replace("_", "").isalnum() or len(raw_ref) < 5 or len(raw_ref) > 64:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректный @username канала")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("channel_username_invalid"))
     session.add(WhitelistSenderChat(chat_id=int(chat_id), channel_username=raw_ref))
     try:
         await session.commit()
     except IntegrityError:
         await session.rollback()
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Канал уже в доверенных")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=err_detail("trusted_channel_duplicate"))
     invalidate_whitelist_cache(int(chat_id))
     return await _whitelist_lists_for_chat(session, int(chat_id))
 
@@ -3762,10 +3834,10 @@ async def api_whitelist_sender_chat_delete(
 
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     uname = str(channel_username or "").strip().lstrip("@").lower()
     if not uname:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректный channel_username")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("channel_username_bad"))
     await session.execute(
         delete(WhitelistSenderChat).where(
             WhitelistSenderChat.chat_id == int(chat_id),
@@ -3789,35 +3861,35 @@ async def api_link_blacklist_add(
 
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     chat = await session.get(Chat, int(chat_id))
     if not chat:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     max_bl = await _link_blacklist_max_for_chat(session, chat)
     if max_bl <= 0:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Чёрный список ссылок доступен только при Premium у владельца чата.",
+            detail=err_detail("link_blacklist_premium_only"),
         )
     raw_in = str(body.get("pattern") or body.get("domain") or "")
     pat = normalize_trusted_link_pattern(raw_in)
     if not pat or not is_valid_trusted_pattern(raw_in):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Некорректный фрагмент. Примеры: spam.com, t.me/spam_channel",
+            detail=err_detail("link_blacklist_fragment_invalid"),
         )
     cnt_q = await session.execute(select(func.count()).select_from(LinkBlacklist).where(LinkBlacklist.chat_id == int(chat_id)))
     if int(cnt_q.scalar_one() or 0) >= max_bl:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Лимит чёрного списка: {max_bl} записей.",
+            detail=err_detail("link_blacklist_limit", max_bl=max_bl),
         )
     session.add(LinkBlacklist(chat_id=int(chat_id), pattern=pat))
     try:
         await session.commit()
     except IntegrityError:
         await session.rollback()
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Уже в списке")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=err_detail("link_blacklist_duplicate"))
     invalidate_whitelist_cache(int(chat_id))
     return {"link_blacklist": await _link_blacklist_patterns_list(session, int(chat_id))}
 
@@ -3834,10 +3906,10 @@ async def api_link_blacklist_delete(
 
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     pat = normalize_trusted_link_pattern(pattern or "")
     if not pat:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Need query param pattern")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("need_query_param_pattern"))
     await session.execute(delete(LinkBlacklist).where(LinkBlacklist.chat_id == int(chat_id), LinkBlacklist.pattern == pat))
     await session.commit()
     invalidate_whitelist_cache(int(chat_id))
@@ -3992,10 +4064,11 @@ async def api_billing_token_packs():
     from app.services.token_packs import (
         TOKEN_PACK_EXTRA,
         TOKEN_PACK_PRICES_RUB,
-        TOKEN_PACK_TAG,
         pack_savings_label_rub,
+        token_pack_tag_for_ui,
     )
 
+    loc = current_api_locale()
     items = []
     for tokens in sorted(TOKEN_PACK_PRICES_RUB.keys()):
         t = int(tokens)
@@ -4003,8 +4076,8 @@ async def api_billing_token_packs():
             {
                 "tokens": t,
                 "price_rub": float(TOKEN_PACK_PRICES_RUB[tokens]),
-                "discount_label": pack_savings_label_rub(t),
-                "tag": (TOKEN_PACK_TAG.get(t) or None),
+                "discount_label": pack_savings_label_rub(t, loc),
+                "tag": token_pack_tag_for_ui(t, loc),
                 "extra": bool(t in TOKEN_PACK_EXTRA),
             }
         )
@@ -4059,8 +4132,14 @@ async def api_referral(
             ).order_by(Payment.created_at.desc()).limit(1)
         )
         last_months = pr.scalar_one_or_none()
+    loc = normalize_locale(getattr(user, "language", None))
+    access_label = (
+        i18n_t(loc, "api.ui.referral_access_months", months=int(last_months))
+        if last_months
+        else i18n_t(loc, "api.ui.referral_access_no_period")
+    )
     return {
-        "access_label": f"{int(last_months)} мес." if last_months else "без активного периода",
+        "access_label": access_label,
         "days_left": int(days_left),
         "active_until": _format_dt(sub_until),
         "subscription_credits": 0.0,
@@ -4172,14 +4251,15 @@ async def api_referral_payouts_request(
     full_name = str(body.get("full_name") or "").strip()[:255] or None
     is_owner_fast = str(getattr(user, "username", "") or "").lower() == "pastukh_viscera"
     if amount_rub < _PARTNER_PAYOUT_MIN_RUB and not is_owner_fast:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Минимальная сумма вывода {_PARTNER_PAYOUT_MIN_RUB:.0f} ₽")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("partner_payout_min", min_rub=f"{_PARTNER_PAYOUT_MIN_RUB:.0f}"))
     if not requisites:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Укажите реквизиты для выплаты")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("partner_payout_details_required"))
     fin = await _partner_financials(session, user)
     if amount_rub > fin["available_rub"]:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Недостаточно доступного баланса")
-    risk_flag, risk_note = _is_suspicious_payout(amount_rub, requisites)
-    dup_flag, dup_note = await _partner_payout_duplicate_requisites(session, int(user.id), requisites)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("partner_balance_insufficient"))
+    ui_lang = getattr(user, "language", None)
+    risk_flag, risk_note = _is_suspicious_payout(amount_rub, requisites, ui_lang)
+    dup_flag, dup_note = await _partner_payout_duplicate_requisites(session, int(user.id), requisites, ui_lang)
     if dup_flag:
         risk_flag = True
         risk_note = ((risk_note + " · ") if risk_note else "") + dup_note
@@ -4199,12 +4279,11 @@ async def api_referral_payouts_request(
     try:
         await send_user_dm(
             int(user.telegram_id),
-            (
-                "📨 Заявка на вывод принята.\n\n"
-                f"Сумма: {round(amount_rub, 2):.2f} ₽\n"
-                "Статус: на рассмотрении.\n"
-                f"Ориентир выплаты: следующий понедельник ({_next_monday_text()}).\n"
-                "Мы уведомим вас после обработки."
+            _t_api_ui_user(
+                user,
+                "partner_dm_payout_submitted",
+                amount=f"{round(amount_rub, 2):.2f}",
+                monday=_next_monday_text(),
             ),
         )
     except Exception:
@@ -4348,15 +4427,15 @@ async def api_admin_message_templates_options(
     await _require_admin_user(session, int(user_id))
     return {
         "events": [
-            {"id": "manual", "label": "Ручной (только хранение/редактирование)"},
-            {"id": "owner_daily_report", "label": "Суточная сводка владельцу"},
-            {"id": "window_group_joins", "label": "Вступления в группы (окно)"},
-            {"id": "window_starts", "label": "Нажали /start (окно)"},
-            {"id": "window_payments", "label": "Оплаты (окно)"},
-            {"id": "window_referral_shares", "label": "Шеры рефералки (окно)"},
+            {"id": "manual", "label": _t_api_ui("tmpl_event_manual")},
+            {"id": "owner_daily_report", "label": _t_api_ui("tmpl_event_owner_daily_report")},
+            {"id": "window_group_joins", "label": _t_api_ui("tmpl_event_window_group_joins")},
+            {"id": "window_starts", "label": _t_api_ui("tmpl_event_window_starts")},
+            {"id": "window_payments", "label": _t_api_ui("tmpl_event_window_payments")},
+            {"id": "window_referral_shares", "label": _t_api_ui("tmpl_event_window_referral_shares")},
         ],
         "targets": [
-            {"id": "owner_admin", "label": "Владелец/админ в личку"},
+            {"id": "owner_admin", "label": _t_api_ui("tmpl_target_owner_admin")},
         ],
     }
 
@@ -4371,9 +4450,9 @@ async def api_admin_message_template_create(
     title = str(body.get("title") or "").strip()
     text_body = str(body.get("body_text") or "").strip()
     if not title:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="title required")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("template_title_required"))
     if not text_body:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="body_text required")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("template_body_required"))
     key_raw = str(body.get("template_key") or "").strip().lower()
     key = key_raw or _safe_template_key(title)
     i = 2
@@ -4414,7 +4493,7 @@ async def api_admin_message_template_patch(
     await _require_admin_user(session, int(user_id))
     row = await session.get(AdminMessageTemplate, int(template_id))
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="template not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("admin_template_not_found"))
     if "title" in body:
         row.title = str(body.get("title") or "").strip() or row.title
     if "body_text" in body:
@@ -4455,7 +4534,7 @@ async def api_admin_message_template_delete(
     if not row:
         return {"ok": True}
     if not bool(getattr(row, "is_custom", False)):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="system template cannot be deleted")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("system_template_no_delete"))
     await session.delete(row)
     await session.commit()
     return {"ok": True}
@@ -4547,10 +4626,10 @@ async def api_admin_payout_set_status(
     admin_note = str(body.get("admin_note") or "").strip()[:255] or None
     allowed = {"approved", "paid", "rejected", "frozen", "new"}
     if new_status not in allowed:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Недопустимый статус")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("partner_invalid_status"))
     req = await session.get(PartnerPayoutRequest, int(request_id))
     if not req:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Заявка не найдена")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("partner_request_not_found"))
     prev_status = str(req.status or "")
     req.status = new_status
     req.admin_note = admin_note
@@ -4576,18 +4655,18 @@ async def api_admin_payout_set_status(
                     reply_markup = {
                         "inline_keyboard": [[
                             {
-                                "text": "Открыть партнерку",
+                                "text": _t_api_ui_user(u, "partner_kb_open_partner"),
                                 "web_app": {"url": partner_url},
                             }
                         ]]
                     }
                 payload = await send_user_dm_with_result(
                     tg_id,
-                    (
-                        "✅ Выплата одобрена и переведена.\n\n"
-                        f"Сумма: {float(req.amount_rub or 0.0):.2f} ₽\n"
-                        f"Осталось к выводу: {remaining_rub:.2f} ₽\n\n"
-                        "Проверьте поступление средств по вашим реквизитам."
+                    _t_api_ui_user(
+                        u,
+                        "partner_dm_payout_paid",
+                        amount=f"{float(req.amount_rub or 0.0):.2f}",
+                        remaining=f"{remaining_rub:.2f}",
                     ),
                     reply_markup=reply_markup,
                 )
@@ -4847,7 +4926,9 @@ async def api_admin_users(
                 expires_at = _format_dt(sub_until)
                 remaining_days = max(0, (sub_until.date() - now_utc.date()).days)
             purpose = (
-                f"Активация {tariff} на {days} дн." if days > 0 else f"Активация {tariff} без срока"
+                _t_api_ui("promo_purpose_with_days", tariff=tariff, days=days)
+                if days > 0
+                else _t_api_ui("promo_purpose_no_expiry", tariff=tariff)
             )
             promo_by_user[uid] = {
                 "applied_code": str(row[1] or ""),
@@ -4972,7 +5053,7 @@ async def api_admin_broadcast_groups(
     if sc == "all" and not _broadcast_viewer_can_scope_all(user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="scope=all: недостаточно прав (доступны только ваши группы)",
+            detail=err_detail("scope_all_chats_forbidden"),
         )
     q = (
         select(Chat)
@@ -5030,7 +5111,7 @@ async def api_admin_broadcast_channels(
     if sc == "all" and not _broadcast_viewer_can_scope_all(user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="scope=all: недостаточно прав",
+            detail=err_detail("scope_all_forbidden"),
         )
     q = (
         select(Chat)
@@ -5213,7 +5294,7 @@ async def api_admin_my_partner_stats(
     me = await get_or_create_user(session, int(user_id))
     now_chk = datetime.now(timezone.utc)
     if not (_is_full_admin_user(me, int(user_id)) or _is_user_premium_now(me, now_chk)):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("access_denied"))
     fin = await _partner_financials(session, me)
     now_utc = datetime.now(timezone.utc)
     periods = {
@@ -5340,13 +5421,13 @@ async def api_admin_ops_health(
     diagnostics: list[str] = []
     if db_latency_ms > 300:
         status = "warn"
-        diagnostics.append("База данных отвечает медленно — возможна нехватка ресурсов.")
+        diagnostics.append(_t_api_ui("ops_diag_db_slow"))
     if int(payouts_open_count or 0) > 30:
         status = "warn"
-        diagnostics.append("Много открытых заявок на выплаты — проверьте обработку выплат.")
+        diagnostics.append(_t_api_ui("ops_diag_payouts"))
     if int(moderation_24h or 0) > 10000:
         status = "warn"
-        diagnostics.append("Сильный всплеск модерации — возможна атака/рейд в чатах.")
+        diagnostics.append(_t_api_ui("ops_diag_moderation"))
 
     rw_token = (os.getenv("RAILWAY_API_TOKEN") or os.getenv("RAILWAY_TOKEN") or "").strip()
     rw_env, rw_sid_bot, rw_sid_api, rw_sid_web = _railway_redeploy_ids()
@@ -5366,25 +5447,16 @@ async def api_admin_ops_health(
     }
     if not rw_token:
         status = "warn"
-        diagnostics.append(
-            "Guard Pulse / перезапуск: создайте токен в Railway → Account → Tokens, "
-            "добавьте в сервис API переменную RAILWAY_API_TOKEN (или RAILWAY_TOKEN). См. DEPLOY-RAILWAY.md."
-        )
+        diagnostics.append(_t_api_ui("ops_diag_rw_token"))
     elif not rw_env:
         status = "warn"
-        diagnostics.append(
-            "Guard Pulse / перезапуск: нет RAILWAY_ENVIRONMENT_ID (на Railway он обычно приходит сам; "
-            "локально задайте вручную или смотрите DEPLOY-RAILWAY.md)."
-        )
+        diagnostics.append(_t_api_ui("ops_diag_rw_env"))
     elif not (_sid_ok(rw_sid_bot) and _sid_ok(rw_sid_api) and _sid_ok(rw_sid_web)):
         status = "warn"
-        diagnostics.append(
-            "Guard Pulse / перезапуск: задайте UUID сервисов RAILWAY_SERVICE_ID_BOT, "
-            "RAILWAY_SERVICE_ID_API, RAILWAY_SERVICE_ID_WEBAPP (Settings → service → ID). См. DEPLOY-RAILWAY.md."
-        )
+        diagnostics.append(_t_api_ui("ops_diag_rw_services"))
 
     if not diagnostics:
-        diagnostics.append("Система работает стабильно. Критичных отклонений не обнаружено.")
+        diagnostics.append(_t_api_ui("ops_diag_ok"))
 
     return {
         "status": status,
@@ -5452,23 +5524,17 @@ async def api_admin_ops_action(
         "restart_webapp": sid_web,
     }
     if action not in service_map:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Неизвестное действие")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("unknown_action"))
     if not token or not environment_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "Не настроены RAILWAY_API_TOKEN (или RAILWAY_TOKEN) или не виден RAILWAY_ENVIRONMENT_ID "
-                "(на деплое Railway он задаётся платформой; локально добавьте в .env)."
-            ),
+            detail=err_detail("railway_token_env_not_configured"),
         )
     service_id = service_map.get(action, "")
     if not service_id or "YOUR_" in service_id.upper():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "Не настроен service id для действия. "
-                "Проверьте RAILWAY_SERVICE_ID_BOT / RAILWAY_SERVICE_ID_API / RAILWAY_SERVICE_ID_WEBAPP"
-            ),
+            detail=err_detail("railway_service_id_not_configured"),
         )
     gql = """
     mutation serviceInstanceRedeploy($serviceId: String!, $environmentId: String!) {
@@ -5488,7 +5554,10 @@ async def api_admin_ops_action(
             ) as resp:
                 payload = await resp.json(content_type=None)
                 if resp.status >= 400:
-                    raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Railway API HTTP {resp.status}")
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail=err_detail("railway_api_http_status", status=resp.status),
+                    )
                 if isinstance(payload, dict) and payload.get("errors"):
                     parts: list[str] = []
                     for err in payload.get("errors") or []:
@@ -5497,15 +5566,16 @@ async def api_admin_ops_action(
                         else:
                             parts.append(str(err))
                     msg = ("; ".join(parts) if parts else str(payload.get("errors")))[:400]
-                    raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Railway: {msg}")
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail=err_detail("railway_error", message=msg),
+                    )
     except HTTPException:
         raise
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=(
-                "Ошибка вызова Railway API. Проверьте токен/ID окружения/ID сервиса."
-            ),
+            detail=err_detail("railway_call_failed"),
         )
     return {"ok": True, "action": action}
 
@@ -5520,7 +5590,7 @@ async def api_admin_user_reset_finance(
     uq = await session.execute(select(User).where(User.telegram_id == int(target_telegram_id)).limit(1))
     u = uq.scalar_one_or_none()
     if not u:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Пользователь не найден")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("user_not_found"))
 
     # Полный финансовый сброс пользователя.
     await session.execute(delete(Payment).where(Payment.user_id == int(u.id)))
@@ -5560,7 +5630,7 @@ async def api_admin_user_reset_delegation(
     tid = int(target_telegram_id)
     u = (await session.execute(select(User).where(User.telegram_id == tid).limit(1))).scalar_one_or_none()
     if not u:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Пользователь не найден")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("user_not_found"))
     await session.execute(delete(ChatManager).where(ChatManager.user_id == tid))
     await session.execute(delete(ChatManagerInvite).where(ChatManagerInvite.target_telegram_id == tid))
     uname = _norm_username(getattr(u, "username", None))
@@ -5581,7 +5651,7 @@ async def api_admin_user_reset_connected_chats(
     tid = int(target_telegram_id)
     u = (await session.execute(select(User).where(User.telegram_id == tid).limit(1))).scalar_one_or_none()
     if not u:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Пользователь не найден")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("user_not_found"))
     await session.execute(
         text(
             "UPDATE chats SET is_active=FALSE, log_chat_id=NULL "
@@ -5623,7 +5693,7 @@ async def api_admin_user_join_report_settings_set(
     tid = int(target_telegram_id)
     u = (await session.execute(select(User).where(User.telegram_id == tid).limit(1))).scalar_one_or_none()
     if not u:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Пользователь не найден")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("user_not_found"))
     arr = []
     if isinstance(body, dict):
         arr_raw = body.get("periods")
@@ -5656,7 +5726,7 @@ async def api_admin_user_delete_block(
     uq = await session.execute(select(User).where(User.telegram_id == int(target_telegram_id)).limit(1))
     u = uq.scalar_one_or_none()
     if not u:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Пользователь не найден")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("user_not_found"))
 
     # Снимаем активность чатов пользователя.
     await session.execute(
@@ -5713,7 +5783,7 @@ async def api_admin_user_unblock(
     uq = await session.execute(select(User).where(User.telegram_id == int(target_telegram_id)).limit(1))
     u = uq.scalar_one_or_none()
     if not u:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Пользователь не найден")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("user_not_found"))
     u.status = "active"
     session.add(u)
     await session.commit()
@@ -5944,7 +6014,7 @@ async def api_sessions_list(
         items.append({
             "id": int(getattr(row, "id", 0) or 0),
             "session_id": sid,
-            "label": str(getattr(row, "device_label", "") or "Устройство"),
+            "label": str(getattr(row, "device_label", "") or "") or _t_api_ui("session_device_default"),
             "current": bool(current_sid and sid == current_sid),
             "created_at": _format_dt(getattr(row, "created_at", None)),
             "last_seen": _format_dt(getattr(row, "last_seen_at", None)),
@@ -5963,7 +6033,7 @@ async def api_sessions_terminate_one(
     sid_body = str((body or {}).get("session_id") or "").strip()
     rec_id = int((body or {}).get("id") or 0)
     if not sid_body and rec_id <= 0:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="id or session_id required")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("id_or_session_required"))
     q = select(WebAppSession).where(
         WebAppSession.telegram_user_id == int(user_id),
         WebAppSession.revoked_at.is_(None),
@@ -5992,7 +6062,7 @@ async def api_sessions_terminate_others(
     """Завершить все сессии пользователя, кроме текущей."""
     current_sid = str(x_guard_session_id or "").strip()
     if not current_sid:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current session is missing")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("current_session_missing"))
     now = datetime.now(timezone.utc)
     q = await session.execute(
         select(WebAppSession).where(
@@ -6006,6 +6076,50 @@ async def api_sessions_terminate_others(
         row.revoked_at = now
     await session.commit()
     return {"ok": True, "removed": len(rows)}
+
+
+@router.post("/pdf/exports")
+async def api_pdf_export_create(
+    body: dict,
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Сохраняет метаданные сформированного PDF (тип, фильтры, диапазон, размер)."""
+    payload = body or {}
+    report_type = str(payload.get("report_type") or "protection").strip().lower()
+    if report_type not in {"protection", "growth"}:
+        report_type = "protection"
+    period_key = str(payload.get("period_key") or "30d").strip().lower()[:32] or "30d"
+    scope = str(payload.get("scope") or "all").strip().lower()
+    if scope not in {"all", "own", "delegated"}:
+        scope = "all"
+    raw_chat_id = str(payload.get("chat_id") or "").strip()
+    chat_id: int | None = None
+    if raw_chat_id and raw_chat_id.lstrip("-").isdigit():
+        chat_id = int(raw_chat_id)
+    from_ts = _parse_query_datetime(payload.get("from_ts")) if payload.get("from_ts") else None
+    to_ts = _parse_query_datetime(payload.get("to_ts")) if payload.get("to_ts") else None
+    data_payload = payload.get("payload")
+    try:
+        payload_json = json.dumps(data_payload if isinstance(data_payload, dict) else {}, ensure_ascii=False)
+    except Exception:
+        payload_json = "{}"
+    if len(payload_json) > 200_000:
+        payload_json = payload_json[:200_000]
+    row = PdfExport(
+        telegram_user_id=int(user_id),
+        report_type=report_type,
+        period_key=period_key,
+        scope=scope,
+        chat_id=chat_id,
+        from_ts=from_ts,
+        to_ts=to_ts,
+        payload_json=payload_json,
+    )
+    session.add(row)
+    await session.commit()
+    await session.refresh(row)
+    return {"ok": True, "id": int(row.id), "created_at": _format_dt(getattr(row, "created_at", None))}
 
 
 @router.get("/activity/summary")
@@ -6198,7 +6312,7 @@ async def api_activity_breakdown(
     if chat_id is not None:
         cid = int(chat_id)
         if cid not in allowed_ids:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к чату")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("no_chat_access"))
         active_chats = [c for c in active_chats if int(c.id) == cid]
     chat_ids = [int(c.id) for c in active_chats]
 
@@ -6623,7 +6737,7 @@ async def api_activity_journal(
                     target = c
                     break
         if target is None:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к чату")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("no_chat_access"))
         journal_title_source = target
         ids_acc = {int(target.id)}
         if str(getattr(target, "chat_kind", "") or "").lower() == "channel":
@@ -6660,9 +6774,9 @@ async def api_activity_journal(
     to_dt = _parse_query_datetime(to_ts)
     if from_dt is not None and to_dt is not None:
         if from_dt >= to_dt:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректный период: начало позже конца")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("period_start_after_end"))
         if (to_dt - from_dt).days > 400:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Период не более 400 суток")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("period_max_400_days"))
         q = q.where(ModerationLog.created_at >= from_dt, ModerationLog.created_at <= to_dt)
     lim = max(1, min(int(limit or 100), 500 if (from_dt and to_dt) else 300))
     q = q.order_by(ModerationLog.created_at.desc()).limit(lim)
@@ -6732,14 +6846,15 @@ def _activity_slot_index(dt: datetime, bounds: list[tuple[datetime, datetime]]) 
     return None
 
 
-def _activity_risk_index(spam_mod: int, mod_total: int, joins: int) -> dict:
+def _activity_risk_index(spam_mod: int, mod_total: int, joins: int, lang: str | None) -> dict:
     """Три уровня для UI: спокойно / умеренно / под ударом (по спам-срабатываниям и нагрузке)."""
+    loc = normalize_locale(lang)
     score = int(spam_mod) * 3 + int(mod_total) + int(joins) * 2
     if spam_mod <= 1 and mod_total <= 2 and joins <= 2:
-        return {"key": "ok", "label": "в норме", "score": round(float(score), 1)}
+        return {"key": "ok", "label": i18n_t(loc, "api.ui.activity_risk_ok"), "score": round(float(score), 1)}
     if spam_mod <= 4 and mod_total <= 10 and joins <= 8:
-        return {"key": "moderate", "label": "умеренно", "score": round(float(score), 1)}
-    return {"key": "attack", "label": "группа под нагрузкой", "score": round(float(score), 1)}
+        return {"key": "moderate", "label": i18n_t(loc, "api.ui.activity_risk_moderate"), "score": round(float(score), 1)}
+    return {"key": "attack", "label": i18n_t(loc, "api.ui.activity_risk_attack"), "score": round(float(score), 1)}
 
 
 def _infer_gender_from_first_name(first_name: str | None) -> str:
@@ -6783,6 +6898,8 @@ async def api_activity_hours(
     """Активность по слотам времени (UTC): модерация, вступления, спам-метрики. Полоска = доля от макс. в периоде."""
     from collections import defaultdict
 
+    viewer = await get_or_create_user(session, user_id)
+    viewer_lang = getattr(viewer, "language", None)
     chats = await get_managed_chats(session, user_id)
     active_chats = [c for c in chats if not bool(getattr(c, "is_log_chat", False))]
     active_chat_ids = [int(c.id) for c in active_chats]
@@ -6804,22 +6921,22 @@ async def api_activity_hours(
             "selected_chat_id": int(chat_id) if chat_id else None,
             "bucket": "hour",
             "bar_scale_max": 1,
-            "bar_scale_note": "100% = максимум событий в одном слоте выбранного периода (не лимит Telegram).",
+            "bar_scale_note": i18n_t(normalize_locale(viewer_lang), "api.ui.activity_bar_scale_note_a"),
             "period_from": None,
             "period_to": None,
         }
     cid = int(chat_id) if chat_id is not None else None
     if cid is not None and cid not in active_chat_ids:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к чату")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("no_chat_access"))
 
     now_utc = datetime.now(timezone.utc)
     from_dt = _parse_query_datetime(from_ts)
     to_dt = _parse_query_datetime(to_ts)
     if from_dt is not None and to_dt is not None:
         if from_dt >= to_dt:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректный период: начало позже конца")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("period_start_after_end"))
         if (to_dt - from_dt).days > 400:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Период не более 400 суток")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("period_max_400_days"))
         since = from_dt
         until = to_dt
     else:
@@ -6872,7 +6989,7 @@ async def api_activity_hours(
     if cid is not None:
         one = await session.get(Chat, int(cid))
         if not one:
-            raise HTTPException(status_code=404, detail="Chat not found")
+            raise HTTPException(status_code=404, detail=err_detail("chat_not_found"))
         phys_union = set(_activity_effective_ids_for_chat(one, chn_by_id))
         logical_targets = {p: {int(cid)} for p in phys_union}
 
@@ -7019,7 +7136,7 @@ async def api_activity_hours(
                     "score": spike_score,
                 }
             )
-        risk = _activity_risk_index(sm, m, j)
+        risk = _activity_risk_index(sm, m, j, viewer_lang)
         slots_out.append(
             {
                 "index": i,
@@ -7101,7 +7218,7 @@ async def api_activity_hours(
         "hours": legacy_hours,
         "bucket": bucket,
         "bar_scale_max": int(bar_scale_max),
-        "bar_scale_note": "100% полоски = самый загруженный слот в выбранном периоде (относительная шкала, не лимит Telegram).",
+        "bar_scale_note": i18n_t(normalize_locale(viewer_lang), "api.ui.activity_bar_scale_note_b"),
         "totals": {
             "events": total_mod + total_join,
             "moderation": total_mod,
@@ -7144,13 +7261,13 @@ async def api_activity_slot_detail(
         return {"joins": [], "moderation": [], "chats": []}
     cid = int(chat_id) if chat_id is not None else None
     if cid is not None and cid not in active_ids:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к чату")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("no_chat_access"))
     a = _parse_query_datetime(from_ts)
     b = _parse_query_datetime(to_ts)
     if not a or not b or a >= b:
-        raise HTTPException(status_code=400, detail="Нужны корректные from_ts и to_ts")
+        raise HTTPException(status_code=400, detail=err_detail("analytics_ts_invalid"))
     if (b - a).total_seconds() > 86400 * 2 + 3600:
-        raise HTTPException(status_code=400, detail="Интервал не более ~49 часов для детализации")
+        raise HTTPException(status_code=400, detail=err_detail("analytics_interval_max_hours"))
 
     chn_ids = [int(c.id) for c in active_chats if str(getattr(c, "chat_kind", "") or "group").lower() == "channel"]
     chn_by_id: dict[int, Channel] = {}
@@ -7241,7 +7358,7 @@ async def api_activity_audience_gender(
         }
     cid = int(chat_id) if chat_id is not None else None
     if cid is not None and cid not in active_ids:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к чату")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("no_chat_access"))
 
     chn_ids = [int(c.id) for c in active_chats if str(getattr(c, "chat_kind", "") or "group").lower() == "channel"]
     chn_by_id: dict[int, Channel] = {}
@@ -7352,15 +7469,15 @@ async def api_activity_group_breakdown(
     chats = await get_managed_chats(session, user_id)
     active_ids = [int(c.id) for c in chats if not bool(getattr(c, "is_log_chat", False))]
     if int(chat_id) not in active_ids:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к чату")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("no_chat_access"))
     now = datetime.now(timezone.utc)
     from_dt = _parse_query_datetime(from_ts)
     to_dt = _parse_query_datetime(to_ts)
     if from_dt is not None and to_dt is not None:
         if from_dt >= to_dt:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректный период: начало позже конца")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("period_start_after_end"))
         if (to_dt - from_dt).days > 400:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Период не более 400 суток")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("period_max_400_days"))
         since = from_dt
         until = to_dt
         h = 0
@@ -7372,6 +7489,8 @@ async def api_activity_group_breakdown(
         period_mode = "hours"
     user = await get_or_create_user(session, user_id)
     is_premium = _is_user_premium_now(user, now)
+    loc = normalize_locale(getattr(user, "language", None))
+    note_stats = i18n_t(loc, "api.ui.mod_cat_note_not_in_stats")
 
     q = await session.execute(
         select(ModerationLog.reason, func.count(ModerationLog.id)).where(
@@ -7391,21 +7510,35 @@ async def api_activity_group_breakdown(
     newbie_hits = sum(v for k, v in counts.items() if k.endswith("_newbie"))
 
     buckets = [
-        {"key": "links", "label": "Ссылки", "count": c("link", "link_newbie"), "premium": False, "tone": "emerald"},
-        {"key": "media", "label": "Медиа / стикеры", "count": c("media", "media_newbie"), "premium": False, "tone": "emerald"},
-        {"key": "buttons", "label": "Сообщения с кнопками", "count": c("buttons", "buttons_newbie"), "premium": False, "tone": "rose"},
-        {"key": "mentions", "label": "Упоминания", "count": c("mention", "mention_newbie"), "premium": False, "tone": "emerald"},
-        {"key": "stopwords", "label": "Стоп-слова", "count": c("stopword", "stopword_newbie"), "premium": False, "tone": "rose"},
-        {"key": "profanity", "label": "Мат (словарь)", "count": c("profanity", "profanity_newbie"), "premium": False, "tone": "rose"},
-        {"key": "jobs", "label": "Подработки", "count": c("jobs", "jobs_newbie"), "premium": False, "tone": "amber"},
-        {"key": "casino", "label": "Казино / ставки", "count": c("casino", "casino_newbie"), "premium": False, "tone": "amber"},
-        {"key": "politics", "label": "Анти-политика", "count": c("politics", "politics_newbie"), "premium": False, "tone": "rose"},
-        {"key": "religion", "label": "Религия", "count": c("religion", "religion_newbie"), "premium": False, "tone": "rose"},
-        {"key": "esoteric", "label": "Эзотерика / магия", "count": c("esoteric", "esoteric_newbie"), "premium": False, "tone": "rose"},
-        {"key": "silence", "label": "Режим тишины", "count": c("silence"), "premium": True, "tone": "violet"},
-        {"key": "newbie_mode", "label": "Срабатывания для новичков", "count": int(newbie_hits or 0), "premium": True, "tone": "violet"},
-        {"key": "antinakrutka", "label": "Антинакрутка", "count": 0, "premium": True, "tone": "slate", "note": "События не пишутся в эту статистику"},
-        {"key": "global_antispam", "label": "Глобальная антиспам база", "count": 0, "premium": True, "tone": "slate", "note": "События не пишутся в эту статистику"},
+        {"key": "links", "label": i18n_t(loc, "api.ui.mod_cat_links"), "count": c("link", "link_newbie"), "premium": False, "tone": "emerald"},
+        {"key": "media", "label": i18n_t(loc, "api.ui.mod_cat_media"), "count": c("media", "media_newbie"), "premium": False, "tone": "emerald"},
+        {"key": "buttons", "label": i18n_t(loc, "api.ui.mod_cat_buttons"), "count": c("buttons", "buttons_newbie"), "premium": False, "tone": "rose"},
+        {"key": "mentions", "label": i18n_t(loc, "api.ui.mod_cat_mentions"), "count": c("mention", "mention_newbie"), "premium": False, "tone": "emerald"},
+        {"key": "stopwords", "label": i18n_t(loc, "api.ui.mod_cat_stopwords"), "count": c("stopword", "stopword_newbie"), "premium": False, "tone": "rose"},
+        {"key": "profanity", "label": i18n_t(loc, "api.ui.mod_cat_profanity"), "count": c("profanity", "profanity_newbie"), "premium": False, "tone": "rose"},
+        {"key": "jobs", "label": i18n_t(loc, "api.ui.mod_cat_jobs"), "count": c("jobs", "jobs_newbie"), "premium": False, "tone": "amber"},
+        {"key": "casino", "label": i18n_t(loc, "api.ui.mod_cat_casino"), "count": c("casino", "casino_newbie"), "premium": False, "tone": "amber"},
+        {"key": "politics", "label": i18n_t(loc, "api.ui.mod_cat_politics"), "count": c("politics", "politics_newbie"), "premium": False, "tone": "rose"},
+        {"key": "religion", "label": i18n_t(loc, "api.ui.mod_cat_religion"), "count": c("religion", "religion_newbie"), "premium": False, "tone": "rose"},
+        {"key": "esoteric", "label": i18n_t(loc, "api.ui.mod_cat_esoteric"), "count": c("esoteric", "esoteric_newbie"), "premium": False, "tone": "rose"},
+        {"key": "silence", "label": i18n_t(loc, "api.ui.mod_cat_silence"), "count": c("silence"), "premium": True, "tone": "violet"},
+        {"key": "newbie_mode", "label": i18n_t(loc, "api.ui.mod_cat_newbie_mode"), "count": int(newbie_hits or 0), "premium": True, "tone": "violet"},
+        {
+            "key": "antinakrutka",
+            "label": i18n_t(loc, "api.ui.mod_cat_antinakrutka"),
+            "count": 0,
+            "premium": True,
+            "tone": "slate",
+            "note": note_stats,
+        },
+        {
+            "key": "global_antispam",
+            "label": i18n_t(loc, "api.ui.mod_cat_global_antispam"),
+            "count": 0,
+            "premium": True,
+            "tone": "slate",
+            "note": note_stats,
+        },
     ]
     chat_title = ""
     for cht in chats:
@@ -7437,16 +7570,16 @@ async def api_history_payment_receipt(
     email_to = (body.get("email") or "").strip()
     full_name = (body.get("full_name") or "").strip()
     if payment_id <= 0:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="payment_id required")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("payment_id_required"))
     if not email_to or "@" not in email_to:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Введите корректный email")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("email_invalid"))
     user = await get_or_create_user(session, user_id)
     q = await session.execute(
         select(Payment).where(Payment.id == payment_id, Payment.user_id == user.id).limit(1)
     )
     p = q.scalar_one_or_none()
     if not p:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Платеж не найден")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("payment_not_found"))
 
     smtp_host = (os.getenv("SMTP_HOST") or "").strip()
     smtp_port = int((os.getenv("SMTP_PORT") or "587").strip())
@@ -7456,7 +7589,7 @@ async def api_history_payment_receipt(
     if not smtp_host or not smtp_from:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Сервис отправки чеков на email временно недоступен",
+            detail=err_detail("receipt_email_unavailable"),
         )
 
     created = _format_dt(getattr(p, "created_at", None)) or "—"
@@ -7464,18 +7597,19 @@ async def api_history_payment_receipt(
     months = int(getattr(p, "months", 0) or 0)
     provider = str(getattr(p, "provider", "") or "yookassa")
     pay_ext = str(getattr(p, "payment_id", "") or "—")
-    fio = full_name or "Пользователь"
-    text = (
-        "Чек оплаты Guard\n\n"
-        f"Покупатель: {fio}\n"
-        f"Дата: {created}\n"
-        f"Сумма: {amount:.2f} RUB\n"
-        f"Период: {months} мес.\n"
-        f"Способ оплаты: {provider}\n"
-        f"ID платежа: {pay_ext}\n"
+    fio = full_name or _t_api_ui_user(user, "receipt_user_fallback")
+    text = _t_api_ui_user(
+        user,
+        "receipt_email_body",
+        fio=fio,
+        created=created,
+        amount=amount,
+        months=months,
+        provider=provider,
+        pay_ext=pay_ext,
     )
     msg = EmailMessage()
-    msg["Subject"] = "Чек оплаты Guard"
+    msg["Subject"] = _t_api_ui_user(user, "receipt_email_subject")
     msg["From"] = smtp_from
     msg["To"] = email_to
     msg.set_content(text)
@@ -7494,7 +7628,7 @@ async def api_history_payment_receipt(
         await asyncio.to_thread(_send_mail)
     except Exception:
         _log.exception("send receipt email failed")
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Не удалось отправить чек")
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=err_detail("receipt_send_failed"))
     return {"ok": True}
 
 
@@ -7561,7 +7695,7 @@ async def api_admin_global_bad_urls_add(
     if not pat or not is_valid_trusted_pattern(raw_in):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Некорректный шаблон. Примеры: evil.com, t.me/spam_channel",
+            detail=err_detail("url_template_invalid"),
         )
     note = (str(body.get("note") or "").strip() or None)[:255]
     session.add(GlobalBadUrlPattern(pattern=pat, note=note))
@@ -7569,7 +7703,7 @@ async def api_admin_global_bad_urls_add(
         await session.commit()
     except IntegrityError:
         await session.rollback()
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Шаблон уже в базе")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=err_detail("admin_global_template_duplicate"))
     invalidate_global_bad_url_cache()
     res = await session.execute(
         select(GlobalBadUrlPattern.pattern, GlobalBadUrlPattern.note).order_by(GlobalBadUrlPattern.pattern.asc())
@@ -7589,7 +7723,7 @@ async def api_admin_global_bad_urls_delete(
     await _require_admin_user(session, int(user_id))
     pat = normalize_trusted_link_pattern(pattern or "")
     if not pat:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Query param pattern required")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("query_pattern_required"))
     await session.execute(delete(GlobalBadUrlPattern).where(GlobalBadUrlPattern.pattern == pat))
     await session.commit()
     invalidate_global_bad_url_cache()
@@ -7716,7 +7850,7 @@ async def api_global_antispam_add(
 
     uid = body.get("user_id")
     if uid is None:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="user_id required")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("user_id_required"))
     uid = int(uid)
     added = await add_to_global_antispam(session, uid, body.get("reason"))
     if added:
@@ -7763,35 +7897,46 @@ async def api_promo_apply(
         is_tokens_promo = bool(promo and (gt > 0 or ga > 0))
         if is_sub_promo or is_tokens_promo:
             user = await get_or_create_user(session, int(user_id))
-            until_txt = format_subscription_until_ru(getattr(user, "subscription_until", None))
+            lang = normalize_locale(getattr(user, "language", None))
+            until_txt = format_subscription_until(getattr(user, "subscription_until", None), lang)
             bonus_parts: list[str] = []
             if gt > 0:
                 bonus_parts.append(f"+{gt:g} ⚡")
             if ga > 0:
                 bonus_parts.append(f"+{ga:g} ✨")
-            period_txt = "без срока" if days == 0 else f"на {days} дн."
-            bonus_txt = f"\nНачислено: *{', '.join(bonus_parts)}*" if bonus_parts else ""
+            period_txt = (
+                i18n_t(lang, "billing.guardian.promo_period_forever")
+                if days == 0
+                else i18n_t(lang, "billing.guardian.promo_period_days", days=days)
+            )
+            bonus_line = (
+                i18n_t(lang, "billing.guardian.promo_bonus_line", parts=", ".join(bonus_parts))
+                if bonus_parts
+                else ""
+            )
             if is_sub_promo:
-                body_txt = (
-                    "✅ *Guard подтверждает активацию*\n\n"
-                    f"Промокод: *{code_norm}*\n"
-                    f"Подписка Guard Premium: *{period_txt}*\n"
-                    f"Действует до: *{until_txt}*"
-                    f"{bonus_txt}\n\n"
-                    "Защита активна, можно перейти к рассылке."
+                body_txt = i18n_t(
+                    lang,
+                    "billing.guardian.promo_confirm_sub",
+                    code=code_norm,
+                    period=period_txt,
+                    until=until_txt,
+                    bonus=bonus_line,
                 )
             else:
-                body_txt = (
-                    "✅ *Guard начислил бонусы по промокоду*\n\n"
-                    f"Промокод: *{code_norm}*"
-                    f"{bonus_txt}\n\n"
-                    "Токены готовы к использованию в рассылках."
+                body_txt = i18n_t(
+                    lang,
+                    "billing.guardian.promo_confirm_tokens",
+                    code=code_norm,
+                    bonus=bonus_line,
                 )
             reply_markup = None
             admin_url = _mini_app_admin_broadcast_url()
             if admin_url:
                 reply_markup = {
-                    "inline_keyboard": [[{"text": "🔵 Настроить рассылку", "web_app": {"url": admin_url}}]]
+                    "inline_keyboard": [
+                        [{"text": i18n_t(lang, "billing.guardian.btn_configure_broadcast"), "web_app": {"url": admin_url}}]
+                    ]
                 }
             await send_user_dm(
                 int(user_id),
@@ -7816,13 +7961,13 @@ async def api_yookassa_create_payment(
     if not yookassa_configured("live"):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Платежи не настроены",
+            detail=err_detail("payments_not_configured"),
         )
     raw = body.get("months")
     try:
         months = int(raw)
     except (TypeError, ValueError):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="months required")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("months_required"))
     try:
         url = await create_yookassa_subscription_payment(
             session,
@@ -7832,7 +7977,7 @@ async def api_yookassa_create_payment(
             save_payment_method=True,
         )
     except ValueError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Недопустимый период")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("invalid_subscription_period"))
     except RuntimeError as e:
         _log.exception("YooKassa create failed")
         raise HTTPException(
@@ -7853,23 +7998,23 @@ async def api_yookassa_create_test_subscription_payment(
     Доступна только для telegram id из TEST_TARIFF_PAYMENT_TELEGRAM_IDS.
     """
     if int(user_id) not in _test_tariff_payment_telegram_ids():
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Тестовая оплата недоступна")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("test_payment_forbidden"))
     from app.services.payments_yookassa import create_yookassa_subscription_payment, yookassa_configured
 
     if not yookassa_configured("test"):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Платежи не настроены",
+            detail=err_detail("payments_not_configured"),
         )
     raw = body.get("months")
     try:
         months = int(raw)
     except (TypeError, ValueError):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="months required")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("months_required"))
     try:
         url = await create_yookassa_subscription_payment(session, user_id, months, mode="test")
     except ValueError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Недопустимый период")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("invalid_subscription_period"))
     except RuntimeError as e:
         _log.exception("YooKassa test subscription create failed")
         raise HTTPException(
@@ -7891,25 +8036,25 @@ async def api_yookassa_create_tokens_payment(
     if not yookassa_configured("live"):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Платежи не настроены",
+            detail=err_detail("payments_not_configured"),
         )
     user = await get_or_create_user(session, user_id)
     if not _is_user_premium_now(user, datetime.now(timezone.utc)):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Токены доступны только при активной подписке")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("tokens_need_active_subscription"))
     raw = body.get("tokens")
     try:
         tokens = int(raw)
     except (TypeError, ValueError):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="tokens required")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("tokens_required"))
     try:
         url = await create_yookassa_tokens_payment(session, user_id, tokens, mode="live")
     except ValueError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Недопустимый пакет токенов")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("invalid_token_pack"))
     except RuntimeError as e:
         _log.exception("YooKassa tokens create failed")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=str(e) or "Ошибка платёжной системы",
+            detail=str(e) or err_detail("payment_provider_error"),
         ) from e
     return {"confirmation_url": url}
 
@@ -7963,18 +8108,18 @@ async def api_admin_test_create_subscription_payment(
     if not yookassa_configured("test"):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Платежи не настроены",
+            detail=err_detail("payments_not_configured"),
         )
     raw = body.get("months")
     try:
         months = int(raw)
     except (TypeError, ValueError):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="months required")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("months_required"))
     target_telegram_id = int(body.get("target_telegram_id") or user_id)
     try:
         url = await create_yookassa_subscription_payment(session, target_telegram_id, months, mode="test")
     except ValueError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Недопустимый период")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("invalid_subscription_period"))
     except RuntimeError as e:
         _log.exception("Admin test YooKassa create subscription failed")
         raise HTTPException(
@@ -7997,23 +8142,23 @@ async def api_admin_test_create_tokens_payment(
     if not yookassa_configured("test"):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Платежи не настроены",
+            detail=err_detail("payments_not_configured"),
         )
     raw = body.get("tokens")
     try:
         tokens = int(raw)
     except (TypeError, ValueError):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="tokens required")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("tokens_required"))
     target_telegram_id = int(body.get("target_telegram_id") or user_id)
     try:
         url = await create_yookassa_tokens_payment(session, target_telegram_id, tokens, mode="test")
     except ValueError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Недопустимый пакет токенов")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("invalid_token_pack"))
     except RuntimeError as e:
         _log.exception("Admin test YooKassa create tokens failed")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=str(e) or "Ошибка платёжной системы",
+            detail=str(e) or err_detail("payment_provider_error"),
         ) from e
     return {"confirmation_url": url}
 
@@ -8034,7 +8179,7 @@ async def api_admin_test_create_binding_probe_payment(
     if not yookassa_configured(mode):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Платежи не настроены",
+            detail=err_detail("payments_not_configured"),
         )
     target_telegram_id = int((body or {}).get("target_telegram_id") or user_id)
     try:
@@ -8085,16 +8230,16 @@ async def api_admin_test_payments_capability(
         recurring_enabled = bool(mode_payload.get("recurring_enabled"))
         if not configured:
             status = "not_configured"
-            hint = "Платежи для этого режима не настроены."
+            hint = _t_api_ui("yookassa_cap_hint_not_configured")
         elif recurring_enabled:
             status = "enabled"
-            hint = "Recurring отмечен как включённый в настройках окружения."
+            hint = _t_api_ui("yookassa_cap_hint_recurring_env")
         elif observed_bound_any:
             status = "enabled_observed"
-            hint = "Обнаружены успешные привязки карты в базе."
+            hint = _t_api_ui("yookassa_cap_hint_observed")
         else:
             status = "unknown_or_disabled"
-            hint = "Привязки пока не наблюдались. Если LIVE ругается на recurring — подключите у YooMoney менеджера."
+            hint = _t_api_ui("yookassa_cap_hint_unknown")
         return {
             **mode_payload,
             "status": status,
@@ -8172,9 +8317,9 @@ async def api_admin_broadcasts_get(
     )
     row = q.scalar_one_or_none()
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("resource_not_found"))
     if not full and int(getattr(row, "admin_telegram_id", 0) or 0) != int(user_id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к этому посту")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("no_access_to_post"))
     d = broadcast_row_to_dict(row)
     oid = int(getattr(row, "admin_telegram_id", 0) or 0)
     if oid > 0:
@@ -8195,10 +8340,10 @@ async def api_public_broadcast_click(
     """Трекинг реальных кликов/переходов по ссылкам из рассылки."""
     url = str(u or "").strip()
     if not (url.startswith("http://") or url.startswith("https://")):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid url")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("invalid_url"))
     row = await session.get(AdminBroadcast, int(b))
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("resource_not_found_lower"))
     ev = AdminBroadcastClick(
         broadcast_id=int(b),
         target_kind=str(k or "user")[:16],
@@ -8325,7 +8470,9 @@ async def _admin_broadcast_click_breakdown(
             except Exception:
                 btn_idx = -1
         inner = parts[2] if len(parts) >= 3 else ""
-        title = f"Кнопка #{btn_idx + 1}" if btn_idx >= 0 else "Кнопка"
+        title = (
+            _t_api_ui("broadcast_click_button_n", n=btn_idx + 1) if btn_idx >= 0 else _t_api_ui("broadcast_click_button")
+        )
         if inner:
             title = f"{title} · {inner[:96]}"
         row = callback_map.get(val)
@@ -8380,9 +8527,9 @@ async def api_admin_broadcasts_stats(
     _viewer, full = await _require_broadcast_access(session, int(user_id))
     row = await session.get(AdminBroadcast, int(broadcast_id))
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("resource_not_found"))
     if not full and int(getattr(row, "admin_telegram_id", 0) or 0) != int(user_id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к этому посту")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("no_access_to_post"))
     gtotal_q = await session.execute(
         select(func.count(Chat.id)).where(
             Chat.is_active.is_(True),
@@ -8934,9 +9081,9 @@ async def api_admin_broadcasts_autopost_stats(
     _u, full = await _require_broadcast_access(session, int(user_id))
     row = await session.get(AdminBroadcast, int(broadcast_id))
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("resource_not_found"))
     if not full and int(getattr(row, "admin_telegram_id", 0) or 0) != int(user_id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к этому посту")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("no_access_to_post"))
 
     ap_dict: dict | None = None
     raw_ap = getattr(row, "autopost_json", None) or ""
@@ -9081,16 +9228,16 @@ async def api_admin_autopost_campaigns_create(
     if anchor_bid <= 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Укажите anchor_broadcast_id — черновик для ротации постов в кампании",
+            detail=err_detail("anchor_broadcast_required"),
         )
     brow = await session.get(AdminBroadcast, anchor_bid)
     if not brow or int(getattr(brow, "admin_telegram_id", 0) or 0) != int(user_id):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Черновик не найден или недоступен")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("draft_not_found_or_denied"))
     cnt_q = await session.execute(select(func.count()).where(AutopostCampaign.admin_telegram_id == int(user_id)))
     next_seq = int(cnt_q.scalar() or 0) + 1
     title = str(body.get("title") or "").strip()[:255]
     if not title:
-        title = f"Кампания {next_seq}"
+        title = _t_api_ui("autopost_campaign_default_title", seq=next_seq)
     row = AutopostCampaign(
         admin_telegram_id=int(user_id),
         user_seq=next_seq,
@@ -9116,13 +9263,13 @@ async def api_admin_autopost_campaigns_patch(
     user, full = await _require_broadcast_access(session, int(user_id))
     row = await session.get(AutopostCampaign, int(campaign_id))
     if not row or int(getattr(row, "admin_telegram_id", 0) or 0) != int(user_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("resource_not_found"))
     if "anchor_broadcast_id" in body:
         ab = int(body.get("anchor_broadcast_id") or 0)
         if ab > 0:
             brow = await session.get(AdminBroadcast, ab)
             if not brow or int(getattr(brow, "admin_telegram_id", 0) or 0) != int(user_id):
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Черновик не найден или недоступен")
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("draft_not_found_or_denied"))
             row.anchor_broadcast_id = ab
     if "title" in body:
         row.title = str(body.get("title") or "")[:255]
@@ -9135,7 +9282,7 @@ async def api_admin_autopost_campaigns_patch(
             if anchor_bid <= 0:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Сначала задайте anchor_broadcast_id (якорный черновик для ротации)",
+                    detail=err_detail("set_anchor_first"),
                 )
             owner_tid = int(user_id)
             can_scope_all_self = _broadcast_viewer_can_scope_all(user) and owner_tid == int(user_id)
@@ -9179,7 +9326,7 @@ async def api_admin_autopost_campaigns_delete(
 
     row = await session.get(AutopostCampaign, int(campaign_id))
     if not row or int(getattr(row, "admin_telegram_id", 0) or 0) != int(user_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("resource_not_found"))
     raw = (row.autopost_json or "").strip()
     if raw:
         try:
@@ -9190,7 +9337,7 @@ async def api_admin_autopost_campaigns_delete(
                 if ap and str(ap.get("runState") or "").lower() in ("running", "paused"):
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Сначала остановите автопост кампании (runState: stopped)",
+                        detail=err_detail("stop_autopost_first"),
                     )
         except HTTPException:
             raise
@@ -9212,7 +9359,7 @@ async def api_admin_autopost_campaigns_autopost_stats(
 
     row = await session.get(AutopostCampaign, int(campaign_id))
     if not row or int(getattr(row, "admin_telegram_id", 0) or 0) != int(user_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("resource_not_found"))
 
     ap_dict: dict | None = None
     raw_ap = getattr(row, "autopost_json", None) or ""
@@ -9394,11 +9541,11 @@ async def api_admin_broadcasts_patch(
     user, full = await _require_broadcast_access(session, int(user_id))
     row = await session.get(AdminBroadcast, int(broadcast_id))
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("resource_not_found"))
     if not full and int(getattr(row, "admin_telegram_id", 0) or 0) != int(user_id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к этому посту")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("no_access_to_post"))
     if (row.status or "") == "sending":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Нельзя менять шаблон во время активной рассылки")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("cannot_change_template_active_send"))
     if (row.status or "") != "draft":
         row.status = "draft"
         row.error_message = None
@@ -9488,11 +9635,11 @@ async def api_admin_broadcasts_upload_media(
     _u, full = await _require_broadcast_access(session, int(user_id))
     row = await session.get(AdminBroadcast, int(broadcast_id))
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("resource_not_found"))
     if not full and int(getattr(row, "admin_telegram_id", 0) or 0) != int(user_id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к этому посту")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("no_access_to_post"))
     if (row.status or "") == "sending":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Нельзя менять медиа во время активной рассылки")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("cannot_change_media_active_send"))
     if (row.status or "") != "draft":
         row.status = "draft"
         row.error_message = None
@@ -9500,13 +9647,13 @@ async def api_admin_broadcasts_upload_media(
     data = await file.read()
 
     if len(data) > _MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Файл слишком большой")
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=err_detail("file_too_large"))
 
     # GIF временно отключены по продуктовой логике.
     lower_name = str(file.filename or "").lower()
     ct = str(getattr(file, "content_type", "") or "").lower()
     if lower_name.endswith(".gif") or ct.startswith("image/gif"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="GIF отключены. Используйте PNG/JPEG/MP4/MP3 и другие поддерживаемые форматы.")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("gif_disabled"))
 
     mk = safe_media_kind(media_kind) or guess_media_kind_from_name(
         file.filename or "", getattr(file, "content_type", None)
@@ -9553,15 +9700,15 @@ async def api_admin_broadcasts_media_file(
     viewer, _full = await _require_broadcast_access(session, int(user_id))
     row = await session.get(AdminBroadcast, int(broadcast_id))
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("resource_not_found"))
     if int(row.admin_telegram_id) != int(user_id) and not _broadcast_viewer_can_scope_all(viewer):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к этому посту")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("no_access_to_post"))
     m = await session.get(AdminBroadcastMedia, int(media_id))
     if not m or int(m.broadcast_id) != int(broadcast_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("media_not_found"))
     path = broadcast_upload_root() / str(m.media_local_name or "")
     if not path.is_file():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Файл не найден")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("attach_not_found"))
     mk = str(m.media_kind or "photo").lower()
     suffix = Path(path.name).suffix.lower()
     media_type = "application/octet-stream"
@@ -9593,14 +9740,14 @@ async def api_admin_broadcasts_delete_media_item(
     _u, full = await _require_broadcast_access(session, int(user_id))
     row = await session.get(AdminBroadcast, int(broadcast_id))
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("resource_not_found"))
     if not full and int(getattr(row, "admin_telegram_id", 0) or 0) != int(user_id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к этому посту")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("no_access_to_post"))
     if (row.status or "") == "sending":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Нельзя менять медиа во время активной рассылки")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("cannot_change_media_active_send"))
     m = await session.get(AdminBroadcastMedia, int(media_id))
     if not m or int(m.broadcast_id) != int(row.id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("media_not_found"))
     try:
         p = broadcast_upload_root() / str(m.media_local_name or "")
         if p.is_file():
@@ -9642,11 +9789,11 @@ async def api_admin_broadcasts_delete(
     _u, full = await _require_broadcast_access(session, int(user_id))
     row = await session.get(AdminBroadcast, int(broadcast_id))
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("resource_not_found"))
     if not full and int(getattr(row, "admin_telegram_id", 0) or 0) != int(user_id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к этому посту")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("no_access_to_post"))
     if (row.status or "") == "sending":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Нельзя удалить во время активной рассылки")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("cannot_delete_during_active_send"))
     media_q = await session.execute(select(AdminBroadcastMedia).where(AdminBroadcastMedia.broadcast_id == int(row.id)))
     for m in media_q.scalars().all():
         try:
@@ -9694,19 +9841,19 @@ async def api_admin_broadcasts_quote(
             if v != 0:
                 body_chat_ids.append(v)
     if target not in {"users", "groups", "all"}:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Недопустимый тип отправки")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("invalid_send_type"))
 
     viewer, full = await _require_broadcast_access(session, int(user_id))
     allow_all_groups = _broadcast_viewer_can_scope_all(viewer)
     row = await session.get(AdminBroadcast, int(broadcast_id))
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("resource_not_found"))
     if not full and int(getattr(row, "admin_telegram_id", 0) or 0) != int(user_id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к этому посту")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("no_access_to_post"))
     if not full and target in ("users", "all"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Для Premium доступна рассылка только в ваши группы (не в личку и не «всё»).",
+            detail=err_detail("premium_broadcast_groups_only"),
         )
 
     target_chat_ids: list[int] = []
@@ -9721,12 +9868,12 @@ async def api_admin_broadcasts_quote(
         if body_chat_ids and not target_chat_ids:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Неверные id чатов: для групп укажите chat_id супергруппы (обычно отрицательное число)",
+                detail=err_detail("invalid_group_chat_ids"),
             )
         if target == "groups" and not target_chat_ids:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Нет групп для отправки (проверьте выбор или подключите группу к боту)",
+                detail=err_detail("no_groups_to_send"),
             )
 
     n_users, n_groups = await estimate_recipient_counts(session, target=target, target_chat_ids=target_chat_ids)
@@ -9791,7 +9938,7 @@ async def api_admin_broadcasts_send(
             if v != 0:
                 body_chat_ids.append(v)
     if target not in {"users", "groups", "all"}:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Недопустимый тип отправки")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("invalid_send_type"))
     _log.warning(
         "broadcast send request: id=%s target=%s raw_chat_ids=%s by_user=%s",
         int(broadcast_id),
@@ -9804,16 +9951,16 @@ async def api_admin_broadcasts_send(
     allow_all_groups = _broadcast_viewer_can_scope_all(viewer)
     row = await session.get(AdminBroadcast, int(broadcast_id))
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("resource_not_found"))
     if not full and int(getattr(row, "admin_telegram_id", 0) or 0) != int(user_id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к этому посту")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("no_access_to_post"))
     if not full and target in ("users", "all"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Для Premium доступна рассылка только в ваши группы (не в личку и не «всё»).",
+            detail=err_detail("premium_broadcast_groups_only"),
         )
     if (row.status or "") == "sending":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Рассылка уже выполняется")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("broadcast_already_running"))
     if (row.status or "") != "draft":
         row.status = "draft"
         row.error_message = None
@@ -9830,7 +9977,7 @@ async def api_admin_broadcasts_send(
         if body_chat_ids and not target_chat_ids:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Неверные id чатов: для групп укажите chat_id супергруппы (обычно отрицательное число)",
+                detail=err_detail("invalid_group_chat_ids"),
             )
         _log.warning(
             "broadcast send groups filter: id=%s target=%s allow_all=%s selected=%s",
@@ -9842,7 +9989,7 @@ async def api_admin_broadcasts_send(
         if target == "groups" and not target_chat_ids:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Нет групп для отправки (проверьте выбор или подключите группу к боту)",
+                detail=err_detail("no_groups_to_send"),
             )
 
     text_ok = bool((row.body_text or "").strip())
@@ -9855,12 +10002,12 @@ async def api_admin_broadcasts_send(
     if not text_ok and not media_ok:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Нужен текст или загруженное медиа",
+            detail=err_detail("need_text_or_media"),
         )
 
     token = (os.getenv("BOT_TOKEN") or "").strip()
     if not token:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="BOT_TOKEN не задан")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=err_detail("bot_token_not_configured"))
 
     n_users, n_groups = await estimate_recipient_counts(session, target=target, target_chat_ids=target_chat_ids)
     cost_tokens = broadcast_charge_tokens(n_users=n_users, n_groups=n_groups)
@@ -9880,9 +10027,11 @@ async def api_admin_broadcasts_send(
             pau = round(float(getattr(plan.payer_user, "aurum_credits", 0.0) or 0.0), 2)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"Недостаточно AURUM для рассылки: нужно {int(cost_tokens)} ✨ "
-                    f"(платит аккаунт {pid}, на счету {pau} ✨). Докупите пакет или переведите AURUM менеджеру."
+                detail=err_detail(
+                    "broadcast_aurum_insufficient",
+                    need=int(cost_tokens),
+                    payer_tid=pid,
+                    balance=pau,
                 ),
             )
         try:
@@ -9897,9 +10046,10 @@ async def api_admin_broadcasts_send(
             avail = round(float(getattr(plan.payer_user, "aurum_credits", 0.0) or 0.0), 2)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"Недостаточно AURUM для рассылки: нужно {int(cost_tokens)} ✨ "
-                    f"(сейчас у плательщика: {avail} ✨). Докупите пакет в разделе «Токены» при активной подписке."
+                detail=err_detail(
+                    "broadcast_aurum_insufficient_debit",
+                    need=int(cost_tokens),
+                    balance=avail,
                 ),
             ) from None
 
@@ -9954,12 +10104,12 @@ async def api_yoomoney_wallet_notification(
     if not secret:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="YooMoney notifications not configured",
+            detail=err_detail("yoomoney_notifications_not_configured"),
         )
     try:
         form = await request.form()
     except Exception:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid form")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("invalid_form"))
     flat: dict[str, str] = {}
     for k, v in form.multi_items():
         # повторы ключей — оставляем первое значение
@@ -9972,23 +10122,23 @@ async def api_yoomoney_wallet_notification(
         await process_yoomoney_http_notification(session, flat)
     except PermissionError:
         _log.warning("YooMoney notification: invalid signature")
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="invalid signature")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("invalid_signature"))
     except RuntimeError as e:
         if "yoomoney_secret" in str(e).lower():
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="YooMoney secret not configured",
+                detail=err_detail("yoomoney_secret_not_configured"),
             ) from e
         _log.exception("YooMoney notification handler error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="retry",
+            detail=err_detail("retry_later"),
         ) from e
     except Exception:
         _log.exception("YooMoney notification failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="retry",
+            detail=err_detail("retry_later"),
         )
     return PlainTextResponse("OK", status_code=status.HTTP_200_OK)
 
@@ -10013,18 +10163,18 @@ async def api_yookassa_webhook(
         _log.warning("YooKassa webhook secrets are not configured; accepting token from URL")
         valid = True
     if not valid:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("resource_not_found"))
     try:
         body = await request.json()
     except Exception:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid json")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("invalid_json"))
     from app.services.payments_yookassa import process_yookassa_webhook
 
     try:
         await process_yookassa_webhook(session, body)
     except Exception:
         _log.exception("YooKassa webhook handler failed")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="retry")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=err_detail("retry_later"))
     return {"ok": True}
 
 
@@ -10033,7 +10183,7 @@ async def api_yookassa_webhook(
 async def api_profanity_list(_user_id: int = Depends(require_init_data)):
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
-        detail="profanity_list_not_available",
+        detail=err_detail("profanity_list_not_available"),
     )
 
 
@@ -10041,7 +10191,7 @@ async def api_profanity_list(_user_id: int = Depends(require_init_data)):
 async def api_profanity_add(_user_id: int = Depends(require_init_data)):
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
-        detail="profanity_list_not_available",
+        detail=err_detail("profanity_list_not_available"),
     )
 
 
@@ -10049,7 +10199,7 @@ async def api_profanity_add(_user_id: int = Depends(require_init_data)):
 async def api_profanity_remove(_word: str, _user_id: int = Depends(require_init_data)):
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
-        detail="profanity_list_not_available",
+        detail=err_detail("profanity_list_not_available"),
     )
 
 
@@ -10064,16 +10214,16 @@ async def api_chat_copy_settings(
     """Перенести настройки из текущего чата в другой. Body: { "target_chat_id": number }."""
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     target_id = body.get("target_chat_id")
     if target_id is None:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target_chat_id required")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("target_chat_id_required"))
     target_id = int(target_id)
     ok_target = await user_can_access_chat(session, user_id, target_id)
     if not ok_target:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Target chat not found or access denied")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("target_chat_access_denied"))
     if int(chat_id) == target_id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Source and target must differ")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("source_target_must_differ"))
     try:
         rule = await copy_rule_to_chat(session, int(chat_id), target_id)
     except ValueError as e:

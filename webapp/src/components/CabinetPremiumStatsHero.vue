@@ -5,7 +5,10 @@
  */
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import NavIcon from './NavIcon.vue'
+
+const { t, locale } = useI18n()
 
 const props = defineProps({
   summary: { type: Object, default: () => ({}) },
@@ -57,6 +60,7 @@ const dashboardEstimatedSavedRub = computed(() => {
 })
 
 const dashboardProtectionLevelMeta = computed(() => {
+  void locale.value
   const empty = {
     segments: 0,
     score: 0,
@@ -68,8 +72,8 @@ const dashboardProtectionLevelMeta = computed(() => {
   if (n <= 0) return empty
 
   const del = Math.max(0, Math.round(Number(activitySummary.value?.today?.deleted || 0)))
-  const t = String(activitySummary.value?.tariff || 'free').toLowerCase()
-  const premium = ['premium', 'pro', 'business'].includes(t)
+  const tariffCode = String(activitySummary.value?.tariff || 'free').toLowerCase()
+  const premium = ['premium', 'pro', 'business'].includes(tariffCode)
   const protOn = !!activitySummary.value?.protection_active
   const usage = Math.max(0, Math.min(100, activityGroupsProgress.value))
 
@@ -89,22 +93,22 @@ const dashboardProtectionLevelMeta = computed(() => {
 
   const tiers = {
     1: {
-      label: 'Слабый',
+      label: t('cabinet_stats.hero.tier_weak'),
       fillSegmentClass: 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.35)]',
       labelClass: 'text-rose-400',
     },
     2: {
-      label: 'Базовый',
+      label: t('cabinet_stats.hero.tier_basic'),
       fillSegmentClass: 'bg-orange-500 shadow-[0_0_6px_rgba(249,115,22,0.32)]',
       labelClass: 'text-orange-400',
     },
     3: {
-      label: 'Средний',
+      label: t('cabinet_stats.hero.tier_medium'),
       fillSegmentClass: 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.38)]',
       labelClass: 'text-amber-300',
     },
     4: {
-      label: 'Сильный',
+      label: t('cabinet_stats.hero.tier_strong'),
       fillSegmentClass: 'bg-lime-400 shadow-[0_0_6px_rgba(163,230,53,0.38)]',
       labelClass: 'text-lime-400',
     },
@@ -122,8 +126,9 @@ const dashboardProtectionLevelMeta = computed(() => {
 
 function fmtRubInt(n) {
   const v = Math.max(0, Math.round(Number(n) || 0))
+  const loc = String(locale.value || 'ru') === 'en' ? 'en-US' : 'ru-RU'
   try {
-    return v.toLocaleString('ru-RU')
+    return v.toLocaleString(loc)
   } catch {
     return String(v)
   }
@@ -134,14 +139,17 @@ function fmtAmount(v) {
   return Number.isInteger(n) ? String(n) : n.toFixed(2)
 }
 
-function ruGroupsProtectedLabel(count) {
+function groupsProtectedLabel(count) {
   const n = Math.abs(Math.trunc(Number(count) || 0))
+  if (String(locale.value || 'ru') === 'en') {
+    return n === 1 ? t('cabinet_stats.hero.groups_one', { n }) : t('cabinet_stats.hero.groups_many', { n })
+  }
   const k = n % 100
   const l = n % 10
-  if (k > 10 && k < 20) return `${n} групп`
-  if (l === 1) return `${n} группа`
-  if (l >= 2 && l <= 4) return `${n} группы`
-  return `${n} групп`
+  if (k > 10 && k < 20) return t('cabinet_stats.hero.groups_many', { n })
+  if (l === 1) return t('cabinet_stats.hero.groups_one', { n })
+  if (l >= 2 && l <= 4) return t('cabinet_stats.hero.groups_few', { n })
+  return t('cabinet_stats.hero.groups_many', { n })
 }
 
 function goManageChats() {
@@ -206,31 +214,31 @@ function goManageChats() {
               class="text-[11px] font-extrabold leading-tight tracking-tight md:text-[12px]"
               :class="protectionStatusOk ? 'text-lime-400' : protectionStatusNoChats ? 'text-rose-400' : 'text-amber-400'"
             >
-              <template v-if="protectionStatusOk">Защита активна</template>
-              <template v-else-if="protectionStatusNoChats">Защита отключена</template>
-              <template v-else>Защита не активна</template>
+              <template v-if="protectionStatusOk">{{ t('cabinet_stats.hero.prot_ok') }}</template>
+              <template v-else-if="protectionStatusNoChats">{{ t('cabinet_stats.hero.prot_no_chats') }}</template>
+              <template v-else>{{ t('cabinet_stats.hero.prot_warn') }}</template>
             </p>
           </div>
 
           <div class="mt-2 w-full min-w-0 sm:mt-2.5">
             <div class="flex w-full min-w-0 items-stretch justify-between divide-x divide-white/[0.07]">
               <div class="flex min-w-0 flex-1 flex-col items-center px-1.5 text-center sm:px-2">
-                <p class="w-full text-[8px] font-semibold uppercase tracking-wide text-white/45">Удалено</p>
+                <p class="w-full text-[8px] font-semibold uppercase tracking-wide text-white/45">{{ t('cabinet_stats.hero.col_deleted') }}</p>
                 <p class="mt-0.5 w-full text-[15px] font-extrabold tabular-nums leading-none text-white sm:text-[16px]">
                   {{ activitySummary?.today?.deleted ?? 0 }}
                 </p>
-                <p class="mt-0.5 w-full text-[9px] font-medium leading-tight text-lime-400/95">сообщения</p>
+                <p class="mt-0.5 w-full text-[9px] font-medium leading-tight text-lime-400/95">{{ t('cabinet_stats.hero.col_messages') }}</p>
               </div>
               <div class="flex min-w-0 flex-1 flex-col items-center px-1.5 text-center sm:px-2">
-                <p class="w-full text-[8px] font-semibold uppercase tracking-wide text-white/45">Сэкономлено</p>
+                <p class="w-full text-[8px] font-semibold uppercase tracking-wide text-white/45">{{ t('cabinet_stats.hero.col_saved') }}</p>
                 <p class="mt-0.5 w-full whitespace-nowrap text-center text-[12px] font-extrabold tabular-nums leading-none text-white sm:text-[13px]">
                   ~ {{ fmtRubInt(dashboardEstimatedSavedRub) }} ₽
                 </p>
-                <p class="mt-0.5 w-full text-[9px] font-medium leading-tight text-lime-400/95">админам</p>
+                <p class="mt-0.5 w-full text-[9px] font-medium leading-tight text-lime-400/95">{{ t('cabinet_stats.hero.col_for_admins') }}</p>
               </div>
               <div class="flex min-w-0 flex-1 flex-col items-center px-1.5 text-center sm:px-2">
                 <p class="w-full whitespace-nowrap text-[8px] font-semibold uppercase leading-tight tracking-wide text-white/45">
-                  Уровень защиты
+                  {{ t('cabinet_stats.hero.col_level') }}
                 </p>
                 <div class="mt-0.5 flex w-full min-w-0 flex-col items-stretch gap-1">
                   <p
@@ -241,7 +249,7 @@ function goManageChats() {
                   </p>
                   <div
                     class="flex h-1 w-full min-w-0 gap-1"
-                    :title="`Оценка: ${dashboardProtectionLevelMeta.score ?? '—'}/100`"
+                    :title="t('cabinet_stats.hero.score_title', { score: dashboardProtectionLevelMeta.score ?? '—' })"
                   >
                     <span
                       v-for="seg in 4"
@@ -272,7 +280,7 @@ function goManageChats() {
               </svg>
             </span>
             <span class="min-w-0 flex-1 text-[11px] font-semibold leading-tight text-white sm:text-[12px]">
-              Защищено сегодня: <span class="text-lime-400">{{ ruGroupsProtectedLabel(activityProtectedGroupsCount) }}</span>
+              {{ t('cabinet_stats.hero.protected_today') }} <span class="text-lime-400">{{ groupsProtectedLabel(activityProtectedGroupsCount) }}</span>
             </span>
             <span class="shrink-0 text-sm font-light text-white/40" aria-hidden="true">›</span>
           </button>
@@ -285,13 +293,13 @@ function goManageChats() {
         <div class="flex items-start justify-between gap-1.5">
           <div class="min-w-0">
             <p class="flex items-center gap-0.5 text-[8px] font-bold uppercase tracking-wide text-amber-200/90">
-              <span aria-hidden="true">⚡</span> Токены AURUM
+              <span aria-hidden="true">⚡</span> {{ t('cabinet_stats.hero.aurum_heading') }}
             </p>
             <p class="mt-0.5 flex items-baseline gap-0.5 text-[18px] font-extrabold tabular-nums leading-none text-white">
               {{ fmtAmount(profile?.aurum_tokens || 0) }}
               <span class="text-sm">✨</span>
             </p>
-            <p class="mt-0.5 text-[9px] text-white/45">Ваш баланс</p>
+            <p class="mt-0.5 text-[9px] text-white/45">{{ t('cabinet_stats.hero.balance_label') }}</p>
           </div>
           <div class="relative grid h-9 w-9 shrink-0 place-items-center">
             <span class="absolute inset-0 rounded-full border border-lime-400/25" />
@@ -309,7 +317,7 @@ function goManageChats() {
               <circle cx="9" cy="21" r="1" /><circle cx="20" cy="21" r="1" />
               <path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6" />
             </svg>
-            Купить
+            {{ t('cabinet_stats.hero.buy') }}
           </button>
           <button
             type="button"
@@ -320,7 +328,7 @@ function goManageChats() {
               <circle cx="12" cy="12" r="10" />
               <path d="M12 6v6l4 2" />
             </svg>
-            История
+            {{ t('cabinet_stats.hero.history') }}
           </button>
         </div>
       </div>
@@ -330,7 +338,7 @@ function goManageChats() {
           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-sky-300/90" aria-hidden="true">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
           </svg>
-          Ваши чаты
+          {{ t('cabinet_stats.hero.your_chats') }}
         </p>
         <div class="space-y-1.5">
           <div class="flex min-w-0 items-center gap-1.5">
@@ -349,7 +357,7 @@ function goManageChats() {
               </svg>
             </span>
             <span class="shrink-0 whitespace-nowrap text-[10px] font-semibold leading-tight text-lime-200">
-              Группы
+              {{ t('cabinet_stats.hero.groups') }}
               <span class="ml-0.5 tabular-nums font-medium text-white/90">
                 {{ activityGroupsCount }} / {{ activityGroupsLimit }}
               </span>
@@ -363,7 +371,7 @@ function goManageChats() {
             <button
               type="button"
               class="grid h-4 w-4 shrink-0 place-items-center rounded-md border border-lime-300/35 bg-gradient-to-b from-lime-400 to-lime-600 text-[10px] font-bold leading-none text-lime-950 shadow-[0_0_10px_rgba(132,204,22,0.45)]"
-              aria-label="Подключить группу"
+              :aria-label="t('cabinet_stats.hero.aria_connect_group')"
               @click="router.push({ path: '/connect', query: { kind: 'group' } })"
             >
               +
@@ -387,7 +395,7 @@ function goManageChats() {
               </svg>
             </span>
             <span class="shrink-0 whitespace-nowrap text-[10px] font-semibold leading-tight text-white/95">
-              Каналы
+              {{ t('cabinet_stats.hero.channels') }}
               <span class="ml-0.5 tabular-nums font-medium text-white/90">
                 {{ activityChannelsCount }} / {{ activityChannelsLimit }}
               </span>
@@ -401,7 +409,7 @@ function goManageChats() {
             <button
               type="button"
               class="grid h-4 w-4 shrink-0 place-items-center rounded-md border border-amber-300/40 bg-gradient-to-b from-amber-400 to-amber-600 text-[10px] font-bold leading-none text-amber-950 shadow-[0_0_10px_rgba(251,191,36,0.4)]"
-              aria-label="Подключить канал"
+              :aria-label="t('cabinet_stats.hero.aria_connect_channel')"
               @click="router.push({ path: '/connect', query: { kind: 'channel' } })"
             >
               +
@@ -413,7 +421,7 @@ function goManageChats() {
           class="mt-1 flex w-full items-center justify-center gap-0.5 rounded-lg bg-black/30 py-1 text-[10px] font-semibold text-white/90 transition hover:bg-black/45"
           @click="goManageChats"
         >
-          Управление
+          {{ t('cabinet_stats.hero.manage') }}
           <span class="text-white/40">›</span>
         </button>
       </div>

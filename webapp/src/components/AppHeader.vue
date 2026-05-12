@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import NavIcon from './NavIcon.vue'
 import { useApi } from '../composables/useApi'
 import { canOpenAdminEntry } from '../utils/adminAccess'
@@ -10,7 +11,8 @@ import { useDashboardSection } from '../composables/useDashboardSection'
 const router = useRouter()
 const route = useRoute()
 const { api, fetchSilent, hasInitData } = useApi()
-const { dashboardSection } = useDashboardSection()
+const { dashboardSection, setDashboardSection } = useDashboardSection()
+const { t } = useI18n()
 const PREMIUM_CACHE_KEY = 'guard.me.is_premium.v1'
 const me = ref(null)
 const hasDelegated = ref(false)
@@ -100,6 +102,12 @@ function openPurpleAdm() {
   }
 }
 
+function goDashboardAccount() {
+  setDashboardSection('account')
+  const nav = router.push({ path: '/', query: { ...route.query, section: 'account' } })
+  if (nav && typeof nav.catch === 'function') nav.catch(() => {})
+}
+
 function goBack() {
   if (props.subscriptionScreen) {
     emit('subscription-back')
@@ -119,7 +127,7 @@ function goBack() {
       return
     }
   } catch { /* */ }
-  router.push('/').catch(() => {})
+  goDashboardAccount()
 }
 </script>
 
@@ -132,7 +140,7 @@ function goBack() {
         v-if="showBack"
         type="button"
         class="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/[0.06] text-slate-200 hover:bg-white/[0.12] hover:text-white md:h-9 md:w-9"
-        aria-label="Назад"
+        :aria-label="t('common.back')"
         @click="goBack"
       >
         <NavIcon name="back" class="h-4 w-4 md:h-5 md:w-5" />
@@ -141,12 +149,12 @@ function goBack() {
         v-else
         type="button"
         class="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/[0.06] text-slate-200 hover:bg-white/[0.12] hover:text-white md:h-9 md:w-9"
-        aria-label="Меню"
+        :aria-label="t('common.menu')"
         @click="emit('menu-click')"
       >
         <NavIcon name="menu" class="h-4 w-4 md:h-5 md:w-5" />
       </button>
-      <a href="#" class="flex min-w-0 items-center gap-2" @click.prevent="router.push('/')">
+      <a href="#" class="flex min-w-0 items-center gap-2" @click.prevent="goDashboardAccount">
         <img
           v-show="!hideHeaderLogo"
           :src="logoSrc"
@@ -168,7 +176,7 @@ function goBack() {
         type="button"
         class="inline-flex h-[22px] shrink-0 items-center justify-center rounded border border-cyan-400/45 px-1.5 text-[9px] font-bold leading-none tracking-wide text-cyan-600 transition-colors hover:bg-cyan-500/10 dark:text-cyan-300 dark:hover:bg-cyan-500/15"
         :class="isBlueAdmActive ? 'bg-cyan-500/15 shadow-[0_0_12px_rgba(34,211,238,0.45)] ring-1 ring-cyan-300/35' : ''"
-        aria-label="Открыть админку"
+        :aria-label="t('common.open_admin')"
         @click="openBlueAdm"
       >
         ADM
@@ -178,7 +186,7 @@ function goBack() {
         type="button"
         class="inline-flex h-[22px] shrink-0 items-center justify-center rounded border border-violet-400/45 px-1.5 text-[9px] font-bold leading-none tracking-wide text-violet-300 transition-colors hover:bg-violet-500/10"
         :class="isPurpleAdmActive ? 'bg-violet-500/15 shadow-[0_0_12px_rgba(167,139,250,0.5)] ring-1 ring-violet-300/45' : ''"
-        aria-label="Делегированные чаты"
+        :aria-label="t('common.delegated_chats')"
         @click="openPurpleAdm"
       >
         ADM

@@ -237,6 +237,184 @@ DEFAULT_ADS_ROOTS = (
 )
 
 
+# =========================================================
+# EN moderation roots — параллельные RU‑группам наборы корней.
+#
+# Подключаются через DEFAULT_*_FULL_ROOTS ниже. RU‑логика evaluate остаётся прежней
+# (RU‑корни ловятся всегда), EN‑часть добавляется только если в нормализованном
+# тексте встречается латиница, чтобы не давать ложные срабатывания на бренды.
+# =========================================================
+
+# Чистый английский мат (корни). Используем формы без флексий, потому что в коде идёт
+# поиск по подстрокам/токенам.
+DEFAULT_PROFANITY_ROOTS_EN = (
+    "fuck", "fucker", "fucking", "motherfuck",
+    "shit", "bullshit", "dipshit",
+    "bitch",
+    "cunt",
+    "dick", "dickhead",
+    "cock", "cocksucker",
+    "pussy",
+    "asshole",
+    "bastard",
+    "wanker",
+    "twat",
+    "prick",
+)
+
+DEFAULT_RACISM_ROOTS_EN = (
+    "nigger", "nigga", "negroid",
+    "kike",
+    "spic",
+    "chink",
+    "gook",
+    "wetback",
+    "paki ",
+    "raghead",
+    "towelhead",
+    "white power", "white pride", "aryan supremacy",
+    "go back to your country",
+)
+
+DEFAULT_NAZI_ROOTS_EN = (
+    "heil hitler", "sieg heil", "seig heil",
+    "white nationalis", "neo nazi", "neo-nazi", "nazi rule",
+    "third reich", "fuehrer", "fuhrer",
+    "1488", "14/88", "14-88",
+    "ss88",
+    "blood and soil",
+)
+
+DEFAULT_VULGAR_ROOTS_EN = (
+    "penis", "vagina", "anus", "anal",
+    "tits", "boobs", "boob",
+    "ass ", "butt ",
+    "nipple",
+    "orgasm",
+    "blowjob", "handjob", "rimjob",
+    "masturbat", "jerk off", "jerking off",
+    "porn", "porno", "xxx",
+    "cum ",
+    "horny",
+)
+
+DEFAULT_POLITICS_ROOTS_EN = (
+    "politic", "election", "referendum",
+    "president", "prime minister", "minister of",
+    "parliament", "senate", "congress", "duma",
+    "democrat", "republican", "left wing", "right wing",
+    "putin", "zelensky", "biden", "trump", "merkel", "macron",
+    "stalin", "lenin", "hitler", "mussolini",
+    "ukraine war", "russia war", "donbas", "crimea",
+    "nato", "kremlin", "white house",
+    "sanction", "embargo", "protest", "revolution",
+    "war crime",
+)
+
+DEFAULT_RELIGION_ROOTS_EN = (
+    "religion", "religious", "faith",
+    "god ", "lord ", "jesus", "christ", "christian", "christianity",
+    "catholic", "protestant", "orthodox",
+    "bible", "gospel", "church", "chapel",
+    "priest", "pastor", "monk", "nun",
+    "islam", "muslim", "quran", "koran", "mosque",
+    "imam", "mullah", "ramadan",
+    "judaism", "jewish", "torah", "talmud", "synagogue", "rabbi",
+    "buddh", "buddhism", "dalai lama", "nirvana",
+    "hindu", "krishna", "shiva", "vishnu",
+    "sikh", "jain",
+)
+
+DEFAULT_ESOTERIC_ROOTS_EN = (
+    "esoteric", "occult",
+    "magic ", "witchcraft", "witch ", "wizard",
+    "spell ", "ritual",
+    "tarot", "fortune teller", "psychic",
+    "horoscope", "astrology", "natal chart",
+    "numerolog",
+    "rune ", "amulet", "talisman",
+    "chakra", "aura ", "karma ", "reincarnat",
+    "medium ", "seance",
+    "alchemy", "kabbalah", "shaman", "shamanism",
+)
+
+DEFAULT_INSULT_ROOTS_EN = (
+    "idiot", "stupid", "moron", "retard",
+    "dumbass", "dumb",
+    "loser", "imbecile",
+    "jerk ", "creep", "weirdo",
+    "scumbag", "douche", "douchebag",
+    "asshat",
+    "shut up", "kys",
+    "you suck", "you are trash", "go cry",
+    "clown", "freak",
+)
+
+DEFAULT_CASINO_ROOTS_EN = (
+    "casino",
+    "betting", "sportsbook", "sports book",
+    "bookmaker", "bookie",
+    "roulette", "blackjack", "poker room",
+    "slot machine", "slots",
+    "jackpot",
+    "freebet", "free bet",
+    "1xbet", "betway", "bet365", "stake.com", "parimatch",
+)
+
+DEFAULT_JOBS_ROOTS_EN = (
+    "earn money", "earn from home", "easy money",
+    "passive income", "guaranteed income",
+    "no experience", "no investment",
+    "work from home", "remote work",
+    "make $", "make money fast", "make money online",
+    "dm for details", "dm me", "pm for details",
+    "link in bio", "check my bio",
+    "join my channel", "join my team",
+    "telegram earning", "crypto signals",
+)
+
+DEFAULT_ADS_ROOTS_EN = (
+    "sale", "discount", "promo", "promotion",
+    "buy now", "buy today", "order now",
+    "shop ", "shopping", "store ",
+    "limited offer", "special offer", "best offer",
+    "only today", "today only", "last chance", "don't miss",
+    "free shipping", "delivery free",
+    "subscribe now", "click the link",
+    "swipe up", "link in bio",
+    "wholesale", "retail",
+    "franchise",
+)
+
+
+# Полные финальные наборы (RU + EN корни в одной плоской коллекции).
+# `app/handlers/moderation.py` подгружает их через эти константы.
+def _combine_roots(*groups: tuple[str, ...]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for g in groups:
+        for w in g:
+            w = (w or "").strip()
+            if not w or w in seen:
+                continue
+            seen.add(w)
+            out.append(w)
+    return tuple(out)
+
+
+DEFAULT_PROFANITY_ROOTS_FULL = _combine_roots(DEFAULT_PROFANITY_ROOTS, DEFAULT_PROFANITY_ROOTS_EN)
+DEFAULT_RACISM_ROOTS_FULL = _combine_roots(DEFAULT_RACISM_ROOTS, DEFAULT_RACISM_ROOTS_EN)
+DEFAULT_NAZI_ROOTS_FULL = _combine_roots(DEFAULT_NAZI_ROOTS, DEFAULT_NAZI_ROOTS_EN)
+DEFAULT_VULGAR_ROOTS_FULL = _combine_roots(DEFAULT_VULGAR_ROOTS, DEFAULT_VULGAR_ROOTS_EN)
+DEFAULT_POLITICS_ROOTS_FULL = _combine_roots(DEFAULT_POLITICS_ROOTS, DEFAULT_POLITICS_ROOTS_EN)
+DEFAULT_RELIGION_ROOTS_FULL = _combine_roots(DEFAULT_RELIGION_ROOTS, DEFAULT_RELIGION_ROOTS_EN)
+DEFAULT_ESOTERIC_ROOTS_FULL = _combine_roots(DEFAULT_ESOTERIC_ROOTS, DEFAULT_ESOTERIC_ROOTS_EN)
+DEFAULT_INSULT_ROOTS_FULL = _combine_roots(DEFAULT_INSULT_ROOTS, DEFAULT_INSULT_ROOTS_EN)
+DEFAULT_CASINO_ROOTS_FULL = _combine_roots(DEFAULT_CASINO_ROOTS, DEFAULT_CASINO_ROOTS_EN)
+DEFAULT_JOBS_ROOTS_FULL = _combine_roots(DEFAULT_JOBS_ROOTS, DEFAULT_JOBS_ROOTS_EN)
+DEFAULT_ADS_ROOTS_FULL = _combine_roots(DEFAULT_ADS_ROOTS, DEFAULT_ADS_ROOTS_EN)
+
+
 def get_owner_forever_promo_code() -> str:
     return (os.getenv("OWNER_FOREVER_PROMO_CODE") or DEFAULT_OWNER_FOREVER_CODE).strip().upper()
 
@@ -1750,6 +1928,36 @@ async def ensure_users_delegate_broadcast_payer_column(engine: AsyncEngine) -> N
         log.warning("ensure_users_delegate_broadcast_payer_column skipped: %s", e)
 
 
+async def ensure_users_language_column(engine: AsyncEngine) -> None:
+    """Язык интерфейса Mini App и бота (ru | en). Идемпотентно."""
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS language "
+                    "VARCHAR(8) NOT NULL DEFAULT 'ru'"
+                )
+            )
+        log.info("ensure_users_language_column: ok")
+    except Exception as e:
+        log.warning("ensure_users_language_column skipped: %s", e)
+
+
+async def ensure_profanity_lang_column(engine: AsyncEngine) -> None:
+    """Колонка lang в profanity_words: ru | en | any. Идемпотентно."""
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "ALTER TABLE profanity_words ADD COLUMN IF NOT EXISTS lang "
+                    "VARCHAR(8) NOT NULL DEFAULT 'any'"
+                )
+            )
+        log.info("ensure_profanity_lang_column: ok")
+    except Exception as e:
+        log.warning("ensure_profanity_lang_column skipped: %s", e)
+
+
 async def ensure_admin_incident_feed_schema(engine: AsyncEngine) -> None:
     """Журнал сбоев API для вкладки Guard Pulse (простым языком для владельца)."""
     stmts = (
@@ -1778,3 +1986,32 @@ async def ensure_admin_incident_feed_schema(engine: AsyncEngine) -> None:
         log.info("ensure_admin_incident_feed_schema: ok")
     except Exception as e:
         log.warning("ensure_admin_incident_feed_schema skipped: %s", e)
+
+
+async def ensure_pdf_exports_schema(engine: AsyncEngine) -> None:
+    """Идемпотентно создает таблицу журнала PDF-экспортов Mini App."""
+    stmts = (
+        """
+        CREATE TABLE IF NOT EXISTS pdf_exports (
+            id SERIAL PRIMARY KEY,
+            telegram_user_id BIGINT NOT NULL,
+            report_type VARCHAR(32) NOT NULL DEFAULT 'protection',
+            period_key VARCHAR(32) NOT NULL DEFAULT '30d',
+            scope VARCHAR(32) NOT NULL DEFAULT 'all',
+            chat_id BIGINT NULL,
+            from_ts TIMESTAMPTZ NULL,
+            to_ts TIMESTAMPTZ NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_pdf_exports_telegram_user_id ON pdf_exports (telegram_user_id)",
+        "CREATE INDEX IF NOT EXISTS ix_pdf_exports_chat_id ON pdf_exports (chat_id)",
+        "CREATE INDEX IF NOT EXISTS ix_pdf_exports_created_at ON pdf_exports (created_at DESC)",
+    )
+    try:
+        async with engine.begin() as conn:
+            for sql in stmts:
+                await conn.execute(text(sql))
+    except Exception as e:
+        log.warning("ensure_pdf_exports_schema skipped: %s", e)

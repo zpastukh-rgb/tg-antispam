@@ -25,17 +25,17 @@ from sqlalchemy import delete, select, func, desc, text
 
 from app.db.session import get_session
 from app.db.ensure_defaults import (
-    DEFAULT_ADS_ROOTS,
-    DEFAULT_CASINO_ROOTS,
-    DEFAULT_ESOTERIC_ROOTS,
-    DEFAULT_INSULT_ROOTS,
-    DEFAULT_JOBS_ROOTS,
-    DEFAULT_NAZI_ROOTS,
-    DEFAULT_POLITICS_ROOTS,
-    DEFAULT_PROFANITY_ROOTS,
-    DEFAULT_RACISM_ROOTS,
-    DEFAULT_RELIGION_ROOTS,
-    DEFAULT_VULGAR_ROOTS,
+    DEFAULT_ADS_ROOTS_FULL as DEFAULT_ADS_ROOTS,
+    DEFAULT_CASINO_ROOTS_FULL as DEFAULT_CASINO_ROOTS,
+    DEFAULT_ESOTERIC_ROOTS_FULL as DEFAULT_ESOTERIC_ROOTS,
+    DEFAULT_INSULT_ROOTS_FULL as DEFAULT_INSULT_ROOTS,
+    DEFAULT_JOBS_ROOTS_FULL as DEFAULT_JOBS_ROOTS,
+    DEFAULT_NAZI_ROOTS_FULL as DEFAULT_NAZI_ROOTS,
+    DEFAULT_POLITICS_ROOTS_FULL as DEFAULT_POLITICS_ROOTS,
+    DEFAULT_PROFANITY_ROOTS_FULL as DEFAULT_PROFANITY_ROOTS,
+    DEFAULT_RACISM_ROOTS_FULL as DEFAULT_RACISM_ROOTS,
+    DEFAULT_RELIGION_ROOTS_FULL as DEFAULT_RELIGION_ROOTS,
+    DEFAULT_VULGAR_ROOTS_FULL as DEFAULT_VULGAR_ROOTS,
 )
 from app.moderation_lexicon import root_matches_token
 from app.db.models import (
@@ -74,6 +74,8 @@ from app.services.diagnostics_incidents import (
     record_bot_delete_message_failed,
     record_moderation_restrict_failed,
 )
+from app.i18n import t
+from app.services.chat_owner_locale import owner_locale_for_chat
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -2269,18 +2271,18 @@ async def _try_ban(message: Message) -> bool:
         await record_moderation_restrict_failed(message=message, action="ban", exc=e)
         return False
 
-async def apply_action(message: Message, v: Verdict) -> Tuple[bool, str, bool]:
+async def apply_action(message: Message, v: Verdict, *, locale: str) -> Tuple[bool, str, bool]:
     """
     returns: (ok_action, action_label_for_log, deleted_ok)
     """
+    loc = locale
     if v.action == "observe":
         # Только фиксация в логах / отчётах — сообщение не трогаем.
-        return True, "👁 Замечено (без удаления)", False
+        return True, t(loc, "guard.log.action_observe"), False
 
     deleted_ok = await _try_delete(message)
-
     if v.action == "delete":
-        return deleted_ok, "🧹 Удаление", deleted_ok
+        return deleted_ok, t(loc, "guard.log.action_delete"), deleted_ok
 
     # Капча на паузе — блок не вызывается (в evaluate не возвращаем action "captcha")
     # if v.action == "captcha":
@@ -2297,20 +2299,21 @@ async def apply_action(message: Message, v: Verdict) -> Tuple[bool, str, bool]:
     if v.action == "mute":
         ok = await _try_mute(message, v.mute_minutes)
         mm = int(v.mute_minutes)
-        mute_lbl = "🔇 Мут 1 день" if mm == 1440 else f"🔇 Мут {mm} мин"
+        mute_lbl = t(loc, "guard.log.action_mute_day") if mm == 1440 else t(loc, "guard.log.action_mute_min", mm=mm)
         return ok, mute_lbl, deleted_ok
 
     if v.action == "ban":
         ok = await _try_ban(message)
-        return ok, "⛔ Бан", deleted_ok
+        return ok, t(loc, "guard.log.action_ban"), deleted_ok
 
-    return False, "⚠️ Неизвестное действие", deleted_ok
+    return False, t(loc, "guard.log.action_unknown"), deleted_ok
 
 
 # =========================================================
 # Log keyboard (unban / unmute)
 # =========================================================
-def log_keyboard(action: str, chat_id: int, user_id: int):
+def log_keyboard(action: str, chat_id: int, user_id: int, locale: str):
+    loc = locale
     b = InlineKeyboardBuilder()
 
     if action == "observe":
@@ -2318,10 +2321,10 @@ def log_keyboard(action: str, chat_id: int, user_id: int):
         return b.as_markup()
 
     if action == "ban":
-        b.button(text="✅ Разбанить", callback_data=f"log:unban:{chat_id}:{user_id}")
+        b.button(text=t(loc, "guard.log.btn_unban"), callback_data=f"log:unban:{chat_id}:{user_id}")
 
     if action == "mute":
-        b.button(text="🔊 Размутить", callback_data=f"log:unmute:{chat_id}:{user_id}")
+        b.button(text=t(loc, "guard.log.btn_unmute"), callback_data=f"log:unmute:{chat_id}:{user_id}")
 
     b.adjust(1)
     return b.as_markup()
@@ -2330,37 +2333,13 @@ def log_keyboard(action: str, chat_id: int, user_id: int):
 # =========================================================
 # Logging
 # =========================================================
-_REASON_HUMAN = {
-    "stopword": "🧨 стоп-слово",
-    "stopword_newbie": "🧨 стоп-слово (новичок)",
-    "profanity": "🚫 мат",
-    "profanity_newbie": "🚫 мат (новичок)",
-    "jobs": "🕵️ мутные подработки",
-    "jobs_newbie": "🕵️ мутные подработки (новичок)",
-    "casino": "🎰 казино/ставки",
-    "casino_newbie": "🎰 казино/ставки (новичок)",
-    "ads": "📢 реклама",
-    "ads_newbie": "📢 реклама (новичок)",
-    "insult": "👎 обзывательство",
-    "insult_newbie": "👎 обзывательство (новичок)",
-    "racism": "🚫 расизм",
-    "racism_newbie": "🚫 расизм (новичок)",
-    "nazi": "⛔ нацизм/фашизм",
-    "nazi_newbie": "⛔ нацизм/фашизм (новичок)",
-    "vulgar": "🔞 пошлость",
-    "vulgar_newbie": "🔞 пошлость (новичок)",
-    "link": "🔗 ссылка",
-    "link_newbie": "🔗 ссылка (новичок)",
-    "mention": "🏷 упоминание",
-    "mention_newbie": "🏷 упоминание (новичок)",
-    "media": "🖼 медиа/стикер",
-    "media_newbie": "🖼 медиа/стикер (новичок)",
-    "buttons": "🔘 сообщение с кнопками",
-    "buttons_newbie": "🔘 сообщение с кнопками (новичок)",
-    "channel_post_actor": "📣 сообщение от имени канала/чата",
-    "silence": "🔇 режим тишины",
-    "edited_clean": "✏️ edit (чисто)",
-}
+def _log_reason_human(loc: str, reason: str) -> str:
+    key = f"guard.log.reason.{reason}"
+    label = t(loc, key)
+    if label == key:
+        return str(reason)
+    return label
+
 
 async def send_log(
     session,
@@ -2403,24 +2382,26 @@ async def send_log(
     if not log_chat_id:
         return
 
+    loc = await owner_locale_for_chat(session, message.chat.id)
+
     src = (message.text or message.caption or "")
     src = (src[:500] + "…") if len(src) > 500 else src
 
     who = f"@{user.username}" if user.username else user.full_name
-    reason_h = _REASON_HUMAN.get(v.reason, v.reason)
+    reason_h = _log_reason_human(loc, str(v.reason or ""))
 
     extra_parts: List[str] = []
     if v.log_extra:
         extra_parts.append(v.log_extra)
 
     if not deleted_ok and v.action != "observe":
-        extra_parts.append("⚠️ не смог удалить (нет права Delete messages)")
+        extra_parts.append(t(loc, "guard.log.extra_delete_failed"))
 
     if v.action in ("mute", "ban") and not ok_action:
-        extra_parts.append("⚠️ не смог наказать (нет права Ban/Restrict или лимит Telegram)")
+        extra_parts.append(t(loc, "guard.log.extra_punish_failed"))
 
     if v.action == "observe":
-        extra_parts.append("сообщение в чате не удалялось — режим проверки")
+        extra_parts.append(t(loc, "guard.log.extra_observe_note"))
 
     extra = " | ".join(extra_parts)
 
@@ -2431,33 +2412,35 @@ async def send_log(
     action_s = html.escape(str(action_label))
     extra_s = html.escape(extra) if extra else ""
 
-    if v.action == "observe":
-        header = "👁 <b>Guard — ЗАМЕЧЕНО</b>\n<i>(сообщение оставлено в чате)</i>\n"
-    else:
-        header = "😈 <b>Guard: Боевое срабатывание</b>\n"
+    header = t(loc, "guard.log.header_observe") if v.action == "observe" else t(loc, "guard.log.header_combat")
 
     txt = (
         header
-        + f"🏷 <b>Чат:</b> {title_s}\n"
-        f"👤 <b>Нарушитель:</b> {who_s} (<code>{user.id}</code>)\n"
-        f"🧠 <b>Триггер:</b> {reason_s}\n"
-        f"🔎 <b>Деталь:</b> <code>{details_s}</code>\n"
-        f"⚔️ <b>Реакция:</b> {action_s}\n"
+        + t(loc, "guard.log.line_chat", title=title_s)
+        + "\n"
+        + t(loc, "guard.log.line_who", who=who_s, user_id=user.id)
+        + "\n"
+        + t(loc, "guard.log.line_reason", reason=reason_s)
+        + "\n"
+        + t(loc, "guard.log.line_detail", details=details_s)
+        + "\n"
+        + t(loc, "guard.log.line_action", action=action_s)
+        + "\n"
     )
 
     if extra_s:
-        txt += f"\n<i>{extra_s}</i>\n"
+        txt += t(loc, "guard.log.extra_line", extra=extra_s)
 
     if src:
         src_s = html.escape(src)
-        txt += f"\n💬 <b>Текст:</b>\n<code>{src_s}</code>\n"
+        txt += t(loc, "guard.log.text_block", src=src_s)
 
     try:
         await message.bot.send_message(
             int(log_chat_id),
             txt,
             parse_mode="HTML",
-            reply_markup=log_keyboard(v.action, message.chat.id, user.id),
+            reply_markup=log_keyboard(v.action, message.chat.id, user.id, loc),
         )
     except Exception as e:
         logger.warning(f"[log send failed] chat={message.chat.id} -> log_chat={log_chat_id}: {e}")
@@ -2787,7 +2770,8 @@ async def pipeline(message: Message, *, edited: bool = False) -> None:
             if not v.should_act:
                 return
 
-            ok_action, action_label, deleted_ok = await apply_action(message, v)
+            owner_loc = await owner_locale_for_chat(session, message.chat.id)
+            ok_action, action_label, deleted_ok = await apply_action(message, v, locale=owner_loc)
             try:
                 print(
                     f"[GUARD TRACE] applied chat={message.chat.id} user={getattr(message.from_user, 'id', None)} "
@@ -3219,10 +3203,14 @@ async def on_chat_member(event: ChatMemberUpdated):
             chat_title = (event.chat.title or "").strip() or str(chat_id)
             log_chat_id = getattr(chat_row, "log_chat_id", None)
             ct = html.escape(chat_title)
-            alert_text = (
-                f"⚠ <b>Антинакрутка</b>\n\n"
-                f"Обнаружен массовый вход в чат <b>{ct}</b>.\n"
-                f"За последние <b>{window_min}</b> мин вступило <b>{len(joins_list)}</b> участников (порог {threshold})."
+            loc_anti = await owner_locale_for_chat(session, int(chat_id))
+            alert_text = t(
+                loc_anti,
+                "guard.antinakrutka.alert",
+                chat_title=ct,
+                window_min=window_min,
+                joins=len(joins_list),
+                threshold=threshold,
             )
             if log_chat_id:
                 try:

@@ -46,6 +46,23 @@ PROFANITY_WORDS = [
     "хер", "херня",
     "шалава", "шлюха", "шлюхи",
     "ёб", "ёбаный", "ёбанный", "ёбанат", "ёбана", "ёбнул", "ёбнутый", "ёбушка",
+    # English profanity (basic forms — поиск идёт по подстрокам/токенам, поэтому
+    # большинство словоформ ловится по корням ниже).
+    "fuck", "fucker", "fucking", "fucked", "motherfucker", "motherfucking",
+    "shit", "shitty", "bullshit", "dipshit",
+    "bitch", "bitches", "son of a bitch",
+    "cunt",
+    "dick", "dickhead",
+    "cock", "cocksucker",
+    "pussy",
+    "asshole", "assholes",
+    "bastard", "bastards",
+    "wanker",
+    "twat",
+    "prick",
+    "douchebag", "douche",
+    "jackass",
+    "slut", "slutty", "whore",
 ]
 
 

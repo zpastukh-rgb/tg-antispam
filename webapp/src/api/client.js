@@ -2,6 +2,8 @@
  * API-клиент для бэкенда. Все запросы отправляют initData для авторизации.
  */
 
+import { t } from '../i18n/index.js'
+
 function trimApiBase(raw) {
   if (raw == null) return ''
   let s = String(raw).trim()
@@ -37,6 +39,10 @@ const getBaseUrl = () => {
     }
   }
   return ''
+}
+
+export function hasConfiguredApiBase() {
+  return !!getBaseUrl()
 }
 
 if (typeof window !== 'undefined' && import.meta.env.PROD) {
@@ -149,8 +155,7 @@ async function request(method, path, body = null) {
     const err = new Error('API base URL missing')
     err.status = 0
     err.body = {
-      detail:
-        'Веб-приложение собрано без адреса API (переменная VITE_API_BASE_URL на этапе сборки). Укажите полный URL бэкенда в настройках деплоя фронта (например Railway → Variables) и пересоберите сервис.',
+      detail: t('app.api_base_missing_build'),
     }
     throw err
   }
@@ -203,7 +208,7 @@ async function request(method, path, body = null) {
         guardSessionTerminatedNotified = true
         window.dispatchEvent(
           new CustomEvent('guard:session-terminated', {
-            detail: { message: 'Сессия завершена на этом устройстве' },
+            detail: { message: '' },
           }),
         )
       }
@@ -240,6 +245,7 @@ export const api = {
   delete: (path) => request('DELETE', path),
 
   me: () => api.get('/api/me'),
+  meSetLanguage: (lang) => api.patch('/api/me/language', { language: String(lang || 'ru') }),
   postLegalConsent: (body) => api.post('/api/me/legal-consent', body),
   presencePing: () => api.post('/api/presence/ping', {}),
   chats: (mode = 'all', opts = {}) => {
@@ -450,6 +456,7 @@ export const api = {
   sessionsList: () => api.get('/api/sessions'),
   sessionsTerminate: (payload) => api.post('/api/sessions/terminate', payload || {}),
   sessionsTerminateOthers: () => api.post('/api/sessions/terminate-others', {}),
+  pdfExportCreate: (payload) => api.post('/api/pdf/exports', payload || {}),
   /** Только для TG id из TEST_TARIFF_PAYMENT_TELEGRAM_IDS (отдельный путь от продовой оплаты). */
   yookassaCreateTestSubscriptionPayment: (months) =>
     api.post('/api/payments/yookassa/create-test-subscription', { months }),

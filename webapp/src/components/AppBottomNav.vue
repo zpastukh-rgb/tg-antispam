@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import NavIcon from './NavIcon.vue'
 import { useDashboardSection } from '../composables/useDashboardSection'
 import { useApi } from '../composables/useApi'
@@ -11,6 +12,7 @@ const router = useRouter()
 const { dashboardSection, setDashboardSection } = useDashboardSection()
 const { api, hasInitData } = useApi()
 const { setCabinetMode } = useCabinetMode()
+const { t } = useI18n()
 const PREMIUM_CACHE_KEY = 'guard.me.is_premium.v1'
 const DELEGATED_BC_CACHE_KEY = 'guard.me.has_delegated_broadcast.v1'
 const spikeActiveOwner = ref(false)
@@ -37,12 +39,12 @@ const navDragState = ref({
   startLeft: 0,
 })
 
-const baseItems = [
-  { key: 'account', label: 'Аккаунт', icon: 'account', to: '/' },
-  { key: 'partner', label: 'Партнер', icon: 'partner', section: 'partner', to: '/' },
-  { key: 'protection', label: 'Защита', icon: 'shield', to: '/protection' },
-  { key: 'support', label: 'Поддержка', icon: 'support', to: 'support' },
-]
+const baseItems = computed(() => [
+  { key: 'account', label: t('nav.account'), icon: 'account', to: '/' },
+  { key: 'partner', label: t('nav.partner'), icon: 'partner', section: 'partner', to: '/' },
+  { key: 'protection', label: t('nav.protection'), icon: 'shield', to: '/protection' },
+  { key: 'support', label: t('nav.support'), icon: 'support', to: 'support' },
+])
 const isPremiumUser = ref(false)
 const hasDelegatedBroadcast = ref(false)
 function _readBoolCache(key) {
@@ -75,11 +77,12 @@ if (cachedDelegatedBc !== null) hasDelegatedBroadcast.value = !!cachedDelegatedB
 const canSeeBroadcasts = computed(() => hasInitData.value)
 
 const items = computed(() => {
-  const base = [baseItems[0], baseItems[1]]
+  const all = baseItems.value
+  const base = [all[0], all[1]]
   if (canSeeBroadcasts.value) {
-    base.push({ key: 'broadcasts', label: 'Рассылка', icon: 'telegram', to: '/admin', adminTab: 'broadcasts' })
+    base.push({ key: 'broadcasts', label: t('nav.broadcast'), icon: 'telegram', to: '/admin', adminTab: 'broadcasts' })
   }
-  base.push(baseItems[2], baseItems[3])
+  base.push(all[2], all[3])
   return base
 })
 
@@ -227,17 +230,21 @@ function onTap(item) {
     return
   }
   if (item.to === '/') {
-    setDashboardSection(item.section || 'account')
-    router.push('/')
+    const section = item.section || 'account'
+    setDashboardSection(section)
+    // Нельзя сбрасывать query: в Telegram WebView в нём бывают tgWebApp* / initData.
+    const nav = router.push({ path: '/', query: { ...route.query, section } })
+    if (nav && typeof nav.catch === 'function') nav.catch(() => {})
     return
   }
   if (item.adminTab) {
     setCabinetMode('owner')
-    const nav = router.push({ path: item.to, query: { tab: item.adminTab } })
+    const nav = router.push({ path: item.to, query: { ...route.query, tab: item.adminTab } })
     if (nav && typeof nav.catch === 'function') nav.catch(() => {})
     return
   }
-  router.push(item.to)
+  const nav = router.push({ path: item.to, query: { ...route.query } })
+  if (nav && typeof nav.catch === 'function') nav.catch(() => {})
 }
 
 function showSpikeFor(item) {
@@ -355,8 +362,8 @@ watch(
         <span
           v-if="showSpikeFor(item)"
           class="absolute right-1.5 top-1.5 inline-flex items-center justify-center"
-          title="Чат под угрозой"
-          aria-label="Чат под угрозой"
+          :title="t('app.chat_under_threat')"
+          :aria-label="t('app.chat_under_threat')"
         >
           <span class="absolute inline-flex h-4 w-4 animate-ping rounded-full bg-yellow-400/55" />
           <span class="relative text-[12px] leading-none text-yellow-300">⚠</span>

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any
 from collections import OrderedDict
 
 from aiogram import Router, F
@@ -13,11 +13,10 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
-from aiogram.enums import ChatType, ChatMemberStatus
+from aiogram.enums import ChatType
 
-from app.db.session import get_session
-from app.db.models import Chat, Rule
-from app.services.user_service import get_or_create_user, can_add_chat
+from app.i18n import t as _i18n_t
+from app.services.user_locale import get_user_language as _get_user_lang
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -79,9 +78,20 @@ def _cache_get(user_id: int) -> Optional[int]:
     return msg_id
 
 
-async def _edit_or_send(message: Message, text: str, kb):
+async def _actor_lang(actor: Any) -> str:
+    if not actor:
+        return "ru"
+    tid = getattr(actor, "id", None)
+    if not tid:
+        return "ru"
+    code = getattr(actor, "language_code", None)
+    return await _get_user_lang(int(tid), fallback_tg_language_code=str(code) if code else None)
 
-    msg_id = _cache_get(message.from_user.id)
+
+async def _edit_or_send(message: Message, text: str, kb, *, for_user_id: int):
+
+    msg_id = _cache_get(for_user_id)
+    chat_id = message.chat.id if message.chat else for_user_id
 
     if msg_id:
 
@@ -89,7 +99,7 @@ async def _edit_or_send(message: Message, text: str, kb):
 
             await message.bot.edit_message_text(
                 text=text,
-                chat_id=message.from_user.id,
+                chat_id=chat_id,
                 message_id=msg_id,
                 parse_mode="Markdown",
                 reply_markup=kb,
@@ -101,38 +111,39 @@ async def _edit_or_send(message: Message, text: str, kb):
 
     m = await message.answer(text, parse_mode="Markdown", reply_markup=kb)
 
-    _cache_set(message.from_user.id, m.message_id)
+    _cache_set(for_user_id, m.message_id)
 
 
 # =========================================================
 # KEYBOARDS
 # =========================================================
 
-def kb_start():
+def kb_start(lang: str):
 
+    ob = "bot.onboarding"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="➕ Подключить защиту",
+                    text=_i18n_t(lang, f"{ob}.btn_connect"),
                     callback_data=CB_ADD_CHAT,
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="🧨 Панель управления",
+                    text=_i18n_t(lang, f"{ob}.btn_panel"),
                     callback_data=CB_PANEL,
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="🧾 Как включить отчёты",
+                    text=_i18n_t(lang, f"{ob}.btn_reports"),
                     callback_data=CB_LOGS,
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="🧪 Проверить работу",
+                    text=_i18n_t(lang, f"{ob}.btn_test"),
                     callback_data=CB_TEST,
                 )
             ],
@@ -140,13 +151,13 @@ def kb_start():
     )
 
 
-def kb_back():
+def kb_back(lang: str):
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="⬅️ Назад",
+                    text=_i18n_t(lang, "bot.onboarding.btn_back"),
                     callback_data=CB_START,
                 )
             ]
@@ -158,19 +169,14 @@ def kb_back():
 # START SCREEN
 # =========================================================
 
-async def render_start(message: Message):
+async def render_start(message: Message, actor):
 
-    text = (
-        "😈 *AntiSpam Guard*\n\n"
-        "Я защищаю Telegram-чаты от:\n\n"
-        "• спама\n"
-        "• ссылок\n"
-        "• рейдов\n"
-        "• ботов\n\n"
-        "Выбери действие:"
-    )
-
-    await _edit_or_send(message, text, kb_start())
+    lang = await _actor_lang(actor)
+    text = _i18n_t(lang, "bot.onboarding.intro")
+    uid = int(getattr(actor, "id", 0) or 0)
+    if uid <= 0:
+        return
+    await _edit_or_send(message, text, kb_start(lang), for_user_id=uid)
 
 
 @router.callback_query(F.data == CB_START)
@@ -178,7 +184,10 @@ async def cb_start(cb: CallbackQuery):
 
     await cb.answer()
 
-    await render_start(cb.message)
+    if not cb.from_user or not cb.message:
+        return
+
+    await render_start(cb.message, cb.from_user)
 
 
 # =========================================================
@@ -190,21 +199,16 @@ async def cb_add_chat(cb: CallbackQuery):
 
     await cb.answer()
 
-    text = (
-        "➕ *Подключение защиты*\n\n"
-        "1️⃣ Добавь бота в группу\n\n"
-        "2️⃣ Дай права администратора:\n"
-        "✅ Удалять сообщения\n"
-        "➕ желательно банить участников\n\n"
-        "3️⃣ В группе напиши:\n"
-        "`/check`\n\n"
-        "После этого чат появится в панели."
-    )
+    if not cb.from_user or not cb.message:
+        return
+
+    lang = await _actor_lang(cb.from_user)
+    text = _i18n_t(lang, "bot.onboarding.add_chat")
 
     await cb.message.edit_text(
         text,
         parse_mode="Markdown",
-        reply_markup=kb_back(),
+        reply_markup=kb_back(lang),
     )
 
 
@@ -217,20 +221,16 @@ async def cb_logs(cb: CallbackQuery):
 
     await cb.answer()
 
-    text = (
-        "🧾 *Отчёты модерации*\n\n"
-        "Лучше использовать отдельную группу.\n\n"
-        "1️⃣ Создай группу (например AntiSpam Logs)\n"
-        "2️⃣ Добавь туда бота\n"
-        "3️⃣ Дай админ-права\n\n"
-        "После этого выбери эту группу\n"
-        "в панели управления."
-    )
+    if not cb.from_user or not cb.message:
+        return
+
+    lang = await _actor_lang(cb.from_user)
+    text = _i18n_t(lang, "bot.onboarding.logs")
 
     await cb.message.edit_text(
         text,
         parse_mode="Markdown",
-        reply_markup=kb_back(),
+        reply_markup=kb_back(lang),
     )
 
 
@@ -243,23 +243,16 @@ async def cb_test(cb: CallbackQuery):
 
     await cb.answer()
 
-    text = (
-        "🧪 *Проверка бота*\n\n"
-        "В защищаемом чате отправь:\n\n"
-        "🔗 ссылку\n"
-        "`https://t.me/test`\n\n"
-        "🏷 упоминание\n"
-        "`@username`\n\n"
-        "Если включён Anti-edit:\n"
-        "1️⃣ отправь текст\n"
-        "2️⃣ отредактируй\n"
-        "3️⃣ добавь ссылку"
-    )
+    if not cb.from_user or not cb.message:
+        return
+
+    lang = await _actor_lang(cb.from_user)
+    text = _i18n_t(lang, "bot.onboarding.test")
 
     await cb.message.edit_text(
         text,
         parse_mode="Markdown",
-        reply_markup=kb_back(),
+        reply_markup=kb_back(lang),
     )
 
 
@@ -292,9 +285,9 @@ async def setlog_command(message: Message):
         await message.delete()
     except Exception:
         pass
+    lang = await _actor_lang(message.from_user)
     await message.answer(
-        "Подключение чата отчётов теперь делается через панель.\n"
-        "Откройте настройки группы и нажмите: *Подключить чат отчётов*.",
+        _i18n_t(lang, "bot.onboarding.setlog_reply"),
         parse_mode="Markdown",
     )
 
@@ -316,8 +309,9 @@ async def check_command(message: Message):
     except Exception:
         pass
 
-    await message.answer(
-        "Подключение групп теперь делается через панель.\n"
-        "Открой личный чат с ботом и нажми: *➕ Добавить группу* (или *➕ Подключить чат*).",
-        parse_mode="Markdown",
+    lang = await _actor_lang(message.from_user)
+    text = _i18n_t(lang, "bot.onboarding.check_reply").format(
+        btn_add=_i18n_t(lang, "bot.start.btn_add_bot"),
+        btn_connect=_i18n_t(lang, "bot.start.btn_connect"),
     )
+    await message.answer(text, parse_mode="Markdown")

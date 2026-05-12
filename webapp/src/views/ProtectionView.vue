@@ -1,8 +1,11 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount, computed, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { useApi } from '../composables/useApi'
+import { useI18n } from 'vue-i18n'
+import { useApi, messageFromApiError } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
+
+const { t: tt, tm } = useI18n()
 import { guardLog, guardWarn } from '../utils/guardDebugLog'
 import { useCabinetMode } from '../composables/useCabinetMode'
 import {
@@ -159,7 +162,7 @@ function requestProtectionPin() {
 async function submitProtectionPin() {
   const pin = String(protectionPinInput.value || '').replace(/\D/g, '').slice(0, 4)
   if (pin.length !== 4) {
-    protectionPinError.value = 'Введите 4 цифры'
+    protectionPinError.value = tt('protection.pin.need_four')
     return
   }
   const tid = Number(viewerTelegramId.value || 0)
@@ -174,7 +177,7 @@ async function submitProtectionPin() {
   }
   if (!ok) ok = verifyPinDigits(protectionPinInput.value)
   if (!ok) {
-    protectionPinError.value = 'Неверный код'
+    protectionPinError.value = tt('protection.pin.invalid')
     return
   }
   showProtectionPinModal.value = false
@@ -190,7 +193,7 @@ function cancelProtectionPin() {
 }
 
 function masterOffConfirmMessage(chatTitle) {
-  return `Выключить защиту только в чате «${chatTitle}»?\n\nНастройки сохранятся, но Guard перестанет модерировать этот чат, пока вы снова не включите защиту.`
+  return tt('protection.master_off_prompt', { chatTitle })
 }
 
 async function ensureCanTurnMasterOff(chatTitle) {
@@ -352,8 +355,10 @@ function writePremiumCache(v) {
 }
 
 onMounted(async () => {
+  error.value = null
   if (!hasInitData.value) {
     guardLog('Protection', 'mount: skip (no initData)')
+    chatsListLoading.value = false
     return
   }
   const cached = readProtectionCache()
@@ -417,11 +422,21 @@ onMounted(async () => {
       data = await eagerChatPromise
     }
     if (!data?.rule) data = await fetchSilent(() => api.chat(resolvedSelectedChatId))
+    if (!data || typeof data !== 'object') {
+      guardWarn('Protection', 'chat payload empty or invalid', { resolvedSelectedChatId })
+      chat.value = { loadError: true }
+      return
+    }
     chat.value = data
     ensureChatRuleShape(chat.value)
     redirectChannelToBroadcastFromChatPayload(data)
     if (String(data.chat_kind || 'group').toLowerCase() === 'channel') {
       chatsListLoading.value = false
+      return
+    }
+    if (!data.rule) {
+      guardWarn('Protection', 'chat payload missing rule', { id: data.id })
+      chat.value = { loadError: true }
       return
     }
     void loadReputationPanel()
@@ -516,7 +531,7 @@ watch(
 
 const selectedChatTitle = computed(() => {
   const current = (chatsList.value || []).find((c) => Number(c.id) === Number(selectedChatId.value))
-  return current?.title || chat.value?.title || 'Чат не выбран'
+  return current?.title || chat.value?.title || tt('protection.ui.no_chat_selected')
 })
 const selectedChatMeta = computed(() => (chatsList.value || []).find((c) => Number(c.id) === Number(selectedChatId.value)) || null)
 const canUsePremiumForCurrentChat = computed(
@@ -558,7 +573,56 @@ function redirectChannelToBroadcastFromRow(row) {
   setCabinetMode(shared ? 'delegated' : 'owner')
   const q = { tab: 'broadcasts' }
   if (shared) q.cabinet = 'delegated'
-  router.replace({ path: '/admin', query: q })
+  const nav = router.replace({ path: '/admin', query: q })
+  if (nav && typeof nav.catch === 'function') {
+    nav.catch((err) => {
+      const n = String(err?.name || err || '')
+      if (n.includes('duplicat') || n.includes('NavigationDuplicated')) return
+      guardWarn('Protection', 'redirectChannelToBroadcastFromRow', err)
+    })
+  }
+}
+
+async function retryProtectionChatPayload() {
+  const id = Number(selectedChatId.value || chat.value?.id || 0)
+  if (!id || !hasInitData.value) return
+  error.value = null
+  chatsListLoading.value = true
+  try {
+    const data = await fetchSilent(() => api.chat(id))
+    if (!data || typeof data !== 'object') {
+      chat.value = { loadError: true }
+      return
+    }
+    chat.value = data
+    ensureChatRuleShape(chat.value)
+    redirectChannelToBroadcastFromChatPayload(data)
+    if (String(data.chat_kind || 'group').toLowerCase() === 'channel') {
+      return
+    }
+    if (!data.rule) {
+      guardWarn('Protection', 'retry: chat payload missing rule', { id })
+      chat.value = { loadError: true }
+      return
+    }
+    void loadReputationPanel()
+    saveCurrentChatCache(data)
+    void loadSpikeAlerts()
+    void fetchSilent(() => api.globalAntispamList())
+      .then((antispam) => {
+        antispamItems.value = antispam?.items || []
+      })
+      .catch(() => {
+        antispamItems.value = []
+      })
+    if (spikeAlertsTimer) clearInterval(spikeAlertsTimer)
+    spikeAlertsTimer = setInterval(loadSpikeAlerts, 30000)
+  } catch (e) {
+    guardWarn('Protection', 'retryProtectionChatPayload failed', e)
+    chat.value = { loadError: true }
+  } finally {
+    chatsListLoading.value = false
+  }
 }
 
 function redirectChannelToBroadcastFromChatPayload(data) {
@@ -592,11 +656,21 @@ const pickerActiveChats = computed(() =>
   Number((chatsList.value || []).filter((c) => !c?.locked_by_limit && !!c?.master_anti_spam).length || 0),
 )
 
+function silencePresetLabel(mins) {
+  const m = Number(mins)
+  if (!m) return ''
+  if (m === 1440) return tt('protection.presets.silence_day')
+  if (m >= 60 && m % 60 === 0) {
+    const h = m / 60
+    return h === 1 ? tt('protection.presets.silence_hour_one') : tt('protection.presets.silence_hours', { n: h })
+  }
+  return tt('protection.presets.silence_minutes', { n: m })
+}
+
 const silenceStatusLabel = computed(() => {
   const mins = Number(chat.value?.rule?.silence_minutes || 0)
-  if (!mins) return 'Выключено'
-  const found = silencePresets.find((p) => p.value === mins)
-  return found?.label || `${mins} минут`
+  if (!mins) return ''
+  return silencePresetLabel(mins)
 })
 
 const antiraidActivePresetKey = computed(() => {
@@ -620,7 +694,7 @@ async function switchChat(chatId) {
     return
   }
   if (target && !delegatedCanProtection(target)) {
-    showToast('У вас нет права «Защита» для этого чата.')
+    showToast(tt('protection.toasts.no_protection_perm'))
     return
   }
   if (target && isChannelListRow(target)) {
@@ -645,7 +719,7 @@ async function switchChat(chatId) {
   } catch (e) {
     selectedChatId.value = prevId
     guardWarn('Protection', `switchChat(${chatId}) failed`, e)
-    showToast('Не удалось переключить чат')
+    showToast(tt('protection.toasts.switch_chat_failed'))
   } finally {
     switchChatBusy.value = false
   }
@@ -806,7 +880,7 @@ async function toggleChatProtectionFromPicker(chatRow) {
       chat.value.rule.master_anti_spam = prev
     }
     guardWarn('Protection', `toggleChatProtectionFromPicker(${cid}) failed`, e)
-    showToast('Не удалось переключить защиту')
+    showToast(tt('protection.toasts.toggle_protection_failed'))
   } finally {
     pickerToggleBusyByChat.value = { ...pickerToggleBusyByChat.value, [cid]: false }
   }
@@ -841,31 +915,20 @@ async function applySpikeRecommendedSettings() {
   if (!chat.value.rule.join_captcha_enabled) patch.join_captcha_enabled = true
   if (Number(chat.value.rule.silence_minutes || 0) <= 0) patch.silence_minutes = 10
   if (!Object.keys(patch).length) {
-    showToast('Рекомендуемые безопасные настройки уже включены')
+    showToast(tt('protection.toasts.spike_already_safe'))
     return
   }
   await updateRule(patch)
 }
 
-const spamSpikeDeletePresets = [
-  { n: 5, label: '5 удалений' },
-  { n: 10, label: '10 удалений' },
-  { n: 15, label: '15 удалений' },
-  { n: 25, label: '25 удалений' },
-  { n: 50, label: '50 удалений' },
-  { n: 100, label: '100 удалений' },
-  { n: 150, label: '150 удалений' },
-]
-const spamSpikeWindowPresets = [
-  { m: 10, label: '10 мин' },
-  { m: 20, label: '20 мин' },
-  { m: 35, label: '35 мин' },
-  { m: 60, label: '60 мин' },
-  { m: 90, label: '90 мин' },
-  { m: 120, label: '120 мин' },
-  { m: 180, label: '180 мин' },
-  { m: 360, label: '360 мин' },
-]
+const SPAM_SPIKE_DELETE_NS = [5, 10, 15, 25, 50, 100, 150]
+const spamSpikeDeletePresets = computed(() =>
+  SPAM_SPIKE_DELETE_NS.map((n) => ({ n, label: tt('protection.presets.spike_deletes', { n }) })),
+)
+const SPAM_SPIKE_WINDOW_MS = [10, 20, 35, 60, 90, 120, 180, 360]
+const spamSpikeWindowPresets = computed(() =>
+  SPAM_SPIKE_WINDOW_MS.map((m) => ({ m, label: tt('protection.presets.spike_minutes', { n: m }) })),
+)
 
 const premiumGuardVisualClass =
   'text-[12px] font-semibold tracking-wide text-slate-100'
@@ -881,18 +944,17 @@ async function updateRule(patch, opts = {}) {
   saving.value = true
   guardLog('Protection', `PATCH rule chat=${chat.value.id}`, patch)
   try {
-    const data = await fetchSilent(() => api.updateRule(chat.value.id, patch))
+    const data = await api.updateRule(chat.value.id, patch)
     chat.value.rule = data.rule
     saveCurrentChatCache()
     guardLog('Protection', 'PATCH rule OK', {
       public_alerts_enabled: data.rule?.public_alerts_enabled,
       public_alerts_style: data.rule?.public_alerts_style,
     })
-    if (!quietToast) showToast('Настройки успешно сохранены')
+    if (!quietToast) showToast(tt('protection.toasts.settings_saved'))
   } catch (e) {
     guardWarn('Protection', 'PATCH rule failed', e)
-    if (error.value) showToast(error.value)
-    else showToast('Не удалось сохранить настройки')
+    showToast(messageFromApiError(e) || tt('protection.toasts.settings_save_failed'))
   } finally {
     saving.value = false
   }
@@ -902,7 +964,7 @@ async function toggleMasterProtection() {
   if (!chat.value?.rule) return
   const next = !chat.value.rule.master_anti_spam
   if (!next) {
-    const ok = await ensureCanTurnMasterOff(String(selectedChatTitle.value || 'Чат'))
+    const ok = await ensureCanTurnMasterOff(String(selectedChatTitle.value || tt('protection.ui.chat_title_fallback')))
     if (!ok) return
   }
   await updateRule({ master_anti_spam: next })
@@ -997,7 +1059,7 @@ async function addStopword() {
     chat.value.stopwords = data.stopwords || []
     if (chat.value.rule) chat.value.rule.stopwords_count = chat.value.stopwords.length
     newStopword.value = ''
-    showToast('Стоп-слово добавлено')
+    showToast(tt('protection.toasts.stopword_added'))
   } finally {
     stopwordLoading.value = false
   }
@@ -1010,7 +1072,7 @@ async function removeStopword(word) {
     const data = await fetchSilent(() => api.deleteStopword(chat.value.id, word))
     chat.value.stopwords = data.stopwords || []
     if (chat.value.rule) chat.value.rule.stopwords_count = chat.value.stopwords.length
-    showToast('Стоп-слово удалено')
+    showToast(tt('protection.toasts.stopword_removed'))
   } finally {
     stopwordLoading.value = false
   }
@@ -1073,7 +1135,7 @@ async function addReputationWord() {
     await fetchSilent(() => api.addReputationWord(chat.value.id, word))
     newReputationWord.value = ''
     await loadReputationPanel()
-    showToast('Слово благодарности добавлено')
+    showToast(tt('protection.toasts.thanks_word_added'))
   } finally {
     reputationWordsLoading.value = false
   }
@@ -1085,7 +1147,7 @@ async function removeReputationWord(word) {
   try {
     await fetchSilent(() => api.deleteReputationWord(chat.value.id, word))
     await loadReputationPanel()
-    showToast('Слово удалено')
+    showToast(tt('protection.toasts.thanks_word_removed'))
   } finally {
     reputationWordsLoading.value = false
   }
@@ -1104,7 +1166,7 @@ async function loadAntispamList() {
 async function addAntispamUser() {
   const uid = (newAntispamUserId.value || '').trim()
   if (!uid || !/^\d+$/.test(uid)) {
-    showToast('Введите числовой user_id')
+    showToast(tt('protection.toasts.need_numeric_user_id'))
     return
   }
   antispamLoading.value = true
@@ -1112,7 +1174,7 @@ async function addAntispamUser() {
     await fetchSilent(() => api.globalAntispamAdd(Number(uid)))
     newAntispamUserId.value = ''
     await loadAntispamList()
-    showToast('Добавлено в антиспам базу')
+    showToast(tt('protection.toasts.antispam_added'))
   } finally {
     antispamLoading.value = false
   }
@@ -1123,7 +1185,7 @@ async function removeAntispamUser(userId) {
   try {
     await fetchSilent(() => api.globalAntispamRemove(userId))
     antispamItems.value = antispamItems.value.filter((i) => i.user_id !== userId)
-    showToast('Удалено из базы')
+    showToast(tt('protection.toasts.antispam_removed'))
   } finally {
     antispamLoading.value = false
   }
@@ -1135,9 +1197,9 @@ async function openCleanDeleted() {
   cleanLaunchLoading.value = true
   try {
     const res = await fetchSilent(() => api.cleanDeleted(chat.value.id))
-    showToast(`Очистка завершена: проверено ${res.checked}, удалено ${res.kicked}`)
+    showToast(tt('protection.toasts.cleanup_done', { checked: res.checked, kicked: res.kicked }))
   } catch {
-    showToast(error.value || 'Не удалось запустить очистку')
+    showToast(error.value || tt('protection.toasts.cleanup_failed'))
   } finally {
     cleanLaunchLoading.value = false
   }
@@ -1146,7 +1208,7 @@ async function openCleanDeleted() {
 async function doCopySettings() {
   if (!chat.value?.id || !copyTargetId.value || chat.value.noSelection) return
   if (copyTargetId.value !== '__all__' && Number(copyTargetId.value) === chat.value.id) {
-    showToast('Выберите другой чат')
+    showToast(tt('protection.toasts.pick_other_chat'))
     return
   }
   copyLoading.value = true
@@ -1154,18 +1216,18 @@ async function doCopySettings() {
     if (copyTargetId.value === '__all__') {
       const targets = (chatsList.value || []).filter((c) => Number(c.id) !== Number(chat.value.id))
       if (!targets.length) {
-        showToast('Нет других чатов для переноса')
+        showToast(tt('protection.toasts.no_targets_copy'))
         return
       }
-      const ok = window.confirm(`Перенести текущие настройки во все чаты (${targets.length})?`)
+      const ok = window.confirm(tt('protection.confirm.copy_settings_all', { count: targets.length }))
       if (!ok) return
       for (const target of targets) {
         await fetchSilent(() => api.copySettings(chat.value.id, Number(target.id)))
       }
-      showToast(`Настройки перенесены во все чаты (${targets.length})`)
+      showToast(tt('protection.toasts.settings_copied_all', { count: targets.length }))
     } else {
-    await fetchSilent(() => api.copySettings(chat.value.id, Number(copyTargetId.value)))
-    showToast('Настройки перенесены')
+      await fetchSilent(() => api.copySettings(chat.value.id, Number(copyTargetId.value)))
+      showToast(tt('protection.toasts.settings_copied'))
     }
     copyTargetId.value = null
   } finally {
@@ -1173,73 +1235,35 @@ async function doCopySettings() {
   }
 }
 
-const policyOptions = [
-  { value: 'allow', label: 'Разрешено' },
-  { value: 'forbid', label: 'Запрещено' },
+const policyOptions = computed(() => [
+  { value: 'allow', label: tt('protection.policy.allow') },
+  { value: 'forbid', label: tt('protection.policy.forbid') },
+])
+
+const LINK_FILTER_MODE_ORDER = [
+  'allow',
+  'allow_except_global',
+  'open_blacklist',
+  'smart',
+  'telegram_only',
+  'forbid',
+  'delete_all',
 ]
 
-const linkModeOptions = [
-  {
-    value: 'allow',
-    label: 'Ссылки разрешены',
-    guardHtml:
-      'Представь: <strong>Guard</strong> сидит и почти <strong>не трогает</strong> ссылки в чате — можно кидать что угодно, как наклейки.<br><br>Но если ты нарисовал <strong>чёрный список</strong> (Premium) или включил <strong>глобальную базу</strong> ниже — это как <strong>красные наклейки «нельзя»</strong>: их я всё равно сниму. Так честнее: «разрешено» ≠ «без правил».',
-  },
-  {
-    value: 'allow_except_global',
-    label: 'Всё, кроме глобальной базы URL',
-    guardHtml:
-      'Обычные ссылки — <strong>проходят</strong>. Но если в адресе есть кусок из <strong>твоей глобальной базы URL</strong> (Premium: «Кабинет → АнтиURL»), <strong>Guard</strong> говорит: «Это из ящика „фу“ — мимо».<br><br>Плюс твой <strong>чёрный список</strong> по чату. Если в ящике пусто — я не придираюсь.',
-  },
-  {
-    value: 'open_blacklist',
-    label: 'Всё, кроме чёрного списка',
-    guardHtml:
-      'Почти всё летит в чат, как мячик. Исключение — <strong>твой чёрный список</strong> (Premium): попал под строку — <strong>Guard</strong> без сантиментов.<br><br>Отдельного «интернет-полицейского» у меня нет: есть твои строки и опционально <strong>глобальная база</strong> ниже, если включишь.',
-  },
-  {
-    value: 'smart',
-    label: 'Умный режим',
-    guardHtml:
-      '<strong>Guard</strong> злится в основном на <strong>чужие t.me / telegram.me</strong>, но <strong>не трогает</strong> ссылку на <strong>наш чат</strong> и ссылку на <strong>человека, который уже сидит здесь</strong>.<br><br>Обычные сайты — не моя война в этом режиме: дальше работают стоп-слова и остальное.',
-  },
-  {
-    value: 'telegram_only',
-    label: 'Только Telegram-ссылки',
-    guardHtml:
-      'Режу только <strong>телеграмные</strong> штуки: <strong>t.me</strong>, <strong>telegram.me</strong>, <strong>tg://</strong>. Сайт с рецептом борща — <strong>не трогаю</strong> здесь; если там мусор — поймают другие фильтры.',
-  },
-  {
-    value: 'forbid',
-    label: 'Кроме доверенных',
-    guardHtml:
-      'Тут правило простое: можно кидать ссылки только из твоего списка <strong>«Доверенные ссылки»</strong> ниже. Это и есть «белый список» — список <strong>разрешённых</strong> ссылок.<br><br>Если в одном сообщении намешали разрешённую и левую ссылку — <strong>Guard</strong> удаляет <strong>всё сообщение целиком</strong>.',
-  },
-  {
-    value: 'delete_all',
-    label: 'Резать все ссылки',
-    guardHtml:
-      'Любая ссылка в сообщении — <strong>под нож</strong>. Как наказывать (удалить / мут / бан) — смотри общие настройки <strong>Guard</strong>, я не выдумываю отдельный суд.',
-  },
-]
+const linkModeOptions = computed(() =>
+  LINK_FILTER_MODE_ORDER.map((value) => ({
+    value,
+    label: tt(`protection.links_modal.modes.${value}.label`),
+    guardHtml: tt(`protection.links_modal.modes.${value}.hint_html`),
+  })),
+)
 
-const linkModalLegendHtml =
-  'Здесь не одна кнопка «вкл/выкл», а <strong>как именно Guard смотрит на ссылки</strong>.<br><br><strong>Чёрный список</strong> — твои личные «нельзя» по этому чату (Premium). <strong>Глобальная база URL</strong> — твои шаблоны из <strong>Premium → АнтиURL</strong>, если включишь проверку ниже (одна база на все твои чаты). <strong>Белый список</strong> — «разрешено именно так». Всё может работать <strong>вместе</strong> — как несколько правил в одной игре 😈'
-
-const linkModalGlobalBadUrlsHtml =
-  'Откуда берётся: ты сам кладёшь шаблоны в <strong>«Кабинет Premium → АнтиURL»</strong> — это твоя личная коробка «фу-ссылки» на все чаты, где ты владелец Guard.<br><br>Как для пятилетки: включил тумблер ниже — Guard заглядывает в коробку. Выключил — не заглядывает. Если совпало, дальше срабатывает <strong>то наказание, которое у тебя выбрано в этом чате</strong> (удалить / мут / бан). Чужие люди твою коробку не видят и к себе её не подмешивают.'
-
-const linkModalScopeHtml =
-  'В <strong>форуме-обсуждении канала</strong> иногда хочется: в «Общем» чатике — помягче, а <strong>под постами</strong> — построже. Guard умеет: можно проверять <strong>только комментарии к постам</strong>.<br><br>В обычной группе без топиков я не гадаю — фильтр на <strong>весь чат</strong>, иначе спам уйдёт в «болталку» и смеётся в усы.'
-
-const linkModalBlacklistHtml =
-  'Сюда пишешь кусок адреса (например <code class="rounded-md bg-black/35 px-1 text-zinc-200">spam.ru</code>). Попало в ссылку в сообщении — <strong>Guard</strong> бьёт <strong>отдельным правилом</strong> (жёстче обычного delete/mute/ban за ссылку, если ты так настроил).<br><br>До <strong>20</strong> строк с Premium; без Premium ящик пустой — так устроен тариф, не обижайся.'
-
-const linkModalWhitelistHtml =
-  'Это список <strong>разрешённых ссылок</strong> для режима <strong>«Кроме доверенных»</strong>. Добавляй домен (<code class="rounded-md bg-black/35 px-1 text-zinc-200">vk.com</code>) или конкретный путь (<code class="rounded-md bg-black/35 px-1 text-zinc-200">t.me/канал</code>).<br><br>Если ссылка не из этого списка — Guard считает её чужой и удаляет сообщение по правилам чата. Лимит: <strong>5</strong> бесплатно, <strong>100</strong> с Premium.'
-
-const linkModalWhitelistUsersHtml =
-  'Это люди, которым Guard <strong>доверяет ссылки</strong> в этом чате. Их сообщения со ссылками не режутся ссылочным фильтром.<br><br>Зачем: например, твой модератор, рекламный менеджер или бот-партнёр. Добавлять можно по <strong>@username</strong> или по <strong>Telegram ID</strong>.'
+const linkModalLegendHtml = computed(() => tt('protection.links_modal.legend_html'))
+const linkModalGlobalBadUrlsHtml = computed(() => tt('protection.links_modal.global_hint_html'))
+const linkModalScopeHtml = computed(() => tt('protection.links_modal.scope_hint_html'))
+const linkModalBlacklistHtml = computed(() => tt('protection.links_modal.blacklist_hint_html'))
+const linkModalWhitelistHtml = computed(() => tt('protection.links_modal.trusted_hint_html'))
+const linkModalWhitelistUsersHtml = computed(() => tt('protection.links_modal.trusted_users_hint_html'))
 
 function linkModeButtonClass(currentMode, optValue) {
   const selected = String(currentMode || '').toLowerCase() === String(optValue || '').toLowerCase()
@@ -1259,36 +1283,35 @@ function linkModeButtonClass(currentMode, optValue) {
 
 const linkModeSummary = computed(() => {
   const m = String(chat.value?.rule?.filter_links_mode || '').toLowerCase()
-  const labels = {
-    allow: 'Ссылки разрешены',
-    allow_except_global: 'Всё разрешено, кроме глобальной базы URL',
-    open_blacklist: 'Всё разрешено, кроме чёрного списка',
-    forbid: 'Только доверенные шаблоны',
-    smart: 'Умный режим (Telegram)',
-    telegram_only: 'Режутся только Telegram-ссылки',
-    delete_all: 'Режутся все ссылки',
-    captcha: 'Ссылки через капчу (на паузе)',
-  }
-  return labels[m] || 'Ссылки фильтруются'
+  const key = `protection.summaries.link_mode.${m}`
+  const tr = tt(key)
+  if (tr !== key) return tr
+  return tt('protection.summaries.link_mode.fallback')
 })
 
 const mentionsSummary = computed(() =>
-  chat.value?.rule?.filter_mentions ? 'Упоминания запрещены' : 'Упоминания разрешены',
+  chat.value?.rule?.filter_mentions
+    ? tt('protection.summaries.mentions_forbidden')
+    : tt('protection.summaries.mentions_allowed'),
 )
 const mediaSummary = computed(() => {
   const m = String(chat.value?.rule?.filter_media_mode || 'allow').toLowerCase()
-  return m === 'forbid' ? 'Медиа запрещено' : 'Медиа разрешено'
+  return m === 'forbid'
+    ? tt('protection.summaries.media_forbidden')
+    : tt('protection.summaries.media_allowed')
 })
 const buttonsSummary = computed(() => {
   const m = String(chat.value?.rule?.filter_buttons_mode || 'allow').toLowerCase()
-  return m === 'forbid' ? 'Кнопки запрещены' : 'Кнопки разрешены'
+  return m === 'forbid'
+    ? tt('protection.summaries.buttons_forbidden')
+    : tt('protection.summaries.buttons_allowed')
 })
 const channelPostsSummary = computed(() => {
   const enabled = !!chat.value?.rule?.filter_channel_posts_enabled
-  if (!enabled) return 'Сообщения от каналов разрешены'
+  if (!enabled) return tt('protection.summaries.channel_posts_allowed')
   return String(chat.value?.rule?.filter_channel_posts_action || 'delete') === 'ban'
-    ? 'Режутся + канал-источник банится'
-    : 'Режутся (без бана канала)'
+    ? tt('protection.summaries.channel_posts_ban')
+    : tt('protection.summaries.channel_posts_delete')
 })
 const postRulesDraftsForChat = computed(() =>
   (postRulesDrafts.value || []).filter(
@@ -1334,11 +1357,11 @@ function postRulesServerSignature() {
 }
 
 const postRulesGroupDraftStatusLabel = computed(() =>
-  postRulesServerDirty.value ? 'Черновик не сохранён' : 'Черновик сохранён',
+  postRulesServerDirty.value ? tt('protection.post_rules.draft_unsaved') : tt('protection.post_rules.draft_saved'),
 )
 const postRulesGroupEditingLabel = computed(() => {
   const name = String(postRulesEditingDraftName.value || '').trim()
-  const tail = postRulesServerDirty.value ? 'не сохранён' : 'сохранён'
+  const tail = postRulesServerDirty.value ? tt('protection.post_rules.tail_unsaved') : tt('protection.post_rules.tail_saved')
   if (name) return `${name} · ${tail}`
   return tail
 })
@@ -1408,7 +1431,7 @@ async function postRulesCommitDraftName(d) {
   if (!id) return
   const next = String(postRulesDraftNameDraft.value || '').trim()
   if (!next) {
-    showToast('Имя не может быть пустым')
+    showToast(tt('protection.toasts.template_name_empty'))
     return
   }
   postRulesDrafts.value = (postRulesDrafts.value || []).map((x) => {
@@ -1418,7 +1441,7 @@ async function postRulesCommitDraftName(d) {
   postRulesPersistDrafts()
   postRulesDraftNameDirty.value = false
   postRulesDraftNameEditId.value = ''
-  showToast('Название шаблона сохранено')
+  showToast(tt('protection.toasts.template_name_saved'))
 }
 
 function mergeWhitelistFromResponse(data) {
@@ -1645,7 +1668,7 @@ async function postRulesSaveDraft(opts = {}) {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 40)
-  const fallbackName = baseNameFromEditor || `Шаблон ${new Date().toLocaleString()}`
+  const fallbackName = baseNameFromEditor || tt('protection.post_rules.template_dated', { date: new Date().toLocaleString() })
   if (activeId) {
     const nextPayload = {
       enabled: !!postRulesGroupForm.value.enabled,
@@ -1667,7 +1690,7 @@ async function postRulesSaveDraft(opts = {}) {
     })
     postRulesPersistDrafts()
     postRulesMarkDraftContentBaseline()
-    if (!silent) showToast('Шаблон обновлён')
+    if (!silent) showToast(tt('protection.toasts.template_updated'))
     return
   }
   const payload = {
@@ -1689,7 +1712,7 @@ async function postRulesSaveDraft(opts = {}) {
   postRulesDraftNameEditId.value = ''
   postRulesDraftNameDirty.value = false
   postRulesMarkDraftContentBaseline()
-  if (!silent) showToast('Шаблон сохранён')
+  if (!silent) showToast(tt('protection.toasts.template_saved'))
 }
 
 function postRulesCreateGroupDraft() {
@@ -1701,7 +1724,7 @@ function postRulesCreateGroupDraft() {
     id: `d-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     chatId: cid,
     mode,
-    name: `Шаблон ${n}`,
+    name: tt('protection.post_rules.template_n', { n }),
     savedAt: Date.now(),
     payload: {
       enabled: !!postRulesGroupForm.value.enabled,
@@ -1735,7 +1758,7 @@ function postRulesCreateGroupDraft() {
   postRulesBeginDraftNameEdit(payload)
   postRulesMarkDraftContentBaseline()
   postRulesTouchServerDirty()
-  showToast('Новый шаблон — отредактируйте и сохраните')
+  showToast(tt('protection.toasts.template_new_hint'))
 }
 
 async function postRulesToggleRunGroupDraft(d) {
@@ -1756,16 +1779,20 @@ async function postRulesToggleRunGroupDraft(d) {
         chat.value.rule.rules_group_active_draft_id = ''
         ensureChatRuleShape(chat.value)
       }
-      showToast('Запуск шаблона выключен')
+      showToast(tt('protection.toasts.template_launch_off'))
       return
     }
     await postRulesApplyDraft(d, { quiet: true })
     postRulesGroupForm.value.enabled = true
     postRulesGroupRunActiveId.value = id
     await savePostRulesSettings({ skipResultToast: true })
-    showToast(`Запущен: ${String(d?.name || '').trim() || 'шаблон'}`)
+    showToast(
+      tt('protection.toasts.template_launched', {
+        name: String(d?.name || '').trim() || tt('protection.post_rules.template_fallback'),
+      }),
+    )
   } catch {
-    showToast(error.value || 'Не удалось переключить шаблон')
+    showToast(error.value || tt('protection.toasts.template_launch_failed'))
   } finally {
     postRulesGroupRunDraftBusyId.value = ''
   }
@@ -1833,7 +1860,7 @@ async function postRulesApplyDraft(d, opts = {}) {
     await nextTick()
     postRulesMarkServerBaseline()
     postRulesMarkDraftContentBaseline()
-    if (!quiet) showToast('Черновик загружен')
+    if (!quiet) showToast(tt('protection.toasts.draft_loaded'))
   } finally {
     postRulesDraftLoadingId.value = ''
   }
@@ -2015,7 +2042,7 @@ function postRulesFormatLink() {
   const range = sel && sel.rangeCount ? sel.getRangeAt(0).cloneRange() : postRulesSavedRange.value
   const selectedText = String(range?.toString() || '').trim()
   if (!selectedText) {
-    showToast('Сначала выдели текст для ссылки')
+    showToast(tt('protection.toasts.select_text_for_link'))
     return
   }
   postRulesLinkRange.value = range || null
@@ -2032,12 +2059,12 @@ function postRulesApplyLinkModal() {
   const sel = window.getSelection?.()
   const range = postRulesLinkRange.value || postRulesSavedRange.value || (sel && sel.rangeCount ? sel.getRangeAt(0) : null)
   if (!range) {
-    showToast('Сначала выдели текст для ссылки')
+    showToast(tt('protection.toasts.select_text_for_link'))
     return
   }
   const text = String(range.toString() || '').trim()
   if (!text) {
-    showToast('Сначала выдели текст для ссылки')
+    showToast(tt('protection.toasts.select_text_for_link'))
     return
   }
   const safeText = text
@@ -2230,7 +2257,7 @@ function welcomeFormatSpoiler() {
   el.focus()
   const range = welcomeCurrentRange()
   if (!welcomeWrapRange(range, '<span data-spoiler="1">', '</span>')) {
-    window.alert('Выдели текст, затем нажми «Скрытый»')
+    window.alert(tt('protection.alerts.select_spoiler'))
     return
   }
 }
@@ -2242,7 +2269,7 @@ function welcomeFormatPre() {
   const sel = window.getSelection?.()
   const text = sel?.toString() || ''
   if (!text.trim()) {
-    window.alert('Выдели текст, затем нажми «PRE»')
+    window.alert(tt('protection.alerts.select_pre'))
     return
   }
   welcomeInsertHtmlAtCursor(`<pre>${text}</pre>`)
@@ -2254,18 +2281,18 @@ function welcomeFormatBlockquote() {
   el.focus()
   const sel = window.getSelection()
   if (!sel || !sel.rangeCount) {
-    window.alert('Выдели текст, затем нажми «Цитата»')
+    window.alert(tt('protection.alerts.select_quote'))
     return
   }
   const r0 = sel.getRangeAt(0)
   if (r0.collapsed) {
-    window.alert('Выдели текст, затем нажми «Цитата»')
+    window.alert(tt('protection.alerts.select_quote'))
     return
   }
   const inEditor =
     el.contains(r0.commonAncestorContainer) || el.contains(r0.startContainer) || el.contains(r0.endContainer)
   if (!inEditor) {
-    window.alert('Выдели текст в поле, затем нажми «Цитата»')
+    window.alert(tt('protection.alerts.select_quote_field'))
     return
   }
   // Не используем formatBlock: в однострочном contentEditable он тянет в цитату весь «блок» = всё поле.
@@ -2278,14 +2305,14 @@ function welcomeFormatBlockquote() {
   if (!r1) return
   try {
     if (!r1.toString().trim() && !welcomeSelectedTextFromRange(r1).trim()) {
-      window.alert('Выдели текст, затем нажми «Цитата»')
+      window.alert(tt('protection.alerts.select_quote'))
       return
     }
     const frag = r1.extractContents()
     if (!frag) return
     const t = (frag.textContent || '').trim()
     if (!t) {
-      window.alert('Выдели текст, затем нажми «Цитата»')
+      window.alert(tt('protection.alerts.select_quote'))
       return
     }
     const bq = document.createElement('blockquote')
@@ -2298,7 +2325,7 @@ function welcomeFormatBlockquote() {
   } catch (e) {
     const r2 = welcomeCurrentRange()
     if (!welcomeWrapRange(r2, '<blockquote>', '</blockquote>')) {
-      window.alert('Не удалось оформить цитату. Выдели кусок текста в поле и нажми «Цитата» снова.')
+      window.alert(tt('protection.alerts.quote_failed'))
       return
     }
     return
@@ -2313,7 +2340,7 @@ function welcomeFormatCode() {
   const sel = window.getSelection?.()
   const text = sel?.toString() || ''
   if (!text.trim()) {
-    window.alert('Выдели текст, затем нажми «Код»')
+    window.alert(tt('protection.alerts.select_code'))
     return
   }
   welcomeInsertHtmlAtCursor(`<code>${text}</code>`)
@@ -2326,7 +2353,7 @@ function welcomeFormatLink() {
   const range = sel && sel.rangeCount ? sel.getRangeAt(0).cloneRange() : welcomeSavedRange.value
   const selectedText = welcomeSelectedTextFromRange(range)
   if (!selectedText.trim()) {
-    window.alert('Выдели текст, затем нажми «Ссылка»')
+    window.alert(tt('protection.alerts.select_link'))
     return
   }
   welcomeLinkRange.value = range || null
@@ -2475,8 +2502,12 @@ function openWelcomeSettings() {
       })
   }
   nextTick(() => {
-    initWelcomeEditorDom()
-    welcomeMarkSessionBaseline()
+    try {
+      initWelcomeEditorDom()
+      welcomeMarkSessionBaseline()
+    } catch (e) {
+      guardWarn('Protection', 'welcome editor init failed', e)
+    }
   })
 }
 
@@ -2491,9 +2522,9 @@ async function onWelcomePhotoPicked(event) {
     if (welcomePreviewUrl.value) revokeBroadcastMediaPreviewUrl(welcomePreviewUrl.value)
     welcomePreviewUrl.value = await fetchChatWelcomePhotoPreviewUrl(chat.value.id)
     welcomeMarkSessionBaseline()
-    showToast('Фото приветствия загружено')
+    showToast(tt('protection.toasts.welcome_photo_ok'))
   } catch {
-    showToast(error.value || 'Не удалось загрузить фото')
+    showToast(error.value || tt('protection.toasts.welcome_photo_fail'))
   } finally {
     welcomePhotoBusy.value = false
   }
@@ -2508,9 +2539,9 @@ async function removeWelcomePhoto() {
     if (welcomePreviewUrl.value) revokeBroadcastMediaPreviewUrl(welcomePreviewUrl.value)
     welcomePreviewUrl.value = ''
     welcomeMarkSessionBaseline()
-    showToast('Фото удалено')
+    showToast(tt('protection.toasts.welcome_photo_removed'))
   } catch {
-    showToast(error.value || 'Не удалось удалить фото')
+    showToast(error.value || tt('protection.toasts.welcome_photo_remove_fail'))
   } finally {
     welcomePhotoBusy.value = false
   }
@@ -2545,11 +2576,11 @@ async function persistWelcomeSettings(opts = {}) {
     chat.value.rule = data.rule
     welcomeMarkSessionBaseline()
     saveCurrentChatCache()
-    if (!quietToast) showToast('Приветствие сохранено')
+    if (!quietToast) showToast(tt('protection.toasts.welcome_saved'))
     if (closeAfter) showWelcomeSettingsModal.value = false
     return true
   } catch {
-    showToast(error.value || 'Не удалось сохранить приветствие')
+    showToast(error.value || tt('protection.toasts.welcome_save_fail'))
     return false
   } finally {
     welcomeBusy.value = false
@@ -2571,7 +2602,7 @@ async function closeWelcomeSettingsModal() {
 
 async function welcomeSaveButtonsFromModal() {
   const ok = await persistWelcomeSettings({ closeAfter: false, quietToast: true })
-  if (ok) showToast('Кнопки сохранены')
+  if (ok) showToast(tt('protection.toasts.welcome_buttons_saved'))
 }
 
 async function openPostRulesSettings() {
@@ -2648,9 +2679,9 @@ async function onPostRulesPhotoPicked(event) {
   try {
     await uploadChatRulesPhoto(chat.value.id, 'group', f)
     await loadPostRulesPhotoPreview()
-    showToast('Фото для правил сохранено')
+    showToast(tt('protection.toasts.rules_photo_ok'))
   } catch {
-    showToast(error.value || 'Не удалось загрузить фото')
+    showToast(error.value || tt('protection.toasts.rules_photo_fail'))
   } finally {
     postRulesBusy.value = false
     postRulesTouchServerDirty()
@@ -2665,9 +2696,9 @@ async function removePostRulesPhoto(opts = {}) {
     await fetchSilent(() => deleteChatRulesPhoto(chat.value.id, 'group'))
     if (postRulesGroupPreviewUrl.value) revokeBroadcastMediaPreviewUrl(postRulesGroupPreviewUrl.value)
     postRulesGroupPreviewUrl.value = ''
-    if (!silent) showToast('Фото удалено')
+    if (!silent) showToast(tt('protection.toasts.rules_photo_removed'))
   } catch {
-    if (!silent) showToast(error.value || 'Не удалось удалить фото')
+    if (!silent) showToast(error.value || tt('protection.toasts.rules_photo_remove_fail'))
   } finally {
     postRulesBusy.value = false
     postRulesTouchServerDirty()
@@ -2741,7 +2772,7 @@ async function savePostRulesSettings(opts = {}) {
     postRulesMarkDraftContentBaseline()
     if (!skipResultToast) {
       postRulesFlashSaved()
-      showToast('Правила сохранены')
+      showToast(tt('protection.toasts.rules_saved'))
     }
     ensureChatRuleShape(chat.value)
     postRulesClearLastDraftForChat(chat.value.id)
@@ -2771,7 +2802,7 @@ async function closePostRulesSettingsModal() {
     try {
       await savePostRulesSettings()
     } catch {
-      showToast(error.value || 'Не удалось сохранить настройки в Telegram')
+      showToast(error.value || tt('protection.toasts.rules_telegram_fail'))
       return
     }
   } else {
@@ -2808,9 +2839,11 @@ async function postRulesDoGroupSendNow() {
       pin: !!postRulesGroupForm.value.pinOnSend,
       delete_pin_notice: !!postRulesGroupForm.value.deletePinNotice,
     }))
-    showToast(postRulesGroupForm.value.pinOnSend ? 'Правила отправлены и закреплены' : 'Правила отправлены')
+    showToast(
+      postRulesGroupForm.value.pinOnSend ? tt('protection.toasts.rules_sent_pinned') : tt('protection.toasts.rules_sent'),
+    )
   } catch {
-    showToast(error.value || 'Не удалось отправить правила')
+    showToast(error.value || tt('protection.toasts.rules_send_fail'))
   } finally {
     postRulesSendBusy.value = false
   }
@@ -2844,10 +2877,12 @@ async function postRulesConfirmGroupSendFromModal() {
       pin: !!postRulesGroupForm.value.pinOnSend,
       delete_pin_notice: !!postRulesGroupForm.value.deletePinNotice,
     }))
-    showToast(postRulesGroupForm.value.pinOnSend ? 'Правила отправлены и закреплены' : 'Правила отправлены')
+    showToast(
+      postRulesGroupForm.value.pinOnSend ? tt('protection.toasts.rules_sent_pinned') : tt('protection.toasts.rules_sent'),
+    )
     showPostRulesGroupSendModal.value = false
   } catch {
-    showToast(error.value || 'Не удалось отправить правила')
+    showToast(error.value || tt('protection.toasts.rules_send_fail'))
   } finally {
     postRulesSendBusy.value = false
   }
@@ -2865,9 +2900,9 @@ async function addLinkBlacklistPattern() {
     const res = await fetchSilent(() => api.addLinkBlacklistPattern(chat.value.id, p))
     mergeLinkBlacklistFromResponse(res)
     newLinkBlacklistPattern.value = ''
-    showToast('Добавлено в чёрный список')
+    showToast(tt('protection.toasts.link_blacklist_added'))
   } catch {
-    showToast(error.value || 'Не удалось добавить')
+    showToast(error.value || tt('protection.toasts.link_blacklist_add_fail'))
   } finally {
     linkBlacklistLoading.value = false
   }
@@ -2879,9 +2914,9 @@ async function removeLinkBlacklistPattern(pat) {
   try {
     const res = await fetchSilent(() => api.deleteLinkBlacklistPattern(chat.value.id, pat))
     mergeLinkBlacklistFromResponse(res)
-    showToast('Удалено из чёрного списка')
+    showToast(tt('protection.toasts.link_blacklist_removed'))
   } catch {
-    showToast(error.value || 'Не удалось удалить')
+    showToast(error.value || tt('protection.toasts.link_blacklist_remove_fail'))
   } finally {
     linkBlacklistLoading.value = false
   }
@@ -2895,9 +2930,9 @@ async function addWhitelistDomain() {
     const res = await fetchSilent(() => api.addWhitelistDomain(chat.value.id, d))
     mergeWhitelistFromResponse(res)
     newWhitelistDomain.value = ''
-    showToast('Домен добавлен в доверенные')
+    showToast(tt('protection.toasts.domain_trusted_added'))
   } catch {
-    showToast(error.value || 'Не удалось добавить домен')
+    showToast(error.value || tt('protection.toasts.domain_add_fail'))
   } finally {
     whitelistLoading.value = false
   }
@@ -2909,9 +2944,9 @@ async function removeWhitelistDomain(domain) {
   try {
     const res = await fetchSilent(() => api.deleteWhitelistDomain(chat.value.id, domain))
     mergeWhitelistFromResponse(res)
-    showToast('Домен удалён')
+    showToast(tt('protection.toasts.domain_removed'))
   } catch {
-    showToast(error.value || 'Не удалось удалить')
+    showToast(error.value || tt('protection.toasts.domain_remove_fail'))
   } finally {
     whitelistLoading.value = false
   }
@@ -2920,7 +2955,7 @@ async function removeWhitelistDomain(domain) {
 async function addWhitelistUser() {
   const raw = (newWhitelistUserId.value || '').trim()
   if (!raw || !chat.value?.id || chat.value.noSelection) {
-    showToast('Укажи Telegram ID или @username')
+    showToast(tt('protection.toasts.need_tg_id_or_username'))
     return
   }
   whitelistLoading.value = true
@@ -2928,9 +2963,9 @@ async function addWhitelistUser() {
     const res = await fetchSilent(() => api.addWhitelistUser(chat.value.id, raw))
     mergeWhitelistFromResponse(res)
     newWhitelistUserId.value = ''
-    showToast('Пользователь может слать ссылки без фильтра')
+    showToast(tt('protection.toasts.user_trusted_links'))
   } catch {
-    showToast(error.value || 'Не удалось добавить пользователя')
+    showToast(error.value || tt('protection.toasts.user_add_fail'))
   } finally {
     whitelistLoading.value = false
   }
@@ -2942,9 +2977,9 @@ async function removeWhitelistUser(uid) {
   try {
     const res = await fetchSilent(() => api.deleteWhitelistUser(chat.value.id, uid))
     mergeWhitelistFromResponse(res)
-    showToast('Удалено из доверенных')
+    showToast(tt('protection.toasts.user_trust_removed'))
   } catch {
-    showToast(error.value || 'Не удалось удалить')
+    showToast(error.value || tt('protection.toasts.user_remove_fail'))
   } finally {
     whitelistLoading.value = false
   }
@@ -2953,7 +2988,7 @@ async function removeWhitelistUser(uid) {
 async function addWhitelistSenderChat() {
   const raw = (newWhitelistSenderChat.value || '').trim()
   if (!raw || !chat.value?.id || chat.value.noSelection) {
-    showToast('Укажи @username канала')
+    showToast(tt('protection.toasts.need_channel_username'))
     return
   }
   whitelistLoading.value = true
@@ -2961,9 +2996,9 @@ async function addWhitelistSenderChat() {
     const res = await fetchSilent(() => api.addWhitelistSenderChat(chat.value.id, raw))
     mergeWhitelistFromResponse(res)
     newWhitelistSenderChat.value = ''
-    showToast('Канал добавлен в доверенные')
+    showToast(tt('protection.toasts.channel_trusted_added'))
   } catch {
-    showToast(error.value || 'Не удалось добавить канал')
+    showToast(error.value || tt('protection.toasts.channel_add_fail'))
   } finally {
     whitelistLoading.value = false
   }
@@ -2975,64 +3010,56 @@ async function removeWhitelistSenderChat(uname) {
   try {
     const res = await fetchSilent(() => api.deleteWhitelistSenderChat(chat.value.id, uname))
     mergeWhitelistFromResponse(res)
-    showToast('Канал удалён из доверенных')
+    showToast(tt('protection.toasts.channel_trust_removed'))
   } catch {
-    showToast(error.value || 'Не удалось удалить канал')
+    showToast(error.value || tt('protection.toasts.channel_remove_fail'))
   } finally {
     whitelistLoading.value = false
   }
 }
 
-const actionOptions = [
-  { value: 'delete', label: 'Удалить', hint: 'мягко' },
-  { value: 'mute', label: 'Мут + удалить', hint: 'средне' },
-  { value: 'ban', label: 'Бан', hint: 'жёстко' },
-  { value: 'observe', label: 'Заметить', hint: 'без удаления' },
-]
+const actionOptions = computed(() => [
+  { value: 'delete', label: tt('protection.ui.action_delete_label'), hint: tt('protection.ui.action_delete_hint') },
+  { value: 'mute', label: tt('protection.ui.action_mute_label'), hint: tt('protection.ui.action_mute_hint') },
+  { value: 'ban', label: tt('protection.ui.action_ban_label'), hint: tt('protection.ui.action_ban_hint') },
+  { value: 'observe', label: tt('protection.ui.action_observe_label'), hint: tt('protection.ui.action_observe_hint') },
+])
 
-const mutePresets = [
+const mutePresets = computed(() => [
   { value: 5, label: '5' },
   { value: 10, label: '10' },
   { value: 30, label: '30' },
   { value: 60, label: '60' },
-  { value: 1440, label: '1 день' },
-]
+  { value: 1440, label: tt('protection.presets.mute_day') },
+])
 const newbiePresets = [5, 10, 15, 30, 60]
 const joinCaptchaTtlPresets = [1, 2, 3, 4, 5]
-const joinCaptchaKinds = [
-  { value: 'button', label: 'Кнопки' },
-  { value: 'math', label: 'Счёт' },
-  { value: 'emoji', label: 'Эмодзи' },
-  { value: 'word_emoji', label: 'Слово → эмодзи' },
-  { value: 'digits', label: 'Цифры' },
-  { value: 'word_send', label: 'Повтори слово' },
-  { value: 'word_guess', label: 'Отгадай слово' },
-]
+const joinCaptchaKinds = computed(() => [
+  { value: 'button', label: tt('protection.join_captcha.button') },
+  { value: 'math', label: tt('protection.join_captcha.math') },
+  { value: 'emoji', label: tt('protection.join_captcha.emoji') },
+  { value: 'word_emoji', label: tt('protection.join_captcha.word_emoji') },
+  { value: 'digits', label: tt('protection.join_captcha.digits') },
+  { value: 'word_send', label: tt('protection.join_captcha.word_send') },
+  { value: 'word_guess', label: tt('protection.join_captcha.word_guess') },
+])
 // Синхронно с app/handlers/panel_dm.py — _kb_filter_silence (SILENCE_OPTIONS), сетка 2×N + «Отключить»
-const silencePresets = [
-  { value: 10, label: '10 минут' },
-  { value: 60, label: '1 час' },
-  { value: 120, label: '2 часа' },
-  { value: 180, label: '3 часа' },
-  { value: 240, label: '4 часа' },
-  { value: 360, label: '6 часов' },
-  { value: 480, label: '8 часов' },
-  { value: 600, label: '10 часов' },
-  { value: 720, label: '12 часов' },
-  { value: 1440, label: '1 день' },
-]
+const SILENCE_PRESET_MINUTES = [10, 60, 120, 180, 240, 360, 480, 600, 720, 1440]
+const silencePresets = computed(() =>
+  SILENCE_PRESET_MINUTES.map((value) => ({ value, label: silencePresetLabel(value) })),
+)
 const antinakrutkaThresholdPresets = [5, 10, 15, 20]
 const antinakrutkaWindowPresets = [3, 5, 10]
-const antinakrutkaActionOptions = [
-  { value: 'alert', label: 'Только оповещение' },
-  { value: 'alert_restrict', label: 'Оповещение + мут' },
-]
+const antinakrutkaActionOptions = computed(() => [
+  { value: 'alert', label: tt('protection.antinakrutka_ui.action_alert') },
+  { value: 'alert_restrict', label: tt('protection.antinakrutka_ui.action_alert_restrict') },
+])
 const antinakrutkaRestrictPresets = [15, 30, 60]
-const antinakrutkaModePresets = [
-  { key: 'soft', label: 'Мягко', threshold: 20, window: 3, action: 'alert', restrict: 30 },
-  { key: 'standard', label: 'Стандарт', threshold: 10, window: 5, action: 'alert_restrict', restrict: 30 },
-  { key: 'hard', label: 'Жёстко', threshold: 5, window: 10, action: 'alert_restrict', restrict: 60 },
-]
+const antinakrutkaModePresets = computed(() => [
+  { key: 'soft', label: tt('protection.antinakrutka_ui.preset_soft'), threshold: 20, window: 3, action: 'alert', restrict: 30 },
+  { key: 'standard', label: tt('protection.antinakrutka_ui.preset_standard'), threshold: 10, window: 5, action: 'alert_restrict', restrict: 30 },
+  { key: 'hard', label: tt('protection.antinakrutka_ui.preset_hard'), threshold: 5, window: 10, action: 'alert_restrict', restrict: 60 },
+])
 
 const publicAlertsEveryPresets = [
   { n: 3, label: '3' },
@@ -3041,69 +3068,55 @@ const publicAlertsEveryPresets = [
   { n: 15, label: '15' },
   { n: 20, label: '20' },
 ]
-const publicAlertsIntervalPresets = [
-  { sec: 120, label: '2 мин' },
-  { sec: 300, label: '5 мин' },
-  { sec: 600, label: '10 мин' },
-  { sec: 1800, label: '30 мин' },
-  { sec: 3600, label: '1 ч' },
-  { sec: 7200, label: '2 ч' },
-]
-const guardianPeriodicIntervalPresets = [
-  { h: 24, label: '24ч' },
-  { h: 48, label: '48ч' },
-  { h: 72, label: '72ч' },
-  { h: 168, label: '7д' },
-]
-const publicAlertsStyleOptions = [
-  { value: 'soft', label: 'Мягко', hint: 'нейтральные формулировки' },
-  { value: 'medium', label: 'Средне', hint: 'делово, без сленга' },
-  { value: 'guard', label: 'Guard', hint: 'фирменный тон Guard' },
-]
-const publicAlertsStyleLabelMap = {
-  soft: 'Мягко',
-  medium: 'Средне',
-  guard: 'Guard',
-}
-const publicAlertsCategoryExamplesByStyle = {
-  soft: {
-    spam: ['Мы убрали сообщение, которое не подошло по правилам. Если вопросы — напишите админам.', 'Одно сообщение удалено, чтобы чат оставался комфортным.'],
-    link: ['Сообщение со ссылкой снято — так настроена защита чата.'],
-    bad_words: ['Сообщение снято: в чате действует фильтр по выражениям.'],
-    mute: ['Участнику временно ограничили отправку сообщений.'],
-    ban: ['Участник покинул чат по решению защиты.'],
-    generic: ['Защита чата обработала нарушение.', 'Сообщение не прошло проверку и было убрано.'],
-  },
-  medium: {
-    spam: ['Спам удалён. Спасибо за порядок в чате.', 'Лишнее сообщение убрано модерацией.'],
-    link: ['Сообщение со ссылкой удалено по правилам чата.', 'Ссылка не разрешена — сообщение снято.'],
-    bad_words: ['Сообщение с ненормативной лексикой удалено.', 'Нарушение правил по языку — пост убран.'],
-    mute: ['Участник ограничен по правилам чата.', 'Применено временное ограничение.'],
-    ban: ['Участник исключён из чата по правилам.', 'Доступ участника к чату прекращён.'],
-    generic: ['Сообщение обработано модерацией.', 'Правила чата применены.'],
-  },
-  guard: {
-    spam: ['😈 Guard зачистил спам. Чат дышит свободнее.', '🧹 Спам снесён. Помойка закрыта.', '🚫 Ещё пачка мусора уничтожена.'],
-    link: ['🔗 Левые ссылки срезаны. Проход закрыт.', '⚔ Guard распилил очередную партию ссылок.'],
-    bad_words: ['🤬 Матершинник был снесён. Следи за языком.', '🪓 Грязный язык зачищен.'],
-    mute: ['🔇 Нарушитель притих. В чате снова порядок.', '⛓ Один шумный пассажир отправлен остывать.'],
-    ban: ['☠ Спамер выброшен за борт.', '🚪 Ещё один мусорный гость вылетел из чата.'],
-    generic: ['😈 Guard продолжает зачистку.', '🛡 Порядок восстановлен.'],
-  },
+const PUBLIC_ALERT_INTERVAL_SECS = [120, 300, 600, 1800, 3600, 7200]
+const publicAlertsIntervalPresets = computed(() =>
+  PUBLIC_ALERT_INTERVAL_SECS.map((sec) => {
+    let label
+    if (sec === 3600) label = tt('protection.presets.public_alert_interval_h_one')
+    else if (sec === 7200) label = tt('protection.presets.public_alert_interval_h', { n: 2 })
+    else label = tt('protection.presets.public_alert_interval_min', { n: sec / 60 })
+    return { sec, label }
+  }),
+)
+const GUARDIAN_INTERVAL_HOURS = [24, 48, 72, 168]
+const guardianPeriodicIntervalPresets = computed(() =>
+  GUARDIAN_INTERVAL_HOURS.map((h) => ({
+    h,
+    label:
+      h === 168
+        ? tt('protection.presets.guardian_period_d', { n: 7 })
+        : tt('protection.presets.guardian_period_h', { n: h }),
+  })),
+)
+const publicAlertsStyleOptions = computed(() => [
+  { value: 'soft', label: tt('protection.public_alerts_style.label_soft'), hint: tt('protection.public_alerts_style.soft_hint') },
+  { value: 'medium', label: tt('protection.public_alerts_style.label_medium'), hint: tt('protection.public_alerts_style.medium_hint') },
+  { value: 'guard', label: tt('protection.public_alerts_style.label_guard'), hint: tt('protection.public_alerts_style.guard_hint') },
+])
+function publicAlertExamplesForStyle(style) {
+  const st = String(style || 'guard').toLowerCase()
+  const key = `protection.public_alert_style_examples.${['soft', 'medium', 'guard'].includes(st) ? st : 'guard'}`
+  let raw = tm(key)
+  if (!raw || typeof raw !== 'object' || !Array.isArray(raw.spam) || !raw.spam.length) {
+    raw = tm('protection.public_alert_style_examples.guard')
+  }
+  return raw && typeof raw === 'object' ? raw : {}
 }
 const currentPublicAlertsStyle = computed(() => {
   const st = String(chat.value?.rule?.public_alerts_style || 'guard').toLowerCase()
   return ['soft', 'medium', 'guard'].includes(st) ? st : 'guard'
 })
-const currentPublicAlertsStyleLabel = computed(() => publicAlertsStyleLabelMap[currentPublicAlertsStyle.value] || 'Guard')
-const currentPublicAlertsExamples = computed(() => publicAlertsCategoryExamplesByStyle[currentPublicAlertsStyle.value] || publicAlertsCategoryExamplesByStyle.guard)
-const guardianPeriodicExamples = [
-  '😈 AntiSpam Guard на месте. Пока всё спокойно. Спамеров не обнаружено. Но если появятся — разберусь.',
-  '🛡 AntiSpam Guard проверил чат. Спам не обнаружен. Можно продолжать общаться спокойно.',
-  '😈 Я здесь. Слежу за ссылками, ботами и подозрительными сообщениями. Если кто-то решит спамить — долго не проживёт.',
-  '🛡 Guard проверяет чат. Если заметите странные ссылки — можете не переживать. Я их тоже вижу.',
-  '😈 AntiSpam Guard на дежурстве. Порядок в чате поддерживается автоматически.',
-]
+const currentPublicAlertsStyleLabel = computed(() => {
+  const st = currentPublicAlertsStyle.value
+  if (st === 'soft') return tt('protection.public_alerts_style.label_soft')
+  if (st === 'medium') return tt('protection.public_alerts_style.label_medium')
+  return tt('protection.public_alerts_style.label_guard')
+})
+const currentPublicAlertsExamples = computed(() => publicAlertExamplesForStyle(currentPublicAlertsStyle.value))
+const guardianPeriodicExamples = computed(() => {
+  const arr = tm('protection.guardian_periodic_examples')
+  return Array.isArray(arr) ? arr : []
+})
 
 async function togglePublicAlerts(on) {
   if (!chat.value?.rule) return
@@ -3161,36 +3174,36 @@ const protCardIndigo =
     >
       <div class="relative z-[2] space-y-4 pt-1 text-[13px] leading-snug md:pt-2">
     <div class="flex items-center justify-between gap-2">
-      <h1 class="text-lg font-semibold text-white drop-shadow-sm md:text-xl">Защита</h1>
+      <h1 class="text-lg font-semibold text-white drop-shadow-sm md:text-xl">{{ tt('protection.title') }}</h1>
       <span
         v-if="switchChatBusy"
         class="pointer-events-none inline-flex shrink-0 items-center gap-1.5 rounded-full border border-cyan-300/35 bg-cyan-500/15 px-2.5 py-1 text-xs font-semibold text-cyan-100 shadow-[0_0_18px_-10px_rgba(34,211,238,0.9)]"
         aria-live="polite"
-      ><span class="inline-block hourglass-flip">⏳</span>Переключаю чат…</span>
+      ><span class="inline-block hourglass-flip">⏳</span>{{ tt('protection.ui.switching_chat') }}</span>
     </div>
 
     <div v-if="!hasInitData" class="rounded-xl border border-amber-200 bg-amber-50 p-4 text-amber-800 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-200">
-      Откройте панель из Telegram.
+      {{ tt('protection.ui.open_from_tg') }}
     </div>
 
     <div v-else-if="chat?.noSelection" :class="protCard">
-      <p class="text-xs text-slate-300">Сначала выберите чат в разделе «Подключённые чаты».</p>
+      <p class="text-xs text-slate-300">{{ tt('protection.ui.pick_chat_first') }}</p>
       <button
         type="button"
         class="guard-green-soft mt-3 rounded-lg px-3 py-1.5 text-xs font-semibold"
         @click="router.push(cabinetMode === 'delegated' ? { path: '/chats', query: { cabinet: 'delegated' } } : '/chats')"
       >
-        К списку чатов
+        {{ tt('protection.ui.open_chat_list') }}
       </button>
     </div>
 
     <div v-else-if="chat?.loadError || error" class="rounded-xl border border-red-200 bg-red-50 p-4 text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300">
-      {{ error || 'Не удалось загрузить настройки' }}
+      {{ error || tt('protection.ui.load_failed') }}
     </div>
 
     <div
       v-else-if="chatsListLoading && !chat?.noSelection && !chat?.loadError && !chat?.rule"
-      class="rounded-2xl bg-white/[0.05] py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.07)] backdrop-blur-xl"
+      class="min-h-[42dvh] rounded-2xl border border-white/10 bg-white/[0.05] py-6 shadow-[inset_0_1px_0_rgba(255,255,255,0.07)] backdrop-blur-xl"
     >
       <GuardBlueLoadingState />
     </div>
@@ -3212,12 +3225,12 @@ const protCardIndigo =
               class="shrink-0 rounded-xl border border-white/[0.14] bg-white/[0.07] px-2.5 py-2 text-xs font-semibold text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.1)] backdrop-blur-md transition hover:border-white/22 hover:bg-white/[0.12]"
               @click="openChatPicker"
             >
-              Выбор чата
+              {{ tt('protection.ui.pick_chat') }}
             </button>
             <button
               type="button"
               class="prot-info-btn chatbar-info-btn shrink-0"
-              aria-label="Как работает выбор чата"
+              :aria-label="tt('protection.ui.chat_picker_aria')"
               @click="showChatSwitchInfoModal = true"
             >
               i
@@ -3229,11 +3242,17 @@ const protCardIndigo =
         v-if="currentSpikeAlert"
         class="rounded-xl border border-yellow-400/45 bg-yellow-950/25 p-2.5 text-[11px] text-yellow-100 shadow-[0_0_16px_-10px_rgba(250,204,21,0.9)]"
       >
-        <p class="font-semibold uppercase tracking-wide"><span class="mr-1 text-base text-orange-300">⚠</span>Статус: чат под угрозой</p>
+        <p class="font-semibold uppercase tracking-wide"><span class="mr-1 text-base text-orange-300">⚠</span>{{ tt('protection.ui.spike_status') }}</p>
         <p class="mt-1 text-yellow-100/90">
-          За {{ currentSpikeAlert.window_min }} мин: всплеск срабатываний фильтров ({{ currentSpikeAlert.spam_count }}), подключений: {{ currentSpikeAlert.joins_count }}.
+          {{
+            tt('protection.ui.spike_body', {
+              mins: currentSpikeAlert.window_min,
+              spam: currentSpikeAlert.spam_count,
+              joins: currentSpikeAlert.joins_count,
+            })
+          }}
         </p>
-        <p class="mt-1 text-yellow-100/80">Рекомендуем усилить:</p>
+        <p class="mt-1 text-yellow-100/80">{{ tt('protection.ui.spike_recommend') }}</p>
         <ul class="mt-0.5 list-disc space-y-0.5 pl-4 text-yellow-100/90">
           <li v-for="(rec, ri) in (currentSpikeAlert.recommendations || [])" :key="`spike-rec-${ri}`">{{ rec }}</li>
         </ul>
@@ -3242,7 +3261,7 @@ const protCardIndigo =
           class="mt-2 rounded-lg border border-yellow-300/60 bg-yellow-400/20 px-2.5 py-1 text-[11px] font-semibold text-yellow-100 hover:bg-yellow-400/30"
           @click="applySpikeRecommendedSettings"
         >
-          Применить рекомендуемые настройки
+          {{ tt('protection.ui.spike_apply') }}
         </button>
       </div>
 
@@ -3258,13 +3277,13 @@ const protCardIndigo =
         >
           <div class="mx-auto mb-2 h-1 w-12 shrink-0 rounded-full bg-white/30 md:hidden" aria-hidden="true" />
           <div class="mb-2 flex shrink-0 items-center justify-between gap-2 border-b border-white/10 pb-2.5">
-            <p class="text-sm font-semibold tracking-wide text-white/95">Выбор чата</p>
+            <p class="text-sm font-semibold tracking-wide text-white/95">{{ tt('protection.ui.chat_picker_title') }}</p>
             <button
               type="button"
               class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 transition hover:bg-white/10 hover:text-white"
               @click="showChatPicker = false"
             >
-              Закрыть
+              {{ tt('common.close') }}
             </button>
           </div>
           <template v-if="chatsListLoading">
@@ -3272,7 +3291,7 @@ const protCardIndigo =
               <div class="w-full rounded-2xl border border-white/10 bg-white/[0.04] p-4 text-center">
                 <div class="mx-auto mb-2 inline-flex items-center gap-2 rounded-full border border-emerald-300/35 bg-emerald-500/12 px-3 py-1.5 text-xs font-semibold text-emerald-100 shadow-[0_0_20px_-10px_rgba(16,185,129,0.9)]">
                   <span class="inline-block hourglass-flip">⏳</span>
-                  Загружаю выбор чата…
+                  {{ tt('protection.ui.loading_chats') }}
                 </div>
                 <div class="space-y-2.5">
                   <div class="mx-auto h-3 w-2/3 max-w-[14rem] animate-pulse rounded bg-white/15" />
@@ -3285,7 +3304,7 @@ const protCardIndigo =
           <template v-else-if="(chatsList || []).length > 0">
             <div class="mb-2.5 shrink-0 rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2">
               <p class="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">
-                Всего групп: {{ pickerTotalChats }} · Активных: {{ pickerActiveChats }}
+                {{ tt('protection.ui.picker_totals', { total: pickerTotalChats, active: pickerActiveChats }) }}
               </p>
             </div>
             <div
@@ -3293,7 +3312,7 @@ const protCardIndigo =
               style="-webkit-overflow-scrolling: touch;"
             >
               <div v-if="pickerDelegatedChats.length" class="space-y-1.5">
-                <p class="px-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-violet-300">Делегированные</p>
+                <p class="px-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-violet-300">{{ tt('protection.ui.delegated') }}</p>
                 <button
                   v-for="c in pickerDelegatedChats"
                   :key="`pick-shared-${c.id}`"
@@ -3312,7 +3331,7 @@ const protCardIndigo =
                   <span class="min-w-0 flex-1">
                     <span class="block truncate font-medium">{{ c.title }}</span>
                     <span v-if="c.locked_by_limit" class="block text-[10px] font-semibold uppercase tracking-wide text-amber-300">
-                      Лимит Free: нужен Premium
+                      {{ tt('protection.ui.free_limit_premium') }}
                     </span>
                   </span>
                   <div class="shrink-0 flex items-center gap-1.5">
@@ -3332,7 +3351,7 @@ const protCardIndigo =
                       @click.stop="toggleChatProtectionFromPicker(c)"
                     >
                       <span v-if="pickerToggleBusyByChat[Number(c.id)]" class="inline-block hourglass-flip">⏳</span>
-                      <span v-else>{{ !delegatedCanProtection(c) ? 'Нет доступа' : (pickerProtectionOn(c) ? 'Активна' : 'На паузе') }}</span>
+                      <span v-else>{{ !delegatedCanProtection(c) ? tt('protection.ui.no_access') : (pickerProtectionOn(c) ? tt('subscription.status_active') : tt('chats.paused')) }}</span>
                     </button>
                     <span
                       v-if="c.locked_by_limit"
@@ -3343,13 +3362,13 @@ const protCardIndigo =
                     <span
                       v-if="spikeAlertsByChat[Number(c.id)]"
                       class="text-[18px] leading-none text-orange-300 drop-shadow-[0_0_12px_rgba(251,146,60,0.85)]"
-                      title="В чате сейчас всплеск"
+                      :title="tt('protection.ui.spike_spike_tooltip')"
                     >⚠</span>
                   </div>
                 </button>
               </div>
               <div v-if="pickerOwnChats.length" class="space-y-1.5 pt-1.5">
-                <p class="px-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-cyan-300">Мои чаты</p>
+                <p class="px-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-cyan-300">{{ tt('protection.ui.my_chats') }}</p>
                 <button
                   v-for="c in pickerOwnChats"
                   :key="`pick-own-${c.id}`"
@@ -3368,7 +3387,7 @@ const protCardIndigo =
                   <span class="min-w-0 flex-1">
                     <span class="block truncate font-medium">{{ c.title }}</span>
                     <span v-if="c.locked_by_limit" class="block text-[10px] font-semibold uppercase tracking-wide text-amber-300">
-                      Лимит Free: нужен Premium
+                      {{ tt('protection.ui.free_limit_premium') }}
                     </span>
                   </span>
                   <div class="shrink-0 flex items-center gap-1.5">
@@ -3388,7 +3407,7 @@ const protCardIndigo =
                       @click.stop="toggleChatProtectionFromPicker(c)"
                     >
                       <span v-if="pickerToggleBusyByChat[Number(c.id)]" class="inline-block hourglass-flip">⏳</span>
-                      <span v-else>{{ !delegatedCanProtection(c) ? 'Нет доступа' : (pickerProtectionOn(c) ? 'Активна' : 'На паузе') }}</span>
+                      <span v-else>{{ !delegatedCanProtection(c) ? tt('protection.ui.no_access') : (pickerProtectionOn(c) ? tt('subscription.status_active') : tt('chats.paused')) }}</span>
                     </button>
                     <span
                       v-if="c.locked_by_limit"
@@ -3399,7 +3418,7 @@ const protCardIndigo =
                     <span
                       v-if="spikeAlertsByChat[Number(c.id)]"
                       class="text-[18px] leading-none text-orange-300 drop-shadow-[0_0_12px_rgba(251,146,60,0.85)]"
-                      title="В чате сейчас всплеск"
+                      :title="tt('protection.ui.spike_spike_tooltip')"
                     >⚠</span>
                   </div>
                 </button>
@@ -3410,7 +3429,7 @@ const protCardIndigo =
             <div class="w-full rounded-2xl border border-white/10 bg-white/[0.04] p-4 text-center">
               <div class="mx-auto mb-2 inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/8 px-3 py-1.5 text-xs font-semibold text-slate-100 shadow-[0_0_20px_-10px_rgba(255,255,255,0.4)]">
                 <span class="inline-block hourglass-flip">⏳</span>
-                Подгружаю список чатов…
+                {{ tt('protection.ui.loading_list') }}
               </div>
               <div class="space-y-2.5">
                 <div class="mx-auto h-3 w-2/3 max-w-[14rem] animate-pulse rounded bg-white/15" />
@@ -3425,11 +3444,11 @@ const protCardIndigo =
       <!-- Основное -->
       <section :class="[protCard, 'relative z-0']">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h2 class="text-xs font-medium uppercase tracking-wide text-slate-200">Основное</h2>
+          <h2 class="text-xs font-medium uppercase tracking-wide text-slate-200">{{ tt('protection.ui.main_section') }}</h2>
           <button
             type="button"
             class="prot-info-btn"
-            aria-label="Что делает переключатель защиты"
+            :aria-label="tt('protection.ui.main_info_aria')"
             @click="showMainInfoModal = true"
           >
             i
@@ -3442,7 +3461,7 @@ const protCardIndigo =
             class="rounded-xl px-3 py-1.5 text-xs font-semibold"
             @click="toggleMasterProtection()"
           >
-            {{ chat.rule.master_anti_spam ? '✅ Guard активен' : '⏸ Guard на паузе' }}
+            {{ chat.rule.master_anti_spam ? tt('protection.ui.guard_on') : tt('protection.ui.guard_paused') }}
           </button>
         </div>
       </section>
@@ -3450,11 +3469,11 @@ const protCardIndigo =
       <!-- Фильтры -->
       <section :class="protCard">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h2 class="text-xs font-medium text-slate-200">Фильтры</h2>
+          <h2 class="text-xs font-medium text-slate-200">{{ tt('protection.ui.filters_section') }}</h2>
           <button
             type="button"
             class="prot-info-btn"
-            aria-label="Информация по фильтрам"
+            :aria-label="tt('protection.ui.filters_info_aria')"
             @click="showFiltersInfoModal = true"
           >
             i
@@ -3462,7 +3481,7 @@ const protCardIndigo =
         </div>
         <div class="space-y-3">
           <p class="text-[11px] leading-relaxed text-slate-500">
-            Настройки открываются в отдельных окнах — так спокойнее крутить режимы и белые списки без простыни кнопок.
+            {{ tt('protection.ui.filters_intro') }}
           </p>
           <div class="grid grid-cols-2 gap-2">
             <button
@@ -3471,7 +3490,7 @@ const protCardIndigo =
               @click="showLinksFilterModal = true"
             >
               <span class="text-lg leading-none">🔗</span>
-              <span class="mt-1.5 text-xs font-semibold text-slate-100">Ссылки</span>
+              <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_links') }}</span>
               <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ linkModeSummary }}</span>
             </button>
             <button
@@ -3480,7 +3499,7 @@ const protCardIndigo =
               @click="showMentionsFilterModal = true"
             >
               <span class="text-lg leading-none">@</span>
-              <span class="mt-1.5 text-xs font-semibold text-slate-100">Упоминания</span>
+              <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_mentions') }}</span>
               <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ mentionsSummary }}</span>
             </button>
             <button
@@ -3489,7 +3508,7 @@ const protCardIndigo =
               @click="showMediaFilterModal = true"
             >
               <span class="text-lg leading-none">🖼</span>
-              <span class="mt-1.5 text-xs font-semibold text-slate-100">Медиа</span>
+              <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_media') }}</span>
               <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ mediaSummary }}</span>
             </button>
             <button
@@ -3498,7 +3517,7 @@ const protCardIndigo =
               @click="showButtonsFilterModal = true"
             >
               <span class="text-lg leading-none">🔘</span>
-              <span class="mt-1.5 text-xs font-semibold text-slate-100">Кнопки</span>
+              <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_buttons') }}</span>
               <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ buttonsSummary }}</span>
             </button>
             <button
@@ -3507,35 +3526,35 @@ const protCardIndigo =
               @click="showChannelPostsFilterModal = true"
             >
               <span class="text-lg leading-none">📣</span>
-              <span class="mt-1.5 text-xs font-semibold text-slate-100">Сообщения от каналов</span>
+              <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_channel_posts') }}</span>
               <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ channelPostsSummary }}</span>
             </button>
           </div>
           <div class="flex items-center justify-between gap-2 pt-1">
-            <span class="text-xs text-slate-300">Удалять сообщения «вступил в группу»</span>
+            <span class="text-xs text-slate-300">{{ tt('protection.ui.delete_join_messages') }}</span>
             <button
               type="button"
             :class="boolToggleClass(chat.rule.delete_join_messages)"
               class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium"
               @click="updateRule({ delete_join_messages: !chat.rule.delete_join_messages })"
             >
-              {{ chat.rule.delete_join_messages ? 'Да' : 'Нет' }}
+              {{ chat.rule.delete_join_messages ? tt('protection.ui.yes') : tt('protection.ui.no') }}
             </button>
           </div>
           <div class="flex items-center justify-between gap-2 pt-1">
-            <span class="text-xs text-slate-300">Удалять сообщения «покинул группу»</span>
+            <span class="text-xs text-slate-300">{{ tt('protection.ui.delete_left_messages') }}</span>
               <button
                 type="button"
             :class="boolToggleClass(chat.rule.delete_left_messages)"
               class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium"
               @click="updateRule({ delete_left_messages: !chat.rule.delete_left_messages })"
             >
-              {{ chat.rule.delete_left_messages ? 'Да' : 'Нет' }}
+              {{ chat.rule.delete_left_messages ? tt('protection.ui.yes') : tt('protection.ui.no') }}
               </button>
             </div>
           <div :class="protCardSub">
             <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
-              <h3 class="text-xs font-medium text-slate-200">🧠 Стоп-слова</h3>
+              <h3 class="text-xs font-medium text-slate-200">{{ tt('protection.ui.stopwords_title') }}</h3>
               <div class="flex items-center gap-1.5">
                 <button
                   v-if="(chat.stopwords || []).length"
@@ -3543,7 +3562,7 @@ const protCardIndigo =
                   class="inline-flex items-center gap-1.5 rounded-full border border-cyan-400/50 bg-gradient-to-r from-cyan-500/25 to-sky-600/20 px-3 py-1 text-[11px] font-semibold text-cyan-100 shadow-[0_0_20px_-8px_rgba(34,211,238,0.6)] transition hover:border-cyan-300/80 hover:from-cyan-500/35"
                   @click="showStopwordsModal = true"
                 >
-                  Все слова
+                  {{ tt('protection.ui.all_words') }}
                   <span
                     class="rounded-full bg-black/35 px-1.5 py-0.5 text-[10px] font-bold tabular-nums text-white"
                   >{{ (chat.stopwords || []).length }}</span>
@@ -3551,7 +3570,7 @@ const protCardIndigo =
                 <button
                   type="button"
                   class="prot-info-btn"
-                  aria-label="Информация по стоп-словам"
+                  :aria-label="tt('protection.ui.info_stopwords_aria')"
                   @click="showStopwordsInfoModal = true"
                 >
                   i
@@ -3559,13 +3578,13 @@ const protCardIndigo =
               </div>
             </div>
           <p class="mb-3 text-xs text-slate-300">
-            Сообщения, содержащие эти слова (в тексте, не внутри ссылок), будут удаляться или наказываться по правилам выше.
+            {{ tt('protection.ui.stopwords_desc') }}
           </p>
           <div class="mb-3 flex flex-wrap gap-2">
             <input
               v-model="newStopword"
               type="text"
-              placeholder="Добавить слово"
+              :placeholder="tt('protection.ui.add_word_placeholder')"
               class="min-w-0 flex-1 rounded-lg border border-white/15 bg-white/10 px-2.5 py-1.5 text-xs text-slate-100 placeholder:text-slate-500"
               :disabled="stopwordLoading"
               @keydown.enter.prevent="addStopword()"
@@ -3576,7 +3595,7 @@ const protCardIndigo =
               :disabled="stopwordLoading || !(newStopword || '').trim()"
               @click="addStopword()"
             >
-              Добавить
+              {{ tt('protection.ui.add_button') }}
             </button>
           </div>
           <ul v-if="(chat.stopwords || []).length" class="space-y-1">
@@ -3590,7 +3609,7 @@ const protCardIndigo =
                 type="button"
                 class="rounded p-1 text-red-600 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-900/30"
                 :disabled="stopwordLoading"
-                aria-label="Удалить"
+                :aria-label="tt('protection.ui.remove_word_aria')"
                 @click="removeStopword(w)"
               >
                 ✕
@@ -3598,31 +3617,31 @@ const protCardIndigo =
             </li>
           </ul>
           <p v-if="!(chat.stopwords || []).length" class="text-xs text-slate-400">
-            Нет стоп-слов. Добавьте слово выше.
+            {{ tt('protection.ui.stopwords_empty') }}
           </p>
           </div>
 
           <div :class="protCardDanger">
             <div class="mb-1 flex items-center justify-between gap-2">
-              <h3 class="text-xs font-semibold text-rose-200">🚫 Guard: Жёсткий словарь</h3>
+              <h3 class="text-xs font-semibold text-rose-200">{{ tt('protection.ui.hard_dict_title') }}</h3>
               <button
                 type="button"
                 class="prot-info-btn prot-info-btn--danger"
-                aria-label="Информация по жёсткому словарю"
+                :aria-label="tt('protection.ui.info_hard_dict_aria')"
                 @click="showHardDictInfoModal = true"
               >
                 i
               </button>
             </div>
             <p class="mb-3 text-xs text-rose-100/90">
-              Режет мат и искажённые формы по корням, а также подозрительные темы: подработки-скам, казино/ставки и политические обсуждения.
+              {{ tt('protection.ui.hard_dict_desc_1') }}
             </p>
             <p class="mt-2 border-t border-white/10 pt-2 text-[10px] leading-snug text-slate-400">
-              У фильтров «Религия» и «Эзотерика» есть режим «только объявления»: не трогает обычный разговор, режет услуги, цены, призыв в лс/канал и похожий спам.
+              {{ tt('protection.ui.hard_dict_desc_2') }}
             </p>
             <div class="space-y-2">
           <div class="flex items-center justify-between gap-2">
-                <span class="text-xs text-rose-100/90">Мат</span>
+                <span class="text-xs text-rose-100/90">{{ tt('protection.filters.profanity') }}</span>
             <button
               type="button"
                   :class="hardDictSwitchClass(chat.rule.filter_profanity_enabled)"
@@ -3636,7 +3655,7 @@ const protCardIndigo =
             </button>
               </div>
               <div class="flex items-center justify-between gap-2">
-                <span class="text-xs text-rose-100/90">Мутные подработки</span>
+                <span class="text-xs text-rose-100/90">{{ tt('protection.filters.jobs_row') }}</span>
                 <button
                   type="button"
                   :class="hardDictSwitchClass(chat.rule.filter_jobs_enabled)"
@@ -3650,7 +3669,7 @@ const protCardIndigo =
                 </button>
               </div>
               <div class="flex items-center justify-between gap-2">
-                <span class="text-xs text-rose-100/90">Казино / ставки</span>
+                <span class="text-xs text-rose-100/90">{{ tt('protection.filters.casino') }}</span>
                 <button
                   type="button"
                   :class="hardDictSwitchClass(chat.rule.filter_casino_enabled)"
@@ -3664,7 +3683,7 @@ const protCardIndigo =
                 </button>
               </div>
               <div class="flex items-center justify-between gap-2">
-                <span class="text-xs text-rose-100/90">Реклама / акции / распродажи</span>
+                <span class="text-xs text-rose-100/90">{{ tt('protection.filters.ads_promos') }}</span>
                 <button
                   type="button"
                   :class="hardDictSwitchClass(chat.rule.filter_ads_enabled)"
@@ -3678,7 +3697,7 @@ const protCardIndigo =
                 </button>
               </div>
               <div class="flex items-center justify-between gap-2">
-                <span class="text-xs text-rose-100/90">Обзывательства / оскорбления</span>
+                <span class="text-xs text-rose-100/90">{{ tt('protection.filters.insults_row') }}</span>
                 <button
                   type="button"
                   :class="hardDictSwitchClass(chat.rule.filter_insults_enabled)"
@@ -3692,7 +3711,7 @@ const protCardIndigo =
                 </button>
               </div>
               <div class="flex items-center justify-between gap-2">
-                <span class="text-xs text-rose-100/90">Антирасист (этнические оскорбления)</span>
+                <span class="text-xs text-rose-100/90">{{ tt('protection.filters.antiracist_detail') }}</span>
                 <button
                   type="button"
                   :class="hardDictSwitchClass(chat.rule.filter_racism_enabled)"
@@ -3706,7 +3725,7 @@ const protCardIndigo =
                 </button>
               </div>
               <div class="flex items-center justify-between gap-2">
-                <span class="text-xs text-rose-100/90">Антифашист (нацизм / лозунги)</span>
+                <span class="text-xs text-rose-100/90">{{ tt('protection.filters.antifascist_detail') }}</span>
                 <button
                   type="button"
                   :class="hardDictSwitchClass(chat.rule.filter_nazi_enabled)"
@@ -3720,7 +3739,7 @@ const protCardIndigo =
                 </button>
               </div>
               <div class="flex items-center justify-between gap-2">
-                <span class="text-xs text-rose-100/90">Антипошлость (анатомия / половые)</span>
+                <span class="text-xs text-rose-100/90">{{ tt('protection.filters.vulgar_detail') }}</span>
                 <button
                   type="button"
                   :class="hardDictSwitchClass(chat.rule.filter_vulgar_enabled)"
@@ -3734,7 +3753,7 @@ const protCardIndigo =
                 </button>
               </div>
               <div class="flex items-center justify-between gap-2">
-                <span class="text-xs text-rose-100/90">Анти-политика (политтемы / война / деятели)</span>
+                <span class="text-xs text-rose-100/90">{{ tt('protection.filters.politics_detail') }}</span>
                 <button
                   type="button"
                   :class="hardDictSwitchClass(chat.rule.filter_politics_enabled)"
@@ -3747,15 +3766,15 @@ const protCardIndigo =
                   />
                 </button>
               </div>
-              <div class="space-y-2 rounded-xl border border-white/[0.06] bg-white/[0.02] px-2 py-2">
+              <div class="space-y-1">
                 <div class="flex items-start justify-between gap-2">
                   <div class="min-w-0">
-                    <span class="block text-xs text-rose-100/90">Религия (конфессии / обряды / термины)</span>
+                    <span class="block text-xs text-rose-100/90">{{ tt('protection.filters.religion') }}</span>
                     <span v-if="chat.rule.filter_religion_enabled" class="mt-0.5 block text-[10px] leading-snug text-slate-500">
                       {{
                         chat.rule.filter_religion_promo_only
-                          ? 'Мягко: только объявления услуг, цены, призыв в лс/канал.'
-                          : 'Строго: любое срабатывание по словарю.'
+                          ? tt('protection.filters.dict_promo_only_sub')
+                          : tt('protection.filters.dict_strict_sub')
                       }}
                     </span>
                   </div>
@@ -3773,9 +3792,9 @@ const protCardIndigo =
                 </div>
                 <div
                   v-if="chat.rule.filter_religion_enabled"
-                  class="flex items-center justify-between gap-2 border-t border-white/[0.06] pt-2"
+                  class="flex items-center justify-between gap-2 pl-0.5 pt-1"
                 >
-                  <span class="text-[10px] leading-snug text-slate-400">Только объявления и спам</span>
+                  <span class="text-[10px] leading-snug text-slate-400">{{ tt('protection.filters.promo_only_toggle') }}</span>
                   <button
                     type="button"
                     :class="hardDictSwitchClass(chat.rule.filter_religion_promo_only)"
@@ -3789,15 +3808,15 @@ const protCardIndigo =
                   </button>
                 </div>
               </div>
-              <div class="space-y-2 rounded-xl border border-white/[0.06] bg-white/[0.02] px-2 py-2">
+              <div class="space-y-1">
                 <div class="flex items-start justify-between gap-2">
                   <div class="min-w-0">
-                    <span class="block text-xs text-rose-100/90">Эзотерика / магия (таро / ритуалы / оккульт)</span>
+                    <span class="block text-xs text-rose-100/90">{{ tt('protection.filters.esoteric') }}</span>
                     <span v-if="chat.rule.filter_esoteric_enabled" class="mt-0.5 block text-[10px] leading-snug text-slate-500">
                       {{
                         chat.rule.filter_esoteric_promo_only
-                          ? 'Мягко: только объявления услуг, цены, призыв в лс/канал.'
-                          : 'Строго: любое срабатывание по словарю.'
+                          ? tt('protection.filters.dict_promo_only_sub')
+                          : tt('protection.filters.dict_strict_sub')
                       }}
                     </span>
                   </div>
@@ -3815,9 +3834,9 @@ const protCardIndigo =
                 </div>
                 <div
                   v-if="chat.rule.filter_esoteric_enabled"
-                  class="flex items-center justify-between gap-2 border-t border-white/[0.06] pt-2"
+                  class="flex items-center justify-between gap-2 pl-0.5 pt-1"
                 >
-                  <span class="text-[10px] leading-snug text-slate-400">Только объявления и спам</span>
+                  <span class="text-[10px] leading-snug text-slate-400">{{ tt('protection.filters.promo_only_toggle') }}</span>
                   <button
                     type="button"
                     :class="hardDictSwitchClass(chat.rule.filter_esoteric_promo_only)"
@@ -3838,61 +3857,60 @@ const protCardIndigo =
 
       <section :class="protCard">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h2 class="text-xs font-medium text-slate-200">Приветствие новичков</h2>
+          <h2 class="text-xs font-medium text-slate-200">{{ tt('protection.ui.welcome_newcomers_title') }}</h2>
           <button
             type="button"
             class="rounded-lg border border-white/15 bg-white/10 px-2.5 py-1 text-xs font-semibold text-slate-100 hover:bg-white/15"
             @click="openWelcomeSettings()"
           >
-            Настроить
+            {{ tt('protection.ui.configure') }}
           </button>
         </div>
         <p class="text-[11px] text-slate-300/90">
-          Отдельный текст для новых участников этого чата. Можно добавить кнопки и фото.
+          {{ tt('protection.ui.welcome_newcomers_body') }}
         </p>
         <p class="mt-1 text-[11px] text-slate-500">
-          Статус:
+          {{ tt('protection.ui.status_label') }}
           <span :class="chat.rule.welcome_enabled ? 'text-emerald-300' : 'text-slate-400'">
-            {{ chat.rule.welcome_enabled ? 'включено' : 'выключено' }}
+            {{ chat.rule.welcome_enabled ? tt('protection.ui.enabled_short') : tt('protection.ui.disabled_short') }}
           </span>
-          <span v-if="chat.rule.welcome_has_photo" class="text-sky-300"> · фото добавлено</span>
-          <span class="text-zinc-500"> · каждый {{ Number(chat.rule.welcome_every_n_joins || 1) }}-й</span>
+          <span v-if="chat.rule.welcome_has_photo" class="text-sky-300">{{ tt('protection.ui.photo_added') }}</span>
+          <span class="text-zinc-500">{{ tt('protection.ui.every_nth', { n: Number(chat.rule.welcome_every_n_joins || 1) }) }}</span>
         </p>
       </section>
 
       <section :class="protCard">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h2 class="text-xs font-medium text-slate-200">📜 Правила в группе</h2>
+          <h2 class="text-xs font-medium text-slate-200">{{ tt('protection.ui.group_rules_title') }}</h2>
           <button
             type="button"
             class="rounded-lg border border-white/15 bg-white/10 px-2.5 py-1 text-xs font-semibold text-slate-100 hover:bg-white/15"
             @click="openPostRulesSettings()"
           >
-            Настроить
+            {{ tt('protection.ui.configure') }}
           </button>
         </div>
         <p class="text-[11px] text-slate-300/90">
-          Статус:
-          <span :class="chat.rule.rules_group_enabled ? 'text-emerald-300' : 'text-slate-400'">{{ chat.rule.rules_group_enabled ? 'включено' : 'выключено' }}</span>
+          {{ tt('protection.ui.status_label') }}
+          <span :class="chat.rule.rules_group_enabled ? 'text-emerald-300' : 'text-slate-400'">{{ chat.rule.rules_group_enabled ? tt('protection.ui.group_rules_status_on') : tt('protection.ui.group_rules_status_off') }}</span>
         </p>
         <p class="mt-1 text-[11px] text-slate-500">
-          Текст и кнопки для этого чата. Правила в комментариях к каналу — в «Подключённые чаты» → канал → «Настройки».
+          {{ tt('protection.ui.group_rules_hint') }}
         </p>
       </section>
 
       <!-- Наказания -->
       <section :class="protCard">
-        <h2 class="mb-3 text-xs font-medium text-slate-200">Наказания</h2>
+        <h2 class="mb-3 text-xs font-medium text-slate-200">{{ tt('protection.ui.punishments_title') }}</h2>
         <div :class="protCardSub">
-          <p class="text-xs font-semibold text-amber-200">⚔️ Режим Guard</p>
+          <p class="text-xs font-semibold text-amber-200">{{ tt('protection.ui.guard_mode_title') }}</p>
           <p class="mt-1 text-xs leading-relaxed text-amber-100/85">
-            Все фильтры сверху (мат, подработки, казино, ссылки, кнопки и т.д.) получают <strong>одно общее наказание</strong> из этого блока.
-            Выбираешь режим, Guard применяет его ко всем нарушениям.
+            {{ tt('protection.ui.guard_mode_body') }}
           </p>
         </div>
         <div class="space-y-3">
           <div>
-            <p class="mb-1 text-xs text-slate-400">Действие</p>
+            <p class="mb-1 text-xs text-slate-400">{{ tt('protection.ui.action_label') }}</p>
             <div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
               <button
                 v-for="opt in actionOptions"
@@ -3908,7 +3926,7 @@ const protCardIndigo =
             </div>
           </div>
           <div v-if="chat.rule.action_mode === 'mute'">
-            <p class="mb-1 text-xs text-slate-400">Длительность мута</p>
+            <p class="mb-1 text-xs text-slate-400">{{ tt('protection.ui.mute_duration_label') }}</p>
             <div class="flex flex-wrap gap-2">
               <button
                 v-for="p in mutePresets"
@@ -3930,11 +3948,11 @@ const protCardIndigo =
       <!-- Публичные сообщения от Guard -->
       <section :class="protCard">
         <div class="mb-2 flex items-center justify-between gap-2">
-          <h2 class="text-sm font-semibold tracking-wide text-slate-50">Публичные сообщения от Guard</h2>
+          <h2 class="text-sm font-semibold tracking-wide text-slate-50">{{ tt('protection.ui.public_messages_title') }}</h2>
           <button
             type="button"
             class="prot-info-btn prot-info-btn--frost"
-            aria-label="Справка: публичные сообщения"
+            :aria-label="tt('protection.ui.info_public_messages_aria')"
             @click="showPublicAlertsHelpModal = true"
           >
             i
@@ -3944,31 +3962,31 @@ const protCardIndigo =
           v-if="premiumFeatureLocked"
           class="mb-1.5 text-[10px] font-medium text-amber-200/90"
         >
-          Блок <span class="font-bold">Дежурные</span> и смена интервала в модалке — <span class="font-bold">Premium</span> · публичные алерты можно крутить и на Free
+          {{ tt('protection.ui.public_messages_premium_hint') }}
         </p>
         <p class="text-xs text-slate-300/90">
-          Дежурные: <span class="font-semibold text-slate-100">{{ chat.rule.guardian_periodic_enabled ? 'включены' : 'выключены' }}</span>
-          <span class="text-slate-400"> · {{ Number(chat.rule.guardian_periodic_interval_hours || guardianPeriodicFreeHours) }}ч</span>
+          {{ tt('protection.ui.duty_label') }} <span class="font-semibold text-slate-100">{{ chat.rule.guardian_periodic_enabled ? tt('protection.ui.enabled_short') : tt('protection.ui.disabled_short') }}</span>
+          <span class="text-slate-400">{{ tt('protection.ui.duty_hours', { n: Number(chat.rule.guardian_periodic_interval_hours || guardianPeriodicFreeHours) }) }}</span>
         </p>
         <p class="mt-1 text-xs text-slate-300/90">
-          Алерты: <span class="font-semibold text-slate-100">{{ chat.rule.public_alerts_enabled ? 'включены' : 'выключены' }}</span>
-          <span v-if="chat.rule.public_alerts_enabled" class="text-slate-400"> · каждые {{ Number(chat.rule.public_alerts_every_n || 5) }} срабатываний</span>
+          {{ tt('protection.ui.alerts_label') }} <span class="font-semibold text-slate-100">{{ chat.rule.public_alerts_enabled ? tt('protection.ui.enabled_short') : tt('protection.ui.disabled_short') }}</span>
+          <span v-if="chat.rule.public_alerts_enabled" class="text-slate-400">{{ tt('protection.ui.alerts_every_hits', { n: Number(chat.rule.public_alerts_every_n || 5) }) }}</span>
         </p>
         <button
           type="button"
           class="mt-2 rounded-lg border border-white/15 bg-white/10 px-3 py-1.5 text-xs font-semibold text-slate-100 hover:bg-white/15"
           @click="showPublicAlertsSettingsModal = true"
         >
-          Настроить
+          {{ tt('protection.ui.configure') }}
         </button>
         <p v-if="!chat.rule.guardian_messages_enabled" class="mt-2 text-[10px] text-amber-300/90">
-          Служебные сообщения выключены — публичные алерты не отправляются.
+          {{ tt('protection.ui.service_messages_off_hint') }}
         </p>
       </section>
 
       <section class="rounded-2xl border border-white/12 bg-gradient-to-br from-fuchsia-500/10 via-cyan-500/8 to-indigo-500/10 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] backdrop-blur-xl">
         <div class="mb-2 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-white/95">⭐ Репутация (карма)</h3>
+          <h3 class="text-xs font-semibold text-white/95">{{ tt('protection.ui.reputation_title') }}</h3>
           <div class="flex items-center gap-2">
             <button
               type="button"
@@ -3976,43 +3994,43 @@ const protCardIndigo =
               class="min-w-[5.25rem] rounded-lg px-2.5 py-1 text-xs font-medium"
               @click="updateRule({ reputation_enabled: !chat.rule.reputation_enabled })"
             >
-              {{ chat.rule.reputation_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+              {{ chat.rule.reputation_enabled ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}
             </button>
             <button
               type="button"
               class="prot-info-btn"
-              aria-label="Как работает карма"
+              :aria-label="tt('protection.ui.info_reputation_aria')"
               @click="showReputationInfoModal = true"
             >i</button>
           </div>
         </div>
         <p class="text-[11px] text-slate-200/85">
-          Моя карма: <span class="font-semibold text-lime-300">{{ reputationMyScore }}</span>.
+          {{ tt('protection.ui.reputation_karma_line', { score: reputationMyScore }) }}
         </p>
         <button
           type="button"
           class="mt-2 w-full rounded-lg border border-cyan-400/35 bg-cyan-500/15 px-3 py-1.5 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-500/25"
           @click="showReputationSettingsModal = true"
         >
-          Настроить
+          {{ tt('protection.ui.configure') }}
         </button>
       </section>
 
       <div :class="protCardSub">
         <div class="flex items-start justify-between gap-2">
           <div>
-            <p class="text-xs font-semibold uppercase tracking-wide text-slate-200">⚠ Всплеск удалений</p>
+            <p class="text-xs font-semibold uppercase tracking-wide text-slate-200">{{ tt('protection.ui.spam_spike_title') }}</p>
             <p class="mt-1 text-[11px] text-slate-300/90">
-              Сейчас сработает, если Guard/админы удалят
-              <strong>{{ Number(chat.rule.spam_spike_min_deletes || spamSpikeDefaultDeleteCount) }}</strong>
-              сообщений за
-              <strong>{{ Number(chat.rule.spam_spike_window_minutes || 35) }} мин</strong>.
+              {{ tt('protection.ui.spam_spike_body', {
+                count: Number(chat.rule.spam_spike_min_deletes || spamSpikeDefaultDeleteCount),
+                mins: Number(chat.rule.spam_spike_window_minutes || 35),
+              }) }}
             </p>
           </div>
           <button
             type="button"
             class="prot-info-btn"
-            aria-label="Как работает всплеск удалений"
+            :aria-label="tt('protection.ui.info_spam_spike_aria')"
             @click="showSpamSpikeInfoModal = true"
           >
             i
@@ -4025,14 +4043,14 @@ const protCardIndigo =
             class="rounded-xl px-3 py-1.5 text-xs font-semibold"
             @click="updateRule({ spam_spike_enabled: !chat.rule.spam_spike_enabled })"
           >
-            {{ chat.rule.spam_spike_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+            {{ chat.rule.spam_spike_enabled ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}
           </button>
           <button
             type="button"
             class="rounded-xl border border-white/15 bg-white/10 px-3 py-1.5 text-xs font-semibold text-slate-100 hover:bg-white/15"
             @click="showSpamSpikeSettingsModal = true"
           >
-            Настроить
+            {{ tt('protection.ui.configure') }}
           </button>
         </div>
       </div>
@@ -4040,25 +4058,25 @@ const protCardIndigo =
       <!-- Режим тишины (Premium) -->
       <section :class="[protCardSky, premiumSectionFrameClass]">
         <div class="mb-2 flex items-center justify-between gap-2">
-          <p class="text-xs font-semibold text-sky-100">🤫 Режим тишины <span v-if="premiumFeatureLocked" class="text-amber-300">🔒 Premium</span></p>
+          <p class="text-xs font-semibold text-sky-100">{{ tt('protection.ui.silence_title') }} <span v-if="premiumFeatureLocked" class="text-amber-300">🔒 Premium</span></p>
           <button
             type="button"
             class="prot-info-btn"
-            aria-label="Информация по режиму тишины"
+            :aria-label="tt('protection.ui.info_silence_aria')"
             @click="showSilenceInfoModal = true"
           >
             i
           </button>
         </div>
         <p class="mb-2 text-xs leading-relaxed text-sky-100/85">
-          После входа в чат выбранное время: любое сообщение участника может привести к муту на оставшиеся минуты окна.
+          {{ tt('protection.ui.silence_body') }}
         </p>
         <div :class="['flex flex-wrap items-center gap-2', premiumControlRowClass]">
           <span
             :class="(chat.rule.silence_minutes || 0) > 0 ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/25 dark:text-emerald-300' : 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300'"
             class="inline-flex rounded-lg px-2.5 py-1.5 text-xs font-semibold"
           >
-            {{ (chat.rule.silence_minutes || 0) > 0 ? `Включено: ${silenceStatusLabel}` : 'Выключено' }}
+            {{ (chat.rule.silence_minutes || 0) > 0 ? tt('protection.ui.silence_enabled', { label: silenceStatusLabel }) : tt('protection.ui.silence_off_chip') }}
           </span>
           <button
             type="button"
@@ -4068,7 +4086,7 @@ const protCardIndigo =
             ]"
             @click="onSilenceConfigureClick"
           >
-            Настроить время
+            {{ tt('protection.ui.silence_configure_time') }}
           </button>
         </div>
       </section>
@@ -4076,11 +4094,11 @@ const protCardIndigo =
       <!-- Антинакрутка (Premium) -->
       <section :class="[protCard, premiumSectionFrameClass]">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h2 class="text-xs font-medium text-slate-200">📈 Антинакрутка <span v-if="premiumFeatureLocked" class="text-amber-300">🔒 Premium</span></h2>
+          <h2 class="text-xs font-medium text-slate-200">{{ tt('protection.ui.antinakrutka_title') }} <span v-if="premiumFeatureLocked" class="text-amber-300">🔒 Premium</span></h2>
           <button
             type="button"
             class="prot-info-btn"
-            aria-label="Информация по антинакрутке"
+            :aria-label="tt('protection.ui.info_antinakrutka_aria')"
             @click="showAntinakrutkaInfoModal = true"
           >
             i
@@ -4088,8 +4106,8 @@ const protCardIndigo =
         </div>
         <div :class="premiumControlRowClass">
           <p class="text-xs text-slate-300/90">
-            Состояние: <span class="font-semibold text-slate-100">{{ chat.rule.antinakrutka_enabled ? 'включено' : 'выключено' }}</span>
-            <span v-if="chat.rule.antinakrutka_enabled" class="text-slate-400"> · порог {{ Number(chat.rule.antinakrutka_joins_threshold || 10) }}, окно {{ Number(chat.rule.antinakrutka_window_minutes || 5) }} мин</span>
+            {{ tt('protection.ui.antinakrutka_state') }} <span class="font-semibold text-slate-100">{{ chat.rule.antinakrutka_enabled ? tt('protection.ui.antinakrutka_enabled') : tt('protection.ui.antinakrutka_disabled') }}</span>
+            <span v-if="chat.rule.antinakrutka_enabled" class="text-slate-400">{{ tt('protection.ui.antinakrutka_threshold', { t: Number(chat.rule.antinakrutka_joins_threshold || 10), m: Number(chat.rule.antinakrutka_window_minutes || 5) }) }}</span>
           </p>
         </div>
         <button
@@ -4100,18 +4118,18 @@ const protCardIndigo =
           ]"
           @click="onAntinakrutkaOpenSettingsClick"
         >
-          Настроить
+          {{ tt('protection.ui.configure') }}
         </button>
       </section>
 
       <!-- Капча при входе (Premium) -->
       <section :class="[protCardIndigo, premiumSectionFrameClass]">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h2 class="text-xs font-medium text-slate-100">🧩 Капча при входе <span v-if="premiumFeatureLocked" class="text-amber-300">🔒 Premium</span></h2>
+          <h2 class="text-xs font-medium text-slate-100">{{ tt('protection.ui.join_captcha_title') }} <span v-if="premiumFeatureLocked" class="text-amber-300">🔒 Premium</span></h2>
           <button
             type="button"
             class="prot-info-btn"
-            aria-label="Справка: капча при входе"
+            :aria-label="tt('protection.ui.info_join_captcha_aria')"
             @click="showJoinCaptchaInfoModal = true"
           >
             i
@@ -4119,14 +4137,14 @@ const protCardIndigo =
         </div>
         <div :class="['space-y-3', premiumControlRowClass]">
           <div class="flex items-center justify-between gap-2">
-            <span class="text-xs text-slate-300">Включить проверку новых участников</span>
+            <span class="text-xs text-slate-300">{{ tt('protection.ui.join_captcha_enable') }}</span>
             <button
               type="button"
               :class="boolToggleClass(!!chat.rule.join_captcha_enabled)"
               class="rounded-lg px-2.5 py-1 text-xs"
               @click="onJoinCaptchaToggleClick"
             >
-              {{ chat.rule.join_captcha_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+              {{ chat.rule.join_captcha_enabled ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}
             </button>
           </div>
           <button
@@ -4137,7 +4155,7 @@ const protCardIndigo =
             ]"
             @click="onJoinCaptchaOpenSettingsClick"
           >
-            Настроить
+            {{ tt('protection.ui.configure') }}
           </button>
         </div>
       </section>
@@ -4145,11 +4163,11 @@ const protCardIndigo =
       <!-- Новички (Premium) -->
       <section :class="[protCardIndigo, premiumSectionFrameClass]">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h2 class="text-xs font-medium text-slate-100">🆕 Новички <span v-if="premiumFeatureLocked" class="text-amber-300">🔒 Premium</span></h2>
+          <h2 class="text-xs font-medium text-slate-100">{{ tt('protection.ui.newbie_section_title') }} <span v-if="premiumFeatureLocked" class="text-amber-300">🔒 Premium</span></h2>
           <button
             type="button"
             class="prot-info-btn"
-            aria-label="Информация по режиму новичков"
+            :aria-label="tt('protection.ui.info_newbie_aria')"
             @click="showNewbieInfoModal = true"
           >
             i
@@ -4157,18 +4175,18 @@ const protCardIndigo =
         </div>
         <div :class="['space-y-3', premiumControlRowClass]">
           <div class="flex items-center justify-between gap-2">
-            <span class="text-xs text-slate-300">Режим новичков</span>
+            <span class="text-xs text-slate-300">{{ tt('protection.ui.newbie_mode_label') }}</span>
             <button
               type="button"
               :class="boolToggleClass(chat.rule.newbie_enabled)"
               class="rounded-lg px-2.5 py-1 text-xs"
               @click="onNewbieToggleClick"
             >
-              {{ chat.rule.newbie_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+              {{ chat.rule.newbie_enabled ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}
             </button>
           </div>
           <div v-if="chat.rule.newbie_enabled && canUsePremiumForCurrentChat">
-            <p class="mb-1 text-xs text-slate-400">Окно (мин)</p>
+            <p class="mb-1 text-xs text-slate-400">{{ tt('protection.ui.newbie_window_label') }}</p>
             <div class="flex flex-wrap gap-2">
               <button
                 v-for="m in newbiePresets"
@@ -4188,22 +4206,22 @@ const protCardIndigo =
       <!-- Антиспам база (Premium) -->
       <section :class="[protCard, premiumSectionFrameClass]">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h2 class="text-xs font-medium text-slate-200">📋 Антиспам база <span v-if="premiumFeatureLocked" class="text-amber-300">🔒 Premium</span></h2>
+          <h2 class="text-xs font-medium text-slate-200">{{ tt('protection.ui.antispam_db_title') }} <span v-if="premiumFeatureLocked" class="text-amber-300">🔒 Premium</span></h2>
         </div>
         <div :class="['space-y-3', premiumControlRowClass]">
           <div class="flex items-center justify-between gap-2">
-            <span class="text-xs text-slate-300">Проверять при входе в этот чат</span>
+            <span class="text-xs text-slate-300">{{ tt('protection.ui.antispam_check_on_join') }}</span>
             <button
               type="button"
               :class="boolToggleClass(chat.rule.use_global_antispam_db)"
               class="rounded-lg px-2.5 py-1 text-xs"
               @click="onAntispamDbToggleClick"
             >
-              {{ chat.rule.use_global_antispam_db ? 'ВКЛ' : 'ВЫКЛ' }}
+              {{ chat.rule.use_global_antispam_db ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}
             </button>
           </div>
           <div class="flex items-center justify-between gap-2">
-            <p class="text-xs text-slate-400">Записей в базе: {{ (antispamItems || []).length }}</p>
+            <p class="text-xs text-slate-400">{{ tt('protection.ui.antispam_records') }} {{ (antispamItems || []).length }}</p>
             <button
               type="button"
               :class="[
@@ -4213,7 +4231,7 @@ const protCardIndigo =
               :disabled="antispamLoading"
               @click="onAntispamListButtonClick"
             >
-              Настроить
+              {{ tt('protection.ui.configure') }}
             </button>
           </div>
         </div>
@@ -4222,11 +4240,11 @@ const protCardIndigo =
       <!-- Очистка от удалённых аккаунтов -->
       <section :class="protCard">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h2 class="text-xs font-medium text-slate-200">🧹 Очистка от удалённых аккаунтов</h2>
+          <h2 class="text-xs font-medium text-slate-200">{{ tt('protection.ui.cleanup_title') }}</h2>
           <button
             type="button"
             class="prot-info-btn"
-            aria-label="Информация по очистке удалённых"
+            :aria-label="tt('protection.ui.info_cleanup_aria')"
             @click="showCleanupInfoModal = true"
           >
             i
@@ -4240,28 +4258,28 @@ const protCardIndigo =
         >
           <span v-if="cleanLaunchLoading" class="inline-flex items-center gap-2">
             <span class="inline-block hourglass-flip">⏳</span>
-            Запуск…
+            {{ tt('protection.ui.launching') }}
           </span>
-          <span v-else>Запустить очистку</span>
+          <span v-else>{{ tt('protection.ui.launch_cleaning') }}</span>
         </button>
         <p v-else class="text-xs text-slate-400">
-          Выберите чат выше, чтобы запустить очистку.
+          {{ tt('protection.ui.pick_chat_for_cleanup') }}
         </p>
       </section>
 
       <!-- Перенести настройки (доступно при нескольких чатах / Premium) -->
       <section :class="[protCard, copySectionPremiumClass]">
-        <h2 class="mb-3 text-xs font-medium text-slate-200">📤 Перенести настройки <span v-if="premiumFeatureLocked && (chatsList || []).length > 1" class="text-amber-300">🔒 Premium</span></h2>
+        <h2 class="mb-3 text-xs font-medium text-slate-200">{{ tt('protection.ui.copy_settings_title') }} <span v-if="premiumFeatureLocked && (chatsList || []).length > 1" class="text-amber-300">🔒 Premium</span></h2>
         <p class="mb-3 text-xs text-slate-400">
-          Скопировать все настройки защиты из текущего чата в выбранный или сразу во все чаты.
+          {{ tt('protection.ui.copy_settings_body') }}
         </p>
         <div class="flex flex-wrap items-center gap-2">
           <select
             v-model="copyTargetId"
             class="rounded-lg border border-white/15 bg-white/10 px-2.5 py-1.5 text-xs text-slate-100"
           >
-            <option :value="null">Выберите чат</option>
-            <option value="__all__">Во все чаты</option>
+            <option :value="null">{{ tt('protection.ui.copy_select_placeholder') }}</option>
+            <option value="__all__">{{ tt('protection.ui.copy_all_chats') }}</option>
             <option
               v-for="c in (chatsList || []).filter((x) => x.id !== chat?.id)"
               :key="c.id"
@@ -4276,18 +4294,42 @@ const protCardIndigo =
             :disabled="copyLoading || !copyTargetId || (copyTargetId !== '__all__' && String(copyTargetId) === String(chat?.id))"
             @click="onCopySettingsBarClick"
           >
-            Перенести
+            {{ tt('protection.ui.copy_transfer') }}
           </button>
         </div>
       </section>
 
-      <p v-if="saving" class="text-xs text-slate-400">Сохранение…</p>
+      <p v-if="saving" class="text-xs text-slate-400">{{ tt('protection.ui.saving_dots') }}</p>
+    </div>
+
+    <div
+      v-else-if="chat?.id && !chat?.rule && !chat?.noSelection && !chat?.loadError"
+      :class="protCard"
+    >
+      <p class="text-xs text-slate-300">{{ tt('protection.ui.load_failed') }}</p>
+      <div class="mt-3 flex flex-wrap gap-2">
+        <button
+          type="button"
+          class="guard-green-soft rounded-lg px-3 py-1.5 text-xs font-semibold"
+          @click="retryProtectionChatPayload"
+        >
+          {{ tt('common.refresh') }}
+        </button>
+        <button
+          v-if="isChannelListRow(chat)"
+          type="button"
+          class="rounded-lg border border-white/15 bg-white/10 px-3 py-1.5 text-xs font-semibold text-slate-100 hover:bg-white/[0.14]"
+          @click="redirectChannelToBroadcastFromRow({ id: chat.id, is_shared: !!chat.is_shared })"
+        >
+          {{ tt('nav.broadcast') }}
+        </button>
+      </div>
     </div>
 
     <div v-else-if="hasInitData" class="space-y-3 py-2" aria-busy="true">
       <div class="mx-auto inline-flex items-center gap-2 rounded-full border border-cyan-300/30 bg-cyan-500/12 px-3 py-1.5 text-xs font-semibold text-cyan-100 shadow-[0_0_20px_-10px_rgba(34,211,238,0.9)]">
         <span class="inline-block hourglass-flip">⏳</span>
-        Загружаю настройки чата…
+        {{ tt('protection.ui.loading_chat_settings') }}
       </div>
       <div class="space-y-2.5 rounded-2xl border border-white/10 bg-black/30 p-3 backdrop-blur-md">
         <div class="h-3 w-2/3 max-w-[14rem] animate-pulse rounded bg-white/15" />
@@ -4307,12 +4349,12 @@ const protCardIndigo =
     >
       <div class="w-full max-w-xl rounded-2xl border border-cyan-400/20 bg-gradient-to-b from-slate-900/95 via-slate-950/95 to-black/95 p-4 text-slate-100 shadow-[0_24px_80px_-22px_rgba(0,0,0,0.9),inset_0_1px_0_rgba(255,255,255,0.1)] backdrop-blur-2xl ring-1 ring-cyan-300/20">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold uppercase tracking-wide text-cyan-100">Публичные сообщения — настройки</h3>
+          <h3 class="text-xs font-semibold uppercase tracking-wide text-cyan-100">{{ tt('protection.public_alerts_settings_modal.title') }}</h3>
           <div class="flex items-center gap-1.5">
             <button
               type="button"
               class="prot-info-btn"
-              aria-label="Пояснения по настройкам публичных сообщений"
+              :aria-label="tt('protection.ui.info_public_alerts_settings_aria')"
               @click="showPublicAlertsHelpModal = true"
             >
               i
@@ -4329,17 +4371,17 @@ const protCardIndigo =
         <div class="space-y-3">
           <div class="rounded-xl border border-cyan-300/20 bg-cyan-500/[0.08] p-2.5 backdrop-blur-md">
             <div class="mb-2 flex items-center justify-between gap-2">
-              <p class="text-[11px] font-semibold uppercase tracking-wide text-cyan-100">Дежурные сообщения</p>
+              <p class="text-[11px] font-semibold uppercase tracking-wide text-cyan-100">{{ tt('protection.public_alerts_settings_modal.duty_messages') }}</p>
               <button
                 type="button"
                 :class="boolToggleClass(!!chat.rule.guardian_periodic_enabled)"
                 class="rounded-xl px-3 py-1.5 text-xs font-semibold"
                 @click="toggleGuardianPeriodic(!chat.rule.guardian_periodic_enabled)"
               >
-                {{ chat.rule.guardian_periodic_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+                {{ chat.rule.guardian_periodic_enabled ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}
               </button>
             </div>
-            <p class="mb-1 text-[11px] text-slate-400">Частота дежурных сообщений Guard</p>
+            <p class="mb-1 text-[11px] text-slate-400">{{ tt('protection.public_alerts_settings_modal.duty_frequency') }}</p>
             <div class="flex flex-wrap gap-1.5">
               <button
                 v-for="opt in guardianPeriodicIntervalPresets"
@@ -4356,19 +4398,19 @@ const protCardIndigo =
 
           <div class="rounded-xl border border-cyan-300/20 bg-cyan-500/[0.08] p-2.5 backdrop-blur-md">
             <div class="mb-2 flex items-center justify-between gap-2">
-              <p class="text-[11px] font-semibold uppercase tracking-wide text-cyan-100">Публичные алерты</p>
+              <p class="text-[11px] font-semibold uppercase tracking-wide text-cyan-100">{{ tt('protection.public_alerts_settings_modal.public_alerts') }}</p>
               <button
                 type="button"
                 :class="boolToggleClass(!!chat.rule.public_alerts_enabled)"
                 class="rounded-xl px-3 py-1.5 text-xs font-semibold"
                 @click="togglePublicAlerts(!chat.rule.public_alerts_enabled)"
               >
-                {{ chat.rule.public_alerts_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+                {{ chat.rule.public_alerts_enabled ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}
               </button>
             </div>
             <div class="space-y-2" :class="chat.rule.public_alerts_enabled ? '' : 'opacity-55'">
               <div>
-                <p class="mb-1 text-[11px] text-slate-400">После скольких срабатываний подряд отправить строку</p>
+                <p class="mb-1 text-[11px] text-slate-400">{{ tt('protection.public_alerts_settings_modal.every_n_label') }}</p>
                 <div class="flex flex-wrap gap-1.5">
                   <button
                     v-for="p in publicAlertsEveryPresets"
@@ -4384,7 +4426,7 @@ const protCardIndigo =
                 </div>
               </div>
               <div>
-                <p class="mb-1 text-[11px] text-slate-400">Не чаще одного сообщения, чем раз в…</p>
+                <p class="mb-1 text-[11px] text-slate-400">{{ tt('protection.public_alerts_settings_modal.interval_label') }}</p>
                 <div class="flex flex-wrap gap-1.5">
                   <button
                     v-for="p in publicAlertsIntervalPresets"
@@ -4401,11 +4443,11 @@ const protCardIndigo =
               </div>
               <div>
                 <div class="mb-1 flex items-center justify-between gap-2">
-                  <p class="text-[11px] text-slate-400">Стиль текста</p>
+                  <p class="text-[11px] text-slate-400">{{ tt('protection.public_alerts_settings_modal.text_style') }}</p>
                   <button
                     type="button"
                     class="link-glass-info-btn"
-                    aria-label="Примеры стилей публичных сообщений"
+                    :aria-label="tt('protection.ui.info_public_alerts_style_examples_aria')"
                     @click="showPublicAlertsStyleHelpModal = true"
                   >
                     ⓘ
@@ -4435,14 +4477,17 @@ const protCardIndigo =
         </div>
       </div>
     </div>
+
+    <Teleport to="body">
+    <div class="contents">
     <div
       v-if="showSpamSpikeInfoModal"
-      class="fixed inset-0 z-[265] flex items-end justify-center bg-black/60 p-3 md:items-center"
+      class="fixed inset-0 z-[530] flex items-end justify-center bg-black/60 p-3 md:items-center"
       @click.self="showSpamSpikeInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-orange-300/35 bg-white p-4 shadow-2xl dark:border-orange-500/35 dark:bg-slate-900">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-sm font-semibold text-gray-900 dark:text-white">😈 Всплеск удалений — как это работает</h3>
+          <h3 class="text-sm font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.spam_spike.title') }}</h3>
           <button
             type="button"
             class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
@@ -4452,29 +4497,29 @@ const protCardIndigo =
           </button>
         </div>
         <div class="space-y-2 text-xs leading-relaxed text-gray-700 dark:text-slate-300">
-          <p>Когда в чате резко летит мусор, я считаю удаления за выбранное окно времени. Добрался до порога — поднимаю флаг «под угрозой» и пингую ответственных.</p>
-          <p>В счёт идут только модерационные удаления Guard/админов. Самоудаление пользователем в счётчик не попадает.</p>
-          <p>Что крутят настройки в модалке:</p>
-          <p>• <strong>Порог удалений</strong> — сколько удалений нужно для срабатывания.</p>
-          <p>• <strong>Окно времени</strong> — за какой промежуток считаем эти удаления.</p>
-          <p>• <strong>Уведомлять делегата</strong> — слать ли DM менеджерам чата при всплеске.</p>
-          <p>• <strong>Главный триггер «всплеск удалений»</strong> — не пустышка: это мастер‑переключатель самого детектора. Если выключен, всплеск вообще не проверяется.</p>
+          <p>{{ tt('protection.modals.spam_spike.p1') }}</p>
+          <p>{{ tt('protection.modals.spam_spike.p2') }}</p>
+          <p>{{ tt('protection.modals.spam_spike.p3') }}</p>
+          <p v-html="tt('protection.modals.spam_spike.p4_threshold')" />
+          <p v-html="tt('protection.modals.spam_spike.p5_window')" />
+          <p v-html="tt('protection.modals.spam_spike.p6_notify')" />
+          <p v-html="tt('protection.modals.spam_spike.p7_master')" />
         </div>
       </div>
     </div>
     <div
       v-if="showSpamSpikeSettingsModal && chat?.rule"
-      class="fixed inset-0 z-[260] flex items-end justify-center bg-black/65 p-3 md:items-center"
+      class="fixed inset-0 z-[400] flex items-end justify-center bg-black/65 p-3 md:items-center"
       @click.self="showSpamSpikeSettingsModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-white/12 bg-zinc-950/78 p-4 text-slate-100 shadow-[0_26px_90px_-24px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-2xl">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-100">⚠ Настройка всплеска удалений</h3>
+          <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-100">{{ tt('protection.spam_spike_settings_modal.title') }}</h3>
           <div class="flex items-center gap-1.5">
             <button
               type="button"
               class="prot-info-btn"
-              aria-label="Пояснения по всплеску удалений"
+              :aria-label="tt('protection.ui.info_spam_spike_aria')"
               @click="showSpamSpikeInfoModal = true"
             >
               i
@@ -4491,12 +4536,11 @@ const protCardIndigo =
 
         <div class="space-y-3">
           <p class="rounded-xl border border-white/10 bg-white/[0.04] p-2.5 text-[11px] leading-relaxed text-slate-200">
-            Guard считает только модерационные удаления по фильтрам (действия Guard/админов через инструменты модерации).
-            Самоудаление сообщения пользователем в этот счётчик не попадает.
+            {{ tt('protection.spam_spike_settings_modal.note') }}
           </p>
 
           <div class="rounded-xl border border-white/10 bg-white/[0.04] p-2.5 backdrop-blur-md">
-            <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-200">Порог удалений</p>
+            <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-200">{{ tt('protection.spam_spike_settings_modal.threshold') }}</p>
             <div class="mt-2 flex flex-wrap gap-2">
               <button
                 v-for="p in spamSpikeDeletePresets"
@@ -4512,7 +4556,7 @@ const protCardIndigo =
           </div>
 
           <div class="rounded-xl border border-white/10 bg-white/[0.04] p-2.5 backdrop-blur-md">
-            <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-200">Окно времени</p>
+            <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-200">{{ tt('protection.spam_spike_settings_modal.window') }}</p>
             <div class="mt-2 flex flex-wrap gap-2">
               <button
                 v-for="p in spamSpikeWindowPresets"
@@ -4529,8 +4573,8 @@ const protCardIndigo =
 
           <div class="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-white/[0.04] p-2.5 backdrop-blur-md">
             <div>
-              <p class="text-xs font-semibold text-slate-100">Уведомлять делегата</p>
-              <p class="text-[11px] text-slate-400">Если включено — DM о всплеске получат и менеджеры чата.</p>
+              <p class="text-xs font-semibold text-slate-100">{{ tt('protection.spam_spike_settings_modal.notify_title') }}</p>
+              <p class="text-[11px] text-slate-400">{{ tt('protection.spam_spike_settings_modal.notify_hint') }}</p>
             </div>
             <button
               type="button"
@@ -4538,19 +4582,19 @@ const protCardIndigo =
               class="rounded-xl px-3 py-1.5 text-xs font-semibold"
               @click="updateRule({ spam_spike_notify_managers: !chat.rule.spam_spike_notify_managers })"
             >
-              {{ chat.rule.spam_spike_notify_managers ? 'ВКЛ' : 'ВЫКЛ' }}
+              {{ chat.rule.spam_spike_notify_managers ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}
             </button>
           </div>
 
           <div class="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-white/[0.04] p-2.5 backdrop-blur-md">
-            <p class="text-xs text-slate-300">Главный триггер «всплеск удалений»</p>
+            <p class="text-xs text-slate-300">{{ tt('protection.spam_spike_settings_modal.master_trigger') }}</p>
             <button
               type="button"
               :class="boolToggleClass(!!chat.rule.spam_spike_enabled)"
               class="rounded-xl px-3 py-1.5 text-xs font-semibold"
               @click="updateRule({ spam_spike_enabled: !chat.rule.spam_spike_enabled })"
             >
-              {{ chat.rule.spam_spike_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+              {{ chat.rule.spam_spike_enabled ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}
             </button>
           </div>
         </div>
@@ -4558,100 +4602,100 @@ const protCardIndigo =
     </div>
     <div
       v-if="showCleanupInfoModal"
-      class="fixed inset-0 z-[266] flex items-center justify-center bg-black/65 p-3"
+      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
       @click.self="showCleanupInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">😈 Очистка «призраков»</h3>
+          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.cleanup.title') }}</h3>
           <button type="button" class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="showCleanupInfoModal = false">✕</button>
         </div>
         <div class="space-y-2 text-xs text-gray-700 dark:text-gray-300">
-          <p>Пробегаюсь по выбранному чату и выкидываю аккаунты, которые Telegram уже пометил как удалённые — они только засоряют списки.</p>
-          <p>После рейда, массового входа или перед важным анонсом — самое время нажать и не тащить мёртвые души в статистику.</p>
-          <p>Откроется личка со мной и стартанёт очистка именно для текущего чата — никуда руками копировать не надо.</p>
+          <p>{{ tt('protection.modals.cleanup.p1') }}</p>
+          <p>{{ tt('protection.modals.cleanup.p2') }}</p>
+          <p>{{ tt('protection.modals.cleanup.p3') }}</p>
         </div>
       </div>
     </div>
     <div
       v-if="showFiltersInfoModal"
-      class="fixed inset-0 z-[266] flex items-center justify-center bg-black/65 p-3"
+      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
       @click.self="showFiltersInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">😈 Фильтры — простыми словами</h3>
+          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.filters.title') }}</h3>
           <button type="button" class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="showFiltersInfoModal = false">✕</button>
         </div>
         <div class="space-y-2 text-xs text-gray-700 dark:text-gray-300">
-          <p><strong>Разрешено</strong> — пропускаю мимо ушей, как будто ничего не было.</p>
-          <p><strong>Запрещено</strong> — срабатываю по сценарию из блока «Наказания»: удалить, замьютить, забанить — что выберешь.</p>
-          <p>На админов чата эти правила не вешаю — вы сами за порядок отвечаете.</p>
-          <p><strong>Сообщения с кнопками</strong> — посты с inline-кнопками («жми сюда», «забери», «вступи»); чаще всего это реклама или скам, поэтому отдельный тумблер.</p>
+          <p>{{ tt('protection.modals.filters.p1') }}</p>
+          <p>{{ tt('protection.modals.filters.p2') }}</p>
+          <p>{{ tt('protection.modals.filters.p3') }}</p>
+          <p>{{ tt('protection.modals.filters.p4') }}</p>
         </div>
       </div>
     </div>
     <div
       v-if="showSilenceInfoModal"
-      class="fixed inset-0 z-[266] flex items-center justify-center bg-black/65 p-3"
+      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
       @click.self="showSilenceInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">😈 Режим тишины</h3>
+          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.silence.title') }}</h3>
           <button type="button" class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="showSilenceInfoModal = false">✕</button>
         </div>
         <div class="space-y-2 text-xs text-gray-700 dark:text-gray-300">
-          <p>Человек только зашёл — даю ему короткое «молчи в тряпочку». Если всё же пишет в окне, могу приглушить на остаток тишины.</p>
-          <p>После рекламы, при волне новичков или когда чувствуешь, что вот-вот начнётся цирк — включай без стеснения.</p>
-          <p class="text-xs text-slate-400">Админов не трогаю: вы и так знаете, что делаете.</p>
+          <p>{{ tt('protection.modals.silence.p1') }}</p>
+          <p>{{ tt('protection.modals.silence.p2') }}</p>
+          <p class="text-xs text-slate-400">{{ tt('protection.modals.silence.p3') }}</p>
         </div>
       </div>
     </div>
     <div
       v-if="showPublicAlertsHelpModal"
-      class="fixed inset-0 z-[266] flex items-center justify-center bg-black/65 p-3"
+      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
       @click.self="showPublicAlertsHelpModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-lime-400/35 bg-white p-4 shadow-2xl dark:border-lime-500/30 dark:bg-slate-900">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-sm font-semibold text-gray-900 dark:text-white">😈 Публичные реплики от меня</h3>
+          <h3 class="text-sm font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.public_alerts.title') }}</h3>
           <button type="button" class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="showPublicAlertsHelpModal = false">✕</button>
         </div>
         <div class="space-y-2 text-xs leading-relaxed text-gray-700 dark:text-slate-300">
           <p>
-            Когда я <strong>реально</strong> снял спам, замьютил или забанил кого-то, коплю счётчик по чату. Добрался до порога и прошёл минимальный интервал с прошлой реплики — кидаю в чат одну короткую фразу без кнопок: мол, я на посту.
+            {{ tt('protection.modals.public_alerts.p1') }}
           </p>
           <p>
-            Это не рекламная простыня, а редкий пинг «модерация жива». Частоту режу и по числу срабатываний, и по паузе между сообщениями — чтобы не бесить людей.
+            {{ tt('protection.modals.public_alerts.p2') }}
           </p>
           <p class="text-[11px] text-gray-500 dark:text-slate-400">
-            Ниже показаны реплики именно для выбранного стиля (сейчас: {{ currentPublicAlertsStyleLabel }}).
+            {{ tt('protection.modals.public_alerts.p3', { style: currentPublicAlertsStyleLabel }) }}
           </p>
           <div class="rounded-xl border border-lime-400/25 bg-lime-500/10 p-2.5 text-[11px] text-slate-700 dark:text-slate-200">
             <p class="mb-1 font-semibold text-slate-800 dark:text-slate-100">
-              Сейчас выбран стиль: {{ currentPublicAlertsStyleLabel }} — примеры для него:
+              {{ tt('protection.modals.public_alerts.box_title', { style: currentPublicAlertsStyleLabel }) }}
             </p>
-            <p>• Спам: «{{ currentPublicAlertsExamples.spam?.[0] }}»</p>
-            <p>• Ссылки: «{{ currentPublicAlertsExamples.link?.[0] }}»</p>
-            <p>• Мат/грубость: «{{ currentPublicAlertsExamples.bad_words?.[0] }}»</p>
-            <p>• Мут: «{{ currentPublicAlertsExamples.mute?.[0] }}»</p>
-            <p>• Бан: «{{ currentPublicAlertsExamples.ban?.[0] }}»</p>
+            <p>{{ tt('protection.modals.public_alerts.ex_spam') }} «{{ currentPublicAlertsExamples.spam?.[0] }}»</p>
+            <p>{{ tt('protection.modals.public_alerts.ex_link') }} «{{ currentPublicAlertsExamples.link?.[0] }}»</p>
+            <p>{{ tt('protection.modals.public_alerts.ex_bad_words') }} «{{ currentPublicAlertsExamples.bad_words?.[0] }}»</p>
+            <p>{{ tt('protection.modals.public_alerts.ex_mute') }} «{{ currentPublicAlertsExamples.mute?.[0] }}»</p>
+            <p>{{ tt('protection.modals.public_alerts.ex_ban') }} «{{ currentPublicAlertsExamples.ban?.[0] }}»</p>
           </div>
           <p class="text-[11px] text-gray-500 dark:text-slate-400">
-            Фраза выбирается хаотично из набора под конкретный фильтр (спам/ссылка/мат и т.д.) и текущий стиль.
+            {{ tt('protection.modals.public_alerts.p4') }}
           </p>
         </div>
       </div>
     </div>
     <div
       v-if="showPublicAlertsStyleHelpModal"
-      class="fixed inset-0 z-[266] flex items-center justify-center bg-black/65 p-3"
+      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
       @click.self="showPublicAlertsStyleHelpModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-400/30 bg-white p-4 shadow-2xl dark:border-sky-500/30 dark:bg-slate-900">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-sm font-semibold text-gray-900 dark:text-white">📝 Примеры стилей публичных реплик</h3>
+          <h3 class="text-sm font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.public_alerts_style.title') }}</h3>
           <button
             type="button"
             class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
@@ -4661,27 +4705,27 @@ const protCardIndigo =
         <div class="space-y-3 text-xs leading-relaxed text-gray-700 dark:text-slate-300">
           <div class="rounded-xl border border-lime-400/25 bg-lime-500/10 p-2.5">
             <p class="mb-1 font-semibold text-lime-900 dark:text-lime-200">
-              Активный стиль сейчас: {{ currentPublicAlertsStyleLabel }}
+              {{ tt('protection.modals.public_alerts_style.active', { style: currentPublicAlertsStyleLabel }) }}
             </p>
-            <p>• Спам: «{{ currentPublicAlertsExamples.spam?.[1] || currentPublicAlertsExamples.spam?.[0] }}»</p>
-            <p>• Ссылка: «{{ currentPublicAlertsExamples.link?.[1] || currentPublicAlertsExamples.link?.[0] }}»</p>
-            <p>• Мат: «{{ currentPublicAlertsExamples.bad_words?.[1] || currentPublicAlertsExamples.bad_words?.[0] }}»</p>
-            <p>• Мут/бан: «{{ currentPublicAlertsExamples.mute?.[0] }}» / «{{ currentPublicAlertsExamples.ban?.[0] }}»</p>
+            <p>{{ tt('protection.modals.public_alerts_style.ex_spam') }} «{{ currentPublicAlertsExamples.spam?.[1] || currentPublicAlertsExamples.spam?.[0] }}»</p>
+            <p>{{ tt('protection.modals.public_alerts_style.ex_link') }} «{{ currentPublicAlertsExamples.link?.[1] || currentPublicAlertsExamples.link?.[0] }}»</p>
+            <p>{{ tt('protection.modals.public_alerts_style.ex_bad') }} «{{ currentPublicAlertsExamples.bad_words?.[1] || currentPublicAlertsExamples.bad_words?.[0] }}»</p>
+            <p>{{ tt('protection.modals.public_alerts_style.ex_mute_ban') }} «{{ currentPublicAlertsExamples.mute?.[0] }}» / «{{ currentPublicAlertsExamples.ban?.[0] }}»</p>
           </div>
           <p class="text-[11px] text-gray-500 dark:text-slate-400">
-            После смены стиля этот список меняется автоматически.
+            {{ tt('protection.modals.public_alerts_style.p_footer') }}
           </p>
         </div>
       </div>
     </div>
     <div
       v-if="showGuardianPeriodicHelpModal"
-      class="fixed inset-0 z-[266] flex items-center justify-center bg-black/65 p-3"
+      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
       @click.self="showGuardianPeriodicHelpModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-emerald-400/30 bg-white p-4 shadow-2xl dark:border-emerald-500/30 dark:bg-slate-900">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-sm font-semibold text-gray-900 dark:text-white">🛡 Дежурные сообщения в группе</h3>
+          <h3 class="text-sm font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.guardian_periodic.title') }}</h3>
           <button
             type="button"
             class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
@@ -4690,13 +4734,13 @@ const protCardIndigo =
         </div>
         <div class="space-y-2 text-xs leading-relaxed text-gray-700 dark:text-slate-300">
           <p>
-            Это отдельные «дежурные» сообщения о присутствии Guard в чате. Они отправляются не по факту конкретного нарушения, а периодически.
+            {{ tt('protection.modals.guardian_periodic.p1') }}
           </p>
           <p class="text-[11px] text-gray-500 dark:text-slate-400">
-            На Free: всегда включены, интервал фиксирован 24 часа. На Premium можно отключить и выбрать частоту.
+            {{ tt('protection.modals.guardian_periodic.p2') }}
           </p>
           <div class="rounded-xl border border-emerald-400/25 bg-emerald-500/10 p-2.5 text-[11px]">
-            <p class="mb-1 font-semibold text-emerald-900 dark:text-emerald-200">Примеры текущих дежурных сообщений:</p>
+            <p class="mb-1 font-semibold text-emerald-900 dark:text-emerald-200">{{ tt('protection.modals.guardian_periodic.examples_title') }}</p>
             <p v-for="(txt, idx) in guardianPeriodicExamples" :key="`gp-ex-${idx}`">• «{{ txt }}»</p>
           </div>
         </div>
@@ -4704,12 +4748,12 @@ const protCardIndigo =
     </div>
     <div
       v-if="showSilencePickerModal"
-      class="fixed inset-0 z-[266] flex items-center justify-center bg-black/65 p-3"
+      class="fixed inset-0 z-[400] flex items-center justify-center bg-black/65 p-3"
       @click.self="showSilencePickerModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">🤫 Время режима тишины</h3>
+          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.silence_picker_modal.title') }}</h3>
           <button type="button" class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="showSilencePickerModal = false">✕</button>
         </div>
         <div class="grid grid-cols-2 gap-2">
@@ -4729,108 +4773,108 @@ const protCardIndigo =
             class="col-span-2 rounded-lg px-2.5 py-2 text-center text-xs font-medium"
             @click="onSilencePresetPick(0)"
           >
-            ❌ Отключить
+            {{ tt('protection.ui.silence_disable') }}
             </button>
           </div>
       </div>
     </div>
     <div
       v-if="showStopwordsInfoModal"
-      class="fixed inset-0 z-[266] flex items-center justify-center bg-black/65 p-3"
+      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
       @click.self="showStopwordsInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">😈 Стоп-слова</h3>
+          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.stopwords.title') }}</h3>
           <button type="button" class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="showStopwordsInfoModal = false">✕</button>
         </div>
         <div class="space-y-2 text-xs text-gray-700 dark:text-gray-300">
-          <p>Твой личный список слов и фраз: увидел — среагировал так, как настроишь в наказаниях.</p>
-          <p>Удобно для местных мемов-спама, рекламных маркеров и заезженных триггеров именно в этом чате.</p>
-          <p class="text-xs text-slate-400">Смотрю на текст сообщения; что спрятано за ссылкой, сам не читаю — у Telegram свои правила.</p>
+          <p>{{ tt('protection.modals.stopwords.p1') }}</p>
+          <p>{{ tt('protection.modals.stopwords.p2') }}</p>
+          <p class="text-xs text-slate-400">{{ tt('protection.modals.stopwords.p3') }}</p>
         </div>
       </div>
     </div>
     <div
       v-if="showHardDictInfoModal"
-      class="fixed inset-0 z-[266] flex items-center justify-center bg-black/65 p-3"
+      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
       @click.self="showHardDictInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-red-300/60 bg-white p-4 shadow-2xl dark:border-red-700/60 dark:bg-gray-800">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">😈 Жёсткий словарь</h3>
+          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.hard_dict.title') }}</h3>
           <button type="button" class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="showHardDictInfoModal = false">✕</button>
         </div>
         <div class="space-y-2 text-xs text-gray-700 dark:text-gray-300">
-          <p>Готовый набор самых частых токсичных и мошеннических заготовок — включил и не собираешь простыню вручную.</p>
-          <p>Хорош для быстрого старта, пока ты допиливаешь свои правила.</p>
-          <p class="text-xs text-slate-400">Нужны точечные исключения — пиши их в «Стоп-слова» выше, там гибче.</p>
+          <p>{{ tt('protection.modals.hard_dict.p1') }}</p>
+          <p>{{ tt('protection.modals.hard_dict.p2') }}</p>
+          <p class="text-xs text-slate-400">{{ tt('protection.modals.hard_dict.p3') }}</p>
         </div>
       </div>
     </div>
     <div
       v-if="showReputationInfoModal"
-      class="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-3 backdrop-blur-[3px] md:items-center"
+      class="fixed inset-0 z-[530] flex items-end justify-center bg-black/70 p-3 backdrop-blur-[3px] md:items-center"
       @click.self="showReputationInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-white/12 bg-gradient-to-b from-zinc-900/80 to-zinc-950/95 p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.9)] ring-1 ring-inset ring-white/[0.06] backdrop-blur-2xl">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-sm font-semibold text-white">⭐ Карма в группе</h3>
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.modals.reputation.title') }}</h3>
           <button type="button" class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-white/10 hover:text-white" @click="showReputationInfoModal = false">✕</button>
         </div>
         <div class="space-y-2 text-xs leading-relaxed text-slate-200/90">
-          <p>Проверка через команды: <b>/karma</b> — личная карма, <b>/topkarma</b> — топ группы.</p>
-          <p>Начисление идёт, когда участник пишет слова благодарности в ответ на сообщение другого участника (самому себе начислить нельзя; есть кулдаун, чтобы не накручивать).</p>
-          <p>После начисления Guard отправляет подтверждение в фирменном стиле: начисление, текущий баланс и быстрые команды.</p>
-          <p>Карма хранится отдельно для каждой группы, между чатами не смешивается.</p>
-          <p><b>Слова в базе:</b> {{ (reputationDefaultWords || []).join(', ') || '—' }}</p>
+          <p>{{ tt('protection.modals.reputation.p1') }}</p>
+          <p>{{ tt('protection.modals.reputation.p2') }}</p>
+          <p>{{ tt('protection.modals.reputation.p3') }}</p>
+          <p>{{ tt('protection.modals.reputation.p4') }}</p>
+          <p><b>{{ tt('protection.modals.reputation.words_label') }}</b> {{ (reputationDefaultWords || []).join(', ') || '—' }}</p>
         </div>
       </div>
     </div>
     <div
       v-if="showReputationSettingsModal"
-      class="fixed inset-0 z-[279] flex items-center justify-center bg-black/70 p-3 backdrop-blur-[3px]"
+      class="fixed inset-0 z-[400] flex items-center justify-center bg-black/70 p-3 backdrop-blur-[3px]"
       @click.self="showReputationSettingsModal = false"
     >
       <div class="flex max-h-[84vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-white/12 bg-gradient-to-b from-zinc-900/85 to-zinc-950/95 p-3 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.9)] ring-1 ring-inset ring-white/[0.06] backdrop-blur-2xl">
         <div class="mb-2 flex items-center justify-between gap-2 border-b border-white/10 pb-2">
-          <h3 class="text-sm font-semibold text-white">Настройки благодарности</h3>
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.reputation_settings_modal.title') }}</h3>
           <button type="button" class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-white/10 hover:text-white" @click="showReputationSettingsModal = false">✕</button>
         </div>
         <div class="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
           <div class="rounded-lg border border-white/12 bg-black/25 p-2">
-            <p class="text-[10px] font-semibold uppercase tracking-wide text-slate-300">Слова в базе</p>
+            <p class="text-[10px] font-semibold uppercase tracking-wide text-slate-300">{{ tt('protection.reputation_settings_modal.words_in_base') }}</p>
             <p class="mt-1 text-[11px] text-slate-300/90">{{ (reputationDefaultWords || []).join(', ') || '—' }}</p>
           </div>
           <div class="flex flex-wrap gap-2">
             <input
               v-model="newReputationWord"
               type="text"
-              placeholder="Свое слово (напр. мерси)"
+              :placeholder="tt('protection.reputation_settings_modal.custom_word_placeholder')"
               class="min-w-0 flex-1 rounded-lg border border-white/15 bg-black/25 px-2.5 py-1.5 text-xs text-slate-100 placeholder:text-slate-500"
               :disabled="reputationWordsLoading"
               @keydown.enter.prevent="addReputationWord()"
-            >
+            />
             <button
               type="button"
               class="guard-green-soft rounded-lg px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
               :disabled="reputationWordsLoading || !(newReputationWord || '').trim()"
               @click="addReputationWord()"
             >
-              Добавить
+              {{ tt('protection.reputation_settings_modal.add') }}
             </button>
           </div>
           <div class="grid gap-2 sm:grid-cols-2">
             <div class="rounded-lg border border-white/12 bg-black/25 p-2">
               <div class="flex items-center justify-between gap-2">
-                <p class="text-[10px] font-semibold uppercase tracking-wide text-slate-300">Свои слова</p>
+                <p class="text-[10px] font-semibold uppercase tracking-wide text-slate-300">{{ tt('protection.reputation_settings_modal.my_words') }}</p>
                 <button
                   v-if="reputationWords.length > 3"
                   type="button"
                   class="rounded-md border border-cyan-400/40 bg-cyan-500/15 px-2 py-0.5 text-[10px] font-semibold text-cyan-100"
                   @click="showReputationWordsModal = true"
                 >
-                  Все
+                  {{ tt('protection.reputation_settings_modal.all') }}
                 </button>
               </div>
               <ul v-if="reputationWords.length" class="mt-1 space-y-1">
@@ -4848,21 +4892,21 @@ const protCardIndigo =
                   >✕</button>
                 </li>
               </ul>
-              <p v-else class="mt-1 text-[11px] text-slate-400">Индивидуальные слова не заданы.</p>
+              <p v-else class="mt-1 text-[11px] text-slate-400">{{ tt('protection.reputation_settings_modal.no_custom_words') }}</p>
             </div>
             <div class="rounded-lg border border-white/12 bg-black/25 p-2">
               <div class="flex items-center justify-between gap-2">
-                <p class="text-[10px] font-semibold uppercase tracking-wide text-slate-300">Топ группы</p>
+                <p class="text-[10px] font-semibold uppercase tracking-wide text-slate-300">{{ tt('protection.reputation_settings_modal.top_group') }}</p>
                 <button
                   v-if="reputationTop.length > 3"
                   type="button"
                   class="rounded-md border border-violet-400/40 bg-violet-500/15 px-2 py-0.5 text-[10px] font-semibold text-violet-100"
                   @click="showReputationTopModal = true"
                 >
-                  Все
+                  {{ tt('protection.reputation_settings_modal.all') }}
                 </button>
               </div>
-              <p v-if="reputationLoading" class="mt-1 text-[11px] text-slate-400">Считаем...</p>
+              <p v-if="reputationLoading" class="mt-1 text-[11px] text-slate-400">{{ tt('protection.reputation_settings_modal.calculating') }}</p>
               <ul v-else-if="reputationTop.length" class="mt-1 space-y-1">
                 <li
                   v-for="(row, idx) in reputationTop.slice(0, 3)"
@@ -4879,7 +4923,7 @@ const protCardIndigo =
                   <span class="font-semibold text-lime-300">{{ row.score }}</span>
                 </li>
               </ul>
-              <p v-else class="mt-1 text-[11px] text-slate-400">Пока без начислений.</p>
+              <p v-else class="mt-1 text-[11px] text-slate-400">{{ tt('protection.reputation_settings_modal.empty_top') }}</p>
             </div>
           </div>
         </div>
@@ -4887,12 +4931,12 @@ const protCardIndigo =
     </div>
     <div
       v-if="showMainInfoModal"
-      class="fixed inset-0 z-[266] flex items-center justify-center bg-black/65 p-3"
+      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
       @click.self="showMainInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">😈 Защита этого чата</h3>
+          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.main.title') }}</h3>
               <button
                 type="button"
             class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
@@ -4902,23 +4946,23 @@ const protCardIndigo =
               </button>
             </div>
         <div class="space-y-2 text-xs text-gray-700 dark:text-gray-300">
-          <p>Тумблер касается только того чата, который сейчас открыт — остальные не трогаю.</p>
-          <p><strong>ВКЛ</strong> — работаю по твоим фильтрам и наказаниям, как договорились.</p>
-          <p><strong>ВЫКЛ</strong> — отдыхаю в этом чате, но настройки не стираю, чтобы не собирать заново.</p>
+          <p>{{ tt('protection.modals.main.p1') }}</p>
+          <p>{{ tt('protection.modals.main.p2') }}</p>
+          <p>{{ tt('protection.modals.main.p3') }}</p>
           <p class="text-xs text-slate-400">
-            Удобно на паузу поставить один зал, пока в другом творится праздник.
+            {{ tt('protection.modals.main.p4') }}
           </p>
           </div>
         </div>
     </div>
     <div
       v-if="showReputationWordsModal"
-      class="fixed inset-0 z-[280] flex items-center justify-center bg-black/70 p-3 backdrop-blur-[3px]"
+      class="fixed inset-0 z-[410] flex items-center justify-center bg-black/70 p-3 backdrop-blur-[3px]"
       @click.self="showReputationWordsModal = false"
     >
       <div class="flex max-h-[84vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-white/12 bg-gradient-to-b from-zinc-900/85 to-zinc-950/95 p-3 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.9)] ring-1 ring-inset ring-white/[0.06] backdrop-blur-2xl">
         <div class="mb-2 flex items-center justify-between gap-2 border-b border-white/10 pb-2">
-          <h3 class="text-sm font-semibold text-white">Свои слова</h3>
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.reputation_settings_modal.my_words') }}</h3>
           <button type="button" class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-white/10 hover:text-white" @click="showReputationWordsModal = false">✕</button>
         </div>
         <div class="min-h-0 flex-1 space-y-1.5 overflow-y-auto pr-1">
@@ -4935,12 +4979,12 @@ const protCardIndigo =
     </div>
     <div
       v-if="showReputationTopModal"
-      class="fixed inset-0 z-[281] flex items-center justify-center bg-black/70 p-3 backdrop-blur-[3px]"
+      class="fixed inset-0 z-[410] flex items-center justify-center bg-black/70 p-3 backdrop-blur-[3px]"
       @click.self="showReputationTopModal = false"
     >
       <div class="flex max-h-[84vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-white/12 bg-gradient-to-b from-zinc-900/85 to-zinc-950/95 p-3 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.9)] ring-1 ring-inset ring-white/[0.06] backdrop-blur-2xl">
         <div class="mb-2 flex items-center justify-between gap-2 border-b border-white/10 pb-2">
-          <h3 class="text-sm font-semibold text-white">Топ группы</h3>
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.reputation_settings_modal.top_group') }}</h3>
           <button type="button" class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-white/10 hover:text-white" @click="showReputationTopModal = false">✕</button>
         </div>
         <div class="min-h-0 flex-1 space-y-1.5 overflow-y-auto pr-1">
@@ -4963,12 +5007,12 @@ const protCardIndigo =
     </div>
     <div
       v-if="showChatSwitchInfoModal"
-      class="fixed inset-0 z-[266] flex items-center justify-center bg-black/65 p-3"
+      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
       @click.self="showChatSwitchInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">😈 Выбор чата</h3>
+          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.chat_switch.title') }}</h3>
           <button
             type="button"
             class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
@@ -4978,18 +5022,20 @@ const protCardIndigo =
           </button>
         </div>
         <div class="space-y-2 text-xs text-gray-700 dark:text-gray-300">
-          <p>Сверху видно, какой чат сейчас «на игле» — именно его кручу.</p>
-          <p>«Выбор чата» открывает список подключённых залов и мгновенно перекидывает настройки туда, куда ткнул.</p>
+          <p>{{ tt('protection.modals.chat_switch.p1') }}</p>
+          <p>{{ tt('protection.modals.chat_switch.p2') }}</p>
           <p class="text-xs text-slate-400">
-            Всё, что ниже на экране, относится только к активному чату — без сюрпризов для соседей.
+            {{ tt('protection.modals.chat_switch.p3') }}
           </p>
         </div>
       </div>
     </div>
+    </div>
+    </Teleport>
     <Teleport to="body">
       <div
         v-if="showStopwordsModal"
-        class="fixed inset-0 z-[260] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+        class="fixed inset-0 z-[400] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         role="dialog"
         aria-modal="true"
         aria-labelledby="stopwords-modal-title"
@@ -5001,8 +5047,8 @@ const protCardIndigo =
         >
           <div class="flex shrink-0 items-start justify-between gap-3 border-b border-white/10 px-4 py-3">
             <div>
-              <h3 id="stopwords-modal-title" class="text-sm font-semibold text-white">Стоп-слова</h3>
-              <p class="mt-0.5 text-[11px] text-slate-400">Прокрутка внутри списка · закрыть — вне окна или ✕</p>
+              <h3 id="stopwords-modal-title" class="text-sm font-semibold text-white">{{ tt('protection.ui.stopwords_modal_title') }}</h3>
+              <p class="mt-0.5 text-[11px] text-slate-400">{{ tt('protection.ui.stopwords_modal_hint') }}</p>
             </div>
             <button
               type="button"
@@ -5024,14 +5070,14 @@ const protCardIndigo =
                   type="button"
                   class="rounded-lg px-2 py-1 text-xs text-rose-300 hover:bg-rose-500/15"
                   :disabled="stopwordLoading"
-                  aria-label="Удалить"
+                  :aria-label="tt('protection.ui.stopwords_row_remove')"
                   @click="removeStopword(w)"
                 >
-                  Удалить
+                  {{ tt('protection.ui.stopwords_row_remove') }}
                 </button>
               </li>
             </ul>
-            <p v-else class="py-8 text-center text-sm text-slate-500">Список пуст</p>
+            <p v-else class="py-8 text-center text-sm text-slate-500">{{ tt('protection.ui.stopwords_empty_modal') }}</p>
           </div>
         </div>
       </div>
@@ -5040,7 +5086,7 @@ const protCardIndigo =
     <Teleport to="body">
       <div
         v-if="showProtectionPinModal"
-        class="fixed inset-0 z-[305] flex items-end justify-center bg-black/75 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] backdrop-blur-md md:items-center md:pb-6"
+        class="fixed inset-0 z-[480] flex items-end justify-center bg-black/75 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] backdrop-blur-md md:items-center md:pb-6"
         role="dialog"
         aria-modal="true"
         @click.self="cancelProtectionPin"
@@ -5051,10 +5097,10 @@ const protCardIndigo =
         >
           <span aria-hidden="true" class="pointer-events-none absolute -right-16 -top-16 h-44 w-44 rounded-full bg-emerald-400/20 blur-3xl" />
           <div class="relative mb-2 flex items-center justify-between gap-2">
-            <h3 class="truncate text-base font-extrabold text-white">PIN-код</h3>
+            <h3 class="truncate text-base font-extrabold text-white">{{ tt('protection.pin_modal.title') }}</h3>
             <button type="button" class="rounded-full bg-white/10 px-2 py-1 text-sm text-white/85 transition hover:bg-white/15" @click="cancelProtectionPin">✕</button>
           </div>
-          <p class="relative mb-3 text-[12px] text-white/65">Введите PIN из настроек безопасности, чтобы поставить Guard на паузу.</p>
+          <p class="relative mb-3 text-[12px] text-white/65">{{ tt('protection.pin_modal.body') }}</p>
           <input
             v-model="protectionPinInput"
             type="password"
@@ -5068,8 +5114,8 @@ const protCardIndigo =
           />
           <p v-if="protectionPinError" class="relative mb-2 text-[11px] font-semibold text-rose-200">{{ protectionPinError }}</p>
           <div class="relative flex justify-end gap-2">
-            <button type="button" class="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold text-white/85 transition hover:bg-white/15" @click="cancelProtectionPin">Отмена</button>
-            <button type="button" class="rounded-lg bg-emerald-500/30 px-3 py-1.5 text-xs font-bold text-emerald-100 transition hover:bg-emerald-500/40" @click="submitProtectionPin">Продолжить</button>
+            <button type="button" class="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold text-white/85 transition hover:bg-white/15" @click="cancelProtectionPin">{{ tt('protection.pin_modal.cancel') }}</button>
+            <button type="button" class="rounded-lg bg-emerald-500/30 px-3 py-1.5 text-xs font-bold text-emerald-100 transition hover:bg-emerald-500/40" @click="submitProtectionPin">{{ tt('protection.pin_modal.continue') }}</button>
           </div>
         </div>
       </div>
@@ -5104,7 +5150,7 @@ const protCardIndigo =
           <div class="mb-2 flex justify-end">
             <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="welcomeImagePreviewUrl = ''">✕</button>
           </div>
-          <img :src="welcomeImagePreviewUrl" alt="Превью фото приветствия" class="max-h-[78vh] w-full rounded-lg object-contain" />
+          <img :src="welcomeImagePreviewUrl" :alt="tt('protection.ui.welcome_photo_preview_alt')" class="max-h-[78vh] w-full rounded-lg object-contain" />
         </div>
       </div>
     </Teleport>
@@ -5123,12 +5169,12 @@ const protCardIndigo =
         >
           <div class="flex items-center justify-between border-b border-white/6 bg-gradient-to-r from-white/[0.04] to-transparent px-4 py-3">
             <div class="flex items-center gap-2">
-              <h3 class="text-sm font-semibold text-white">👋 Приветствие новых участников</h3>
+              <h3 class="text-sm font-semibold text-white">{{ tt('protection.welcome_modal.title') }}</h3>
               <button
                 type="button"
                 class="link-glass-info-btn"
                 :class="welcomeInfoModal === 'main' ? 'link-glass-info-btn--active' : ''"
-                aria-label="Подсказка: автоприветствие в этом чате"
+                :aria-label="tt('protection.ui.welcome_hint_main_aria')"
                 @click="welcomeInfoModal = welcomeInfoModal === 'main' ? '' : 'main'"
               >ⓘ</button>
             </div>
@@ -5136,44 +5182,44 @@ const protCardIndigo =
           </div>
           <div class="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3 sm:px-4">
             <div class="glass-panel flex items-center justify-between gap-2 p-3">
-              <span class="text-xs text-slate-200">Включить приветствие в этом чате</span>
+              <span class="text-xs text-slate-200">{{ tt('protection.welcome_modal.enable_label') }}</span>
               <button
                 type="button"
                 :class="boolToggleClass(!!welcomeForm.enabled)"
                 class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium"
                 @click="welcomeForm.enabled = !welcomeForm.enabled"
               >
-                {{ welcomeForm.enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+                {{ welcomeForm.enabled ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}
               </button>
             </div>
             <p
               v-if="chat?.rule?.delete_join_messages"
               class="rounded-xl border border-amber-400/25 bg-amber-950/20 px-3 py-2 text-[11px] leading-relaxed text-amber-100"
             >
-              Сейчас включено удаление сервисного «вступил». Поэтому в чате не видно системную плашку входа, но приветствие всё равно отправится новому участнику.
+              {{ tt('protection.welcome_modal.service_join_hint') }}
             </p>
             <div class="glass-panel p-3">
               <div class="mb-2 flex items-center justify-between gap-2">
-                <p class="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Оформление текста</p>
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ tt('protection.welcome_modal.format_heading') }}</p>
                 <button
                   type="button"
                   class="link-glass-info-btn"
                   :class="welcomeInfoModal === 'text' ? 'link-glass-info-btn--active' : ''"
-                  aria-label="Подсказка: редактор и плейсхолдеры"
+                  :aria-label="tt('protection.ui.welcome_hint_editor_aria')"
                   @click="welcomeInfoModal = welcomeInfoModal === 'text' ? '' : 'text'"
                 >ⓘ</button>
               </div>
               <div class="mb-2 flex flex-wrap items-center gap-2">
                 <label class="post-rules-tool-btn cursor-pointer px-3 py-1.5 text-[11px] font-semibold">
-                  <span v-if="welcomePhotoBusy">Загрузка…</span>
-                  <span v-else>Добавить фото</span>
+                  <span v-if="welcomePhotoBusy">{{ tt('protection.welcome_modal.photo_loading') }}</span>
+                  <span v-else>{{ tt('protection.welcome_modal.add_photo') }}</span>
                   <input type="file" accept="image/*" class="hidden" :disabled="welcomePhotoBusy || welcomeBusy" @change="onWelcomePhotoPicked" />
                 </label>
                 <button
                   v-if="welcomePreviewUrl"
                   type="button"
                   class="h-9 w-9 shrink-0 overflow-hidden rounded-lg border border-white/12 bg-black/40 ring-1 ring-white/10"
-                  title="Открыть превью"
+                  :title="tt('protection.welcome_modal.open_preview')"
                   @click="openWelcomeImagePreview()"
                 >
                   <img :src="welcomePreviewUrl" alt="" class="h-full w-full object-cover" />
@@ -5184,13 +5230,13 @@ const protCardIndigo =
                   class="post-rules-tool-btn border-rose-400/30 bg-rose-500/15 px-2 py-1 text-[10px] text-rose-100"
                   :disabled="welcomePhotoBusy"
                   @click="removeWelcomePhoto()"
-                >Удалить фото</button>
+                >{{ tt('protection.welcome_modal.remove_photo') }}</button>
                 <button
                   type="button"
                   class="post-rules-tool-btn px-3 py-1.5 text-[11px] font-semibold"
                   @click="welcomeInfoModal = ''; showWelcomeButtonsModal = true"
                 >
-                  ＋ Кнопки под постом
+                  {{ tt('protection.welcome_modal.buttons_under_post') }}
                 </button>
               </div>
               <div class="mb-2 flex flex-wrap gap-1.5">
@@ -5198,97 +5244,97 @@ const protCardIndigo =
                   type="button"
                   class="post-rules-tool-btn font-semibold"
                   :class="welcomeFormatState.bold ? 'border-white/35 bg-white/10' : ''"
-                  title="Жирный"
+                  :title="tt('protection.welcome_modal.bold')"
                   @mousedown.prevent
                   @click="welcomeFormatBold"
-                >Ж</button>
+                >{{ tt('protection.welcome_modal.format_bold_key') }}</button>
                 <button
                   type="button"
                   class="post-rules-tool-btn italic font-semibold"
                   :class="welcomeFormatState.italic ? 'border-white/35 bg-white/10' : ''"
-                  title="Курсив"
+                  :title="tt('protection.welcome_modal.italic')"
                   @mousedown.prevent
                   @click="welcomeFormatItalic"
-                >К</button>
+                >{{ tt('protection.welcome_modal.format_italic_key') }}</button>
                 <button
                   type="button"
                   class="post-rules-tool-btn font-semibold underline"
                   :class="welcomeFormatState.underline ? 'border-white/35 bg-white/10' : ''"
-                  title="Подчёркнутый"
+                  :title="tt('protection.welcome_modal.underline')"
                   @mousedown.prevent
                   @click="welcomeFormatUnderline"
-                >Ч</button>
+                >{{ tt('protection.welcome_modal.format_underline_key') }}</button>
                 <button
                   type="button"
                   class="post-rules-tool-btn font-semibold line-through"
                   :class="welcomeFormatState.strike ? 'border-white/35 bg-white/10' : ''"
-                  title="Зачёркнутый"
+                  :title="tt('protection.welcome_modal.strike')"
                   @mousedown.prevent
                   @click="welcomeFormatStrike"
-                >З</button>
-                <button type="button" class="post-rules-tool-btn" title="Скрытый" @mousedown.prevent @click="welcomeFormatSpoiler">👁</button>
-                <button type="button" class="post-rules-tool-btn" title="Код" @mousedown.prevent @click="welcomeFormatCode">Код</button>
-                <button type="button" class="post-rules-tool-btn" title="PRE" @mousedown.prevent @click="welcomeFormatPre">PRE</button>
-                <button type="button" class="post-rules-tool-btn" title="Цитата" @mousedown.prevent @click="welcomeFormatBlockquote">❝ Цитата</button>
-                <button type="button" class="post-rules-tool-btn" title="Ссылка" @mousedown.prevent @click="welcomeFormatLink">🔗 Ссылка</button>
-                <button type="button" class="post-rules-tool-btn" title="Имя вступившего (как в Telegram)" @mousedown.prevent @click="welcomeInsertPlain('{first_name}')">{first_name}</button>
-                <button type="button" class="post-rules-tool-btn" title="Полное имя" @mousedown.prevent @click="welcomeInsertPlain('{full_name}')">{full_name}</button>
-                <button type="button" class="post-rules-tool-btn" title="Ник @username или пусто" @mousedown.prevent @click="welcomeInsertPlain('{username}')">{username}</button>
-                <button type="button" class="post-rules-tool-btn" title="Название этой группы" @mousedown.prevent @click="welcomeInsertPlain('{chat_title}')">{chat_title}</button>
+                >{{ tt('protection.welcome_modal.format_strike_key') }}</button>
+                <button type="button" class="post-rules-tool-btn" :title="tt('protection.welcome_modal.spoiler')" @mousedown.prevent @click="welcomeFormatSpoiler">👁</button>
+                <button type="button" class="post-rules-tool-btn" :title="tt('protection.welcome_modal.code')" @mousedown.prevent @click="welcomeFormatCode">{{ tt('protection.welcome_modal.code') }}</button>
+                <button type="button" class="post-rules-tool-btn" :title="tt('protection.welcome_modal.pre')" @mousedown.prevent @click="welcomeFormatPre">PRE</button>
+                <button type="button" class="post-rules-tool-btn" :title="tt('protection.welcome_modal.quote')" @mousedown.prevent @click="welcomeFormatBlockquote">{{ tt('protection.welcome_modal.quote_btn') }}</button>
+                <button type="button" class="post-rules-tool-btn" :title="tt('protection.welcome_modal.link')" @mousedown.prevent @click="welcomeFormatLink">{{ tt('protection.welcome_modal.link_btn') }}</button>
+                <button type="button" class="post-rules-tool-btn" :title="tt('protection.welcome_modal.ph_first')" @mousedown.prevent @click="welcomeInsertPlain('{first_name}')">{first_name}</button>
+                <button type="button" class="post-rules-tool-btn" :title="tt('protection.welcome_modal.ph_full')" @mousedown.prevent @click="welcomeInsertPlain('{full_name}')">{full_name}</button>
+                <button type="button" class="post-rules-tool-btn" :title="tt('protection.welcome_modal.ph_user')" @mousedown.prevent @click="welcomeInsertPlain('{username}')">{username}</button>
+                <button type="button" class="post-rules-tool-btn" :title="tt('protection.welcome_modal.ph_chat')" @mousedown.prevent @click="welcomeInsertPlain('{chat_title}')">{chat_title}</button>
               </div>
-              <p class="mb-1 text-[10px] font-medium uppercase tracking-wide text-zinc-500">Текст приветствия</p>
+              <p class="mb-1 text-[10px] font-medium uppercase tracking-wide text-zinc-500">{{ tt('protection.welcome_modal.welcome_text_label') }}</p>
               <div class="mb-1.5 flex flex-wrap gap-1.5">
                 <button
                   type="button"
                   class="post-rules-tool-btn px-2.5 text-zinc-200"
                   :class="!welcomeCanUndo() ? 'opacity-40' : ''"
                   :disabled="!welcomeCanUndo()"
-                  title="Откат"
+                  :title="tt('protection.welcome_modal.undo_hint')"
                   @mousedown.prevent
                   @click="welcomeUndo"
-                >↶ Назад</button>
+                >{{ tt('protection.welcome_modal.nav_back') }}</button>
                 <button
                   type="button"
                   class="post-rules-tool-btn px-2.5 text-zinc-200"
                   :class="!welcomeCanRedo() ? 'opacity-40' : ''"
                   :disabled="!welcomeCanRedo()"
-                  title="Повтор"
+                  :title="tt('protection.welcome_modal.redo_hint')"
                   @mousedown.prevent
                   @click="welcomeRedo"
-                >↷ Вперёд</button>
+                >{{ tt('protection.welcome_modal.nav_forward') }}</button>
               </div>
               <div
                 ref="welcomeBodyRef"
                 contenteditable="true"
                 class="welcome-rich-editor max-h-56 min-h-[8rem] w-full overflow-y-auto rounded-xl border border-white/10 bg-slate-950/90 px-3 py-2 text-sm leading-relaxed text-slate-100 focus-within:border-white/20 focus-within:ring-1 focus-within:ring-white/10"
-                data-placeholder="Привет, {first_name}! Добро пожаловать в {chat_title}"
+                :data-placeholder="tt('protection.welcome_modal.placeholder_example')"
                 @input="onWelcomeBodyInput"
                 @click="onWelcomeBodyClick"
                 @mouseup="onWelcomeEditorSelectionChange"
                 @keyup="onWelcomeEditorSelectionChange"
               />
               <p class="mt-1 text-[10px] leading-relaxed text-zinc-500">
-                Плейсхолдеры: <strong>{first_name}</strong> — имя, <strong>{full_name}</strong> — полное имя, <strong>{username}</strong> — @ник или пусто, <strong>{chat_title}</strong> — название чата. Настройки привязаны к этому чату и синхронизируются с сервером для вашего аккаунта.
+                {{ tt('protection.welcome_modal.placeholders_hint') }}
               </p>
             </div>
             <div class="glass-panel p-3">
               <div class="mb-2 flex items-center justify-between gap-2">
-                <p class="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Частота отправки</p>
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ tt('protection.welcome_modal.rate_heading') }}</p>
                 <button
                   type="button"
                   class="link-glass-info-btn"
                   :class="welcomeInfoModal === 'rate' ? 'link-glass-info-btn--active' : ''"
-                  aria-label="Подсказка: кому писать и лимит в минуту"
+                  :aria-label="tt('protection.ui.welcome_hint_rate_aria')"
                   @click="welcomeInfoModal = welcomeInfoModal === 'rate' ? '' : 'rate'"
                 >ⓘ</button>
               </div>
               <div class="mb-2 grid grid-cols-2 gap-2">
                 <div>
-                  <p class="mb-1 text-[10px] text-zinc-500">Отправлять каждому N-му вступившему</p>
+                  <p class="mb-1 text-[10px] text-zinc-500">{{ tt('protection.welcome_modal.every_nth') }}</p>
                   <input v-model.number="welcomeForm.everyNJoins" type="number" min="1" max="500" class="w-full rounded-lg border border-white/14 bg-white/[0.06] px-2 py-1.5 text-xs" />
                 </div>
                 <div>
-                  <p class="mb-1 text-[10px] text-zinc-500">Доп. лимит сообщений в минуту</p>
+                  <p class="mb-1 text-[10px] text-zinc-500">{{ tt('protection.welcome_modal.extra_limit') }}</p>
                   <div class="flex flex-wrap gap-1.5">
                     <button
                       v-for="n in [0,1,2,3,5,10]"
@@ -5298,7 +5344,7 @@ const protCardIndigo =
                       :class="Number(welcomeForm.maxPerMin || 0) === n ? 'guard-green-soft text-slate-900' : protToggleOff"
                       @click="welcomeForm.maxPerMin = n"
                     >
-                      {{ n === 0 ? 'без лимита' : `${n}/мин` }}
+                      {{ n === 0 ? tt('protection.welcome_modal.no_limit') : tt('protection.welcome_modal.per_min', { n }) }}
                     </button>
                   </div>
                 </div>
@@ -5307,12 +5353,12 @@ const protCardIndigo =
             <div class="glass-panel p-3">
               <div class="flex items-center justify-between gap-2">
                 <div class="flex min-w-0 items-center gap-1.5">
-                  <span class="text-xs text-slate-200">Молчать при рейде</span>
+                  <span class="text-xs text-slate-200">{{ tt('protection.welcome_modal.silent_raid') }}</span>
                   <button
                     type="button"
                     class="link-glass-info-btn shrink-0"
                     :class="welcomeInfoModal === 'raid' ? 'link-glass-info-btn--active' : ''"
-                    aria-label="Подсказка: тишина при всплеске входов"
+                    :aria-label="tt('protection.ui.welcome_hint_raid_aria')"
                     @click="welcomeInfoModal = welcomeInfoModal === 'raid' ? '' : 'raid'"
                   >ⓘ</button>
                 </div>
@@ -5322,24 +5368,24 @@ const protCardIndigo =
                   class="min-w-[5rem] shrink-0 rounded-lg px-2.5 py-1 text-xs font-medium"
                   @click="welcomeForm.silentOnRaid = !welcomeForm.silentOnRaid"
                 >
-                  {{ welcomeForm.silentOnRaid ? 'ВКЛ' : 'ВЫКЛ' }}
+                  {{ welcomeForm.silentOnRaid ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}
                 </button>
               </div>
               <div v-if="welcomeForm.silentOnRaid" class="mt-2 grid grid-cols-2 gap-2">
                 <div>
-                  <p class="mb-1 text-[10px] text-zinc-500">Порог входов</p>
+                  <p class="mb-1 text-[10px] text-zinc-500">{{ tt('protection.welcome_modal.raid_threshold') }}</p>
                   <input v-model.number="welcomeForm.raidThreshold" type="number" min="2" max="200" class="w-full rounded-lg border border-white/14 bg-white/[0.06] px-2 py-1.5 text-xs" />
                 </div>
                 <div>
-                  <p class="mb-1 text-[10px] text-zinc-500">Окно (мин)</p>
+                  <p class="mb-1 text-[10px] text-zinc-500">{{ tt('protection.welcome_modal.raid_window') }}</p>
                   <input v-model.number="welcomeForm.raidWindowMinutes" type="number" min="1" max="60" class="w-full rounded-lg border border-white/14 bg-white/[0.06] px-2 py-1.5 text-xs" />
                 </div>
               </div>
             </div>
           </div>
           <div class="flex items-center justify-end gap-2 border-t border-white/10 px-3 py-2.5 sm:px-4">
-            <button type="button" class="post-rules-action-btn post-rules-action-btn--cancel" @click="showWelcomeSettingsModal = false">Отмена</button>
-            <button type="button" class="post-rules-action-btn post-rules-action-btn--save" :disabled="welcomeBusy" @click="saveWelcomeSettings()">{{ welcomeBusy ? 'Сохранение…' : 'Сохранить' }}</button>
+            <button type="button" class="post-rules-action-btn post-rules-action-btn--cancel" @click="showWelcomeSettingsModal = false">{{ tt('protection.welcome_modal.cancel') }}</button>
+            <button type="button" class="post-rules-action-btn post-rules-action-btn--save" :disabled="welcomeBusy" @click="saveWelcomeSettings()">{{ welcomeBusy ? tt('protection.welcome_modal.saving') : tt('protection.welcome_modal.save') }}</button>
           </div>
         </div>
       </div>
@@ -5360,7 +5406,7 @@ const protCardIndigo =
           <div class="flex items-center justify-between border-b border-white/6 bg-gradient-to-r from-white/[0.04] to-transparent px-4 py-3">
             <div>
               <div class="flex items-center gap-2">
-                <h3 class="text-sm font-semibold text-white">⚙️ Защита · правила в группе</h3>
+                <h3 class="text-sm font-semibold text-white">{{ tt('protection.group_rules_ui.header_title') }}</h3>
                 <span
                   class="inline-flex h-2.5 w-2.5 rounded-full"
                   :class="postRulesServerDirty ? 'bg-rose-400' : 'bg-emerald-400'"
@@ -5368,18 +5414,19 @@ const protCardIndigo =
                 />
               </div>
               <p class="text-[10px]" :class="postRulesServerDirty ? 'text-rose-300' : 'text-emerald-300'">{{ postRulesGroupEditingLabel }}</p>
-              <p class="truncate text-[11px] text-slate-400">Группа: {{ postRulesCurrentGroupTitle() }}</p>
+              <p class="truncate text-[11px] text-slate-400">{{ tt('protection.group_rules_ui.group_prefix') }} {{ postRulesCurrentGroupTitle() }}</p>
             </div>
             <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-white/10" @click="closePostRulesSettingsModal()">✕</button>
           </div>
 
           <div class="space-y-2 px-4 pt-2">
             <div class="flex items-center justify-between gap-2">
-              <span class="text-[11px] text-slate-500">Правила в Telegram</span>
+              <span class="text-[11px] text-slate-500">{{ tt('protection.ui.group_rules_panel_label') }}</span>
               <div class="flex items-center gap-1.5">
                 <button
                   type="button"
                   class="inline-flex h-5 min-w-5 items-center justify-center rounded-full border border-cyan-400/35 bg-cyan-950/30 px-1 text-[10px] font-extrabold text-cyan-200"
+                  :aria-label="tt('protection.ui.info_group_rules_telegram_aria')"
                   @click="postRulesGroupInfoOpen = !postRulesGroupInfoOpen"
                 >i</button>
                 <button
@@ -5387,50 +5434,50 @@ const protCardIndigo =
                   :class="boolToggleClass(!!postRulesGroupForm.enabled)"
                   class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium"
                   @click="postRulesGroupForm.enabled = !postRulesGroupForm.enabled; postRulesTouchServerDirty()"
-                >{{ postRulesGroupForm.enabled ? 'ВКЛ' : 'ВЫКЛ' }}</button>
+                >{{ postRulesGroupForm.enabled ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}</button>
               </div>
             </div>
             <div
               v-if="postRulesGroupInfoOpen"
               class="max-h-[min(42vh,18rem)] overflow-y-auto overscroll-y-contain rounded-lg border border-cyan-400/20 bg-cyan-950/20 px-2.5 py-2 text-[11px] leading-snug text-cyan-100 [-webkit-overflow-scrolling:touch]"
             >
-              <p class="mb-1 font-semibold text-cyan-50">Как это работает (Guard)</p>
-              <p>• <b>ВКЛ</b> — шаблон правил активен: ручная отправка и автоотправка (если включены сценарии ниже). Без ВКЛ бот не шлёт правила в чат.</p>
-              <p>• <b>«Любое срабатывание фильтра»</b> — Guard уже принял решение по сообщению (удалил, замутил, забанил или включил режим observe). Счётчик растёт на <b>каждое</b> такое событие; каждые N — пост с правилами.</p>
-              <p>• <b>«На наказание»</b> — только если реально применилось жёсткое действие: сообщение удалено, или мут/бан удалось применить. Режим observe без удаления сюда не входит.</p>
-              <p>• Если в одном сообщении выполнены оба порога — уходит <b>одно</b> сообщение с правилами.</p>
-              <p>• <b>«Запуск»</b> — выбранный шаблон записывается в настройки Telegram-бота: его текст/фото/кнопки пойдут в авто и в ручную рассылку, пока не выключите (ВЫКЛ) не переключите на другой шаблон. Без запуска правила в БД остаются от «Сохранить», не от черновиков. Ручной «Отправить в группу» с несколькими шаблонами — сначала выбор черновика; по умолчанию предлагается последний изменённый или тот, что в «Запуске».</p>
-              <p>• <b>Шаблоны</b> — синхронизируются с сервером для вашего Telegram-аккаунта (телефон и ПК один список, без перемешивания). Очень большие встроенные картинки в шаблоне могут не уместиться в облако — тогда превью подтянется с сервера правил чата. При закрытии окна несохранённые правки в Telegram (включая автоотправку) сохраняются на сервер, если были изменения.</p>
-              <p>• <b>Логи автоотправки</b> — на сервере бота: <code class="rounded bg-black/30 px-1">grep group_rules_autosend</code>. События <code class="rounded bg-black/30 px-1">attempt</code> / <code class="rounded bg-black/30 px-1">ok</code> / <code class="rounded bg-black/30 px-1">send_failed</code> — INFO; счётчики «ещё не N» (<code class="rounded bg-black/30 px-1">wait</code>), пропуски (<code class="rounded bg-black/30 px-1">skip</code>), снимок после действия (<code class="rounded bg-black/30 px-1">after_act</code>) — DEBUG (включите DEBUG на логгере приложения).</p>
+              <p class="mb-1 font-semibold text-cyan-50">{{ tt('protection.ui.group_rules_help_title') }}</p>
+              <p>{{ tt('protection.ui.group_rules_help_1') }}</p>
+              <p>{{ tt('protection.ui.group_rules_help_2') }}</p>
+              <p>{{ tt('protection.ui.group_rules_help_3') }}</p>
+              <p>{{ tt('protection.ui.group_rules_help_4') }}</p>
+              <p>{{ tt('protection.ui.group_rules_help_5') }}</p>
+              <p>{{ tt('protection.ui.group_rules_help_6') }}</p>
+              <p>{{ tt('protection.ui.group_rules_help_7') }}</p>
             </div>
             <div v-if="postRulesUnsavedBanner" class="rounded-lg border border-amber-400/25 bg-amber-950/25 px-2.5 py-2 text-[11px] text-amber-100">
-              Есть несохранённые изменения: сначала «Сохранить черновик» (шаблон), затем «Сохранить» (в Telegram).
+              {{ tt('protection.ui.group_rules_unsaved_hint') }}
             </div>
             <div v-if="postRulesShowSaved" class="rounded-lg border border-emerald-400/25 bg-emerald-950/25 px-2.5 py-2 text-[11px] text-emerald-100">
-              Изменения в Telegram сохранены
+              {{ tt('protection.ui.group_rules_saved_telegram') }}
             </div>
           </div>
 
           <div class="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3 sm:px-4">
               <div class="glass-panel p-3">
                 <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
-                  <p class="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Черновики</p>
+                  <p class="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ tt('protection.group_rules_ui.drafts') }}</p>
                   <div class="flex flex-wrap items-center justify-end gap-1.5">
                     <button
                       type="button"
                       class="rounded-lg border border-emerald-400/40 bg-emerald-500/15 px-2 py-1 text-[11px] font-semibold text-emerald-100 hover:bg-emerald-500/25"
                       @click="postRulesCreateGroupDraft()"
-                    >Создать черновик</button>
+                    >{{ tt('protection.group_rules_ui.create_draft') }}</button>
                     <button
                       v-if="postRulesShowSaveDraftButton"
                       type="button"
                       class="rounded-lg border border-violet-400/45 bg-violet-500/20 px-2 py-1 text-[11px] font-semibold text-violet-100 hover:bg-violet-500/30"
                       @click="postRulesSaveDraft()"
-                    >Сохранить черновик</button>
+                    >{{ tt('protection.group_rules_ui.save_draft') }}</button>
                   </div>
                 </div>
-                <p v-if="postRulesEditingDraftName" class="mb-2 text-[11px] text-cyan-200">Сейчас правим: {{ postRulesEditingDraftName }}</p>
-                <p class="mb-2 text-[11px] text-slate-400">Чат: {{ postRulesCurrentGroupTitle() }}</p>
+                <p v-if="postRulesEditingDraftName" class="mb-2 text-[11px] text-cyan-200">{{ tt('protection.group_rules_ui.editing_now') }} {{ postRulesEditingDraftName }}</p>
+                <p class="mb-2 text-[11px] text-slate-400">{{ tt('protection.group_rules_ui.chat_label') }} {{ postRulesCurrentGroupTitle() }}</p>
                 <div class="space-y-1.5">
                   <div
                     v-for="d in postRulesDraftsForChat.slice(0, 8)"
@@ -5441,7 +5488,7 @@ const protCardIndigo =
                     <span
                       class="inline-flex h-2 w-2 shrink-0 rounded-full"
                       :class="String(postRulesGroupRunActiveId || '') === String(d.id || '') ? 'bg-emerald-400' : 'bg-zinc-600'"
-                      :title="String(postRulesGroupRunActiveId || '') === String(d.id || '') ? 'Запущен в Telegram' : 'Не запущен'"
+                      :title="String(postRulesGroupRunActiveId || '') === String(d.id || '') ? tt('protection.group_rules_ui.tt_launched') : tt('protection.group_rules_ui.tt_not_launched')"
                     />
                     <div class="min-w-0 flex-1">
                       <div class="flex min-w-0 items-center gap-2">
@@ -5461,64 +5508,64 @@ const protCardIndigo =
                       </div>
                       <p class="text-[10px] text-slate-500">{{ postRulesDraftSavedAtLabel(d.savedAt) }}</p>
                     </div>
-                    <button type="button" class="rounded border border-white/20 bg-white/[0.08] px-1.5 py-0.5 text-[10px] text-slate-200" :disabled="postRulesDraftLoadingId === d.id" @click="postRulesApplyDraft(d)">{{ postRulesDraftLoadingId === d.id ? '…' : 'Править' }}</button>
+                    <button type="button" class="rounded border border-white/20 bg-white/[0.08] px-1.5 py-0.5 text-[10px] text-slate-200" :disabled="postRulesDraftLoadingId === d.id" @click="postRulesApplyDraft(d)">{{ postRulesDraftLoadingId === d.id ? '…' : tt('protection.group_rules_ui.edit') }}</button>
                     <button
                       type="button"
                       class="rounded px-1.5 py-0.5 text-[10px] font-semibold"
                       :disabled="!!postRulesGroupRunDraftBusyId"
                       :class="String(postRulesGroupRunActiveId || '') === String(d.id || '') ? 'border border-rose-400/35 bg-rose-500/20 text-rose-100' : 'border border-emerald-400/35 bg-emerald-500/20 text-emerald-100'"
                       @click="postRulesToggleRunGroupDraft(d)"
-                    >{{ String(postRulesGroupRunDraftBusyId || '') === String(d.id) ? '…' : (String(postRulesGroupRunActiveId || '') === String(d.id) ? 'ВЫКЛ' : 'Запуск') }}</button>
+                    >{{ String(postRulesGroupRunDraftBusyId || '') === String(d.id) ? '…' : (String(postRulesGroupRunActiveId || '') === String(d.id) ? tt('protection.group_rules_ui.launch_off') : tt('protection.group_rules_ui.launch')) }}</button>
                     <button type="button" class="rounded border border-rose-400/25 bg-rose-500/15 px-1 py-0.5 text-[10px] text-rose-100 hover:bg-rose-500/25" @click="postRulesDeleteDraft(d.id)">🗑</button>
                   </div>
-                  <p v-if="!postRulesDraftsForChat.length" class="text-[11px] text-slate-500">Черновиков пока нет.</p>
+                  <p v-if="!postRulesDraftsForChat.length" class="text-[11px] text-slate-500">{{ tt('protection.group_rules_ui.no_drafts') }}</p>
                 </div>
               </div>
 
               <div class="glass-panel p-3">
-                <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Автоотправка в чат</p>
-                <p class="mb-2 text-[10px] text-slate-500">Только при включённом <b>ВКЛ</b> выше. Два независимых счётчика — «любой исход фильтра» и «только наказание».</p>
+                <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ tt('protection.group_rules_ui.autosend_title') }}</p>
+                <p class="mb-2 text-[10px] text-slate-500">{{ tt('protection.group_rules_ui.autosend_hint') }}</p>
                 <div class="space-y-2">
                   <div class="flex items-center justify-between gap-2">
-                    <span class="max-w-[14rem] text-xs leading-snug text-slate-200">Любое срабатывание фильтра</span>
-                    <button type="button" :class="boolToggleClass(!!postRulesGroupForm.eventOnTrigger)" class="min-w-[5rem] shrink-0 rounded-lg px-2.5 py-1 text-xs font-medium" @click="postRulesGroupForm.eventOnTrigger = !postRulesGroupForm.eventOnTrigger; postRulesTouchServerDirty()">{{ postRulesGroupForm.eventOnTrigger ? 'ВКЛ' : 'ВЫКЛ' }}</button>
+                    <span class="max-w-[14rem] text-xs leading-snug text-slate-200">{{ tt('protection.group_rules_ui.filter_any') }}</span>
+                    <button type="button" :class="boolToggleClass(!!postRulesGroupForm.eventOnTrigger)" class="min-w-[5rem] shrink-0 rounded-lg px-2.5 py-1 text-xs font-medium" @click="postRulesGroupForm.eventOnTrigger = !postRulesGroupForm.eventOnTrigger; postRulesTouchServerDirty()">{{ postRulesGroupForm.eventOnTrigger ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}</button>
                   </div>
                   <div v-if="postRulesGroupForm.eventOnTrigger" class="flex items-center justify-between gap-2">
-                    <span class="text-[11px] text-slate-400">Каждые N таких событий</span>
+                    <span class="text-[11px] text-slate-400">{{ tt('protection.group_rules_ui.every_n_events') }}</span>
                     <input v-model.number="postRulesGroupForm.eventTriggerEveryN" type="number" min="1" max="500" class="w-24 rounded-lg border border-white/14 bg-white/[0.06] px-2 py-1 text-xs" @input="postRulesTouchServerDirty()" />
                   </div>
                   <div class="flex items-center justify-between gap-2">
-                    <span class="text-xs text-slate-200">На наказание (delete / мут / бан)</span>
-                    <button type="button" :class="boolToggleClass(!!postRulesGroupForm.eventOnPunish)" class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium" @click="postRulesGroupForm.eventOnPunish = !postRulesGroupForm.eventOnPunish; postRulesTouchServerDirty()">{{ postRulesGroupForm.eventOnPunish ? 'ВКЛ' : 'ВЫКЛ' }}</button>
+                    <span class="text-xs text-slate-200">{{ tt('protection.group_rules_ui.on_punish') }}</span>
+                    <button type="button" :class="boolToggleClass(!!postRulesGroupForm.eventOnPunish)" class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium" @click="postRulesGroupForm.eventOnPunish = !postRulesGroupForm.eventOnPunish; postRulesTouchServerDirty()">{{ postRulesGroupForm.eventOnPunish ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}</button>
                   </div>
                   <div v-if="postRulesGroupForm.eventOnPunish" class="flex items-center justify-between gap-2">
-                    <span class="text-[11px] text-slate-400">Каждые N наказаний</span>
+                    <span class="text-[11px] text-slate-400">{{ tt('protection.group_rules_ui.every_n_punish') }}</span>
                     <input v-model.number="postRulesGroupForm.eventPunishEveryN" type="number" min="1" max="500" class="w-24 rounded-lg border border-white/14 bg-white/[0.06] px-2 py-1 text-xs" @input="postRulesTouchServerDirty()" />
                   </div>
                 </div>
               </div>
 
               <div class="glass-panel p-3" :class="postRulesGroupBodyPanelLocked ? 'border-amber-400/15' : ''">
-                <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Текст правил для группы</p>
+                <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ tt('protection.group_rules_ui.rules_text') }}</p>
                 <p
                   v-if="postRulesGroupBodyPanelLocked"
                   class="mb-2 rounded-lg border border-amber-400/25 bg-amber-950/25 px-2.5 py-2 text-[11px] text-amber-100"
                 >
-                  Редактирование текста, фото и кнопок доступно после «Создать черновик» или «Править» у шаблона выше.
+                  {{ tt('protection.group_rules_ui.locked_hint') }}
                 </p>
                 <div class="mb-1.5 flex flex-wrap gap-1.5" :class="postRulesGroupBodyPanelLocked ? 'pointer-events-none opacity-45' : ''">
-                  <button type="button" class="post-rules-tool-btn font-semibold" :class="postRulesFormatState.bold ? 'border-cyan-400/50 bg-cyan-500/15' : ''" @mousedown.prevent @click="postRulesExec('bold')">Ж</button>
-                  <button type="button" class="post-rules-tool-btn italic" :class="postRulesFormatState.italic ? 'border-cyan-400/50 bg-cyan-500/15' : ''" @mousedown.prevent @click="postRulesExec('italic')">К</button>
-                  <button type="button" class="post-rules-tool-btn underline" :class="postRulesFormatState.underline ? 'border-cyan-400/50 bg-cyan-500/15' : ''" @mousedown.prevent @click="postRulesExec('underline')">Ч</button>
-                  <button type="button" class="post-rules-tool-btn line-through" :class="postRulesFormatState.strike ? 'border-cyan-400/50 bg-cyan-500/15' : ''" @mousedown.prevent @click="postRulesExec('strikeThrough')">З</button>
-                  <button type="button" class="post-rules-tool-btn" @mousedown.prevent @click="postRulesFormatLink">🔗 Ссылка</button>
-                  <button type="button" class="post-rules-tool-btn" @mousedown.prevent @click="postRulesClearFormatting">× Сбросить</button>
+                  <button type="button" class="post-rules-tool-btn font-semibold" :class="postRulesFormatState.bold ? 'border-cyan-400/50 bg-cyan-500/15' : ''" @mousedown.prevent @click="postRulesExec('bold')">{{ tt('protection.welcome_modal.format_bold_key') }}</button>
+                  <button type="button" class="post-rules-tool-btn italic" :class="postRulesFormatState.italic ? 'border-cyan-400/50 bg-cyan-500/15' : ''" @mousedown.prevent @click="postRulesExec('italic')">{{ tt('protection.welcome_modal.format_italic_key') }}</button>
+                  <button type="button" class="post-rules-tool-btn underline" :class="postRulesFormatState.underline ? 'border-cyan-400/50 bg-cyan-500/15' : ''" @mousedown.prevent @click="postRulesExec('underline')">{{ tt('protection.welcome_modal.format_underline_key') }}</button>
+                  <button type="button" class="post-rules-tool-btn line-through" :class="postRulesFormatState.strike ? 'border-cyan-400/50 bg-cyan-500/15' : ''" @mousedown.prevent @click="postRulesExec('strikeThrough')">{{ tt('protection.welcome_modal.format_strike_key') }}</button>
+                  <button type="button" class="post-rules-tool-btn" @mousedown.prevent @click="postRulesFormatLink">{{ tt('protection.welcome_modal.link_btn') }}</button>
+                  <button type="button" class="post-rules-tool-btn" @mousedown.prevent @click="postRulesClearFormatting">{{ tt('protection.group_rules_ui.clear_format') }}</button>
                 </div>
                 <div class="mb-1.5 flex flex-wrap gap-1.5" :class="postRulesGroupBodyPanelLocked ? 'pointer-events-none opacity-45' : ''">
-                  <button type="button" class="post-rules-tool-btn px-2.5 text-zinc-200" :class="!postRulesCanUndo() ? 'opacity-40' : ''" :disabled="!postRulesCanUndo()" @mousedown.prevent @click="postRulesUndo">↶ Назад</button>
-                  <button type="button" class="post-rules-tool-btn px-2.5 text-zinc-200" :class="!postRulesCanRedo() ? 'opacity-40' : ''" :disabled="!postRulesCanRedo()" @mousedown.prevent @click="postRulesRedo">↷ Вперёд</button>
+                  <button type="button" class="post-rules-tool-btn px-2.5 text-zinc-200" :class="!postRulesCanUndo() ? 'opacity-40' : ''" :disabled="!postRulesCanUndo()" @mousedown.prevent @click="postRulesUndo">{{ tt('protection.welcome_modal.nav_back') }}</button>
+                  <button type="button" class="post-rules-tool-btn px-2.5 text-zinc-200" :class="!postRulesCanRedo() ? 'opacity-40' : ''" :disabled="!postRulesCanRedo()" @mousedown.prevent @click="postRulesRedo">{{ tt('protection.welcome_modal.nav_forward') }}</button>
                   <label class="post-rules-tool-btn cursor-pointer">
-                    {{ postRulesBusy ? 'Загрузка фото…' : 'Файл' }}
+                    {{ postRulesBusy ? tt('protection.group_rules_ui.photo_loading') : tt('protection.group_rules_ui.file') }}
                     <input type="file" accept="image/*" class="hidden" :disabled="postRulesBusy || postRulesGroupBodyPanelLocked" @change="onPostRulesPhotoPicked($event)" />
                   </label>
                   <button type="button" class="post-rules-tool-btn" :disabled="postRulesBusy || !postRulesGroupPreviewUrl || postRulesGroupBodyPanelLocked" @click="removePostRulesPhoto()">🗑</button>
@@ -5526,7 +5573,7 @@ const protCardIndigo =
                     <img :src="postRulesGroupPreviewUrl" alt="" class="h-full w-full object-cover" />
                   </button>
                   <div class="flex items-center gap-1">
-                    <button type="button" class="post-rules-tool-btn" :disabled="postRulesGroupBodyPanelLocked" @click="showPostRulesButtonsModal = true">＋ Кнопки</button>
+                    <button type="button" class="post-rules-tool-btn" :disabled="postRulesGroupBodyPanelLocked" @click="showPostRulesButtonsModal = true">{{ tt('protection.group_rules_ui.buttons_inline') }}</button>
                     <span v-if="postRulesGroupInlineButtonCount > 0" class="rounded-md border border-cyan-400/25 bg-cyan-500/15 px-1.5 py-0.5 text-[10px] font-bold text-cyan-100">{{ postRulesGroupInlineButtonCount }}</span>
                   </div>
                 </div>
@@ -5535,7 +5582,7 @@ const protCardIndigo =
                   :contenteditable="!postRulesGroupBodyPanelLocked"
                   class="post-rules-rich-editor max-h-56 min-h-[8rem] w-full overflow-y-auto rounded-xl border border-white/10 bg-slate-950/90 px-3 py-2 text-sm leading-relaxed text-slate-100 focus-within:border-white/20 focus-within:ring-1 focus-within:ring-white/10"
                   :class="postRulesGroupBodyPanelLocked ? 'pointer-events-none select-none opacity-55' : ''"
-                  data-placeholder="Текст правил для группы..."
+                  :data-placeholder="tt('protection.group_rules_ui.placeholder_rules')"
                   @input="onPostRulesBodyInput"
                   @mouseup="postRulesUpdateFormatState"
                   @keyup="postRulesUpdateFormatState"
@@ -5543,33 +5590,33 @@ const protCardIndigo =
               </div>
 
               <div class="glass-panel p-3">
-                <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Закрепление и сервис</p>
+                <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ tt('protection.group_rules_ui.pin_block') }}</p>
                 <div class="flex items-center justify-between gap-2">
-                  <span class="text-xs text-slate-200">Закреплять при отправке</span>
-                  <button type="button" :class="boolToggleClass(!!postRulesGroupForm.pinOnSend)" class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium" @click="postRulesGroupForm.pinOnSend = !postRulesGroupForm.pinOnSend; postRulesTouchServerDirty()">{{ postRulesGroupForm.pinOnSend ? 'ВКЛ' : 'ВЫКЛ' }}</button>
+                  <span class="text-xs text-slate-200">{{ tt('protection.group_rules_ui.pin_on_send') }}</span>
+                  <button type="button" :class="boolToggleClass(!!postRulesGroupForm.pinOnSend)" class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium" @click="postRulesGroupForm.pinOnSend = !postRulesGroupForm.pinOnSend; postRulesTouchServerDirty()">{{ postRulesGroupForm.pinOnSend ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}</button>
                 </div>
                 <div class="mt-2 flex items-center justify-between gap-2">
-                  <span class="text-xs text-slate-200">Удалять «закрепил(а) сообщение»</span>
-                  <button type="button" :class="boolToggleClass(!!postRulesGroupForm.deletePinNotice)" class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium" @click="postRulesGroupForm.deletePinNotice = !postRulesGroupForm.deletePinNotice; postRulesTouchServerDirty()">{{ postRulesGroupForm.deletePinNotice ? 'ВКЛ' : 'ВЫКЛ' }}</button>
+                  <span class="text-xs text-slate-200">{{ tt('protection.group_rules_ui.delete_pin_notice') }}</span>
+                  <button type="button" :class="boolToggleClass(!!postRulesGroupForm.deletePinNotice)" class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium" @click="postRulesGroupForm.deletePinNotice = !postRulesGroupForm.deletePinNotice; postRulesTouchServerDirty()">{{ postRulesGroupForm.deletePinNotice ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}</button>
                 </div>
               </div>
           </div>
 
           <div class="post-rules-footer flex flex-col gap-1 border-t border-white/10 px-3 py-2 sm:px-4">
             <div class="flex flex-wrap items-center justify-end gap-2">
-              <button type="button" class="post-rules-action-btn post-rules-action-btn--cancel" @click="closePostRulesSettingsModal()">Закрыть</button>
+              <button type="button" class="post-rules-action-btn post-rules-action-btn--cancel" @click="closePostRulesSettingsModal()">{{ tt('protection.group_rules_ui.close') }}</button>
               <button
                 type="button"
                 class="post-rules-action-btn border border-cyan-400/40 bg-cyan-500/25 text-cyan-50 hover:bg-cyan-500/35"
                 :disabled="postRulesSendBusy || postRulesSaveBusy"
                 @click="sendPostRulesNowGroup()"
-              >{{ postRulesSendBusy ? 'Отправка…' : 'Отправить в группу' }}</button>
+              >{{ postRulesSendBusy ? tt('protection.group_rules_ui.sending') : tt('protection.group_rules_ui.send_group') }}</button>
               <button
                 type="button"
                 class="post-rules-action-btn post-rules-action-btn--save"
                 :disabled="postRulesSaveBusy"
                 @click="savePostRulesSettings()"
-              >{{ postRulesSaveBusy ? 'Сохранение…' : 'Сохранить' }}</button>
+              >{{ postRulesSaveBusy ? tt('protection.group_rules_ui.save_saving') : tt('protection.group_rules_ui.save') }}</button>
             </div>
           </div>
         </div>
@@ -5586,8 +5633,8 @@ const protCardIndigo =
       >
         <div class="w-full max-w-lg overflow-hidden rounded-[1.25rem] border border-white/12 bg-zinc-950/92 text-zinc-100 shadow-2xl backdrop-blur-2xl ring-1 ring-white/10" @click.stop>
           <div class="border-b border-white/10 bg-gradient-to-r from-white/[0.06] to-transparent px-4 py-3">
-            <h4 class="text-sm font-semibold text-white">Какой шаблон отправить в группу?</h4>
-            <p class="mt-1 text-[11px] text-slate-400">Сначала будет сохранено в настройки Telegram, затем сразу отправка в чат. Глаз — полный предпросмотр.</p>
+            <h4 class="text-sm font-semibold text-white">{{ tt('protection.group_rules_ui.send_pick_title') }}</h4>
+            <p class="mt-1 text-[11px] text-slate-400">{{ tt('protection.group_rules_ui.send_pick_hint') }}</p>
           </div>
           <div class="max-h-[50vh] space-y-1.5 overflow-y-auto px-3 py-3 sm:px-4">
             <div
@@ -5610,20 +5657,20 @@ const protCardIndigo =
               <button
                 type="button"
                 class="shrink-0 rounded-lg border border-white/15 bg-white/10 px-2 py-0.5 text-xs text-slate-200 hover:bg-white/16"
-                title="Полный просмотр"
+                :title="tt('protection.group_rules_ui.full_preview')"
                 @click="postRulesGroupOpenFullPreview(d)"
               >👁</button>
             </div>
-            <p v-if="!postRulesDraftsForChat.length" class="text-center text-sm text-slate-500">Нет черновиков</p>
+            <p v-if="!postRulesDraftsForChat.length" class="text-center text-sm text-slate-500">{{ tt('protection.group_rules_ui.no_drafts_inline') }}</p>
           </div>
           <div class="flex items-center justify-end gap-2 border-t border-white/10 px-4 py-3">
-            <button type="button" class="rounded-lg border border-white/15 bg-white/10 px-3 py-2 text-xs font-semibold text-slate-200" @click="showPostRulesGroupSendModal = false">Отмена</button>
+            <button type="button" class="rounded-lg border border-white/15 bg-white/10 px-3 py-2 text-xs font-semibold text-slate-200" @click="showPostRulesGroupSendModal = false">{{ tt('protection.group_rules_ui.cancel') }}</button>
             <button
               type="button"
               class="guard-green-soft rounded-lg px-3 py-2 text-xs font-semibold disabled:opacity-50"
               :disabled="postRulesSendBusy || !postRulesGroupSendPickId"
               @click="postRulesConfirmGroupSendFromModal()"
-            >{{ postRulesSendBusy ? 'Отправка…' : 'Отправить' }}</button>
+            >{{ postRulesSendBusy ? tt('protection.group_rules_ui.sending') : tt('protection.group_rules_ui.send') }}</button>
           </div>
         </div>
       </div>
@@ -5639,7 +5686,7 @@ const protCardIndigo =
       >
         <div class="flex max-h-[min(90vh,36rem)] w-full max-w-lg flex-col overflow-hidden rounded-[1.1rem] border border-white/12 bg-zinc-950/95 text-zinc-100 shadow-2xl" @click.stop>
           <div class="flex items-center justify-between border-b border-white/10 px-3 py-2.5 sm:px-4">
-            <h4 class="min-w-0 flex-1 truncate pr-2 text-sm font-semibold">Превью: {{ postRulesDraftDisplayName(postRulesGroupFullPreviewRow) }}</h4>
+            <h4 class="min-w-0 flex-1 truncate pr-2 text-sm font-semibold">{{ tt('protection.group_rules_ui.preview_prefix') }}{{ postRulesDraftDisplayName(postRulesGroupFullPreviewRow) }}</h4>
             <button type="button" class="shrink-0 rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="postRulesGroupCloseFullPreview()">✕</button>
           </div>
           <div class="min-h-0 flex-1 overflow-y-auto px-3 py-3 sm:px-4">
@@ -5652,13 +5699,13 @@ const protCardIndigo =
             <div
               v-else-if="(chat?.rule && chat.rule.rules_group_has_photo) && String(postRulesGroupRunActiveId || '') === String(postRulesGroupFullPreviewRow?.id || '')"
               class="mb-2 text-[10px] text-slate-500"
-            >Фото подставится с сервера (в превью черновика нет data URL — в чате будет как на сервере, если картинка уже в правилах).</div>
+            >{{ tt('protection.group_rules_ui.photo_server_hint') }}</div>
             <div
               class="post-rules-preview-html rounded-lg border border-white/10 bg-black/35 px-3 py-2 text-sm leading-relaxed text-slate-100"
               v-html="String((postRulesGroupFullPreviewRow.payload || {}).text || '').length ? (postRulesGroupFullPreviewRow.payload || {}).text : '—'"
             />
             <div v-if="postRulesGroupButtonLinesFromDraft(postRulesGroupFullPreviewRow).length" class="mt-3">
-              <p class="mb-1 text-[10px] font-semibold uppercase text-zinc-500">Кнопки</p>
+              <p class="mb-1 text-[10px] font-semibold uppercase text-zinc-500">{{ tt('protection.group_rules_ui.preview_buttons_heading') }}</p>
               <div
                 v-for="(row, i) in postRulesGroupButtonLinesFromDraft(postRulesGroupFullPreviewRow)"
                 :key="`prbprev-${i}`"
@@ -5673,7 +5720,7 @@ const protCardIndigo =
             </div>
           </div>
           <div class="border-t border-white/10 px-3 py-2.5 sm:px-4">
-            <button type="button" class="w-full rounded-lg border border-white/15 bg-white/10 py-1.5 text-xs font-semibold" @click="postRulesGroupCloseFullPreview()">Закрыть</button>
+            <button type="button" class="w-full rounded-lg border border-white/15 bg-white/10 py-1.5 text-xs font-semibold" @click="postRulesGroupCloseFullPreview()">{{ tt('protection.group_rules_ui.close') }}</button>
           </div>
         </div>
       </div>
@@ -5689,31 +5736,31 @@ const protCardIndigo =
       >
         <div class="w-full max-w-2xl overflow-hidden rounded-[1.25rem] border border-white/15 bg-zinc-950/90 text-zinc-100 shadow-2xl backdrop-blur-xl ring-1 ring-white/10" @click.stop>
           <div class="flex items-center justify-between border-b border-white/10 bg-gradient-to-r from-white/[0.06] to-transparent px-4 py-2.5">
-            <h4 class="text-sm font-semibold text-white">Кнопки под постом</h4>
+            <h4 class="text-sm font-semibold text-white">{{ tt('protection.editor_buttons_modal.title') }}</h4>
             <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="showPostRulesButtonsModal = false">✕</button>
           </div>
           <div class="max-h-[70vh] overflow-y-auto px-4 py-3">
             <div v-for="(row, ri) in postRulesRowsRef().value" :key="`prm-row-${ri}`" class="mb-3 rounded-xl border border-white/10 bg-white/[0.04] p-3">
               <div class="mb-2 flex items-center justify-between">
-                <p class="text-xs font-semibold text-slate-200">Ряд {{ ri + 1 }}</p>
+                <p class="text-xs font-semibold text-slate-200">{{ tt('protection.editor_buttons_modal.row', { n: ri + 1 }) }}</p>
               </div>
               <div
                 v-for="(btn, bi) in row"
                 :key="`prm-btn-${ri}-${bi}`"
                 class="mb-2 grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto]"
               >
-                <input v-model="btn.text" type="text" class="rounded-lg border border-white/14 bg-white/[0.06] px-2.5 py-1.5 text-xs" placeholder="Текст кнопки" />
-                <input v-model="btn.url" type="text" class="rounded-lg border border-white/14 bg-white/[0.06] px-2.5 py-1.5 text-xs" placeholder="https://..." />
-                <button type="button" class="rounded-lg border border-rose-400/35 bg-rose-500/20 px-2.5 py-1.5 text-xs text-rose-100" @click="postRulesRemoveButtonCurrent(ri, bi)">Удалить</button>
-                <button type="button" class="rounded-lg border border-emerald-400/35 bg-emerald-500/20 px-2.5 py-1.5 text-xs font-semibold text-emerald-100" :disabled="postRulesSaveBusy" @click="postRulesSaveButtonsFromModal()">Сохранить</button>
+                <input v-model="btn.text" type="text" class="rounded-lg border border-white/14 bg-white/[0.06] px-2.5 py-1.5 text-xs" :placeholder="tt('protection.editor_buttons_modal.btn_placeholder')" />
+                <input v-model="btn.url" type="text" class="rounded-lg border border-white/14 bg-white/[0.06] px-2.5 py-1.5 text-xs" :placeholder="tt('protection.editor_buttons_modal.url_placeholder')" />
+                <button type="button" class="rounded-lg border border-rose-400/35 bg-rose-500/20 px-2.5 py-1.5 text-xs text-rose-100" @click="postRulesRemoveButtonCurrent(ri, bi)">{{ tt('protection.editor_buttons_modal.remove') }}</button>
+                <button type="button" class="rounded-lg border border-emerald-400/35 bg-emerald-500/20 px-2.5 py-1.5 text-xs font-semibold text-emerald-100" :disabled="postRulesSaveBusy" @click="postRulesSaveButtonsFromModal()">{{ tt('protection.editor_buttons_modal.save_row') }}</button>
               </div>
-              <button type="button" class="text-xs font-semibold text-violet-300" @click="postRulesAddButtonCurrent(ri)">+ Кнопка в этот ряд</button>
+              <button type="button" class="text-xs font-semibold text-violet-300" @click="postRulesAddButtonCurrent(ri)">{{ tt('protection.editor_buttons_modal.add_btn') }}</button>
             </div>
-            <button type="button" class="w-full rounded-lg border border-violet-500/40 py-2 text-sm font-semibold text-violet-200" @click="postRulesAddRowCurrent">+ Ряд</button>
+            <button type="button" class="w-full rounded-lg border border-violet-500/40 py-2 text-sm font-semibold text-violet-200" @click="postRulesAddRowCurrent">{{ tt('protection.editor_buttons_modal.add_row') }}</button>
           </div>
           <div class="flex items-center justify-end gap-2 border-t border-white/10 px-4 py-3">
-            <button type="button" class="rounded-lg border border-white/15 bg-white/10 px-3 py-2 text-xs font-semibold text-slate-200 hover:bg-white/15" @click="showPostRulesButtonsModal = false">Закрыть</button>
-            <button type="button" class="guard-green-soft rounded-lg px-3 py-2 text-xs font-semibold text-slate-900 disabled:opacity-50" :disabled="postRulesSaveBusy" @click="postRulesSaveButtonsFromModal()">{{ postRulesSaveBusy ? 'Сохранение…' : 'Сохранить кнопки' }}</button>
+            <button type="button" class="rounded-lg border border-white/15 bg-white/10 px-3 py-2 text-xs font-semibold text-slate-200 hover:bg-white/15" @click="showPostRulesButtonsModal = false">{{ tt('protection.editor_buttons_modal.close') }}</button>
+            <button type="button" class="guard-green-soft rounded-lg px-3 py-2 text-xs font-semibold text-slate-900 disabled:opacity-50" :disabled="postRulesSaveBusy" @click="postRulesSaveButtonsFromModal()">{{ postRulesSaveBusy ? tt('protection.editor_buttons_modal.saving_buttons') : tt('protection.editor_buttons_modal.save_buttons') }}</button>
           </div>
         </div>
       </div>
@@ -5729,15 +5776,15 @@ const protCardIndigo =
       >
         <div class="w-full max-w-md overflow-hidden rounded-[1.1rem] border border-white/15 bg-zinc-950/90 text-zinc-100 shadow-2xl backdrop-blur-xl ring-1 ring-white/10" @click.stop>
           <div class="flex items-center justify-between border-b border-white/10 px-4 py-2.5">
-            <h4 class="text-sm font-semibold text-white">Ссылка</h4>
+            <h4 class="text-sm font-semibold text-white">{{ tt('protection.link_modal.title') }}</h4>
             <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="postRulesLinkModalOpen = false">✕</button>
           </div>
           <div class="space-y-2 px-4 py-3">
-            <input v-model.trim="postRulesLinkUrl" type="text" class="w-full rounded-lg border border-white/15 bg-white/[0.06] px-3 py-2 text-sm" placeholder="https://..." />
+            <input v-model.trim="postRulesLinkUrl" type="text" class="w-full rounded-lg border border-white/15 bg-white/[0.06] px-3 py-2 text-sm" :placeholder="tt('protection.editor_buttons_modal.url_placeholder')" />
           </div>
           <div class="flex items-center justify-end gap-2 border-t border-white/10 px-4 py-3">
-            <button type="button" class="rounded-lg border border-white/15 px-3 py-2 text-sm text-slate-200 hover:bg-white/10" @click="postRulesLinkModalOpen = false">Отмена</button>
-            <button type="button" class="guard-green-soft rounded-lg px-3 py-2 text-sm font-semibold" @click="postRulesApplyLinkModal()">Применить</button>
+            <button type="button" class="rounded-lg border border-white/15 px-3 py-2 text-sm text-slate-200 hover:bg-white/10" @click="postRulesLinkModalOpen = false">{{ tt('common.cancel') }}</button>
+            <button type="button" class="guard-green-soft rounded-lg px-3 py-2 text-sm font-semibold" @click="postRulesApplyLinkModal()">{{ tt('common.apply') }}</button>
           </div>
         </div>
       </div>
@@ -5757,58 +5804,34 @@ const protCardIndigo =
         >
           <div class="flex items-center justify-between border-b border-white/10 bg-gradient-to-r from-white/[0.06] to-transparent px-4 py-2.5">
             <h4 class="pr-2 text-sm font-semibold text-white">
-              <template v-if="welcomeInfoModal === 'main'">Автоприветствие в чате</template>
-              <template v-else-if="welcomeInfoModal === 'text'">Редактор и плейсхолдеры</template>
-              <template v-else-if="welcomeInfoModal === 'rate'">Кому пишем и с какой скоростью</template>
-              <template v-else-if="welcomeInfoModal === 'raid'">Молчать, когда врывается волна</template>
+              <template v-if="welcomeInfoModal === 'main'">{{ tt('protection.welcome_hints.title_main') }}</template>
+              <template v-else-if="welcomeInfoModal === 'text'">{{ tt('protection.welcome_hints.title_text') }}</template>
+              <template v-else-if="welcomeInfoModal === 'rate'">{{ tt('protection.welcome_hints.title_rate') }}</template>
+              <template v-else-if="welcomeInfoModal === 'raid'">{{ tt('protection.welcome_hints.title_raid') }}</template>
             </h4>
-            <button type="button" class="shrink-0 rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-white/10" @click="welcomeInfoModal = ''" aria-label="Закрыть">✕</button>
+            <button type="button" class="shrink-0 rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-white/10" @click="welcomeInfoModal = ''" :aria-label="tt('common.close')">✕</button>
           </div>
           <div class="max-h-[min(60vh,22rem)] overflow-y-auto px-4 py-3">
             <div
               v-if="welcomeInfoModal === 'main'"
               class="rounded-2xl border border-cyan-400/20 bg-cyan-500/[0.08] p-3 text-[11px] leading-relaxed text-zinc-200 backdrop-blur-md"
-            >
-              <p>Новичок <strong>впервые</strong> садится в <strong>эту</strong> группу — и <strong>Guard</strong> может тут же написать ему <strong>твоё</strong> личное приветствие. Ты задаёшь <strong>текст, картинку, кнопки</strong> и правила, <strong>как часто</strong> писать и <strong>когда лучше замолчать</strong>, если входов <strong>слишком много</strong> разом.</p>
-              <p class="mt-1.5">Всё, что дальше в этом окне, — <strong>только про эту</strong> группу. <strong>Guard</strong> не путает это с настройками <strong>других</strong> твоих чатов.</p>
-            </div>
+              v-html="tt('protection.welcome_hints.main_html')"
+            />
             <div
               v-else-if="welcomeInfoModal === 'text'"
               class="rounded-xl border border-violet-400/20 bg-violet-500/[0.08] p-2.5 text-[11px] leading-relaxed text-zinc-200"
-            >
-              <p>
-                <strong>Как в рассылке</strong> из кабинета: <strong>выдели</strong> кусок в поле, потом жми жирный, курсив, цитату, ссылку. Без выделения <strong>Guard</strong> не к чему «навесить» оформление. Исключение — <strong>плейсхолдеры</strong> внизу: вставляются в позицию курсора, как в рассылке, выделение не нужно.
-              </p>
-              <p class="mt-1.5">
-                Наложил лишнего? Над полем <strong>↶ Назад / ↷ Вперёд</strong> — тот же откат, что в рассылке. <strong>Цитата</strong> в чате уйдёт как в Telegram, в чёрновике видна с боковой полоской.
-              </p>
-              <p class="mt-1.5">
-                Сообщение уходит с той разметкой, которую собрал. <strong>Guard</strong> к моменту отправки подставит
-                <strong>{first_name}</strong>, <strong>{full_name}</strong>, <strong>{username}</strong>, <strong>{chat_title}</strong> — для того, кто только вошёл, в <strong>этом</strong> чате.
-              </p>
-            </div>
+              v-html="tt('protection.welcome_hints.text_html')"
+            />
             <div
               v-else-if="welcomeInfoModal === 'rate'"
               class="rounded-xl border border-cyan-400/20 bg-cyan-500/[0.08] p-2.5 text-[11px] leading-relaxed text-zinc-200"
-            >
-              <p>
-                <strong>Каждому N-му</strong> — кого из новичков здороваем. <strong>N = 1</strong> — каждому, кто только что зашёл. <strong>N = 2</strong> — 2-му, 4-му, 6-му… <strong>N = 3</strong> — 3-му, 6-му, 9-му… Удобно, если не хочешь слать привет <strong>каждому</strong> вступившему, а, например, <strong>каждого третьего</strong>.
-              </p>
-              <p class="mt-1.5">
-                <strong>Лимит в минуту</strong> — мягкий «потолок» на скорость: даже если волна входов жирная, <strong>Guard</strong> не сыплет приветствиями больше выбранного числа <strong>в эту</strong> минуту. <strong>0</strong> = без такой страховки, остальные правила ниже всё равно работают.
-              </p>
-            </div>
+              v-html="tt('protection.welcome_hints.rate_html')"
+            />
             <div
               v-else-if="welcomeInfoModal === 'raid'"
               class="rounded-xl border border-amber-400/20 bg-amber-500/[0.08] p-2.5 text-[11px] leading-relaxed text-zinc-200"
-            >
-              <p>
-                Если за короткое время в чат <strong>вломилось</strong> слишком много людей — волна ботов, рейд, слишком плотный поток, — <strong>Guard</strong> может <strong>на время замолкнуть</strong> с приветствиями, чтобы <strong>не засыпать</strong> чат лишними пушами, пока волна <strong>не остынет</strong>.
-              </p>
-              <p class="mt-1.5">
-                <strong>Порог входов</strong> + <strong>окно (мин)</strong> — в двух словах: «если столько-то <strong>новых</strong> вступивших <strong>за</strong> столько-то минут, считаем, что волна». Ниже порога в пределах окна — <strong>снова</strong> обычные приветы, как настроил.
-              </p>
-            </div>
+              v-html="tt('protection.welcome_hints.raid_html')"
+            />
           </div>
         </div>
       </div>
@@ -5824,34 +5847,34 @@ const protCardIndigo =
       >
         <div class="w-full max-w-2xl overflow-hidden rounded-[1.25rem] border border-white/15 bg-zinc-950/90 text-zinc-100 shadow-2xl backdrop-blur-xl ring-1 ring-white/10" @click.stop>
           <div class="flex items-center justify-between border-b border-white/10 bg-gradient-to-r from-white/[0.06] to-transparent px-4 py-2.5">
-            <h4 class="text-sm font-semibold text-white">Кнопки под постом</h4>
+            <h4 class="text-sm font-semibold text-white">{{ tt('protection.editor_buttons_modal.title') }}</h4>
             <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="showWelcomeButtonsModal = false">✕</button>
           </div>
           <div class="max-h-[70vh] overflow-y-auto px-4 py-3">
             <div v-for="(row, ri) in welcomeButtonRows" :key="`wkb-${ri}`" class="mb-3 rounded-xl border border-white/10 bg-white/[0.04] p-3">
               <div class="mb-2 flex items-center justify-between gap-2">
-                <p class="text-xs font-semibold text-slate-200">Ряд {{ ri + 1 }}</p>
-                <button type="button" class="rounded-lg border border-rose-400/25 bg-rose-500/15 px-2 py-0.5 text-[10px] text-rose-100 hover:bg-rose-500/25" @click="welcomeRemoveRow(ri)">Убрать ряд</button>
+                <p class="text-xs font-semibold text-slate-200">{{ tt('protection.editor_buttons_modal.row', { n: ri + 1 }) }}</p>
+                <button type="button" class="rounded-lg border border-rose-400/25 bg-rose-500/15 px-2 py-0.5 text-[10px] text-rose-100 hover:bg-rose-500/25" @click="welcomeRemoveRow(ri)">{{ tt('protection.editor_buttons_modal.remove_row') }}</button>
               </div>
               <div
                 v-for="(btn, bi) in row"
                 :key="`wkbtn-${ri}-${bi}`"
                 class="mb-2 grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto]"
               >
-                <input v-model="btn.text" type="text" class="rounded-lg border border-white/14 bg-white/[0.06] px-2.5 py-1.5 text-xs sm:col-span-2" placeholder="Текст кнопки" />
-                <input v-model="btn.url" type="text" class="rounded-lg border border-white/14 bg-white/[0.06] px-2.5 py-1.5 text-xs" placeholder="https://..." />
-                <input v-model="btn.web_app_url" type="text" class="rounded-lg border border-white/14 bg-white/[0.06] px-2.5 py-1.5 text-xs" placeholder="Web App URL" />
-                <input v-model="btn.callback_data" type="text" class="rounded-lg border border-white/14 bg-white/[0.06] px-2.5 py-1.5 text-xs sm:col-span-2" placeholder="callback_data" />
-                <button type="button" class="rounded-lg border border-rose-400/35 bg-rose-500/20 px-2.5 py-1.5 text-xs text-rose-100" @click="welcomeRemoveButton(ri, bi)">Удалить</button>
-                <button type="button" class="rounded-lg border border-emerald-400/35 bg-emerald-500/20 px-2.5 py-1.5 text-xs font-semibold text-emerald-100" :disabled="welcomeBusy" @click="welcomeSaveButtonsFromModal()">Сохранить</button>
+                <input v-model="btn.text" type="text" class="rounded-lg border border-white/14 bg-white/[0.06] px-2.5 py-1.5 text-xs sm:col-span-2" :placeholder="tt('protection.editor_buttons_modal.btn_placeholder')" />
+                <input v-model="btn.url" type="text" class="rounded-lg border border-white/14 bg-white/[0.06] px-2.5 py-1.5 text-xs" :placeholder="tt('protection.editor_buttons_modal.url_placeholder')" />
+                <input v-model="btn.web_app_url" type="text" class="rounded-lg border border-white/14 bg-white/[0.06] px-2.5 py-1.5 text-xs" :placeholder="tt('protection.editor_buttons_modal.web_app_placeholder')" />
+                <input v-model="btn.callback_data" type="text" class="rounded-lg border border-white/14 bg-white/[0.06] px-2.5 py-1.5 text-xs sm:col-span-2" :placeholder="tt('protection.editor_buttons_modal.callback_placeholder')" />
+                <button type="button" class="rounded-lg border border-rose-400/35 bg-rose-500/20 px-2.5 py-1.5 text-xs text-rose-100" @click="welcomeRemoveButton(ri, bi)">{{ tt('protection.editor_buttons_modal.remove') }}</button>
+                <button type="button" class="rounded-lg border border-emerald-400/35 bg-emerald-500/20 px-2.5 py-1.5 text-xs font-semibold text-emerald-100" :disabled="welcomeBusy" @click="welcomeSaveButtonsFromModal()">{{ tt('protection.editor_buttons_modal.save_row') }}</button>
               </div>
-              <button type="button" class="text-xs font-semibold text-violet-300" @click="welcomeAddButton(ri)">+ Кнопка в этот ряд</button>
+              <button type="button" class="text-xs font-semibold text-violet-300" @click="welcomeAddButton(ri)">{{ tt('protection.editor_buttons_modal.add_btn') }}</button>
             </div>
-            <button type="button" class="w-full rounded-lg border border-violet-500/40 py-2 text-sm font-semibold text-violet-200" @click="welcomeAddRow">+ Ряд</button>
+            <button type="button" class="w-full rounded-lg border border-violet-500/40 py-2 text-sm font-semibold text-violet-200" @click="welcomeAddRow">{{ tt('protection.editor_buttons_modal.add_row') }}</button>
           </div>
           <div class="flex items-center justify-end gap-2 border-t border-white/10 px-4 py-3">
-            <button type="button" class="rounded-lg border border-white/15 bg-white/10 px-3 py-2 text-xs font-semibold text-slate-200 hover:bg-white/15" @click="showWelcomeButtonsModal = false">Закрыть</button>
-            <button type="button" class="guard-green-soft rounded-lg px-3 py-2 text-xs font-semibold text-slate-900 disabled:opacity-50" :disabled="welcomeBusy" @click="welcomeSaveButtonsFromModal()">{{ welcomeBusy ? 'Сохранение…' : 'Сохранить кнопки' }}</button>
+            <button type="button" class="rounded-lg border border-white/15 bg-white/10 px-3 py-2 text-xs font-semibold text-slate-200 hover:bg-white/15" @click="showWelcomeButtonsModal = false">{{ tt('protection.editor_buttons_modal.close') }}</button>
+            <button type="button" class="guard-green-soft rounded-lg px-3 py-2 text-xs font-semibold text-slate-900 disabled:opacity-50" :disabled="welcomeBusy" @click="welcomeSaveButtonsFromModal()">{{ welcomeBusy ? tt('protection.editor_buttons_modal.saving_buttons') : tt('protection.editor_buttons_modal.save_buttons') }}</button>
           </div>
         </div>
       </div>
@@ -5867,18 +5890,18 @@ const protCardIndigo =
       >
         <div class="w-full max-w-md rounded-2xl border border-violet-400/50 bg-slate-900 p-4 shadow-2xl" @click.stop>
           <div class="mb-2 flex items-center justify-between">
-            <p class="text-base font-semibold text-white">Добавить ссылку</p>
+            <p class="text-base font-semibold text-white">{{ tt('protection.link_modal.add_title') }}</p>
             <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="welcomeLinkModalOpen = false">✕</button>
           </div>
           <input
             v-model="welcomeLinkUrl"
             type="text"
-            placeholder="https://..."
+            :placeholder="tt('protection.editor_buttons_modal.url_placeholder')"
             class="w-full rounded-xl border border-slate-600 bg-slate-950 px-3 py-2 text-sm text-white"
           />
           <div class="mt-3 flex gap-2">
-            <button type="button" class="rounded-xl bg-violet-600 px-4 py-2 text-sm font-semibold text-white" @click="welcomeApplyLinkModal">Применить</button>
-            <button type="button" class="rounded-lg border border-white/15 px-3 py-2 text-sm text-slate-200 hover:bg-white/10" @click="welcomeLinkModalOpen = false">Отмена</button>
+            <button type="button" class="rounded-xl bg-violet-600 px-4 py-2 text-sm font-semibold text-white" @click="welcomeApplyLinkModal">{{ tt('common.apply') }}</button>
+            <button type="button" class="rounded-lg border border-white/15 px-3 py-2 text-sm text-slate-200 hover:bg-white/10" @click="welcomeLinkModalOpen = false">{{ tt('common.cancel') }}</button>
           </div>
         </div>
       </div>
@@ -5887,7 +5910,7 @@ const protCardIndigo =
     <Teleport to="body">
       <div
         v-if="showLinksFilterModal && chat?.rule"
-        class="fixed inset-0 z-[255] flex items-center justify-center bg-black/45 p-4 backdrop-blur-md"
+        class="fixed inset-0 z-[400] flex items-center justify-center bg-black/45 p-4 backdrop-blur-md"
         role="dialog"
         aria-modal="true"
         @click.self="showLinksFilterModal = false"
@@ -5904,7 +5927,7 @@ const protCardIndigo =
                 class="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-400/25 to-teal-500/15 text-lg ring-1 ring-emerald-400/20"
                 aria-hidden="true"
               >🔗</span>
-              <h3 class="truncate text-sm font-semibold tracking-tight text-white">Ссылки — политика Guard</h3>
+              <h3 class="truncate text-sm font-semibold tracking-tight text-white">{{ tt('protection.links_modal.title') }}</h3>
             </div>
             <button
               type="button"
@@ -5919,12 +5942,12 @@ const protCardIndigo =
           >
             <div>
               <div class="mb-2 flex items-center justify-between gap-2">
-                <p class="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Режим фильтра</p>
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ tt('protection.links_modal.filter_mode_label') }}</p>
                 <button
                   type="button"
                   class="link-glass-info-btn"
                   :class="openLinkModeHint === '_legend' ? 'link-glass-info-btn--active' : ''"
-                  aria-label="Подсказка"
+                  :aria-label="tt('protection.ui.link_hint_short_aria')"
                   @click="openLinkModeHint = openLinkModeHint === '_legend' ? null : '_legend'"
                 >
                   ⓘ
@@ -5951,7 +5974,7 @@ const protCardIndigo =
                       class="link-glass-info-btn shrink-0 !h-9 !min-w-9 !rounded-2xl !px-2.5 !text-xs"
                       :class="openLinkModeHint === opt.value ? 'link-glass-info-btn--active' : ''"
                       :aria-expanded="openLinkModeHint === opt.value"
-                      :aria-label="`Подсказка: ${opt.label}`"
+                      :aria-label="tt('protection.ui.link_hint_for_mode_aria', { label: opt.label })"
                       @click="openLinkModeHint = openLinkModeHint === opt.value ? null : opt.value"
                     >
                       ⓘ
@@ -5971,21 +5994,18 @@ const protCardIndigo =
               <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div class="min-w-0 flex-1">
                   <div class="mb-1.5 flex items-center justify-between gap-2">
-                    <p class="text-xs font-semibold text-teal-100">Глобальная база URL Guard</p>
+                    <p class="text-xs font-semibold text-teal-100">{{ tt('protection.links_modal.global_title') }}</p>
                     <button
                       type="button"
                       class="link-glass-info-btn"
                       :class="openLinkModeHint === '_global' ? 'link-glass-info-btn--active' : ''"
-                      aria-label="Что такое глобальная база URL"
+                      :aria-label="tt('protection.ui.link_hint_global_url_base_aria')"
                       @click="openLinkModeHint = openLinkModeHint === '_global' ? null : '_global'"
                     >
                       ⓘ
                     </button>
                   </div>
-                  <p class="text-[11px] leading-relaxed text-zinc-400">
-                    Общий список «плохих» кусочков адресов от <strong class="text-zinc-200">админа Guard</strong> —
-                    нажми <strong class="text-zinc-200">ⓘ</strong>, объясню по-человечески.
-                  </p>
+                  <p class="text-[11px] leading-relaxed text-zinc-400" v-html="tt('protection.links_modal.global_teaser_html')" />
                   <div
                     v-show="openLinkModeHint === '_global'"
                     class="link-modal-hint link-liquid-hint mt-2 rounded-xl border border-teal-400/15 bg-black/30 p-3 text-[11px] leading-relaxed text-zinc-300 backdrop-blur-md"
@@ -6002,18 +6022,18 @@ const protCardIndigo =
                   "
                   @click="updateRule({ use_global_bad_urls: !chat.rule.use_global_bad_urls })"
                 >
-                  {{ chat.rule.use_global_bad_urls ? 'ВКЛ' : 'ВЫКЛ' }}
+                  {{ chat.rule.use_global_bad_urls ? tt('protection.links_modal.toggle_on') : tt('protection.links_modal.toggle_off') }}
                 </button>
               </div>
             </div>
             <div>
               <div class="mb-2 flex items-center justify-between gap-2">
-                <p class="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Где проверять</p>
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ tt('protection.links_modal.scope_label') }}</p>
                 <button
                   type="button"
                   class="link-glass-info-btn"
                   :class="openLinkModeHint === '_scope' ? 'link-glass-info-btn--active' : ''"
-                  aria-label="Подсказка область"
+                  :aria-label="tt('protection.ui.link_hint_scope_aria')"
                   @click="openLinkModeHint = openLinkModeHint === '_scope' ? null : '_scope'"
                 >
                   ⓘ
@@ -6031,7 +6051,7 @@ const protCardIndigo =
                   class="min-w-0"
                   @click="updateRule({ filter_links_scope: 'all' })"
                 >
-                  Комментарии + чат
+                  {{ tt('protection.links_modal.scope_all') }}
                 </button>
                 <button
                   type="button"
@@ -6039,7 +6059,7 @@ const protCardIndigo =
                   class="min-w-0"
                   @click="updateRule({ filter_links_scope: 'channel_comments_only' })"
                 >
-                  Только комментарии к постам
+                  {{ tt('protection.links_modal.scope_comments_only') }}
                 </button>
               </div>
             </div>
@@ -6048,14 +6068,14 @@ const protCardIndigo =
             >
               <div class="mb-2 flex items-center justify-between gap-2">
                 <p class="text-[11px] font-semibold uppercase tracking-wide text-rose-100/95">
-                  Чёрный список ссылок
-                  <span v-if="premiumFeatureLocked" class="font-normal text-amber-300">· Premium</span>
+                  {{ tt('protection.links_modal.blacklist_title') }}
+                  <span v-if="premiumFeatureLocked" class="font-normal text-amber-300">{{ tt('protection.links_modal.premium_suffix') }}</span>
                 </p>
                 <button
                   type="button"
                   class="link-glass-info-btn"
                   :class="openLinkModeHint === '_bl' ? 'link-glass-info-btn--active' : ''"
-                  aria-label="Подсказка чёрный список"
+                  :aria-label="tt('protection.ui.link_hint_blacklist_aria')"
                   @click="openLinkModeHint = openLinkModeHint === '_bl' ? null : '_bl'"
                 >
                   ⓘ
@@ -6070,7 +6090,7 @@ const protCardIndigo =
                 <input
                   v-model="newLinkBlacklistPattern"
                   type="text"
-                  placeholder="spam.com или t.me/spam_channel"
+                  :placeholder="tt('protection.links_modal.blacklist_placeholder')"
                   class="min-w-0 flex-1 rounded-xl border border-white/14 bg-white/[0.06] px-2.5 py-2 text-xs text-white placeholder:text-zinc-500 backdrop-blur-sm focus:border-rose-400/40 focus:outline-none"
                   :disabled="linkBlacklistLoading"
                   @keydown.enter.prevent="addLinkBlacklistPattern()"
@@ -6097,7 +6117,7 @@ const protCardIndigo =
                     :disabled="linkBlacklistLoading"
                     @click="removeLinkBlacklistPattern(b)"
                   >
-                    убрать
+                    {{ tt('protection.links_modal.list_remove') }}
                   </button>
                 </li>
               </ul>
@@ -6107,14 +6127,12 @@ const protCardIndigo =
             </div>
             <div
               class="rounded-2xl border border-white/12 bg-gradient-to-br from-white/[0.07] to-black/20 p-3 text-[11px] leading-relaxed text-zinc-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-md ring-1 ring-inset ring-white/[0.04]"
-            >
-              <strong class="text-zinc-200">Не путать с делегированием:</strong> делегат в «Админы и доступы» — доступ к
-              <em>панели</em> и рассылкам. Списки здесь — только про <em>ссылки в этом чате</em> для Guard.
-            </div>
+              v-html="tt('protection.links_modal.delegation_note_html')"
+            ></div>
             <div>
               <div class="mb-2 flex items-center justify-between gap-2">
                 <p class="mb-0 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
-                  Доверенные ссылки
+                  {{ tt('protection.links_modal.trusted_links_title') }}
                   <span class="font-normal normal-case text-zinc-500">
                     ({{ (chat.whitelist_domains || []).length }}/{{ chat.whitelist_max_domains ?? 5 }})
                   </span>
@@ -6123,7 +6141,7 @@ const protCardIndigo =
                   type="button"
                   class="link-glass-info-btn"
                   :class="openLinkModeHint === '_wl' ? 'link-glass-info-btn--active' : ''"
-                  aria-label="Подсказка доверенные"
+                  :aria-label="tt('protection.ui.link_hint_trusted_aria')"
                   @click="openLinkModeHint = openLinkModeHint === '_wl' ? null : '_wl'"
                 >
                   ⓘ
@@ -6138,7 +6156,7 @@ const protCardIndigo =
                 <input
                   v-model="newWhitelistDomain"
                   type="text"
-                  placeholder="Например google.com, youtube.com/channel или t.me/your_channel"
+                  :placeholder="tt('protection.links_modal.trusted_placeholder')"
                   class="min-w-0 flex-1 rounded-xl border border-white/14 bg-white/[0.06] px-2.5 py-2 text-xs text-white placeholder:text-zinc-500 backdrop-blur-sm focus:border-sky-400/40 focus:outline-none"
                   :disabled="whitelistLoading"
                   @keydown.enter.prevent="addWhitelistDomain()"
@@ -6165,7 +6183,7 @@ const protCardIndigo =
                     :disabled="whitelistLoading"
                     @click="removeWhitelistDomain(d)"
                   >
-                    убрать
+                    {{ tt('protection.links_modal.list_remove') }}
                   </button>
                 </li>
               </ul>
@@ -6173,7 +6191,7 @@ const protCardIndigo =
             <div>
               <div class="mb-2 flex items-center justify-between gap-2">
                 <p class="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
-                  Доверенные пользователи
+                  {{ tt('protection.links_modal.trusted_users_title') }}
                   <span class="font-normal normal-case text-zinc-500">
                     ({{ (chat.whitelist_users || []).length }}/{{ chat.whitelist_max_users ?? 50 }})
                   </span>
@@ -6182,7 +6200,7 @@ const protCardIndigo =
                   type="button"
                   class="link-glass-info-btn"
                   :class="openLinkModeHint === '_wl_users' ? 'link-glass-info-btn--active' : ''"
-                  aria-label="Подсказка: доверенные пользователи"
+                  :aria-label="tt('protection.ui.link_hint_trusted_users_aria')"
                   @click="openLinkModeHint = openLinkModeHint === '_wl_users' ? null : '_wl_users'"
                 >
                   ⓘ
@@ -6197,7 +6215,7 @@ const protCardIndigo =
                 <input
                   v-model="newWhitelistUserId"
                   type="text"
-                  placeholder="Например @manager или 123456789"
+                  :placeholder="tt('protection.links_modal.trusted_users_placeholder')"
                   class="min-w-0 flex-1 rounded-xl border border-white/14 bg-white/[0.06] px-2.5 py-2 text-xs text-white placeholder:text-zinc-500 backdrop-blur-sm focus:border-violet-400/40 focus:outline-none"
                   :disabled="whitelistLoading"
                   @keydown.enter.prevent="addWhitelistUser()"
@@ -6229,7 +6247,7 @@ const protCardIndigo =
                     :disabled="whitelistLoading"
                     @click="removeWhitelistUser(u.user_id)"
                   >
-                    убрать
+                    {{ tt('protection.links_modal.list_remove') }}
                   </button>
                 </li>
               </ul>
@@ -6242,7 +6260,7 @@ const protCardIndigo =
     <Teleport to="body">
       <div
         v-if="showChannelPostsFilterModal && chat?.rule"
-        class="fixed inset-0 z-[255] flex items-center justify-center bg-black/45 p-4 backdrop-blur-md"
+        class="fixed inset-0 z-[400] flex items-center justify-center bg-black/45 p-4 backdrop-blur-md"
         role="dialog"
         aria-modal="true"
         @click.self="showChannelPostsFilterModal = false"
@@ -6254,7 +6272,7 @@ const protCardIndigo =
           <div class="flex shrink-0 items-center justify-between gap-2 border-b border-white/10 bg-gradient-to-r from-white/[0.06] to-transparent px-4 py-3.5">
             <div class="flex min-w-0 items-center gap-2">
               <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-fuchsia-400/25 to-indigo-500/15 text-lg ring-1 ring-fuchsia-400/20">📣</span>
-              <h3 class="truncate text-sm font-semibold tracking-tight text-white">Сообщения от каналов</h3>
+              <h3 class="truncate text-sm font-semibold tracking-tight text-white">{{ tt('protection.channel_posts_modal.title') }}</h3>
             </div>
             <button
               type="button"
@@ -6265,22 +6283,20 @@ const protCardIndigo =
             </button>
           </div>
           <div class="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-4 py-4 [-webkit-overflow-scrolling:touch]">
-            <p class="text-[11px] leading-relaxed text-zinc-300">
-              Ловит сообщения, отправленные <strong>от имени канала/чата</strong> в группе. Для своих каналов добавь @username в доверенные ниже.
-            </p>
+            <p class="text-[11px] leading-relaxed text-zinc-300" v-html="tt('protection.channel_posts_modal.intro_html')"></p>
             <div class="flex items-center justify-between gap-2 rounded-xl border border-white/12 bg-white/[0.05] px-3 py-2">
-              <span class="text-xs text-slate-200">Фильтр сообщений от каналов</span>
+              <span class="text-xs text-slate-200">{{ tt('protection.channel_posts_modal.filter_toggle_label') }}</span>
               <button
                 type="button"
                 :class="boolToggleClass(!!chat.rule.filter_channel_posts_enabled)"
                 class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium"
                 @click="updateRule({ filter_channel_posts_enabled: !chat.rule.filter_channel_posts_enabled })"
               >
-                {{ chat.rule.filter_channel_posts_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+                {{ chat.rule.filter_channel_posts_enabled ? tt('protection.links_modal.toggle_on') : tt('protection.links_modal.toggle_off') }}
               </button>
             </div>
             <div v-if="chat.rule.filter_channel_posts_enabled" class="rounded-xl border border-white/12 bg-white/[0.05] p-3">
-              <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Реакция Guard</p>
+              <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ tt('protection.channel_posts_modal.reaction_label') }}</p>
               <div class="grid grid-cols-2 gap-2">
                 <button
                   type="button"
@@ -6288,7 +6304,7 @@ const protCardIndigo =
                   :class="String(chat.rule.filter_channel_posts_action || 'delete') === 'delete' ? 'guard-green-soft text-slate-900' : protToggleOff"
                   @click="updateRule({ filter_channel_posts_action: 'delete' })"
                 >
-                  Удалять
+                  {{ tt('protection.channel_posts_modal.action_delete') }}
                 </button>
                 <button
                   type="button"
@@ -6296,13 +6312,13 @@ const protCardIndigo =
                   :class="String(chat.rule.filter_channel_posts_action || 'delete') === 'ban' ? 'bg-gradient-to-r from-rose-500 to-red-600 text-white shadow-[0_8px_20px_-10px_rgba(239,68,68,0.75)]' : protToggleOff"
                   @click="updateRule({ filter_channel_posts_action: 'ban' })"
                 >
-                  Удалять + банить канал
+                  {{ tt('protection.channel_posts_modal.action_delete_ban') }}
                 </button>
               </div>
             </div>
             <div class="rounded-xl border border-white/12 bg-white/[0.05] p-3">
               <p class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
-                Доверенные каналы (@username)
+                {{ tt('protection.channel_posts_modal.trusted_senders_title') }}
                 <span class="font-normal normal-case text-zinc-500">
                   ({{ (chat.whitelist_sender_chats || []).length }})
                 </span>
@@ -6311,7 +6327,7 @@ const protCardIndigo =
                 <input
                   v-model="newWhitelistSenderChat"
                   type="text"
-                  placeholder="Например @my_news_channel"
+                  :placeholder="tt('protection.channel_posts_modal.trusted_placeholder')"
                   class="min-w-0 flex-1 rounded-xl border border-white/14 bg-white/[0.06] px-2.5 py-2 text-xs text-white placeholder:text-zinc-500 backdrop-blur-sm focus:border-fuchsia-400/40 focus:outline-none"
                   :disabled="whitelistLoading"
                   @keydown.enter.prevent="addWhitelistSenderChat()"
@@ -6338,7 +6354,7 @@ const protCardIndigo =
                     :disabled="whitelistLoading"
                     @click="removeWhitelistSenderChat(u)"
                   >
-                    убрать
+                    {{ tt('protection.links_modal.list_remove') }}
                   </button>
                 </li>
               </ul>
@@ -6351,7 +6367,7 @@ const protCardIndigo =
     <Teleport to="body">
       <div
         v-if="showMentionsFilterModal && chat?.rule"
-        class="fixed inset-0 z-[255] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+        class="fixed inset-0 z-[400] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         @click.self="showMentionsFilterModal = false"
       >
         <div
@@ -6359,11 +6375,11 @@ const protCardIndigo =
           @click.stop
         >
           <div class="mb-3 flex items-center justify-between">
-            <h3 class="text-sm font-semibold text-white">@ Упоминания</h3>
+            <h3 class="text-sm font-semibold text-white">{{ tt('protection.ui.mentions_modal_title') }}</h3>
             <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-white/10" @click="showMentionsFilterModal = false">✕</button>
           </div>
           <p class="mb-3 text-[11px] leading-relaxed text-slate-400">
-            @username и текстовые упоминания. «Запрещено» — удаляются по общему действию (удалить / мут / бан).
+            {{ tt('protection.ui.mentions_modal_body') }}
           </p>
           <div class="grid grid-cols-2 gap-2">
             <button
@@ -6384,7 +6400,7 @@ const protCardIndigo =
     <Teleport to="body">
       <div
         v-if="showMediaFilterModal && chat?.rule"
-        class="fixed inset-0 z-[255] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+        class="fixed inset-0 z-[400] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         @click.self="showMediaFilterModal = false"
       >
         <div
@@ -6392,7 +6408,7 @@ const protCardIndigo =
           @click.stop
         >
           <div class="mb-3 flex items-center justify-between">
-            <h3 class="text-sm font-semibold text-white">🖼 Медиа и стикеры</h3>
+            <h3 class="text-sm font-semibold text-white">{{ tt('protection.ui.media_modal_title') }}</h3>
             <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-white/10" @click="showMediaFilterModal = false">✕</button>
           </div>
           <div class="grid grid-cols-2 gap-2">
@@ -6414,7 +6430,7 @@ const protCardIndigo =
     <Teleport to="body">
       <div
         v-if="showButtonsFilterModal && chat?.rule"
-        class="fixed inset-0 z-[255] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+        class="fixed inset-0 z-[400] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         @click.self="showButtonsFilterModal = false"
       >
         <div
@@ -6422,11 +6438,11 @@ const protCardIndigo =
           @click.stop
         >
           <div class="mb-3 flex items-center justify-between">
-            <h3 class="text-sm font-semibold text-white">🔘 Сообщения с кнопками</h3>
+            <h3 class="text-sm font-semibold text-white">{{ tt('protection.ui.buttons_modal_title') }}</h3>
             <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-white/10" @click="showButtonsFilterModal = false">✕</button>
           </div>
           <p class="mb-3 text-[11px] text-slate-400">
-            Inline-кнопки вроде «перейти», «бонус», «вступить».
+            {{ tt('protection.ui.buttons_modal_body') }}
           </p>
           <div class="grid grid-cols-2 gap-2">
             <button
@@ -6446,12 +6462,12 @@ const protCardIndigo =
 
     <div
       v-if="showAntinakrutkaSettingsModal && chat?.rule"
-      class="fixed inset-0 z-[266] flex items-center justify-center bg-black/65 p-3"
+      class="fixed inset-0 z-[400] flex items-center justify-center bg-black/65 p-3"
       @click.self="showAntinakrutkaSettingsModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-cyan-400/22 bg-gradient-to-b from-slate-900/95 via-slate-950/95 to-black/95 p-4 text-slate-100 shadow-[0_26px_90px_-24px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,255,255,0.1)] backdrop-blur-2xl ring-1 ring-cyan-300/20">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold uppercase tracking-wide text-cyan-100">Антинакрутка — настройки</h3>
+          <h3 class="text-xs font-semibold uppercase tracking-wide text-cyan-100">{{ tt('protection.antinakrutka_settings_modal.title') }}</h3>
           <button
             type="button"
             class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
@@ -6462,7 +6478,7 @@ const protCardIndigo =
         </div>
         <div class="space-y-3">
           <div class="rounded-xl border border-cyan-300/20 bg-cyan-500/[0.08] p-2.5 backdrop-blur-md">
-            <p class="mb-1 text-xs text-slate-300">Быстрая настройка</p>
+            <p class="mb-1 text-xs text-slate-300">{{ tt('protection.antinakrutka_settings_modal.quick') }}</p>
             <div class="grid grid-cols-3 gap-2">
               <button
                 v-for="preset in antinakrutkaModePresets"
@@ -6477,19 +6493,19 @@ const protCardIndigo =
             </div>
           </div>
           <div class="flex items-center justify-between gap-2 rounded-xl border border-cyan-300/20 bg-cyan-500/[0.08] p-2.5 backdrop-blur-md">
-            <span class="text-xs text-slate-300">Включить антинакрутку</span>
+            <span class="text-xs text-slate-300">{{ tt('protection.antinakrutka_settings_modal.enable') }}</span>
             <button
               type="button"
               :class="boolToggleClass(chat.rule.antinakrutka_enabled)"
               class="rounded-lg px-2.5 py-1 text-xs"
               @click="onAntinakrutkaMainToggleClick"
             >
-              {{ chat.rule.antinakrutka_enabled ? 'ВКЛ' : 'ВЫКЛ' }}
+              {{ chat.rule.antinakrutka_enabled ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}
             </button>
           </div>
           <div v-if="chat.rule.antinakrutka_enabled" class="space-y-2">
             <div>
-              <p class="mb-1 text-xs text-slate-400">Порог (участников за окно)</p>
+              <p class="mb-1 text-xs text-slate-400">{{ tt('protection.antinakrutka_settings_modal.threshold') }}</p>
               <div class="flex flex-wrap gap-2">
                 <button
                   v-for="n in antinakrutkaThresholdPresets"
@@ -6504,7 +6520,7 @@ const protCardIndigo =
               </div>
             </div>
             <div>
-              <p class="mb-1 text-xs text-slate-400">Окно (мин)</p>
+              <p class="mb-1 text-xs text-slate-400">{{ tt('protection.antinakrutka_settings_modal.window') }}</p>
               <div class="flex flex-wrap gap-2">
                 <button
                   v-for="w in antinakrutkaWindowPresets"
@@ -6514,12 +6530,12 @@ const protCardIndigo =
                   class="rounded-lg px-2.5 py-1 text-xs"
                   @click="updateRule({ antinakrutka_window_minutes: w })"
                 >
-                  {{ w }} мин
+                  {{ tt('protection.presets.spike_minutes', { n: w }) }}
                 </button>
               </div>
             </div>
             <div>
-              <p class="mb-1 text-xs text-slate-400">Действие</p>
+              <p class="mb-1 text-xs text-slate-400">{{ tt('protection.antinakrutka_settings_modal.action') }}</p>
               <div class="flex flex-wrap gap-2">
                 <button
                   v-for="opt in antinakrutkaActionOptions"
@@ -6534,7 +6550,7 @@ const protCardIndigo =
               </div>
             </div>
             <div v-if="(chat.rule.antinakrutka_action || 'alert') === 'alert_restrict'">
-              <p class="mb-1 text-xs text-slate-400">Мут (мин)</p>
+              <p class="mb-1 text-xs text-slate-400">{{ tt('protection.antinakrutka_settings_modal.mute') }}</p>
               <div class="flex flex-wrap gap-2">
                 <button
                   v-for="r in antinakrutkaRestrictPresets"
@@ -6552,14 +6568,16 @@ const protCardIndigo =
         </div>
       </div>
     </div>
+    <Teleport to="body">
+    <div class="contents">
     <div
       v-if="showAntinakrutkaInfoModal"
-      class="fixed inset-0 z-[266] flex items-center justify-center bg-black/65 p-3"
+      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
       @click.self="showAntinakrutkaInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">😈 Антинакрутка</h3>
+          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.antinakrutka.title') }}</h3>
           <button
             type="button"
             class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
@@ -6570,34 +6588,37 @@ const protCardIndigo =
         </div>
         <div class="space-y-3 text-xs text-gray-700 dark:text-gray-300">
           <p>
-            Слежу за <strong>волнами входов</strong> за короткое окно. Порог перевален — шлю сигнал, а если включено пожёстче, могу автоматом приглушить свежих, пока шторм не уляжется.
+            {{ tt('protection.modals.antinakrutka.p1') }}
           </p>
           <div class="rounded-lg border border-gray-200 bg-gray-50 p-3 dark:border-gray-700 dark:bg-gray-900/40">
-            <p class="font-semibold text-gray-900 dark:text-white">Три настроения</p>
-            <p class="mt-1"><strong>Мягко</strong> — для обычного роста, чтобы не душить живых.</p>
-            <p><strong>Стандарт</strong> — мой будничный режим по умолчанию.</p>
-            <p><strong>Жёстко</strong> — когда явно лезут боты или рейд, и пора включать громче.</p>
+            <p class="font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.antinakrutka.moods_title') }}</p>
+            <p class="mt-1">{{ tt('protection.modals.antinakrutka.mood_soft') }}</p>
+            <p>{{ tt('protection.modals.antinakrutka.mood_std') }}</p>
+            <p>{{ tt('protection.modals.antinakrutka.mood_hard') }}</p>
           </div>
           <div class="rounded-lg border border-emerald-300/70 bg-emerald-50 p-3 dark:border-emerald-700/70 dark:bg-emerald-950/20">
-            <p class="font-semibold text-emerald-900 dark:text-emerald-200">Вышла реклама у блогера</p>
+            <p class="font-semibold text-emerald-900 dark:text-emerald-200">{{ tt('protection.modals.antinakrutka.tip_title') }}</p>
             <p class="mt-1 text-emerald-800 dark:text-emerald-300">
-              Держи <strong>Мягко</strong> или <strong>Стандарт</strong>, чтобы не резать нормальный приток. Увидел пустые профили, клонов и спам-волну — на 30–60 минут можно <strong>Жёстко</strong>, потом вернуться.
+              {{ tt('protection.modals.antinakrutka.tip_body') }}
             </p>
           </div>
           <p class="text-xs text-slate-400">
-            В отчётах видно, где был пик входов и сколько раз я вмешался — не гадай вслепую.
+            {{ tt('protection.modals.antinakrutka.p_footer') }}
           </p>
         </div>
       </div>
     </div>
+    </div>
+    </Teleport>
+    <Teleport to="body">
     <div
       v-if="showJoinCaptchaSettingsModal && chat?.rule"
-      class="fixed inset-0 z-[266] flex items-end justify-center bg-black/65 p-3 md:items-center"
+      class="fixed inset-0 z-[400] flex items-end justify-center bg-black/65 p-3 md:items-center"
       @click.self="showJoinCaptchaSettingsModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-indigo-400/22 bg-gradient-to-b from-slate-900/95 via-slate-950/95 to-black/95 p-4 text-slate-100 shadow-[0_26px_90px_-24px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,255,255,0.1)] backdrop-blur-2xl ring-1 ring-indigo-300/20">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold uppercase tracking-wide text-indigo-100">Капча при входе — настройки</h3>
+          <h3 class="text-xs font-semibold uppercase tracking-wide text-indigo-100">{{ tt('protection.join_captcha_settings_modal.title') }}</h3>
           <button
             type="button"
             class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
@@ -6608,7 +6629,7 @@ const protCardIndigo =
         </div>
         <div class="space-y-3">
           <div>
-            <p class="mb-1 text-xs text-slate-400">Время на ответ (мин)</p>
+            <p class="mb-1 text-xs text-slate-400">{{ tt('protection.join_captcha_settings_modal.ttl') }}</p>
             <div class="flex flex-wrap gap-2">
               <button
                 v-for="m in joinCaptchaTtlPresets"
@@ -6623,7 +6644,7 @@ const protCardIndigo =
             </div>
           </div>
           <div>
-            <p class="mb-1 text-xs text-slate-400">Тип проверки</p>
+            <p class="mb-1 text-xs text-slate-400">{{ tt('protection.join_captcha_settings_modal.kind') }}</p>
             <div class="flex max-h-[10rem] flex-wrap gap-1.5 overflow-y-auto pr-0.5">
               <button
                 v-for="k in joinCaptchaKinds"
@@ -6638,30 +6659,33 @@ const protCardIndigo =
             </div>
           </div>
           <div class="mt-2 flex items-center justify-between gap-2">
-            <span class="text-xs text-slate-300">Сначала в личку боту</span>
+            <span class="text-xs text-slate-300">{{ tt('protection.join_captcha_settings_modal.prefer_dm') }}</span>
             <button
               type="button"
               :class="boolToggleClass(!!chat.rule.join_captcha_prefer_dm)"
               class="rounded-lg px-2.5 py-1 text-xs"
               @click="updateRule({ join_captcha_prefer_dm: !chat.rule.join_captcha_prefer_dm })"
             >
-              {{ chat.rule.join_captcha_prefer_dm ? 'ДА' : 'НЕТ' }}
+              {{ chat.rule.join_captcha_prefer_dm ? tt('protection.join_captcha_settings_modal.yes') : tt('protection.join_captcha_settings_modal.no') }}
             </button>
           </div>
           <p class="text-[11px] leading-snug text-slate-500">
-            Нужны права бота «блокировать» участников. Если не смогу ограничить — всё равно пришлю капчу, но писать смогут до прохождения.
+            {{ tt('protection.join_captcha_settings_modal.note') }}
           </p>
         </div>
       </div>
     </div>
+    </Teleport>
+    <Teleport to="body">
+    <div class="contents">
     <div
       v-if="showJoinCaptchaInfoModal"
-      class="fixed inset-0 z-[266] flex items-center justify-center bg-black/65 p-3"
+      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
       @click.self="showJoinCaptchaInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">😈 Капча при входе</h3>
+          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.join_captcha.title') }}</h3>
           <button
             type="button"
             class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
@@ -6672,32 +6696,28 @@ const protCardIndigo =
         </div>
         <div class="space-y-2 text-xs leading-relaxed text-gray-700 dark:text-gray-300">
           <p>
-            После входа на время <strong>приглушаю</strong> человека (если у бота есть «блокировать») и включаю одну из проверок:
-            <strong>кнопки</strong>, <strong>счёт</strong>, <strong>эмодзи</strong>, <strong>слово → эмодзи</strong>, <strong>цифры</strong> (картинка или текст, если картинка не взлетела),
-            <strong>повтори слово</strong> или <strong>отгадай слово</strong> по маске — ответ нужно прислать сообщением в чат (или в ЛС, если капча ушла туда).
+            {{ tt('protection.modals.join_captcha.p1') }}
           </p>
           <p class="rounded-lg border border-amber-200/80 bg-amber-50/90 p-2.5 text-[11px] text-amber-950 dark:border-amber-700/50 dark:bg-amber-950/25 dark:text-amber-100">
-            <strong>Про «только этот юзер».</strong> В группе текст капчи видят все — так устроен Telegram.
-            Для <strong>кнопок</strong> я сверяю <strong>ID нажавшего</strong> с ID вступившего; для <strong>текста</strong> — только сообщения от его аккаунта.
-            Чтобы не светить проверку в группе, включи <strong>«Сначала в личку»</strong> (нужен открытый диалог со мной).
+            {{ tt('protection.modals.join_captcha.p2') }}
           </p>
           <p class="text-[11px] text-gray-500 dark:text-gray-400">
-            В форумах с темами капчу и приветствия лучше вести в одну закреплённую «служебную» ветку — иначе поток размазывается по топикам (см. документацию Telegram про главную ветку / forum).
+            {{ tt('protection.modals.join_captcha.p3') }}
           </p>
           <p class="text-[11px] text-gray-500 dark:text-gray-400">
-            Не успел за минуты из настроек — кик с возможностью зайти снова. Успел — снимаю мут и дальше не лезу.
+            {{ tt('protection.modals.join_captcha.p4') }}
           </p>
         </div>
       </div>
     </div>
     <div
       v-if="showAntispamInfoModal"
-      class="fixed inset-0 z-[266] flex items-center justify-center bg-black/65 p-3"
+      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
       @click.self="showAntispamInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">😈 Антиспам-база</h3>
+          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.antispam_db.title') }}</h3>
           <button
             type="button"
             class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
@@ -6707,21 +6727,21 @@ const protCardIndigo =
           </button>
         </div>
         <div class="space-y-2 text-xs text-gray-700 dark:text-gray-300">
-          <p>Общий чёрный список: кого занесли — того на входе режу во всех чатах, где проверка включена.</p>
-          <p><strong>Зачем:</strong> одни и те же рейдеры снова и снова прыгают между твоими залами.</p>
-          <p><strong>Как:</strong> включи проверку в чате и добавь ID или ответь <code>/addantispam</code> на сообщение гостя — я сам пойму, кого занести.</p>
-          <p><strong>Если промахнулся:</strong> убери через «Открыть базу», не оставляй обидчиков навечно.</p>
+          <p>{{ tt('protection.modals.antispam_db.p1') }}</p>
+          <p>{{ tt('protection.modals.antispam_db.p2') }}</p>
+          <p>{{ tt('protection.modals.antispam_db.p3') }}</p>
+          <p>{{ tt('protection.modals.antispam_db.p4') }}</p>
         </div>
       </div>
     </div>
     <div
       v-if="showNewbieInfoModal"
-      class="fixed inset-0 z-[266] flex items-center justify-center bg-black/65 p-3"
+      class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
       @click.self="showNewbieInfoModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">😈 Режим «Новички»</h3>
+          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.newbie.title') }}</h3>
           <button
             type="button"
             class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
@@ -6731,21 +6751,23 @@ const protCardIndigo =
           </button>
         </div>
         <div class="space-y-2 text-xs text-gray-700 dark:text-gray-300">
-          <p>Только вошёл — считаю его «свежаком» на выбранные минуты.</p>
-          <p>Правила те же, но в отчётах подсвечу причину как «новичок», чтобы сразу видеть волну риска после рекламы или рейда.</p>
-          <p><strong>Когда включать:</strong> после промо, когда сыпятся пустые профили или когда просто много новых лиц за короткий срок.</p>
-          <p><strong>По времени:</strong> стартуй с 10–15 минут; если жарко — 30–60, потом отпусти назад.</p>
+          <p>{{ tt('protection.modals.newbie.p1') }}</p>
+          <p>{{ tt('protection.modals.newbie.p2') }}</p>
+          <p>{{ tt('protection.modals.newbie.p3_when') }}</p>
+          <p>{{ tt('protection.modals.newbie.p4_time') }}</p>
         </div>
       </div>
     </div>
+    </div>
+    </Teleport>
     <div
       v-if="showAntispamListModal"
-      class="fixed inset-0 z-[266] flex items-center justify-center bg-black/65 p-3"
+      class="fixed inset-0 z-[400] flex items-center justify-center bg-black/65 p-3"
       @click.self="showAntispamListModal = false"
     >
       <div class="w-full max-w-xl rounded-2xl border border-cyan-400/22 bg-gradient-to-b from-slate-900/95 via-slate-950/95 to-black/95 p-4 text-slate-100 shadow-[0_26px_90px_-24px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,255,255,0.1)] backdrop-blur-2xl ring-1 ring-cyan-300/20">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold uppercase tracking-wide text-cyan-100">Антиспам база — настройки</h3>
+          <h3 class="text-xs font-semibold uppercase tracking-wide text-cyan-100">{{ tt('protection.antispam_list_modal.title') }}</h3>
           <button
             type="button"
             class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
@@ -6754,15 +6776,15 @@ const protCardIndigo =
             ✕
           </button>
         </div>
-        <p class="mb-3 rounded-xl border border-cyan-300/20 bg-cyan-500/[0.08] p-2.5 text-[11px] leading-relaxed text-slate-200/90 backdrop-blur-md">
-          Общая база пользователей по всем чатам бота. При включении этой функции пользователи из базы будут автоматически удаляться при входе в текущий чат.
-          Быстрый способ без ID: в группе ответьте на сообщение пользователя и отправьте <code>/addantispam</code>.
-        </p>
+        <p
+          class="mb-3 rounded-xl border border-cyan-300/20 bg-cyan-500/[0.08] p-2.5 text-[11px] leading-relaxed text-slate-200/90 backdrop-blur-md"
+          v-html="tt('protection.antispam_list_modal.intro_html')"
+        />
         <div class="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
           <input
             v-model="newAntispamUserId"
             type="text"
-            placeholder="User ID (число)"
+            :placeholder="tt('protection.antispam_list_modal.placeholder_id')"
             class="min-w-0 rounded-lg border border-white/15 bg-white/10 px-2.5 py-2 text-xs text-slate-100 placeholder:text-slate-400"
             :disabled="antispamLoading"
             @keydown.enter.prevent="addAntispamUser()"
@@ -6773,10 +6795,10 @@ const protCardIndigo =
             :disabled="antispamLoading || !(newAntispamUserId || '').trim()"
             @click="addAntispamUser()"
           >
-            Добавить
+            {{ tt('protection.antispam_list_modal.add') }}
           </button>
         </div>
-        <p v-if="!(antispamItems || []).length" class="text-xs text-slate-400">База пока пустая.</p>
+        <p v-if="!(antispamItems || []).length" class="text-xs text-slate-400">{{ tt('protection.antispam_list_modal.empty') }}</p>
         <ul v-else class="max-h-[52vh] space-y-2 overflow-y-auto pr-1">
           <li
             v-for="item in antispamItems"
@@ -6790,7 +6812,7 @@ const protCardIndigo =
               :disabled="antispamLoading"
               @click="removeAntispamUser(item.user_id)"
             >
-              Удалить
+              {{ tt('protection.antispam_list_modal.remove') }}
             </button>
           </li>
         </ul>
@@ -6817,7 +6839,7 @@ const protCardIndigo =
           <button
             type="button"
             class="absolute right-3 top-3 z-[2] rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-400 transition hover:bg-white/10 hover:text-white"
-            aria-label="Закрыть"
+            :aria-label="tt('common.close')"
             @click="closeFreeLimitsPremiumModal"
           >
             ✕
@@ -6833,32 +6855,31 @@ const protCardIndigo =
               id="free-limits-premium-title"
               class="mt-5 text-center text-[11px] font-extrabold uppercase tracking-[0.22em] text-violet-300"
             >
-              Ограничения Free
+              {{ tt('dashboard.billing.free_limits_title') }}
             </p>
             <p class="mt-2 max-w-[19rem] text-center text-[13px] leading-relaxed text-slate-400">
-              Вы используете бесплатный тариф.<br>
-              Некоторые функции недоступны в Free версии
+              {{ tt('dashboard.billing.free_limits_sub') }}
             </p>
             <ul class="mt-5 w-full space-y-3 rounded-2xl border border-white/[0.08] bg-zinc-950/90 px-4 py-4">
               <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
                 <span class="mt-0.5 shrink-0 text-violet-400" aria-hidden="true">🔒</span>
-                Автоудаление спама
+                {{ tt('dashboard.billing.free_li_autodel') }}
               </li>
               <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
                 <span class="mt-0.5 shrink-0 text-violet-400" aria-hidden="true">🔒</span>
-                Фильтр ссылок и упоминаний
+                {{ tt('dashboard.billing.free_li_links') }}
               </li>
               <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
                 <span class="mt-0.5 shrink-0 text-violet-400" aria-hidden="true">🔒</span>
-                Рассылки по чатам и каналам
+                {{ tt('dashboard.billing.free_li_broadcast') }}
               </li>
               <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
                 <span class="mt-0.5 shrink-0 text-violet-400" aria-hidden="true">🔒</span>
-                Расширенная статистика
+                {{ tt('dashboard.billing.free_li_stats') }}
               </li>
               <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
                 <span class="mt-0.5 shrink-0 text-amber-400/95 drop-shadow-[0_0_8px_rgba(251,191,36,0.45)]" aria-hidden="true">🔒</span>
-                Приоритетная поддержка
+                {{ tt('dashboard.billing.free_li_support') }}
               </li>
             </ul>
             <button
@@ -6866,7 +6887,7 @@ const protCardIndigo =
               class="mt-6 w-full rounded-2xl bg-violet-600 py-3.5 text-[15px] font-bold text-white shadow-[0_12px_32px_-8px_rgba(124,58,237,0.55)] transition hover:bg-violet-500 active:scale-[0.99]"
               @click="onFreeLimitsModalLearnMore"
             >
-              Подробнее о Premium
+              {{ tt('dashboard.billing.cta_learn_premium') }}
             </button>
           </div>
         </div>

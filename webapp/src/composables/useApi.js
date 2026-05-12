@@ -1,16 +1,20 @@
 import { ref, computed } from 'vue'
 import { api, getInitData } from '../api/client'
+import { getLocale } from '../i18n/index.js'
 
-/** Сообщения об ошибках с бэка — по-русски для пользователя (экспорт для админки / Guard Pulse). */
+/** Сообщения об ошибках с бэка — локализованные (RU/EN). */
 export function messageFromApiError(e) {
   const raw = e?.body?.detail ?? e?.message ?? ''
   const detail = typeof raw === 'string' ? raw : String(raw || '')
   const status = e?.status
   const dtrim = detail.trim()
   const dlow = dtrim.toLowerCase()
+  const isEn = String(getLocale() || 'ru').toLowerCase().startsWith('en')
 
   if (status === 503 || dlow.includes('service is starting')) {
-    return 'API ещё запускается (прогрев базы). Подождите 15–30 секунд и снова откройте панель из Telegram.'
+    return isEn
+      ? 'API is still booting (database warm-up). Wait 15–30 seconds and open the panel again from Telegram.'
+      : 'API ещё запускается (прогрев базы). Подождите 15–30 секунд и снова откройте панель из Telegram.'
   }
 
   const looksLikeNetwork =
@@ -20,26 +24,31 @@ export function messageFromApiError(e) {
       dlow,
     )
   if (looksLikeNetwork) {
-    return (
-      'Запрос к API не прошёл (сеть, CORS или адрес API). ' +
-      'Проверьте: 1) у сервиса фронта в Railway задан VITE_API_BASE_URL (или GUARD_API_BASE_URL) = полный https://… API; ' +
-      '2) в консоли: window.__GUARD_API_BASE_EFFECTIVE__ — должен быть тот же URL; ' +
-      '3) у API CORS_ORIGINS=* или домен Mini App.'
-    )
+    return isEn
+      ? 'Request to the API failed (network, CORS or API URL). Check the frontend env vars and CORS.'
+      : 'Запрос к API не прошёл (сеть, CORS или адрес API). Проверьте конфигурацию фронтенда и CORS.'
   }
   if (detail === 'Chat not found' || (status === 404 && String(detail).toLowerCase().includes('chat'))) {
-    return 'Чат не найден или у вас нет к нему доступа. Выберите чат в разделе «Подключённые чаты» или подключите новую группу.'
+    return isEn
+      ? 'Chat not found or you have no access. Pick a chat in “Connected chats” or connect a new group.'
+      : 'Чат не найден или у вас нет к нему доступа. Выберите чат в разделе «Подключённые чаты» или подключите новую группу.'
   }
   if (detail === 'Chat not found or access denied' || (status === 403 && String(detail).toLowerCase().includes('chat'))) {
-    return 'Нет доступа к этому чату. Выберите другой чат в разделе «Подключённые чаты».'
+    return isEn
+      ? 'No access to this chat. Pick another chat in “Connected chats”.'
+      : 'Нет доступа к этому чату. Выберите другой чат в разделе «Подключённые чаты».'
   }
   if (status === 401 && (String(detail).toLowerCase().includes('init') || String(detail).toLowerCase().includes('telegram'))) {
-    return 'Сессия Mini App не подтверждена. Закройте панель и откройте снова через кнопку «Меню» в чате с ботом (не из внешнего браузера). Если открываете другого бота — у этого аккаунта должен быть тот же бот, что и API на сервере.'
+    return isEn
+      ? 'Mini App session is not verified. Close the panel and open it again via the “Menu” button in the bot chat.'
+      : 'Сессия Mini App не подтверждена. Закройте панель и откройте снова через кнопку «Меню» в чате с ботом.'
   }
   if (status === 401 && String(detail).toLowerCase().includes('session terminated')) {
-    return 'Эта сессия завершена. Откройте мини-приложение заново из Telegram.'
+    return isEn
+      ? 'This session has ended. Reopen the Mini App from Telegram.'
+      : 'Эта сессия завершена. Откройте мини-приложение заново из Telegram.'
   }
-  return detail || 'Ошибка запроса'
+  return detail || (isEn ? 'Request error' : 'Ошибка запроса')
 }
 
 export function useApi() {

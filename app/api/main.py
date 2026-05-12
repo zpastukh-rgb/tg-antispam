@@ -16,8 +16,10 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from app.api.api_locale import current_api_locale, reset_request_api_locale, set_request_api_locale
 from app.api.auth import get_telegram_user_id
 from app.api.routes import router
+from app.i18n import t as i18n_t
 from app.db.ensure_defaults import (
     ensure_chats_chat_kind_column,
     ensure_chats_linked_discussion_chat_id_column,
@@ -70,7 +72,10 @@ from app.db.ensure_defaults import (
     ensure_moderation_logs_detail_column,
     ensure_user_post_rules_drafts_json_column,
     ensure_users_delegate_broadcast_payer_column,
+    ensure_users_language_column,
+    ensure_profanity_lang_column,
     ensure_admin_incident_feed_schema,
+    ensure_pdf_exports_schema,
 )
 from app.db.session import engine
 from app.services.admin_diagnostics_service import (
@@ -117,6 +122,17 @@ def _is_startup_exempt_path(path: str) -> bool:
     return False
 
 
+class _ApiLocaleMiddleware(BaseHTTPMiddleware):
+    """Accept-Language → context для err_detail() и прочих API-сообщений."""
+
+    async def dispatch(self, request: Request, call_next):
+        token = set_request_api_locale(request)
+        try:
+            return await call_next(request)
+        finally:
+            reset_request_api_locale(token)
+
+
 class _StartupGateMiddleware(BaseHTTPMiddleware):
     """Пока идёт фоновый прогрев БД — остальные маршруты 503, чтобы не ловить гонки."""
 
@@ -124,7 +140,7 @@ class _StartupGateMiddleware(BaseHTTPMiddleware):
         if _is_startup_exempt_path(request.url.path):
             return await call_next(request)
         if not getattr(request.app.state, "api_ready", False):
-            return JSONResponse({"detail": "Service is starting"}, status_code=503)
+            return JSONResponse({"detail": i18n_t(current_api_locale(), "api.ui.service_starting")}, status_code=503)
         return await call_next(request)
 
 
@@ -194,7 +210,10 @@ async def _run_api_startup_ensures(app: FastAPI) -> None:
         await ensure_moderation_logs_detail_column(engine)
         await ensure_user_post_rules_drafts_json_column(engine)
         await ensure_users_delegate_broadcast_payer_column(engine)
+        await ensure_users_language_column(engine)
+        await ensure_profanity_lang_column(engine)
         await ensure_admin_incident_feed_schema(engine)
+        await ensure_pdf_exports_schema(engine)
     except Exception:
         log.exception("API startup ensures failed")
     else:
@@ -314,6 +333,7 @@ class _AttachTelegramUserAndLogUnhandledMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(_AdminIncidentLogMiddleware)
 app.add_middleware(_AttachTelegramUserAndLogUnhandledMiddleware)
+app.add_middleware(_ApiLocaleMiddleware)
 
 
 @app.get("/")

@@ -1,7 +1,17 @@
 <script setup>
 import { ref, shallowRef, onMounted, onBeforeUnmount, computed, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import { useApi, messageFromApiError } from '../composables/useApi'
+
+const { t: tt, te, locale } = useI18n()
+function adminLocaleTag() {
+  return String(locale.value || 'ru').toLowerCase().startsWith('en') ? 'en-US' : 'ru-RU'
+}
+function localeIsEn() {
+  return adminLocaleTag() === 'en-US'
+}
+const guardPulseUiMarker = computed(() => tt('admin.pulse.ui_marker'))
 import {
   adminBroadcastUploadMedia,
   adminBroadcastDeleteMediaItem,
@@ -144,7 +154,7 @@ const referralsFunnel = ref([])
 const actionLoadingId = ref(0)
 const showPayoutHelp = ref(false)
 const partnerHelpOpen = ref(false)
-const partnerHelpTitle = ref('😈 Коротко')
+const partnerHelpTitle = ref('')
 const partnerHelpLines = ref([])
 const payoutSearch = ref('')
 const payoutsOnlyPaid = ref(false)
@@ -160,7 +170,6 @@ const opsLoading = ref(false)
 const opsActionLoading = ref('')
 /** Подвкладки Guard Pulse: мониторинг / журнал серверных 5xx для владельца */
 /** Метка сборки: если в Guard Pulse её нет — открыт старый фронт (нужен redeploy WebApp). */
-const GUARD_PULSE_UI_MARKER = 'Панель v2 · апр.2026'
 const opsInnerTab = ref('pulse')
 /** Подробности Guard Pulse / журнал (ⓘ), чтобы не засорять экран. */
 const guardPulseInfoOpen = ref(false)
@@ -184,12 +193,12 @@ const showGlobalBadUrlInfo = ref(false)
 const usersScrollTargetTelegramId = ref(0)
 const usersHighlightTelegramId = ref(0)
 const insights = ref({ window_hours: 24, group_joins_count: 0, starts_count: 0, payments_count: 0, payments_sum_rub: 0, referral_shares_count: 0, referral_levels: [] })
-const joinReportPresetOptions = [
-  { id: 'day', label: 'Раз в день' },
-  { id: '3d', label: 'Раз в 3 дня' },
-  { id: 'week', label: 'Раз в неделю' },
-  { id: 'month', label: 'Раз в месяц' },
-]
+const joinReportPresetOptions = computed(() => [
+  { id: 'day', label: tt('admin.partner_presets.join_day') },
+  { id: '3d', label: tt('admin.partner_presets.join_3d') },
+  { id: 'week', label: tt('admin.partner_presets.join_week') },
+  { id: 'month', label: tt('admin.partner_presets.join_month') },
+])
 const insightsLoading = ref(false)
 const msgTemplates = ref([])
 const msgTemplateOptions = ref({ events: [], targets: [] })
@@ -213,10 +222,12 @@ const bcSendTargetGroups = ref(false)
 const bcSendTargetBots = ref(false)
 const bcShowBotsPicker = ref(false)
 const bcBotsSearch = ref('')
-const bcBotRecipients = ref([
-  { id: 1, title: 'Все активные пользователи бота' },
-])
+const bcBotRecipients = ref([{ id: 1, special: 'all' }])
 const bcSelectedBotRecipientIds = ref([])
+function bcBotRowTitle(b) {
+  if (b?.special === 'all') return tt('admin.broadcast_send.all_bot_users')
+  return String(b?.title || '')
+}
 const bcGroupsSearch = ref('')
 const bcChannelsSearch = ref('')
 const bcConfirmModalOpen = ref(false)
@@ -309,9 +320,15 @@ const bcQuickButtonPreview = computed(() =>
 
 const bcSendTargetSummary = computed(() => {
   const rows = []
-  if (bcSendTargetChannels.value) rows.push(`Каналы: ${Number(bcSelectedChannelIds.value?.length || 0)}`)
-  if (bcSendTargetGroups.value) rows.push(`Группы: ${Number(bcSelectedGroupIds.value?.length || 0)}`)
-  if (bcSendTargetBots.value) rows.push(`Боты (личка): ${Number(bcSelectedBotRecipientIds.value?.length || 0)}`)
+  if (bcSendTargetChannels.value) {
+    rows.push(tt('admin.broadcast_send.target_channels', { n: Number(bcSelectedChannelIds.value?.length || 0) }))
+  }
+  if (bcSendTargetGroups.value) {
+    rows.push(tt('admin.broadcast_send.target_groups', { n: Number(bcSelectedGroupIds.value?.length || 0) }))
+  }
+  if (bcSendTargetBots.value) {
+    rows.push(tt('admin.broadcast_send.target_bots', { n: Number(bcSelectedBotRecipientIds.value?.length || 0) }))
+  }
   return rows
 })
 
@@ -327,12 +344,22 @@ function ruPlural(n, one, few, many) {
 
 function bcConfirmSymbolsLabel(n) {
   const v = Math.max(0, Number(n || 0))
+  if (localeIsEn()) {
+    return v === 1
+      ? tt('admin.broadcast_send.symbols_one', { n: v })
+      : tt('admin.broadcast_send.symbols_other', { n: v })
+  }
   return `~${v} ${ruPlural(v, 'символ', 'символа', 'символов')}`
 }
 
 function bcConfirmButtonsLabel(n) {
   const v = Math.max(0, Number(n || 0))
-  if (!v) return 'Нет'
+  if (!v) return tt('admin.broadcast_send.buttons_none')
+  if (localeIsEn()) {
+    return v === 1
+      ? tt('admin.broadcast_send.buttons_one', { n: v })
+      : tt('admin.broadcast_send.buttons_other', { n: v })
+  }
   return `${v} ${ruPlural(v, 'кнопка', 'кнопки', 'кнопок')}`
 }
 
@@ -358,7 +385,7 @@ function fmtBroadcastShortTime(iso) {
   const sameDay =
     d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()
   const timeStr = `${pad(d.getHours())}:${pad(d.getMinutes())}`
-  if (sameDay) return `Сегодня, ${timeStr}`
+  if (sameDay) return tt('admin.broadcast_send.today_time', { time: timeStr })
   return timeStr
 }
 
@@ -366,7 +393,7 @@ function fmtIntSpace(n) {
   const v = Number(n || 0)
   if (!Number.isFinite(v)) return '0'
   try {
-    return new Intl.NumberFormat('ru-RU').format(Math.trunc(v))
+    return new Intl.NumberFormat(adminLocaleTag()).format(Math.trunc(v))
   } catch {
     return String(Math.trunc(v))
   }
@@ -376,7 +403,7 @@ function fmtPctTrim(p) {
   if (p == null) return '—'
   const n = Number(p)
   if (!Number.isFinite(n)) return '—'
-  const s = n.toFixed(1).replace('.', ',')
+  const s = localeIsEn() ? n.toFixed(1) : n.toFixed(1).replace('.', ',')
   return `${s}%`
 }
 function stripHtml(raw) {
@@ -516,8 +543,9 @@ const bcFilteredChannels = computed(() => {
 
 const bcFilteredBots = computed(() => {
   const q = String(bcBotsSearch.value || '').trim().toLowerCase()
-  if (!q) return bcBotRecipients.value || []
-  return (bcBotRecipients.value || []).filter((b) => String(b?.title || '').toLowerCase().includes(q))
+  const list = bcBotRecipients.value || []
+  if (!q) return list
+  return list.filter((b) => bcBotRowTitle(b).toLowerCase().includes(q))
 })
 const bcSelectedTargetsCount = computed(() =>
   Number((bcSelectedChannelIds.value || []).length || 0) + Number((bcSelectedGroupIds.value || []).length || 0),
@@ -525,10 +553,10 @@ const bcSelectedTargetsCount = computed(() =>
 
 function bcRecentWhenLabel(item) {
   const raw = String(item?.sent_at || item?.created_at || '').trim()
-  if (!raw) return 'дата не указана'
+  if (!raw) return tt('admin.broadcast_send.date_unknown')
   const d = new Date(raw)
-  if (!Number.isFinite(d.getTime())) return 'дата не указана'
-  return d.toLocaleString('ru-RU', {
+  if (!Number.isFinite(d.getTime())) return tt('admin.broadcast_send.date_unknown')
+  return d.toLocaleString(adminLocaleTag(), {
     day: 'numeric',
     month: '2-digit',
     year: 'numeric',
@@ -539,11 +567,8 @@ function bcRecentWhenLabel(item) {
 
 function bcRecentStatusLabel(item) {
   const st = String(item?.status || '').toLowerCase()
-  if (st === 'sent') return 'Отправлено'
-  if (st === 'sending') return 'Отправляется'
-  if (st === 'failed') return 'С ошибкой'
-  if (st === 'draft') return 'Черновик'
-  return 'Запуск'
+  if (st === 'sent' || st === 'sending' || st === 'failed' || st === 'draft') return bcStatusLabel(st)
+  return tt('admin.broadcast_send.status_launch')
 }
 
 async function openQuickBroadcastDraft() {
@@ -555,8 +580,8 @@ async function openQuickBroadcastDraft() {
       bcQuickDraftInitializing.value = true
       bcEditorOpen.value = false
       bcQuickDraftModalOpen.value = true
-      bcTitle.value = String(bcTitle.value || 'Новый черновик')
-      bcBodyHtml.value = String(bcBodyHtml.value || '')
+      bcTitle.value = tt('admin.broadcast_send.new_draft')
+      bcBodyHtml.value = ''
       await nextTick()
       bcSetBodyEditorHtml(bcBodyHtml.value || '')
     }
@@ -608,9 +633,35 @@ function bcConfirmBuildPayload() {
   if (mergedIds.length > 0) {
     if (!mergedIds.length) return null
     let label = ''
-    if (nChannels > 0 && nGroups === 0) label = `${nChannels} ${ruPlural(nChannels, 'канал', 'канала', 'каналов')}`
-    else if (nGroups > 0 && nChannels === 0) label = `${nGroups} ${ruPlural(nGroups, 'группа', 'группы', 'групп')}`
-    else label = `${nChannels} ${ruPlural(nChannels, 'канал', 'канала', 'каналов')} · ${nGroups} ${ruPlural(nGroups, 'группа', 'группы', 'групп')}`
+    if (localeIsEn()) {
+      if (nChannels > 0 && nGroups === 0) {
+        label =
+          nChannels === 1
+            ? tt('admin.broadcast_send.en_channel_one', { n: nChannels })
+            : tt('admin.broadcast_send.en_channel_other', { n: nChannels })
+      } else if (nGroups > 0 && nChannels === 0) {
+        label =
+          nGroups === 1
+            ? tt('admin.broadcast_send.en_group_one', { n: nGroups })
+            : tt('admin.broadcast_send.en_group_other', { n: nGroups })
+      } else {
+        const ch =
+          nChannels === 1
+            ? tt('admin.broadcast_send.en_channel_one', { n: nChannels })
+            : tt('admin.broadcast_send.en_channel_other', { n: nChannels })
+        const gr =
+          nGroups === 1
+            ? tt('admin.broadcast_send.en_group_one', { n: nGroups })
+            : tt('admin.broadcast_send.en_group_other', { n: nGroups })
+        label = `${ch} · ${gr}`
+      }
+    } else if (nChannels > 0 && nGroups === 0) {
+      label = `${nChannels} ${ruPlural(nChannels, 'канал', 'канала', 'каналов')}`
+    } else if (nGroups > 0 && nChannels === 0) {
+      label = `${nGroups} ${ruPlural(nGroups, 'группа', 'группы', 'групп')}`
+    } else {
+      label = `${nChannels} ${ruPlural(nChannels, 'канал', 'канала', 'каналов')} · ${nGroups} ${ruPlural(nGroups, 'группа', 'группы', 'групп')}`
+    }
     return { mode: 'groups', ids: mergedIds, recipientLabel: label }
   }
   return null
@@ -635,7 +686,7 @@ async function openBcConfirmModal() {
     const q = await fetch(() => api.adminBroadcastQuote(bid, payload.mode, payload.ids))
     const need = Number(q?.cost_tokens ?? 0)
     if (need > 0 && q?.can_afford === false) {
-      alert(`Недостаточно AURUM: нужно ${need} ✨, доступно ${Number(q?.spendable_credits || 0)} ✨.`)
+      alert(tt('admin.broadcast_send.aurum_short', { need, have: Number(q?.spendable_credits || 0) }))
       return
     }
     bcConfirmQuoteTokens.value = need
@@ -643,7 +694,7 @@ async function openBcConfirmModal() {
     bcSendTargetModalOpen.value = false
     bcConfirmModalOpen.value = true
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось рассчитать стоимость'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.broadcast_send.quote_failed')))
   } finally {
     bcConfirmLoading.value = false
   }
@@ -654,7 +705,7 @@ async function submitBcConfirmedSend() {
   if (!bid) return
   const okPin = await requestPinIfNeeded('broadcast')
   if (!okPin) {
-    if (shouldAskPinForAction('broadcast')) alert('Нужен код из «Настройки → Безопасность»')
+    if (shouldAskPinForAction('broadcast')) alert(tt('admin.broadcast_send.pin_required'))
     return
   }
   bcConfirmSending.value = true
@@ -682,7 +733,7 @@ async function submitBcConfirmedSend() {
     }
   } catch (e) {
     bcSendModalState.value = 'failed'
-    bcSendModalText.value = String(e?.body?.detail || e?.message || 'Не удалось отправить')
+    bcSendModalText.value = String(e?.body?.detail || e?.message || tt('admin.broadcast_send.send_failed'))
     stopBroadcastProgressPolling()
   } finally {
     bcConfirmSending.value = false
@@ -755,7 +806,7 @@ async function saveDelegateBroadcastPayer(mode) {
     await fetch(() => api.meDelegateBroadcastPayerPatch(mode))
     meAdminProfile.value = { ...meAdminProfile.value, delegate_broadcast_payer: mode }
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось сохранить'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.save_failed')))
   } finally {
     delegatePayerSaving.value = false
   }
@@ -765,17 +816,17 @@ async function submitAurumTransferToDelegate() {
   const tg = Number(String(aurumTransferToDelegateTg.value || '').trim())
   const amt = Number(String(aurumTransferToDelegateAmt.value || '').replace(',', '.'))
   if (!tg || tg <= 0 || !Number.isFinite(amt) || amt < 0.01) {
-    alert('Укажите Telegram id менеджера и сумму AURUM (от 0.01)')
+    alert(tt('admin.dlg.transfer_fill'))
     return
   }
   aurumTransferLoading.value = true
   try {
     const r = await fetch(() => api.billingAurumTransferToDelegate(tg, amt))
-    alert(`Переведено: ${Number(r?.transferred ?? amt)} ✨`)
+    alert(tt('admin.dlg.transferred', { n: Number(r?.transferred ?? amt) }))
     aurumTransferToDelegateAmt.value = ''
     meAdminProfile.value = await api.me()
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось перевести'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.transfer_failed')))
   } finally {
     aurumTransferLoading.value = false
   }
@@ -851,20 +902,39 @@ const partnerOverlayOpen = computed(
     showPartnerSegmentModal.value,
 )
 const partnerSegmentModalTab = ref('joins')
+const partnerSegmentModalTitle = computed(() =>
+  partnerSegmentModalTab.value === 'joins'
+    ? tt('admin.partner_ui.segment_title_joins')
+    : tt('admin.partner_ui.segment_title_spam'),
+)
+const partnerJoinsPeriodSummary = computed(() =>
+  tt('admin.partner_ui.joins_period_line', {
+    joins: Number(partnerHourlyData.value?.totals?.joins || 0),
+    events: Number(partnerHourlyData.value?.totals?.events || 0),
+  }),
+)
 const partnerJournalDoneKeys = ref(new Set())
-const OWNER_JOIN_REPORT_PRESETS = [
-  { id: 'day', label: 'Раз в день' },
-  { id: '3d', label: 'Раз в 3 дня' },
-  { id: 'week', label: 'Раз в неделю' },
-  { id: 'month', label: 'Раз в месяц' },
+const PARTNER_HOURLY_PRESET_DEFS = [
+  { id: '24h', hours: 24 },
+  { id: '7d', hours: 24 * 7 },
+  { id: '30d', hours: 24 * 30 },
+  { id: '6m', hours: 24 * 183 },
+  { id: '1y', hours: 24 * 365 },
 ]
-const PARTNER_HOURLY_PRESETS = [
-  { id: '24h', label: '24ч', hours: 24 },
-  { id: '7d', label: '7д', hours: 24 * 7 },
-  { id: '30d', label: '30д', hours: 24 * 30 },
-  { id: '6m', label: '6м', hours: 24 * 183 },
-  { id: '1y', label: '1г', hours: 24 * 365 },
-]
+const PARTNER_HOURLY_PRESETS = computed(() =>
+  PARTNER_HOURLY_PRESET_DEFS.map((d) => ({
+    id: d.id,
+    label: tt(`admin.partner_presets.hourly_${d.id}`),
+    hours: d.hours,
+  })),
+)
+
+function partnerSlotRowMeta(row) {
+  return tt('admin.partner_ui.slot_joined_events', {
+    joins: Number(row?.joins || 0),
+    events: Number(row?.events || 0),
+  })
+}
 
 function partnerNormalizeAction(action) {
   const a = String(action || '').toLowerCase()
@@ -874,12 +944,12 @@ function partnerNormalizeAction(action) {
   return 'delete'
 }
 
-function partnerActionLabelRu(action) {
+function partnerActionLabel(action) {
   const key = partnerNormalizeAction(action)
-  if (key === 'ban') return 'Блокировка'
-  if (key === 'mute') return 'Ограничение'
-  if (key === 'observe') return 'Замечено'
-  return 'Удаление'
+  if (key === 'ban') return tt('admin.journal.action_ban')
+  if (key === 'mute') return tt('admin.journal.action_mute')
+  if (key === 'observe') return tt('admin.journal.action_observe')
+  return tt('admin.journal.action_delete')
 }
 
 const PARTNER_SPAM_REASON_BASES = new Set([
@@ -902,33 +972,21 @@ function partnerIsSpamReason(reason) {
 
 const partnerSlotDetailModerationDisplay = computed(() => {
   const rows = partnerSlotDetailData.value?.moderation || []
-  const t = String(partnerSlotDetailTitle.value || '')
-  if (t.includes('Спам')) {
+  const t = String(partnerSlotDetailTitle.value || '').toLowerCase()
+  if (t.includes('спам') || t.includes('spam')) {
     return rows.filter((m) => partnerIsSpamReason(m.reason))
   }
   return rows
 })
 
-function partnerReasonRu(reason) {
+function partnerReasonLabel(reason) {
   const raw = String(reason || '').trim().toLowerCase()
   if (!raw) return '—'
   const base = raw.replace(/_newbie$/i, '')
-  const map = {
-    link: 'Ссылки',
-    media: 'Медиа',
-    buttons: 'Кнопки',
-    mention: 'Упоминания',
-    stopword: 'Стоп-слова',
-    profanity: 'Мат',
-    jobs: 'Подработки',
-    casino: 'Казино',
-    politics: 'Анти-политика',
-    religion: 'Религия',
-    esoteric: 'Эзотерика / магия',
-    silence: 'Тишина',
-  }
-  if (map[raw]) return map[raw]
-  if (map[base]) return map[base]
+  const path = `cabinet_stats.reasons.${base}`
+  if (te(path)) return tt(path)
+  const pathRaw = `cabinet_stats.reasons.${raw}`
+  if (te(pathRaw)) return tt(pathRaw)
   return raw.replace(/_/g, ' ')
 }
 
@@ -963,9 +1021,9 @@ async function saveOwnerJoinReportSettings() {
   try {
     const r = await fetch(() => api.ownerSetJoinReportSettings(ownerJoinReportPeriods.value || []))
     ownerJoinReportPeriods.value = Array.isArray(r?.periods) ? r.periods : ownerJoinReportPeriods.value
-    alert('Периодичность коротких отчётов сохранена')
+    alert(tt('admin.dlg.join_report_saved'))
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось сохранить периодичность отчётов'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.join_report_save_failed')))
   } finally {
     ownerJoinReportSaving.value = false
   }
@@ -975,14 +1033,14 @@ async function partnerQuickUnmute(ev) {
   const chatId = Number(ev?.chat_id || 0)
   const uid = Number(ev?.user_id || 0)
   if (!chatId || !uid) return
-  if (!window.confirm(`Снять мут для ${partnerUserLabel(ev)}?`)) return
+  if (!window.confirm(tt('admin.dlg.partner_unmute_confirm', { name: partnerUserLabel(ev) }))) return
   try {
     await fetch(() => api.chatMemberUnmute(chatId, uid))
     partnerJournalDoneKeys.value.add(`mute:${chatId}:${uid}`)
     partnerJournalDoneKeys.value = new Set(partnerJournalDoneKeys.value)
-    alert('Команда на размут отправлена')
+    alert(tt('admin.dlg.partner_unmute_ok'))
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось размутить'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.partner_unmute_fail')))
   }
 }
 
@@ -990,21 +1048,21 @@ async function partnerQuickUnban(ev) {
   const chatId = Number(ev?.chat_id || 0)
   const uid = Number(ev?.user_id || 0)
   if (!chatId || !uid) return
-  if (!window.confirm(`Разбанить ${partnerUserLabel(ev)}?`)) return
+  if (!window.confirm(tt('admin.dlg.partner_unban_confirm', { name: partnerUserLabel(ev) }))) return
   try {
     await fetch(() => api.chatMemberUnban(chatId, uid))
     partnerJournalDoneKeys.value.add(`ban:${chatId}:${uid}`)
     partnerJournalDoneKeys.value = new Set(partnerJournalDoneKeys.value)
-    alert('Команда на разбан отправлена')
+    alert(tt('admin.dlg.partner_unban_ok'))
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось разбанить'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.partner_unban_fail')))
   }
 }
 
 function partnerQuickObserve(ev) {
   const uid = Number(ev?.user_id || 0)
   if (!uid) return
-  alert(`Пользователь ${partnerUserLabel(ev)} отмечен как «замечено»`)
+  alert(tt('admin.dlg.partner_observed', { name: partnerUserLabel(ev) }))
 }
 
 function _partnerDayBoundsIso(dateStr, endOfDay) {
@@ -1028,7 +1086,7 @@ async function loadPartnerHourlyActivity() {
       const dFrom = new Date(`${String(partnerHourlyDateFrom.value).trim()}T00:00:00`)
       const dTo = new Date(`${String(partnerHourlyDateTo.value).trim()}T00:00:00`)
       if (!Number.isNaN(dFrom.getTime()) && !Number.isNaN(dTo.getTime()) && dFrom > dTo) {
-        alert('Дата «с» не может быть позже «по»')
+        alert(tt('admin.dlg.date_from_after_to'))
         partnerHourlyLoading.value = false
         return
       }
@@ -1040,7 +1098,7 @@ async function loadPartnerHourlyActivity() {
     }
     if (!r) {
       const pid = String(partnerHourlyPreset.value || '24h')
-      const preset = PARTNER_HOURLY_PRESETS.find((x) => x.id === pid) || PARTNER_HOURLY_PRESETS[0]
+      const preset = PARTNER_HOURLY_PRESET_DEFS.find((x) => x.id === pid) || PARTNER_HOURLY_PRESET_DEFS[0]
       r = await fetch(() => api.activityHours(chatArg, preset.hours))
     }
     const g = await fetch(() => api.activityAudienceGender(chatArg)).catch(() => null)
@@ -1079,8 +1137,7 @@ async function loadPartnerHourlyActivity() {
 function partnerPresetDateHint(presetId) {
   const id = String(presetId || '')
   const now = new Date()
-  const fmt = (d) =>
-    d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short', year: 'numeric' })
+  const fmt = (d) => d.toLocaleDateString(adminLocaleTag(), { day: 'numeric', month: 'short', year: 'numeric' })
   if (id === '24h') return fmt(now)
   if (id === '7d') {
     const a = new Date(now.getTime() - 7 * 86400000)
@@ -1093,62 +1150,36 @@ function partnerPresetDateHint(presetId) {
   return ''
 }
 
-const PARTNER_HELP = {
-  chatList: {
-    shortTitle: 'Список чатов в партнёрке',
-    lines: [
-      'Группы, каналы и «обсуждение канала» я помечаю разными значками — сразу видно, где люди пишут вживую, а где только лента постов.',
-      'Если у канала есть привязанная группа обсуждения, «живую» статистику беру оттуда.',
-    ],
-  },
-  dayCounter: {
-    shortTitle: 'Счётчик за сутки',
-    lines: [
-      'На главной — короткая сводка за последние 24 часа; в окне можно развернуть период и разрез по чатам.',
-      'Считаю те же события, что в журнале: удаления, муты, баны и остальное по правилам чата.',
-    ],
-  },
-  discussion: {
-    shortTitle: 'Группа и канал',
-    lines: [
-      '«Группа в канале» в Telegram — это обсуждение: туда люди пишут комментарии.',
-      'Графики по каналу, если есть обсуждение, собираю из привязанного чата; в одном только постах админов мало данных для картинки.',
-    ],
-  },
-  events: {
-    shortTitle: 'График событий',
-    lines: [
-      'События — это срабатывания Guard в чате плюс новые участники, которых я зафиксировал.',
-      'Насколько «шумно» в слоте, зависит от выбранного отрезка времени.',
-    ],
-  },
-  customRange: {
-    shortTitle: 'Свой диапазон дат',
-    lines: [
-      'Ты выбираешь календарные сутки в часовом поясе браузера; я перевожу границы в UTC и дергаю API.',
-      'Если цифры «пляшут» на стыке дней — глянь время и часовой пояс на устройстве.',
-    ],
-  },
-  barScale: {
-    shortTitle: 'Полоски на графике',
-    lines: [
-      'Высота столбика — доля от максимума в одном слоте на выбранном интервале. Это масштаб графика, не лимит чата и не «потолок».',
-      'Два пика рядом значат: в эти минуты было жарко относительно остального окна.',
-    ],
-  },
-  tgstatPack: {
-    shortTitle: 'Что это за статистика',
-    lines: [
-      'Карточки сверху показывают срез по выбранному чату/каналу из подключённых у пользователя.',
-      'Для части метрик беру прямые цифры из Guard (участники, события, модерация, спам), а остальное отображается как справочный формат блока.',
-      'Пол внизу — оценка по first_name вступивших пользователей в подключенных чатах (может быть неполной).',
-    ],
-  },
+const PARTNER_HELP_LINE_COUNTS = { chatList: 2, dayCounter: 2, discussion: 2, events: 2, customRange: 2, barScale: 2, tgstatPack: 3 }
+const PARTNER_HELP_SLUG = {
+  chatList: 'chat_list',
+  dayCounter: 'day_counter',
+  discussion: 'discussion',
+  events: 'events',
+  customRange: 'custom_range',
+  barScale: 'bar_scale',
+  tgstatPack: 'tgstat_pack',
+}
+
+function partnerHelpBase(key) {
+  const slug = PARTNER_HELP_SLUG[key]
+  return slug ? `admin.partner_help.${slug}` : ''
+}
+
+function partnerHelpTitleText(key) {
+  const base = partnerHelpBase(key)
+  return base ? tt(`${base}.title`) : tt('admin.partner_help.help_generic')
+}
+
+function partnerHelpLinesFor(key) {
+  const base = partnerHelpBase(key)
+  const n = PARTNER_HELP_LINE_COUNTS[key] || 0
+  if (!base || !n) return []
+  return Array.from({ length: n }, (_, i) => tt(`${base}.l${i}`))
 }
 
 function partnerHelpBind(key, variant = 'corner') {
-  const h = PARTNER_HELP[key]
-  const tt = h?.shortTitle || 'Справка'
+  const shortTitle = partnerHelpTitleText(key)
   const base =
     'z-30 inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-full border-2 border-slate-400/80 bg-slate-950 text-[11px] font-bold text-slate-100 shadow-md hover:bg-slate-800 active:scale-95'
   const pos =
@@ -1159,17 +1190,16 @@ function partnerHelpBind(key, variant = 'corner') {
         : ''
   return {
     type: 'button',
-    title: tt,
-    'aria-label': `Справка: ${tt}`,
+    title: shortTitle,
+    'aria-label': tt('admin.partner_help.aria', { title: shortTitle }),
     class: [base, pos].filter(Boolean).join(' '),
   }
 }
 
 function partnerShowHelp(key) {
-  const h = PARTNER_HELP[key]
-  if (!h) return
-  partnerHelpTitle.value = `😈 ${h.shortTitle}`
-  partnerHelpLines.value = h.lines
+  if (!PARTNER_HELP_SLUG[key]) return
+  partnerHelpTitle.value = `${tt('admin.partner_help.modal_prefix')}${partnerHelpTitleText(key)}`
+  partnerHelpLines.value = partnerHelpLinesFor(key)
   partnerHelpOpen.value = true
 }
 
@@ -1197,9 +1227,9 @@ const partnerGroupsModalRows = computed(() => {
 })
 const partnerOwnChatsOrdered = computed(() => {
   const channels = [...(partnerChatsGrouped.value?.channels || [])]
-    .sort((a, b) => String(a?.title || '').localeCompare(String(b?.title || ''), 'ru'))
+    .sort((a, b) => String(a?.title || '').localeCompare(String(b?.title || ''), adminLocaleTag()))
   const groups = [...(partnerChatsGrouped.value?.groups || [])]
-    .sort((a, b) => String(a?.title || '').localeCompare(String(b?.title || ''), 'ru'))
+    .sort((a, b) => String(a?.title || '').localeCompare(String(b?.title || ''), adminLocaleTag()))
   return { channels, groups }
 })
 
@@ -1224,7 +1254,7 @@ const partnerChartLabels = computed(() => {
   return slots.map((s) => {
     const d = new Date(String(s?.slot_start || ''))
     if (!Number.isFinite(d.getTime())) return '—'
-    return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })
+    return d.toLocaleDateString(adminLocaleTag(), { day: '2-digit', month: 'short' })
   })
 })
 const partnerChartSeries = computed(() => {
@@ -1409,7 +1439,7 @@ const partnerSelectedChatMeta = computed(() => {
 function partnerFmtInt(n) {
   const v = Number(n || 0)
   if (!Number.isFinite(v)) return '0'
-  return Math.round(v).toLocaleString('ru-RU')
+  return Math.round(v).toLocaleString(adminLocaleTag())
 }
 const partnerAudienceGender = computed(() => {
   const cur = partnerAudienceGenderData.value || {}
@@ -1541,7 +1571,7 @@ const partnerTgstatDisplay = computed(() => {
 
 async function openPartnerSlotDetail(fromTs, toTs, title) {
   if (!fromTs || !toTs) return
-  partnerSlotDetailTitle.value = title || 'Подробности'
+  partnerSlotDetailTitle.value = title || tt('admin.partner_ui.slot_fallback_title')
   showPartnerSlotDetailModal.value = true
   partnerSlotDetailLoading.value = true
   partnerSlotDetailData.value = { joins: [], moderation: [] }
@@ -1581,7 +1611,7 @@ const partnerActivityPeriodLine = computed(() => {
     const da = new Date(String(a).replace('Z', '+00:00'))
     const db = new Date(String(b).replace('Z', '+00:00'))
     const f = (x) =>
-      x.toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+      x.toLocaleString(adminLocaleTag(), { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
     return `${f(da)} — ${f(db)}`
   } catch {
     return ''
@@ -1756,23 +1786,29 @@ const ownerProtectionReportHint = computed(() => {
   const eligible = (ctx.eligibleChatIds || []).map((x) => sidOwnerCtx(x)).filter(Boolean)
   const targetKey = sidOwnerCtx(ctx.chatId) || (eligible.length === 1 ? eligible[0] : '')
   if (targetKey) {
-    return `Выбран чат: ${ctx.chatTitle || `#${targetKey}`}. В списке ниже — только действия по этой группе (включая обсуждение канала, если оно привязано).`
+    return tt('admin.owner_report.hint_single_chat', { title: ctx.chatTitle || `#${targetKey}` })
   }
-  if (ctx.scope === 'own') return 'Фильтр: свои. Показаны все ваши группы и чаты.'
-  if (ctx.scope === 'delegated') return 'Фильтр: делегированные. Показаны только делегированные группы и чаты.'
-  return 'Фильтр: все. Показаны все группы и чаты.'
+  if (ctx.scope === 'own') return tt('admin.owner_report.hint_scope_own')
+  if (ctx.scope === 'delegated') return tt('admin.owner_report.hint_scope_delegated')
+  return tt('admin.owner_report.hint_scope_all')
 })
 const ownerProtectionReportPeriodLabel = computed(() => {
   const k = String(ownerStatsPeriodKey.value || 'today')
-  const map = {
-    today: 'текущие сутки',
-    '7d': '7 дней',
-    '30d': '30 дней',
-    '6m': '6 месяцев',
-    '1y': 'год',
-    custom: 'выбранный период',
-  }
-  return map[k] || 'период'
+  const keyI18n =
+    k === 'today'
+      ? 'period_today'
+      : k === '7d'
+        ? 'period_7d'
+        : k === '30d'
+          ? 'period_30d'
+          : k === '6m'
+            ? 'period_6m'
+            : k === '1y'
+              ? 'period_1y'
+              : k === 'custom'
+                ? 'period_custom'
+                : 'period_fallback'
+  return tt(`admin.owner_report.${keyI18n}`)
 })
 const ownerProtectionReportDeletedCount = computed(() => {
   const n = Number(plActivityBreakdown.value?.total_deleted ?? NaN)
@@ -1782,13 +1818,14 @@ const ownerProtectionReportDeletedCount = computed(() => {
 function ownerProtectionReportTimeLabel(iso) {
   if (!iso) return '—'
   const dt = new Date(iso)
+  const loc = locale.value === 'en' ? 'en-US' : 'ru-RU'
   if (Number.isNaN(dt.getTime())) {
     const s = String(iso)
     const m = s.match(/(\d{2}):(\d{2})/)
     return m ? `${m[1]}:${m[2]}` : s
   }
   if (String(ownerStatsPeriodKey.value || 'today') !== 'today') {
-    return dt.toLocaleString('ru-RU', {
+    return dt.toLocaleString(loc, {
       day: '2-digit',
       month: 'short',
       hour: '2-digit',
@@ -1796,7 +1833,7 @@ function ownerProtectionReportTimeLabel(iso) {
       hour12: false,
     })
   }
-  return dt.toLocaleTimeString('ru-RU', {
+  return dt.toLocaleTimeString(loc, {
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
@@ -2012,9 +2049,9 @@ const bcCampaignUxRecipientsFiltered = computed(() => {
 
 function bcCampaignUxStatusLabel(camp) {
   const s = bcCampaignRunState(camp)
-  if (s === 'running') return 'Запущена'
-  if (s === 'paused') return 'Остановлена'
-  return 'Черновик'
+  if (s === 'running') return tt('admin.autopost.status_running')
+  if (s === 'paused') return tt('admin.autopost.status_paused')
+  return tt('admin.autopost.status_draft')
 }
 function bcCampaignUxTodaySent(camp) {
   const rows = Array.isArray(camp?.autopost?.recent_runs) ? camp.autopost.recent_runs : []
@@ -2040,7 +2077,7 @@ function bcCampaignUxHydrateWizardFromCampaign(camp) {
   const brIds = Array.isArray(ap?.broadcast_ids) ? ap.broadcast_ids.map((x) => Number(x)).filter((x) => x > 0) : []
   const useAll = !!ap?.use_all_broadcasts
   bcCampaignUxWizard.value = {
-    title: String(camp?.title || `Кампания #${camp?.id || ''}`),
+    title: String(camp?.title || tt('admin.autopost.campaign_default_title', { id: camp?.id || '' })),
     postIds: useAll ? (broadcasts.value || []).map((b) => Number(b?.id || 0)).filter((x) => x > 0) : brIds,
     campaignType: useAll ? 'rotation' : (brIds.length <= 1 ? 'simple' : 'progress'),
     scheduleMode: ap?.scheduleMode === 'weekdays' ? 'weekdays' : 'every_day',
@@ -2276,7 +2313,7 @@ async function bcCampaignUxCreateCampaign() {
     } else {
       const created = await fetch(() => api.adminAutopostCampaignCreate({ anchor_broadcast_id: postIds[0] }))
       cid = Number(created?.id || 0)
-      if (!cid) throw new Error('Кампания не создана')
+      if (!cid) throw new Error(tt('admin.autopost.err_campaign_not_created'))
       await fetch(() => api.adminAutopostCampaignPatch(cid, { title: String(w.title || '').trim(), autopost: ap }))
     }
     await loadAutopostCampaigns()
@@ -2284,7 +2321,7 @@ async function bcCampaignUxCreateCampaign() {
     bcCampaignUxManageId.value = cid
     bcCampaignUxScreen.value = 'success'
   } catch (e) {
-    window.alert(String(e?.body?.detail || e?.message || 'Не удалось создать кампанию'))
+    window.alert(String(e?.body?.detail || e?.message || tt('admin.autopost.err_create_campaign')))
   } finally {
     bcCampaignUxBusy.value = false
   }
@@ -2304,15 +2341,21 @@ async function bcCampaignUxOpenStats(camp) {
   }
 }
 
-const BC_WEEKDAY_OPTS = [
-  { v: 0, label: 'Пн' },
-  { v: 1, label: 'Вт' },
-  { v: 2, label: 'Ср' },
-  { v: 3, label: 'Чт' },
-  { v: 4, label: 'Пт' },
-  { v: 5, label: 'Сб' },
-  { v: 6, label: 'Вс' },
+const CABINET_WEEKDAY_SHORT_KEYS = [
+  'mon_short',
+  'tue_short',
+  'wed_short',
+  'thu_short',
+  'fri_short',
+  'sat_short',
+  'sun_short',
 ]
+const BC_WEEKDAY_OPTS = computed(() =>
+  CABINET_WEEKDAY_SHORT_KEYS.map((key, idx) => ({
+    v: idx,
+    label: tt(`cabinet_stats.weekdays.${key}`),
+  })),
+)
 
 function applyAutopostFromServerItem(item) {
   const ap = item?.autopost
@@ -2566,7 +2609,7 @@ async function saveBcAutopostingModal() {
       await loadAutopostCampaigns()
       bcAutopostingModalOpen.value = false
     } catch (e) {
-      window.alert(String(e?.body?.detail || e?.message || 'Не удалось сохранить расписание'))
+      window.alert(String(e?.body?.detail || e?.message || tt('admin.autopost.err_save_schedule')))
     }
     return
   }
@@ -2578,7 +2621,7 @@ async function saveBcAutopostingModal() {
     applyAutopostFromServerItem(r)
     bcAutopostingModalOpen.value = false
   } catch (e) {
-    window.alert(String(e?.body?.detail || e?.message || 'Не удалось сохранить расписание'))
+    window.alert(String(e?.body?.detail || e?.message || tt('admin.autopost.err_save_schedule')))
   }
 }
 
@@ -2591,7 +2634,7 @@ async function bcAutopostMergeSave(patch) {
       await fetch(() => api.adminAutopostCampaignPatch(cid, { autopost: next }))
       await loadAutopostCampaigns()
     } catch (e) {
-      window.alert(String(e?.body?.detail || e?.message || 'Не удалось сохранить'))
+      window.alert(String(e?.body?.detail || e?.message || tt('admin.autopost.err_save')))
     }
     return
   }
@@ -2602,7 +2645,7 @@ async function bcAutopostMergeSave(patch) {
     upsertBroadcastInList(r)
     applyAutopostFromServerItem(r)
   } catch (e) {
-    window.alert(String(e?.body?.detail || e?.message || 'Не удалось сохранить'))
+    window.alert(String(e?.body?.detail || e?.message || tt('admin.autopost.err_save')))
   }
 }
 
@@ -2627,12 +2670,15 @@ async function refreshBcAutopostCostHint() {
 async function bcAutopostStartOrResume() {
   await refreshBcAutopostCostHint()
   const q = bcAutopostQuoteInfo.value
-  let msg =
-    'Автопостинг: за каждый слот списывается столько же AURUM ✨, сколько за одну ручную отправку «В группы» / «В каналы» с тем же списком чатов (1 ✨ на каждый выбранный чат за слот). При нехватке AURUM слот пропускается. Продолжить?'
+  let msg = tt('admin.autopost.confirm_autopost_draft_intro')
   if (q?.broadcast_charge_applies && Number(q.cost_tokens || 0) > 0) {
-    msg = `Ориентир: ${Number(q.cost_tokens)} ✨ за один слот (${Number(q.n_groups || 0)} чатов в списке). ` + msg
+    msg =
+      tt('admin.autopost.confirm_slot_hint_list', {
+        tokens: Number(q.cost_tokens),
+        n: Number(q.n_groups || 0),
+      }) + msg
     if (q.can_afford === false) {
-      msg += ' Сейчас AURUM не хватает — слоты будут пропускаться, пока не пополните баланс в главном приложении → «Токены» (нужна подписка).'
+      msg += tt('admin.autopost.confirm_aurum_short_suffix')
     }
   }
   if (!window.confirm(msg)) return
@@ -2697,14 +2743,14 @@ async function openBcAutopostCampaignModal(camp) {
 
 async function createBcAutopostCampaign() {
   if (!bcSelectedId.value) {
-    window.alert('Выберите шаблон слева — он станет якорем ротации для новой кампании.')
+    window.alert(tt('admin.autopost.pick_template_anchor'))
     return
   }
   try {
     await fetch(() => api.adminAutopostCampaignCreate({ anchor_broadcast_id: Number(bcSelectedId.value) }))
     await loadAutopostCampaigns()
   } catch (e) {
-    window.alert(String(e?.body?.detail || e?.message || 'Не удалось создать кампанию'))
+    window.alert(String(e?.body?.detail || e?.message || tt('admin.autopost.err_create_campaign')))
   }
 }
 
@@ -2722,19 +2768,19 @@ async function onBcCampaignTitleBlur(camp, ev) {
     await loadAutopostCampaigns()
   } catch (e) {
     if (ev?.target) ev.target.value = prev
-    window.alert(String(e?.body?.detail || e?.message || 'Не удалось сохранить название'))
+    window.alert(String(e?.body?.detail || e?.message || tt('admin.autopost.err_save_title')))
   }
 }
 
 async function deleteBcAutopostCampaign(camp) {
   const id = Number(camp?.id || 0)
   if (!id) return
-  if (!window.confirm('Удалить кампанию автопоста? Расписание будет удалено без восстановления.')) return
+  if (!window.confirm(tt('admin.autopost.confirm_delete_campaign'))) return
   try {
     await fetch(() => api.adminAutopostCampaignDelete(id))
     await loadAutopostCampaigns()
   } catch (e) {
-    window.alert(String(e?.body?.detail || e?.message || 'Не удалось удалить'))
+    window.alert(String(e?.body?.detail || e?.message || tt('admin.autopost.err_delete')))
   }
 }
 
@@ -2745,7 +2791,7 @@ async function bcCampaignPatchRunState(camp, runState) {
     await fetch(() => api.adminAutopostCampaignPatch(id, { autopost: { runState } }))
     await loadAutopostCampaigns()
   } catch (e) {
-    window.alert(String(e?.body?.detail || e?.message || 'Не удалось сохранить'))
+    window.alert(String(e?.body?.detail || e?.message || tt('admin.autopost.err_save')))
   }
 }
 
@@ -2763,12 +2809,15 @@ async function bcCampaignStartOrResume(camp) {
       q = null
     }
   }
-  let msg =
-    'Автопостинг (кампания): за каждый слот — столько же AURUM ✨, сколько за одну ручную отправку с тем же списком чатов. Продолжить?'
+  let msg = tt('admin.autopost.confirm_autopost_campaign_intro')
   if (q?.broadcast_charge_applies && Number(q.cost_tokens || 0) > 0) {
-    msg = `Ориентир: ${Number(q.cost_tokens)} ✨ за один слот (${Number(q.n_groups || 0)} чатов). ` + msg
+    msg =
+      tt('admin.autopost.confirm_slot_hint_short', {
+        tokens: Number(q.cost_tokens),
+        n: Number(q.n_groups || 0),
+      }) + msg
     if (q.can_afford === false) {
-      msg += ' Сейчас AURUM не хватает — слоты будут пропускаться, пока не пополните баланс в главном приложении → «Токены» (нужна подписка).'
+      msg += tt('admin.autopost.confirm_aurum_short_suffix')
     }
   }
   if (!window.confirm(msg)) return
@@ -2823,14 +2872,9 @@ const BC_PARSE_MODE = 'HTML'
 
 function bcMediaKindLabel(kind) {
   const k = String(kind || 'none').toLowerCase()
-  const map = {
-    none: 'нет',
-    photo: 'фото',
-    video: 'видео',
-    animation: 'GIF / анимация',
-    document: 'файл / документ',
-  }
-  return map[k] || k
+  const path = `admin.media_kind.${k}`
+  if (['none', 'photo', 'video', 'animation', 'document'].includes(k) && te(path)) return tt(path)
+  return k
 }
 
 function bcMediaIcon(kind) {
@@ -2851,7 +2895,7 @@ function fmtDateTime(v) {
   if (!s) return '—'
   const d = new Date(s)
   if (Number.isNaN(d.getTime())) return s
-  return d.toLocaleString('ru-RU', {
+  return d.toLocaleString(adminLocaleTag(), {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -2866,12 +2910,12 @@ function fmtUserSeenAt(v) {
 
 function userOnlineState(lastSeenAt) {
   const raw = String(lastSeenAt || '').trim()
-  if (!raw) return { online: false, label: 'оффлайн' }
+  if (!raw) return { online: false, label: tt('admin.presence.offline') }
   const ts = Date.parse(raw)
-  if (!Number.isFinite(ts)) return { online: false, label: 'оффлайн' }
+  if (!Number.isFinite(ts)) return { online: false, label: tt('admin.presence.offline') }
   const freshMs = 2 * 60 * 1000
   const online = Date.now() - ts <= freshMs
-  return { online, label: online ? 'онлайн' : 'оффлайн' }
+  return { online, label: online ? tt('admin.presence.online') : tt('admin.presence.offline') }
 }
 
 function fmtBcTokens(v) {
@@ -2885,8 +2929,8 @@ function fmtBatchLabel(b) {
   const total = Number(b?.total || 0)
   const ok = Number(b?.ok || 0)
   const fail = Number(b?.fail || 0)
-  if (started === ended || ended === '—') return `${started} · всего ${total} · ок ${ok} · ошибки ${fail}`
-  return `${started} → ${ended} · всего ${total} · ок ${ok} · ошибки ${fail}`
+  if (started === ended || ended === '—') return tt('admin.broadcast_stats.batch_same', { started, total, ok, fail })
+  return tt('admin.broadcast_stats.batch_range', { started, ended, total, ok, fail })
 }
 
 function nowLocalInputValue() {
@@ -2920,18 +2964,18 @@ function minusMinutesLocalInputValue(minutes = 1) {
 
 function bcStatusLabel(status) {
   const s = String(status || '').toLowerCase()
-  if (s === 'draft') return 'Черновик'
-  if (s === 'sending') return 'Отправляется'
-  if (s === 'sent') return 'Отправлено'
-  if (s === 'failed') return 'Ошибка'
+  if (s === 'draft') return tt('admin.broadcast_stats.status_draft')
+  if (s === 'sending') return tt('admin.broadcast_stats.status_sending')
+  if (s === 'sent') return tt('admin.broadcast_stats.status_sent')
+  if (s === 'failed') return tt('admin.broadcast_stats.status_failed')
   return String(status || '—')
 }
 
 function bcTargetLabel(target) {
   const t = String(target || '').toLowerCase()
-  if (t === 'groups') return 'группы'
-  if (t === 'all') return 'боты и группы'
-  return 'боты'
+  if (t === 'groups') return tt('admin.broadcast_send.target_kind_groups')
+  if (t === 'all') return tt('admin.broadcast_send.target_kind_all')
+  return tt('admin.broadcast_send.target_kind_users')
 }
 
 function applyStatsPreset(kind) {
@@ -3038,7 +3082,7 @@ const bcStatsCurrentItem = computed(() => {
 
 function openBroadcastStats() {
   if (!broadcasts.value.length) {
-    alert('Нет постов для статистики')
+    alert(tt('admin.broadcast_stats.no_posts'))
     return
   }
   if (!Number(bcStatsSelectedId.value || 0)) {
@@ -3058,9 +3102,15 @@ function openStatsHistoryModal() {
   bcStatsHistoryModalOpen.value = true
 }
 
+const statsHistoryTitleComputed = computed(() => {
+  if (isBroadcastShellLite.value) return tt('admin.broadcast_stats.history_groups')
+  return bcStatsTab.value === 'groups'
+    ? tt('admin.broadcast_stats.history_groups')
+    : tt('admin.broadcast_stats.history_bots')
+})
+
 function statsHistoryTitle() {
-  if (isBroadcastShellLite.value) return 'История отправок в группы'
-  return bcStatsTab.value === 'groups' ? 'История отправок в группы' : 'История отправок в боты'
+  return statsHistoryTitleComputed.value
 }
 
 function applyHistoryItem(item) {
@@ -3282,13 +3332,13 @@ async function startBroadcastProgressPolling(id, target) {
       }
       if (failedAsDraftWithError) {
         bcSendModalState.value = 'failed'
-        bcSendModalText.value = errMsg || 'Ошибка отправки'
+        bcSendModalText.value = errMsg || tt('admin.broadcast_send.send_error')
         stopBroadcastProgressPolling()
         return
       }
       if (st === 'failed') {
         bcSendModalState.value = 'failed'
-        bcSendModalText.value = String(row?.error_message || 'Ошибка отправки')
+        bcSendModalText.value = String(row?.error_message || tt('admin.broadcast_send.send_error'))
         stopBroadcastProgressPolling()
       }
     } catch {
@@ -3515,7 +3565,7 @@ function bcFormatSpoiler() {
   el.focus()
   const range = bcCurrentRange()
   if (!bcWrapRange(range, '<span data-spoiler="1">', '</span>')) {
-    alert('Выдели текст, затем нажми «Скрытый»')
+    alert(tt('admin.broadcast_editor.select_text_spoiler'))
     return
   }
   bcSavedTick.value = false
@@ -3528,7 +3578,7 @@ function bcFormatPre() {
   const sel = window.getSelection?.()
   const text = sel?.toString() || ''
   if (!text.trim()) {
-    alert('Выдели текст, затем нажми «PRE»')
+    alert(tt('admin.broadcast_editor.select_text_pre'))
     return
   }
   bcInsertHtmlAtCursor(`<pre>${text}</pre>`)
@@ -3540,7 +3590,7 @@ function bcFormatBlockquote() {
   el.focus()
   const range = bcCurrentRange()
   if (!bcWrapRange(range, '<blockquote>', '</blockquote>')) {
-    alert('Выдели текст, затем нажми «Цитата»')
+    alert(tt('admin.broadcast_editor.select_text_quote'))
     return
   }
   bcSavedTick.value = false
@@ -3568,7 +3618,7 @@ function bcFormatCode() {
   const sel = window.getSelection?.()
   const text = sel?.toString() || ''
   if (!text.trim()) {
-    alert('Выдели текст, затем нажми «Код»')
+    alert(tt('admin.broadcast_editor.select_text_code'))
     return
   }
   bcInsertHtmlAtCursor(`<code>${text}</code>`)
@@ -3582,7 +3632,7 @@ function bcFormatLink() {
   const range = sel && sel.rangeCount ? sel.getRangeAt(0).cloneRange() : bcSavedRange.value
   const selectedText = bcSelectedTextFromRange(range)
   if (!selectedText.trim()) {
-    alert('Выдели текст, затем нажми «Ссылка»')
+    alert(tt('admin.broadcast_editor.select_text_link'))
     return
   }
   bcLinkRange.value = range || null
@@ -3612,7 +3662,7 @@ function bcApplyLinkModal() {
 function bcEditLink() {
   const el = bcEditBodyRef.value
   if (!el) return
-  const href = window.prompt('Ссылка', 'https://')
+  const href = window.prompt(tt('admin.broadcast_editor.link_prompt'), 'https://')
   if (!href || !String(href).trim()) return
   el.focus()
   document.execCommand('createLink', false, String(href).trim())
@@ -3723,10 +3773,10 @@ function nextMondayLabel() {
 
 function payoutStatusLabel(status) {
   const s = String(status || '').toLowerCase()
-  if (s === 'new') return 'на рассмотрении'
-  if (s === 'paid') return 'выплачено'
-  if (s === 'rejected') return 'отклонено'
-  return s || '—'
+  if (s === 'new') return tt('admin.user_billing.payout_status_new')
+  if (s === 'paid') return tt('admin.user_billing.payout_status_paid')
+  if (s === 'rejected') return tt('admin.user_billing.payout_status_rejected')
+  return s || tt('admin.user_billing.payout_status_unknown')
 }
 
 function payoutCardClass(status) {
@@ -3739,7 +3789,7 @@ function payoutCardClass(status) {
 function openExternalLink(url) {
   const link = String(url || '').trim()
   if (!link) {
-    alert('Ссылка недоступна для этого пользователя/чата')
+    alert(tt('admin.dlg.link_unavailable'))
     return
   }
   const tg = window.Telegram?.WebApp
@@ -3774,7 +3824,7 @@ function openExternalLink(url) {
     window.open(normalized, '_blank', 'noopener,noreferrer')
     return true
   } catch {
-    alert('Не удалось открыть ссылку в Telegram')
+    alert(tt('admin.dlg.open_link_failed'))
     return false
   }
 }
@@ -3901,7 +3951,7 @@ async function loadUsers() {
         usersHighlightTelegramId.value = 0
       }, 2800)
     } else {
-      window.alert('Пользователь не попал в выборку списка (первые 1000). Откройте Telegram-профиль по @username.')
+      window.alert(tt('admin.dlg.user_not_in_list_preview'))
     }
   }
 }
@@ -3957,10 +4007,15 @@ const filteredAdminUsers = computed(() => {
 
 function adminUserPromoDurationLabel(u) {
   const daysLeft = Number(u?.promo_days_left || 0)
-  if (daysLeft > 0) return `${daysLeft} дн`
+  if (daysLeft > 0) return tt('admin.user_billing.promo_days', { n: daysLeft })
   const purpose = String(u?.promo_purpose || '').trim()
+  if (localeIsEn()) {
+    const m = purpose.match(/for\s+(\d+)\s*(?:day|days)?/i) || purpose.match(/(\d+)\s*d\b/i)
+    if (m) return tt('admin.user_billing.promo_days', { n: Number(m[1] || 0) })
+    return ''
+  }
   const m = purpose.match(/на\s+(\d+)\s*дн/i)
-  if (m) return `${Number(m[1] || 0)} дн`
+  if (m) return tt('admin.user_billing.promo_days', { n: Number(m[1] || 0) })
   return ''
 }
 
@@ -3968,15 +4023,15 @@ function adminUserPaymentLabel(u) {
   const promoCode = String(u?.promo_applied_code || '').trim()
   if (promoCode) {
     const dur = adminUserPromoDurationLabel(u)
-    return dur ? `Промокод ${promoCode} (${dur})` : `Промокод ${promoCode}`
+    return dur ? tt('admin.user_billing.promo_code_dur', { code: promoCode, dur }) : tt('admin.user_billing.promo_code', { code: promoCode })
   }
   const p = String(u?.payment_method_type || '').toLowerCase()
-  if (p.includes('card')) return 'ЮKassa (карта)'
-  if (p.includes('sbp')) return 'ЮKassa (СБП)'
-  if (p.includes('yoo_money')) return 'ЮKassa'
-  if (p) return `ЮKassa (${p})`
-  if (u?.payment_method_bound) return 'ЮKassa'
-  return 'Не оплачивал'
+  if (p.includes('card')) return tt('admin.user_billing.yookassa_card')
+  if (p.includes('sbp')) return tt('admin.user_billing.yookassa_sbp')
+  if (p.includes('yoo_money')) return tt('admin.user_billing.yookassa')
+  if (p) return tt('admin.user_billing.yookassa_raw', { method: p })
+  if (u?.payment_method_bound) return tt('admin.user_billing.yookassa')
+  return tt('admin.user_billing.never_paid')
 }
 
 async function openAdminUserInfo(userRow) {
@@ -4030,10 +4085,10 @@ async function loadRevenueStats() {
 
 function revenuePeriodLabel(v) {
   const p = String(v || '')
-  if (p === '7d') return '7д'
-  if (p === '30d') return '30д'
-  if (p === '90d') return '90д'
-  if (p === '12m') return '12м'
+  if (p === '7d') return tt('admin.revenue_period.d7')
+  if (p === '30d') return tt('admin.revenue_period.d30')
+  if (p === '90d') return tt('admin.revenue_period.d90')
+  if (p === '12m') return tt('admin.revenue_period.m12')
   return p
 }
 
@@ -4171,17 +4226,13 @@ async function loadOpsHealth() {
   if (lastErr) {
     const human = messageFromApiError(lastErr)
     const urlHint = guardApiBaseEffective.value
-      ? `Сейчас фронт обращается к API по адресу: ${guardApiBaseEffective.value}`
-      : 'Адрес API пустой: задайте VITE_API_BASE_URL при сборке WebApp и/или runtime guard-api-config.js (см. DEPLOY-RAILWAY.md).'
+      ? tt('admin.pulse.api_url_current', { url: guardApiBaseEffective.value })
+      : tt('admin.pulse.api_url_missing')
     opsHealth.value = {
       status: 'unknown',
       load_failed: true,
       load_error_human: human,
-      diagnostics: [
-        'Мониторинг Guard Pulse сейчас не загрузился: это не «диагноз сервера», а то, что браузер/Telegram не смог получить ответ от API (часто сеть, CORS или неверный адрес API).',
-        urlHint,
-        human,
-      ],
+      diagnostics: [tt('admin.pulse.load_failed_intro'), urlHint, human],
       activity_by_hour: [],
     }
   }
@@ -4191,35 +4242,27 @@ async function loadOpsHealth() {
 
 function incidentCategoryLabel(cat) {
   const key = String(cat || '').toLowerCase()
-  const map = {
-    api: 'API',
-    payment: 'Оплата',
-    telegram_api: 'Telegram',
-    broadcast: 'Рассылка',
-    moderation: 'Модерация',
-    bot: 'Бот',
-    other: 'Прочее',
-  }
-  return map[key] || cat || '—'
+  const path = `admin.pulse.category_${key}`
+  if (te(path)) return tt(path)
+  return cat || '—'
 }
 
-/** Скорость ответа БД для подписи в Guard Pulse (мс, запятая как в RU). */
 function formatDbPingMs(ms) {
   const n = Number(ms)
   if (!Number.isFinite(n) || n < 0) return '—'
   const t = n < 10 ? n.toFixed(2) : n < 100 ? n.toFixed(1) : String(Math.round(n))
-  return `${t.replace('.', ',')} мс`
+  const localized = localeIsEn() ? t : t.replace('.', ',')
+  return tt('admin.pulse.time_ms', { n: localized })
 }
 
-/** Сколько уже работает процесс API без перезапуска (тот хост/контейнер, куда ходит Mini App — не локальный терминал). */
-function formatServerUptimeRu(sec) {
+function formatServerUptime(sec) {
   const s = Math.max(0, Math.floor(Number(sec) || 0))
-  if (s < 60) return `${s} с`
+  if (s < 60) return tt('admin.pulse.uptime_seconds', { s })
   const m = Math.floor(s / 60)
-  if (m < 60) return `${m} мин`
+  if (m < 60) return tt('admin.pulse.uptime_minutes', { m })
   const h = Math.floor(m / 60)
   const rm = m % 60
-  return rm ? `${h} ч ${rm} мин` : `${h} ч`
+  return rm ? tt('admin.pulse.uptime_hours_min', { h, rm }) : tt('admin.pulse.uptime_hours', { h })
 }
 
 async function loadIncidentFeed() {
@@ -4294,9 +4337,9 @@ async function saveMessageTemplate(item) {
 }
 
 async function createMessageTemplate() {
-  const title = prompt('Название нового сообщения')
+  const title = prompt(tt('admin.dlg.msg_prompt_title'))
   if (!title) return
-  const body = prompt('Текст сообщения')
+  const body = prompt(tt('admin.dlg.msg_prompt_body'))
   if (!body) return
   await fetch(() =>
     api.adminMessageTemplateCreate({
@@ -4314,30 +4357,36 @@ async function createMessageTemplate() {
 
 async function deleteMessageTemplate(item) {
   if (!item?.is_custom) return
-  if (!confirm(`Удалить сообщение «${item.title || item.template_key}»?`)) return
+  if (!confirm(tt('admin.dlg.msg_delete_confirm', { title: item.title || item.template_key }))) return
   await fetch(() => api.adminMessageTemplateDelete(item.id))
   msgTemplates.value = msgTemplates.value.filter((x) => Number(x.id || 0) !== Number(item.id || 0))
 }
 
 async function runOpsAction(action) {
-  const actionLabel =
-    action === 'restart_api' ? 'API' : action === 'restart_webapp' ? 'WebApp' : action === 'restart_bot' ? 'бота' : 'сервис'
-  if (!window.confirm(`Перезапустить ${actionLabel}?`)) return
+  const key =
+    action === 'restart_api'
+      ? 'ops_restart_api_confirm'
+      : action === 'restart_webapp'
+        ? 'ops_restart_webapp_confirm'
+        : action === 'restart_bot'
+          ? 'ops_restart_bot_confirm'
+          : 'ops_restart_other_confirm'
+  if (!window.confirm(tt(`admin.dlg.${key}`))) return
   opsActionLoading.value = action
   try {
     await fetch(() => api.adminOpsAction(action))
     await loadOpsHealth()
     if (action === 'restart_webapp') {
-      if (window.confirm('WebApp отправлен на перезапуск. Обновить страницу сейчас?')) {
+      if (window.confirm(tt('admin.dlg.ops_webapp_reload_confirm'))) {
         window.location.reload()
       }
     } else if (action === 'restart_api') {
-      window.alert('API отправлен на перезапуск.')
+      window.alert(tt('admin.dlg.ops_api_restarting'))
     } else {
-      window.alert('Бот отправлен на перезапуск.')
+      window.alert(tt('admin.dlg.ops_bot_restarting'))
     }
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось выполнить действие'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.ops_action_failed')))
   } finally {
     opsActionLoading.value = ''
   }
@@ -4345,7 +4394,7 @@ async function runOpsAction(action) {
 
 async function setPayoutStatus(item, status) {
   if (status === 'paid') {
-    const ok = window.confirm('Подтвердить выплату? После подтверждения пользователю придет уведомление.')
+    const ok = window.confirm(tt('admin.dlg.payout_confirm_paid'))
     if (!ok) return
   }
   actionLoadingId.value = Number(item?.id || 0)
@@ -4353,7 +4402,7 @@ async function setPayoutStatus(item, status) {
     await fetch(() => api.adminSetPayoutStatus(item.id, status))
     await Promise.all([loadPayouts(), loadCommissions()])
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось изменить статус'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.payout_status_failed')))
   } finally {
     actionLoadingId.value = 0
   }
@@ -4362,72 +4411,71 @@ async function setPayoutStatus(item, status) {
 async function resetUserFinance(item) {
   const tgId = Number(item?.telegram_id || 0)
   if (!tgId) return
-  const ok = window.confirm(`Сбросить подписку и токены у ${item.first_name || item.username || tgId}?`)
+  const nm = String(item?.first_name || item?.username || tgId || '').trim() || String(tgId)
+  const ok = window.confirm(tt('admin.dlg.user_reset_finance_confirm', { name: nm }))
   if (!ok) return
   try {
     await fetch(() => api.adminResetUserFinance(tgId))
     await loadUsers()
     await Promise.all([loadOverview(), loadPayouts(), loadReferralsTop(), loadCommissions(), loadMyPartnerPayouts(), loadMyPartnerStats()])
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось выполнить сброс'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.user_reset_finance_fail')))
   }
 }
 
 async function deleteBlockUser(item) {
   const tgId = Number(item?.telegram_id || 0)
   if (!tgId) return
-  const ok = window.confirm(`Удалить данные и заблокировать пользователя ${item.first_name || item.username || tgId}?`)
+  const nm = String(item?.first_name || item?.username || tgId || '').trim() || String(tgId)
+  const ok = window.confirm(tt('admin.dlg.user_delete_block_confirm', { name: nm }))
   if (!ok) return
   try {
     await fetch(() => api.adminDeleteBlockUser(tgId))
     await Promise.all([loadUsers(), loadChats(), loadOverview()])
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось удалить и заблокировать пользователя'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.user_delete_block_fail')))
   }
 }
 
 async function unblockUser(item) {
   const tgId = Number(item?.telegram_id || 0)
   if (!tgId) return
-  const ok = window.confirm(
-    `Разбанить ${item.first_name || item.username || tgId}? Статус станет активным, запись в глобальной антиспам-базе будет снята (если была).`,
-  )
+  const nm = String(item?.first_name || item?.username || tgId || '').trim() || String(tgId)
+  const ok = window.confirm(tt('admin.dlg.user_unblock_confirm', { name: nm }))
   if (!ok) return
   try {
     await fetch(() => api.adminUnblockUser(tgId))
     await loadUsers()
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось разбанить пользователя'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.user_unblock_fail')))
   }
 }
 
 async function resetUserDelegation(item) {
   const tgId = Number(item?.telegram_id || 0)
   if (!tgId) return
-  const ok = window.confirm(
-    `Снять делегирование у ${item.first_name || item.username || tgId}? Пользователь перестанет быть менеджером во всех чужих чатах, приглашения менеджера будут удалены.`,
-  )
+  const nm = String(item?.first_name || item?.username || tgId || '').trim() || String(tgId)
+  const ok = window.confirm(tt('admin.dlg.user_remove_delegation_confirm', { name: nm }))
   if (!ok) return
   try {
     await fetch(() => api.adminUserResetDelegation(tgId))
     await loadUsers()
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось сбросить делегирование'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.user_remove_delegation_fail')))
   }
 }
 
 async function resetUserConnectedChats(item) {
   const tgId = Number(item?.telegram_id || 0)
   if (!tgId) return
-  const ok = window.confirm(
-    `Отключить все группы пользователя ${item.first_name || item.username || tgId} как владельца? Чаты станут неактивными в панели (бот останется в группах до удаления вручную). Блокировки аккаунта не будет.`,
-  )
+  const nm = String(item?.first_name || item?.username || tgId || '').trim() || String(tgId)
+  const ok = window.confirm(tt('admin.dlg.user_reset_chats_confirm', { name: nm }))
   if (!ok) return
   try {
     await fetch(() => api.adminUserResetConnectedChats(tgId))
     await Promise.all([loadUsers(), loadChats(), loadOverview()])
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось отключить чаты'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.user_reset_chats_fail')))
   }
 }
 
@@ -4449,9 +4497,9 @@ async function saveJoinReportSettings(item) {
   try {
     const r = await fetch(() => api.adminUserSetJoinReportSettings(tgId, periods))
     item.join_report_periods = Array.isArray(r?.periods) ? r.periods : periods
-    alert('Настройки отчётов сохранены')
+    alert(tt('admin.dlg.user_join_report_saved'))
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось сохранить периодичность отчётов'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.user_join_report_save_failed')))
   }
 }
 
@@ -4465,7 +4513,7 @@ function resolveTestTargetTelegramId() {
 async function createAdminTestSubscription(months) {
   const okPin = await requestPinIfNeeded('payments')
   if (!okPin) {
-    if (shouldAskPinForAction('payments')) alert('Нужен код из «Настройки → Безопасность»')
+    if (shouldAskPinForAction('payments')) alert(tt('admin.broadcast_send.pin_required'))
     return
   }
   testPayLoading.value = true
@@ -4473,12 +4521,12 @@ async function createAdminTestSubscription(months) {
     const targetId = resolveTestTargetTelegramId()
     const r = await fetch(() => api.adminTestCreateSubscriptionPayment(months, targetId))
     const url = String(r?.confirmation_url || '')
-    if (!url) throw new Error('Не получена ссылка оплаты')
+    if (!url) throw new Error(tt('admin.dlg.pay_no_url'))
     const tg = window.Telegram?.WebApp
     if (typeof tg?.openLink === 'function') tg.openLink(url, { try_instant_view: false })
     else window.open(url, '_blank', 'noopener,noreferrer')
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось создать тестовую оплату'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.test_sub_failed')))
   } finally {
     testPayLoading.value = false
   }
@@ -4487,7 +4535,7 @@ async function createAdminTestSubscription(months) {
 async function createAdminTestTokens(tokens) {
   const okPin = await requestPinIfNeeded('payments')
   if (!okPin) {
-    if (shouldAskPinForAction('payments')) alert('Нужен код из «Настройки → Безопасность»')
+    if (shouldAskPinForAction('payments')) alert(tt('admin.broadcast_send.pin_required'))
     return
   }
   testPayLoading.value = true
@@ -4495,12 +4543,12 @@ async function createAdminTestTokens(tokens) {
     const targetId = resolveTestTargetTelegramId()
     const r = await fetch(() => api.adminTestCreateTokensPayment(tokens, targetId))
     const url = String(r?.confirmation_url || '')
-    if (!url) throw new Error('Не получена ссылка оплаты')
+    if (!url) throw new Error(tt('admin.dlg.pay_no_url'))
     const tg = window.Telegram?.WebApp
     if (typeof tg?.openLink === 'function') tg.openLink(url, { try_instant_view: false })
     else window.open(url, '_blank', 'noopener,noreferrer')
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось создать тестовую оплату токенов'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.test_tokens_failed')))
   } finally {
     testPayLoading.value = false
   }
@@ -4509,7 +4557,7 @@ async function createAdminTestTokens(tokens) {
 async function createAdminBindingProbe(mode = 'live') {
   const okPin = await requestPinIfNeeded('payments')
   if (!okPin) {
-    if (shouldAskPinForAction('payments')) alert('Нужен код из «Настройки → Безопасность»')
+    if (shouldAskPinForAction('payments')) alert(tt('admin.broadcast_send.pin_required'))
     return
   }
   testPayLoading.value = true
@@ -4517,12 +4565,12 @@ async function createAdminBindingProbe(mode = 'live') {
     const targetId = resolveTestTargetTelegramId()
     const r = await fetch(() => api.adminTestCreateBindingProbePayment(targetId, mode))
     const url = String(r?.confirmation_url || '')
-    if (!url) throw new Error('Не получена ссылка оплаты')
+    if (!url) throw new Error(tt('admin.dlg.pay_no_url'))
     const tg = window.Telegram?.WebApp
     if (typeof tg?.openLink === 'function') tg.openLink(url, { try_instant_view: false })
     else window.open(url, '_blank', 'noopener,noreferrer')
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось создать тариф 2д/1₽'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.test_probe_failed')))
   } finally {
     testPayLoading.value = false
   }
@@ -4582,7 +4630,7 @@ async function persistCurrentBroadcast() {
   const normalizedBody = bcNormalizeHtmlForTelegram(bcBodyHtml.value)
   const maxLen = bcMediaKindStored.value === 'none' ? 4096 : 1024
   if (normalizedBody.length > maxLen) {
-    throw new Error(`Текст слишком длинный: максимум ${maxLen} символов для текущего типа поста`)
+    throw new Error(tt('admin.dlg.bc_text_too_long', { max: maxLen }))
   }
   const r = await fetch(() =>
     api.adminBroadcastPatch(id, {
@@ -4750,7 +4798,7 @@ async function createBcDraft() {
   try {
     const r = await fetch(() =>
       api.adminBroadcastCreate({
-        title: 'Новый черновик',
+        title: tt('admin.broadcast_send.new_draft'),
         body_text: '',
         parse_mode: BC_PARSE_MODE,
         keyboard_rows: [],
@@ -4760,7 +4808,7 @@ async function createBcDraft() {
     applyBroadcastToForm(r)
     await prefetchBcDraftListThumbs()
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось создать черновик'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.bc_create_failed')))
   }
 }
 
@@ -4783,7 +4831,7 @@ async function saveBcDraft() {
       }
     }
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось сохранить'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.save_failed')))
   } finally {
     bcSaving.value = false
   }
@@ -4817,7 +4865,7 @@ async function closeQuickBroadcastDraft() {
   if (bcSaving.value) return
   const hasChanges = bcQuickDraftHasPendingChanges()
   if (hasChanges) {
-    const shouldSave = window.confirm('Сохранить изменения перед выходом?')
+    const shouldSave = window.confirm(tt('admin.dlg.bc_save_before_exit_confirm'))
     if (shouldSave) {
       const saved = await saveBcDraft()
       if (!saved) return
@@ -4831,7 +4879,7 @@ async function closeQuickBroadcastDraft() {
 async function applyBcQuickDraftTitle() {
   const id = Number(bcSelectedId.value || 0)
   if (!id || !bcQuickTitleDirty.value) return
-  const title = String(bcTitle.value ?? '').trim().slice(0, 255) || 'Черновик'
+  const title = String(bcTitle.value ?? '').trim().slice(0, 255) || tt('admin.dlg.bc_draft_fallback_title')
   bcSavingTitleId.value = id
   try {
     const r = await fetch(() => api.adminBroadcastPatch(id, { title }))
@@ -4841,7 +4889,7 @@ async function applyBcQuickDraftTitle() {
     bcSaveLocalSnapshot()
     bcSavedTick.value = true
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось сохранить название'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.bc_title_save_failed')))
   } finally {
     bcSavingTitleId.value = null
   }
@@ -4895,7 +4943,7 @@ async function loadBcMediaThumbnails() {
 async function clearBcMedia() {
   const id = bcSelectedId.value
   if (!id) return
-  if (!window.confirm('Убрать медиа из черновика?')) return
+  if (!window.confirm(tt('admin.dlg.bc_remove_media_confirm'))) return
   try {
     const r = await fetch(() => api.adminBroadcastPatch(id, { clear_media: true }))
     bcMediaKindStored.value = r?.media_kind || 'none'
@@ -4906,7 +4954,7 @@ async function clearBcMedia() {
     upsertBroadcastInList(r)
     await prefetchBcDraftListThumbs()
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Ошибка'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.generic_error')))
   }
 }
 
@@ -4932,7 +4980,7 @@ async function uploadBcMedia(ev) {
     await loadBcMediaThumbnails()
     await prefetchBcDraftListThumbs()
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Загрузка не удалась'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.upload_failed')))
   } finally {
     bcUploading.value = false
   }
@@ -4954,14 +5002,14 @@ async function removeBcMediaItem(mediaId) {
     }))
     await loadBcMediaThumbnails()
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось удалить файл'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.bc_delete_media_failed')))
   }
 }
 
 async function deleteBcDraft() {
   const id = bcSelectedId.value
   if (!id) return
-  if (!window.confirm('Удалить черновик?')) return
+  if (!window.confirm(tt('admin.dlg.bc_delete_draft_confirm'))) return
   try {
     await fetch(() => api.adminBroadcastDelete(id))
     bcSelectedId.value = null
@@ -4973,14 +5021,14 @@ async function deleteBcDraft() {
     bcEditorOpen.value = false
     await loadBroadcasts()
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось удалить'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.bc_delete_failed')))
   }
 }
 
 async function deleteBcDraftItem(item) {
   const id = Number(item?.id || 0)
   if (!id) return
-  if (!window.confirm('Удалить этот черновик?')) return
+  if (!window.confirm(tt('admin.dlg.bc_delete_draft_confirm_this'))) return
   try {
     await fetch(() => api.adminBroadcastDelete(id))
     broadcasts.value = (broadcasts.value || []).filter((b) => Number(b?.id || 0) !== id)
@@ -4989,14 +5037,14 @@ async function deleteBcDraftItem(item) {
       bcEditorOpen.value = false
     }
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось удалить'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.bc_delete_failed')))
   }
 }
 
 async function deleteBcDraftById(id) {
   const bid = Number(id || 0)
   if (!bid) return
-  if (!window.confirm('Удалить этот черновик?')) return
+  if (!window.confirm(tt('admin.dlg.bc_delete_draft_confirm_this'))) return
   try {
     await fetch(() => api.adminBroadcastDelete(bid))
     try {
@@ -5015,16 +5063,14 @@ async function deleteBcDraftById(id) {
     }
     await loadBroadcasts()
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось удалить'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.bc_delete_failed')))
   }
 }
 
 async function sendBc(target = 'users') {
   if (isBroadcastShellLite.value && target !== 'groups') {
     alert(
-      isDelegatedFreeBroadcastCabinet.value
-        ? 'По делегированному доступу можно отправлять только в группы владельца.'
-        : 'В Premium-кабинете доступна только рассылка в ваши группы.',
+      isDelegatedFreeBroadcastCabinet.value ? tt('admin.dlg.bc_send_lite_delegated') : tt('admin.dlg.bc_send_lite_owner'),
     )
     return
   }
@@ -5034,30 +5080,37 @@ async function sendBc(target = 'users') {
   try {
     quote = await fetch(() => api.adminBroadcastQuote(id, target, []))
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось оценить стоимость рассылки'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.bc_quote_failed')))
     return
   }
   if (quote?.broadcast_charge_applies && Number(quote.cost_tokens || 0) > 0 && quote.can_afford === false) {
     alert(
-      `Недостаточно AURUM: нужно ${Number(quote.cost_tokens || 0)} ✨, доступно ${Number(quote.spendable_credits || 0)} ✨. Докупите пакет в главном приложении → «Токены» (нужна активная подписка).`,
+      tt('admin.broadcast_send.aurum_topup_long', {
+        need: Number(quote.cost_tokens || 0),
+        have: Number(quote.spendable_credits || 0),
+      }),
     )
     return
   }
-  const titleByTarget = target === 'groups'
-    ? 'Разослать во все группы, где подключен бот?'
-    : target === 'all'
-      ? 'Разослать в личные сообщения и во все группы?'
-      : 'Разослать всем активным пользователям бота?'
+  const titleByTarget =
+    target === 'groups'
+      ? tt('admin.broadcast_send.send_confirm_all_groups')
+      : target === 'all'
+        ? tt('admin.broadcast_send.send_confirm_all_mixed')
+        : tt('admin.broadcast_send.send_confirm_all_users')
   const costHint =
     quote?.broadcast_charge_applies && Number(quote.cost_tokens || 0) > 0
-      ? ` Будет списано ${Number(quote.cost_tokens)} ✨ (чатов в выборе: ${Number(quote.n_groups || 0)}; размер аудитории не умножает цену).`
+      ? tt('admin.broadcast_send.send_cost_line', {
+          tokens: Number(quote.cost_tokens),
+          n: Number(quote.n_groups || 0),
+        })
       : ''
   const okPin = await requestPinIfNeeded('broadcast')
   if (!okPin) {
-    if (shouldAskPinForAction('broadcast')) alert('Нужен код из «Настройки → Безопасность»')
+    if (shouldAskPinForAction('broadcast')) alert(tt('admin.broadcast_send.pin_required'))
     return
   }
-  if (!window.confirm(`${titleByTarget}${costHint} Запущенная отправка на сервере не останавливается, но прогресс можно скрыть кнопкой «Отменить просмотр».`)) return
+  if (!window.confirm(`${titleByTarget}${costHint} ${tt('admin.broadcast_send.send_progress_note')}`)) return
   bcSending.value = true
   try {
     await persistCurrentBroadcast()
@@ -5071,7 +5124,7 @@ async function sendBc(target = 'users') {
       //
     }
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось отправить'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.bc_send_failed')))
   } finally {
     bcSending.value = false
   }
@@ -5264,7 +5317,7 @@ async function bcCommitDraftRename(b) {
     bcDraftRenameId.value = null
     bcDraftRenameValue.value = ''
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось сохранить название'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.bc_title_save_failed')))
   } finally {
     bcSavingTitleId.value = null
   }
@@ -5405,7 +5458,7 @@ async function saveBcEditModal() {
     upsertBroadcastInList(r)
     applyBroadcastToForm(r)
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось сохранить'))
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.save_failed')))
   } finally {
     bcSaving.value = false
   }
@@ -5496,7 +5549,7 @@ onMounted(async () => {
       ownerProtectionStatsMode.value = 'protection'
     }
   } catch (e) {
-    error.value = String(e?.body?.detail || e?.message || 'Нет доступа')
+    error.value = String(e?.body?.detail || e?.message || tt('admin.dlg.no_access'))
   } finally {
     loading.value = false
   }
@@ -5768,7 +5821,7 @@ watch(
     />
     <div class="relative z-10 space-y-3 pb-[calc(5.25rem+env(safe-area-inset-bottom,0px))]">
     <div v-if="!hasInitData" class="rounded-xl border border-amber-200 bg-amber-50 p-4 text-amber-800 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-200">
-      Откройте панель из Telegram.
+      {{ tt('app.init_required') }}
     </div>
     <div
       v-else-if="loading"
@@ -5777,7 +5830,7 @@ watch(
     >
       <div class="mx-auto mb-3 inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/8 px-3 py-1.5 text-xs font-semibold text-slate-100 shadow-[0_0_20px_-10px_rgba(255,255,255,0.35)]">
         <span class="inline-block bc-hourglass">⏳</span>
-        Загружаю кабинет админа…
+        {{ tt('admin.shell.loading_cabinet') }}
       </div>
       <div class="space-y-2.5">
         <div class="mx-auto h-3 w-2/3 max-w-[14rem] animate-pulse rounded bg-white/15" />
@@ -5800,35 +5853,35 @@ watch(
     >
       {{
         isDelegatedFreeBroadcastCabinet
-          ? 'Рассылка (делегированный чат)'
+          ? tt('admin.shell.title_broadcast_delegated')
           : isOwnerCabinet && !meAdminProfile?.is_premium
-            ? '📋 Кабинет Free'
+            ? tt('admin.shell.title_free_cabinet')
             : isPremiumCabinet || (showFullAdminShell && meAdminProfile?.is_premium)
-              ? '👑 Кабинет Premium'
+              ? tt('admin.shell.title_premium_cabinet')
               : showFullAdminShell
-                ? 'Сервисная админка'
-                : 'Админка'
+                ? tt('admin.shell.title_service_admin')
+                : tt('admin.title')
       }}
     </h1>
     <p
       v-if="isDelegatedFreeBroadcastCabinet"
       class="text-[12px] leading-snug text-violet-200/90"
     >
-      Доступна только рассылка и автопост в группы, куда вас добавили как менеджера. Другие разделы админки недоступны.
+      {{ tt('admin.shell.delegated_subtitle') }}
     </p>
     <div v-if="showFullAdminShell" class="space-y-2">
       <div class="grid grid-cols-3 gap-2">
-        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'overview' && !adminOverviewEmbed ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'overview'; adminOverviewEmbed = ''">Статистика</button>
-        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'broadcasts' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'broadcasts'">Рассылка</button>
-        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'referrals' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'referrals'">Рефералы</button>
-        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'bad_urls' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'bad_urls'">АнтиURL</button>
-        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'subscription' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'subscription'">Подписка</button>
+        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'overview' && !adminOverviewEmbed ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'overview'; adminOverviewEmbed = ''">{{ tt('admin.tabs.stats') }}</button>
+        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'broadcasts' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'broadcasts'">{{ tt('admin.tabs.broadcasts') }}</button>
+        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'referrals' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'referrals'">{{ tt('admin.shell.tab_referrals') }}</button>
+        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'bad_urls' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'bad_urls'">{{ tt('admin.shell.tab_antiurl') }}</button>
+        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'subscription' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'subscription'">{{ tt('admin.tabs.subscription') }}</button>
       </div>
       <div class="grid grid-cols-3 gap-2 border-t border-white/10 pt-2">
-        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'payouts' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'payouts'">Выплаты</button>
+        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'payouts' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'payouts'">{{ tt('common.locale_code') === 'en' ? 'Payouts' : 'Выплаты' }}</button>
         <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'ops' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'ops'">Guard Pulse</button>
-        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'insights' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'insights'">Сводка</button>
-        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'messages' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'messages'">Сообщения</button>
+        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'insights' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'insights'">{{ tt('common.locale_code') === 'en' ? 'Insights' : 'Сводка' }}</button>
+        <button type="button" class="rounded-lg px-2 py-1.5 text-xs font-semibold" :class="tab === 'messages' ? 'bg-primary-100 text-primary-800 dark:bg-primary-500/20 dark:text-primary-300' : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'" @click="tab = 'messages'">{{ tt('common.locale_code') === 'en' ? 'Messages' : 'Сообщения' }}</button>
       </div>
     </div>
 
@@ -5860,17 +5913,23 @@ watch(
             >
               😈
             </div>
-            <p class="mt-3 text-[11px] font-extrabold uppercase tracking-[0.18em] text-violet-300">Guard · статистика</p>
+            <p class="mt-3 text-[11px] font-extrabold uppercase tracking-[0.18em] text-violet-300">{{ tt('common.locale_code') === 'en' ? 'Guard · stats' : 'Guard · статистика' }}</p>
             <p class="mx-auto mt-2 max-w-md text-[13px] leading-relaxed text-slate-300">
-              На Free тарифе счётчики намеренно скрыты: здесь всё было бы «нулями» без реальной аналитики. Подключите
-              <b class="text-violet-200">Premium Guard</b>, чтобы видеть удаления, вступления и отчёты по вашим чатам.
+              <template v-if="tt('common.locale_code') === 'en'">
+                On Free plan, counters are intentionally hidden: everything would be zeros without real analytics. Enable
+                <b class="text-violet-200">Premium Guard</b> to see deletions, joins and reports for your chats.
+              </template>
+              <template v-else>
+                На Free тарифе счётчики намеренно скрыты: здесь всё было бы «нулями» без реальной аналитики. Подключите
+                <b class="text-violet-200">Premium Guard</b>, чтобы видеть удаления, вступления и отчёты по вашим чатам.
+              </template>
             </p>
             <button
               type="button"
               class="mt-4 w-full max-w-sm rounded-2xl bg-violet-600 py-3 text-sm font-bold text-white shadow-[0_12px_32px_-8px_rgba(124,58,237,0.55)] transition hover:bg-violet-500 active:scale-[0.99]"
               @click="goOwnerSubscriptionPage"
             >
-              Оформить Premium
+              {{ tt('common.locale_code') === 'en' ? 'Get Premium' : 'Оформить Premium' }}
             </button>
           </div>
           <div v-else class="col-span-2 min-h-0 space-y-2">
@@ -5880,9 +5939,9 @@ watch(
                 class="rounded-xl border border-cyan-400/35 bg-cyan-500/10 px-3 py-1.5 text-[11px] font-semibold text-cyan-100 shadow-[0_10px_24px_-16px_rgba(34,211,238,0.75)] transition hover:bg-cyan-500/20"
                 @click="ownerProtectionReportOpen = !ownerProtectionReportOpen"
               >
-                {{ ownerProtectionReportOpen ? 'Скрыть подробный отчёт' : 'Подробный отчёт' }}
+                {{ ownerProtectionReportOpen ? tt('admin.owner_report.detailed_hide') : tt('admin.owner_report.detailed_show') }}
               </button>
-              <p class="text-[11px] text-cyan-100/75">Разбан / размут доступны прямо в отчёте</p>
+              <p class="text-[11px] text-cyan-100/75">{{ tt('admin.owner_report.unban_unmute_hint') }}</p>
             </div>
             <OwnerCabinetProtectionStats
               :summary="plActivitySummary || {}"
@@ -5900,7 +5959,7 @@ watch(
               class="rounded-[24px] bg-gradient-to-br from-[#050b1f]/96 via-[#09132d]/95 to-[#02050e]/98 p-3 shadow-[0_35px_90px_-36px_rgba(6,182,212,0.7)] ring-1 ring-cyan-300/20 backdrop-blur-2xl"
             >
               <div class="mb-2 flex items-center justify-between">
-                <p class="text-base font-semibold text-white drop-shadow-[0_0_16px_rgba(34,211,238,0.35)]">Подробный отчёт по защите</p>
+                <p class="text-base font-semibold text-white drop-shadow-[0_0_16px_rgba(34,211,238,0.35)]">{{ tt('admin.owner_report.modal_title') }}</p>
                 <button
                   type="button"
                   class="inline-flex h-8 w-8 items-center justify-center rounded-full bg-white/10 text-cyan-100 transition hover:bg-white/15"
@@ -5910,7 +5969,7 @@ watch(
                 </button>
               </div>
               <p class="mb-2 text-[11px] text-cyan-100/85">
-                Удалений за {{ ownerProtectionReportPeriodLabel }}: <b>{{ ownerProtectionReportDeletedCount }}</b>.
+                {{ tt('admin.owner_report.deleted_prefix', { period: ownerProtectionReportPeriodLabel, count: ownerProtectionReportDeletedCount }) }}
                 {{ ownerProtectionReportHint }}
               </p>
               <div class="max-h-[52vh] space-y-1 overflow-y-auto pr-1">
@@ -5935,8 +5994,8 @@ watch(
                       @click.prevent.stop="openExternalLink(partnerUserHref(ev))"
                     >{{ partnerUserLabel(ev) }}</a>
                     <span v-else>{{ partnerUserLabel(ev) }}</span>
-                    · {{ partnerActionLabelRu(ev.action) }}
-                    <span v-if="partnerNormalizeAction(ev.action) === 'delete' || partnerNormalizeAction(ev.action) === 'observe'"> · {{ partnerReasonRu(ev.reason) }}</span>
+                    · {{ partnerActionLabel(ev.action) }}
+                    <span v-if="partnerNormalizeAction(ev.action) === 'delete' || partnerNormalizeAction(ev.action) === 'observe'"> · {{ partnerReasonLabel(ev.reason) }}</span>
                   </p>
                   <div class="mt-1.5 flex flex-wrap gap-1.5">
                     <button
@@ -5945,7 +6004,7 @@ watch(
                       class="rounded-md bg-emerald-500/80 px-2 py-1 text-[10px] font-semibold text-white shadow-[0_10px_20px_-10px_rgba(16,185,129,0.85)]"
                       @click="partnerQuickUnmute(ev)"
                     >
-                      Размут
+                      {{ tt('admin.owner_report.unmute') }}
                     </button>
                     <button
                       v-if="partnerNormalizeAction(ev.action) === 'ban' && !partnerJournalActionHidden(ev, 'ban')"
@@ -5953,7 +6012,7 @@ watch(
                       class="rounded-md bg-indigo-500/85 px-2 py-1 text-[10px] font-semibold text-white shadow-[0_10px_20px_-10px_rgba(99,102,241,0.85)]"
                       @click="partnerQuickUnban(ev)"
                     >
-                      Разбан
+                      {{ tt('admin.owner_report.unban') }}
                     </button>
                     <button
                       v-if="partnerNormalizeAction(ev.action) === 'observe'"
@@ -5961,11 +6020,11 @@ watch(
                       class="rounded-md bg-amber-500/85 px-2 py-1 text-[10px] font-semibold text-slate-950 shadow-[0_10px_20px_-10px_rgba(251,191,36,0.85)]"
                       @click="partnerQuickObserve(ev)"
                     >
-                      Замечено
+                      {{ tt('admin.owner_report.observed') }}
                     </button>
                   </div>
                 </div>
-                <p v-if="!(ownerProtectionReportEvents || []).length" class="py-6 text-center text-[11px] text-slate-400">Пока нет событий.</p>
+                <p v-if="!(ownerProtectionReportEvents || []).length" class="py-6 text-center text-[11px] text-slate-400">{{ tt('admin.owner_report.no_events_yet') }}</p>
               </div>
             </div>
           </div>
@@ -6455,7 +6514,7 @@ watch(
     </div>
     <div v-else-if="showFullAdminShell && tab === 'ops'" class="space-y-3">
       <p class="text-center text-[10px] font-medium uppercase tracking-wide text-cyan-600/90 dark:text-cyan-300/90">
-        {{ GUARD_PULSE_UI_MARKER }}
+        {{ guardPulseUiMarker }}
       </p>
       <div class="flex gap-2 rounded-xl border border-slate-200 bg-slate-50 p-1.5 dark:border-slate-600 dark:bg-slate-800/60">
         <div class="flex min-w-0 flex-1 flex-wrap gap-2">
@@ -6465,7 +6524,7 @@ watch(
             :class="opsInnerTab === 'pulse' ? 'bg-cyan-600 text-white shadow' : 'text-slate-600 hover:bg-slate-200 dark:text-slate-300 dark:hover:bg-slate-700'"
             @click="opsInnerTab = 'pulse'"
           >
-            Мониторинг
+            {{ tt('admin.pulse.tab_monitoring') }}
           </button>
           <button
             type="button"
@@ -6473,14 +6532,14 @@ watch(
             :class="opsInnerTab === 'journal' ? 'bg-cyan-600 text-white shadow' : 'text-slate-600 hover:bg-slate-200 dark:text-slate-300 dark:hover:bg-slate-700'"
             @click="opsInnerTab = 'journal'"
           >
-            Журнал сбоев
+            {{ tt('admin.pulse.tab_failure_log') }}
           </button>
         </div>
         <button
           type="button"
           class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-300 bg-white text-sm font-bold text-slate-600 shadow-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200"
-          title="Подробности и подсказки"
-          aria-label="Подробности Guard Pulse"
+          :title="tt('admin.pulse.info_btn_title')"
+          :aria-label="tt('admin.pulse.info_btn_aria')"
           @click="guardPulseInfoOpen = true"
         >
           ⓘ
@@ -6499,25 +6558,27 @@ watch(
             !opsHealth.load_failed && incidentSummary && incidentSummary.level === 'critical',
         }"
       >
-        <p class="font-semibold text-slate-800 dark:text-slate-100">Пульс по пользователям (журнал за {{ (incidentSummary && incidentSummary.window_hours) || 24 }} ч)</p>
+        <p class="font-semibold text-slate-800 dark:text-slate-100">
+          {{ tt('admin.pulse.user_pulse_title', { hours: (incidentSummary && incidentSummary.window_hours) || 24 }) }}
+        </p>
         <p v-if="opsHealth.load_failed" class="mt-1 text-slate-800 dark:text-slate-100">
-          Связь со сводкой мониторинга нестабильна — уровень ниже по <b>журналу в базе</b>. Подробности — в ⓘ.
+          {{ tt('admin.pulse.summary_link_unstable') }}
         </p>
         <template v-else-if="incidentSummary">
           <p class="mt-1 text-slate-800 dark:text-slate-100">
-            Уровень:
+            {{ tt('admin.pulse.level_prefix') }}
             <b>{{
               incidentSummary.level === 'ok'
-                ? 'норма (зелёный)'
+                ? tt('admin.pulse.level_ok')
                 : incidentSummary.level === 'warn'
-                  ? 'требует внимания (оранжевый)'
-                  : 'критично (красный)'
+                  ? tt('admin.pulse.level_warn')
+                  : tt('admin.pulse.level_critical')
             }}</b>
-            · уникальных пользователей в журнале: <b>{{ incidentSummary.distinct_users_affected }}</b>
-            · записей: <b>{{ incidentSummary.total_incidents }}</b>
+            · {{ tt('admin.pulse.distinct_users') }} <b>{{ incidentSummary.distinct_users_affected }}</b>
+            · {{ tt('admin.pulse.incident_records') }} <b>{{ incidentSummary.total_incidents }}</b>
           </p>
           <p v-if="incidentSummary.by_category && Object.keys(incidentSummary.by_category).length" class="mt-1 text-[11px] text-slate-600 dark:text-slate-300">
-            По категориям:
+            {{ tt('admin.pulse.by_category') }}
             <span v-for="(count, catKey) in incidentSummary.by_category" :key="`cat-${catKey}`" class="mr-2 inline-block">
               {{ incidentCategoryLabel(catKey) }}: {{ count }}
             </span>
@@ -6526,44 +6587,48 @@ watch(
             <li v-for="(ln, li) in incidentSummary.lines_ru" :key="`isl-${li}`">{{ ln }}</li>
           </ul>
         </template>
-        <p v-if="incidentSummaryLoading" class="mt-1 text-slate-500">Обновление сводки…</p>
+        <p v-if="incidentSummaryLoading" class="mt-1 text-slate-500">{{ tt('admin.pulse.updating_summary') }}</p>
       </div>
 
       <div v-show="opsInnerTab === 'pulse'" class="space-y-3">
       <div class="rounded-xl border border-cyan-400/40 bg-cyan-500/10 p-3">
-        <p class="text-xs font-semibold text-cyan-700 dark:text-cyan-300">Состояние серверов</p>
+        <p class="text-xs font-semibold text-cyan-700 dark:text-cyan-300">{{ tt('admin.pulse.server_state') }}</p>
         <template v-if="opsHealth.load_failed">
           <p class="mt-1 text-sm text-slate-700 dark:text-slate-300">
-            <b class="text-amber-800 dark:text-amber-200">Сводка не загрузилась</b> — см. ⓘ. Обновить: кнопка внизу.
+            <b class="text-amber-800 dark:text-amber-200">{{ tt('admin.pulse.summary_not_loaded') }}</b>{{ tt('admin.pulse.summary_not_loaded_hint') }}
           </p>
         </template>
         <template v-else>
           <p class="mt-1 text-sm text-slate-700 dark:text-slate-300">
-            <b>{{ opsHealth.status === 'ok' ? 'Нормально' : 'Нужна проверка' }}</b>
-            · база <b>{{ formatDbPingMs(opsHealth.db_latency_ms) }}</b>
-            · API без перезапуска <b>{{ formatServerUptimeRu(opsHealth.api_uptime_sec || 0) }}</b>
+            <b>{{ opsHealth.status === 'ok' ? tt('admin.pulse.status_ok_short') : tt('admin.pulse.status_check') }}</b
+            >{{
+              tt('admin.pulse.server_metrics', {
+                db: formatDbPingMs(opsHealth.db_latency_ms),
+                uptime: formatServerUptime(opsHealth.api_uptime_sec || 0),
+              })
+            }}
           </p>
         </template>
       </div>
       <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
-        <p class="text-xs font-semibold text-slate-600 dark:text-slate-300">Перезапуск на Railway (порядок после выкладки кода)</p>
+        <p class="text-xs font-semibold text-slate-600 dark:text-slate-300">{{ tt('admin.pulse.railway_title') }}</p>
         <p class="mt-1 text-[11px] leading-snug text-slate-500 dark:text-slate-400">
-          1 → API (бэкенд), 2 → WebApp (мини-ап), 3 → бот. Сверху вниз — как обычно накатывают слои.
+          {{ tt('admin.pulse.railway_hint') }}
         </p>
         <div class="mt-2 flex flex-col gap-2">
           <button type="button" class="rounded-lg bg-amber-600 px-3 py-2.5 text-left text-xs font-semibold text-white disabled:opacity-60" :disabled="opsActionLoading === 'restart_api'" @click="runOpsAction('restart_api')">
-            <span class="font-extrabold tabular-nums text-amber-100">1.</span> Перезапуск API
+            <span class="font-extrabold tabular-nums text-amber-100">1.</span> {{ tt('admin.pulse.restart_api') }}
           </button>
           <button type="button" class="rounded-lg bg-indigo-600 px-3 py-2.5 text-left text-xs font-semibold text-white disabled:opacity-60" :disabled="opsActionLoading === 'restart_webapp'" @click="runOpsAction('restart_webapp')">
-            <span class="font-extrabold tabular-nums text-indigo-100">2.</span> Перезапуск WebApp
+            <span class="font-extrabold tabular-nums text-indigo-100">2.</span> {{ tt('admin.pulse.restart_webapp') }}
           </button>
           <button type="button" class="rounded-lg bg-rose-600 px-3 py-2.5 text-left text-xs font-semibold text-white disabled:opacity-60" :disabled="opsActionLoading === 'restart_bot'" @click="runOpsAction('restart_bot')">
-            <span class="font-extrabold tabular-nums text-rose-100">3.</span> Перезапуск бота
+            <span class="font-extrabold tabular-nums text-rose-100">3.</span> {{ tt('admin.pulse.restart_bot') }}
           </button>
         </div>
       </div>
       <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
-        <p class="text-xs font-semibold text-slate-600 dark:text-slate-300">Оплаты по часам (сутки)</p>
+        <p class="text-xs font-semibold text-slate-600 dark:text-slate-300">{{ tt('admin.pulse.payments_by_hour') }}</p>
         <div class="mt-2 h-32 overflow-hidden rounded-lg bg-slate-50 p-2 dark:bg-slate-900/50">
           <div class="flex h-full items-end gap-1">
             <div
@@ -6580,17 +6645,17 @@ watch(
         </div>
       </div>
       <button type="button" class="w-full rounded-lg bg-cyan-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-60" :disabled="opsLoading" @click="loadOpsHealth()">
-        Обновить мониторинг
+        {{ tt('admin.pulse.refresh_monitoring') }}
       </button>
       </div>
 
       <div v-show="opsInnerTab === 'journal'" class="space-y-3">
-        <p class="text-center text-[11px] text-slate-500 dark:text-slate-400">Что попадает в журнал — в ⓘ справа от вкладок.</p>
+        <p class="text-center text-[11px] text-slate-500 dark:text-slate-400">{{ tt('admin.pulse.journal_intro') }}</p>
         <div class="flex flex-col gap-2 sm:flex-row">
           <input
             v-model="incidentSearchQuery"
             type="search"
-            placeholder="Поиск: id или @username / имя из базы"
+            :placeholder="tt('admin.pulse.journal_search_ph')"
             class="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 placeholder:text-slate-400 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
             @keydown.enter.prevent="loadIncidentFeed()"
           />
@@ -6600,7 +6665,7 @@ watch(
             :disabled="incidentFeedLoading"
             @click="loadIncidentFeed()"
           >
-            Найти
+            {{ tt('admin.pulse.find') }}
           </button>
         </div>
         <button
@@ -6609,19 +6674,19 @@ watch(
           :disabled="incidentFeedLoading"
           @click="loadIncidentFeed()"
         >
-          Обновить журнал
+          {{ tt('admin.pulse.refresh_journal') }}
         </button>
         <div
           v-if="!incidentFeed.length && !incidentFeedLoading"
           class="rounded-xl border border-slate-200 bg-white p-4 text-center text-xs text-slate-500 dark:border-slate-700 dark:bg-slate-800"
         >
-          Пока записей нет.
+          {{ tt('admin.pulse.journal_empty') }}
         </div>
         <div
           v-else-if="incidentFeedLoading"
           class="rounded-xl border border-slate-200 bg-white p-4 text-center text-xs text-slate-500 dark:border-slate-700 dark:bg-slate-800"
         >
-          Загрузка…
+          {{ tt('admin.pulse.journal_loading') }}
         </div>
         <ul v-else-if="incidentFeed.length" class="space-y-2">
           <li
@@ -6643,13 +6708,19 @@ watch(
                   'bg-slate-500 text-white': row.severity !== 'critical' && row.severity !== 'warn',
                 }"
               >
-                {{ row.severity === 'critical' ? 'красный' : row.severity === 'warn' ? 'оранж' : 'фон' }}
+                {{
+                  row.severity === 'critical'
+                    ? tt('admin.pulse.severity_critical')
+                    : row.severity === 'warn'
+                      ? tt('admin.pulse.severity_warn')
+                      : tt('admin.pulse.severity_ok')
+                }}
               </span>
               <span class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700 dark:bg-slate-900 dark:text-slate-200">{{
                 incidentCategoryLabel(row.category)
               }}</span>
               <span v-if="row.affected_count > 0" class="text-[10px] font-semibold text-slate-600 dark:text-slate-300">
-                затронуто аккаунтов: {{ row.affected_count }}
+                {{ tt('admin.pulse.accounts_affected') }} {{ row.affected_count }}
               </span>
             </div>
             <p class="mt-1 font-mono text-[10px] text-slate-500">{{ row.created_at }} · {{ row.method }} · HTTP {{ row.status_code }} · {{ row.path }}</p>
@@ -6673,28 +6744,23 @@ watch(
             @click.stop
           >
             <div class="mb-3 flex items-center justify-between gap-2">
-              <p class="text-sm font-bold text-slate-900 dark:text-slate-100">Подробности</p>
+              <p class="text-sm font-bold text-slate-900 dark:text-slate-100">{{ tt('admin.pulse.info_modal_title') }}</p>
               <button
                 type="button"
                 class="rounded-lg bg-slate-200 px-2.5 py-1 text-xs font-semibold text-slate-800 dark:bg-slate-700 dark:text-slate-100"
                 @click="guardPulseInfoOpen = false"
               >
-                Закрыть
+                {{ tt('admin.pulse.info_close') }}
               </button>
             </div>
 
             <section class="space-y-2 border-b border-slate-200 pb-3 dark:border-slate-600">
-              <p class="font-semibold text-slate-800 dark:text-slate-100">Мониторинг</p>
+              <p class="font-semibold text-slate-800 dark:text-slate-100">{{ tt('admin.pulse.info_monitor_heading') }}</p>
               <p>
-                Если сводка не открывается — чаще всего сеть, CORS или неверный адрес API у Mini App. После смены URL задайте
-                <code class="rounded bg-slate-100 px-1 dark:bg-slate-800">VITE_API_BASE_URL</code> / <code class="rounded bg-slate-100 px-1 dark:bg-slate-800">GUARD_API_BASE_URL</code> на сервисе WebApp и пересоберите фронт.
+                {{ tt('admin.pulse.info_monitor_p1') }}
               </p>
               <p>
-                «База X мс» — за сколько отвечает PostgreSQL; меньше обычно лучше. «API без перезапуска» — сколько работает
-                <b>именно процесс API</b>, который обрабатывает запросы Mini App (тот URL из
-                <code class="rounded bg-slate-100 px-1 dark:bg-slate-800">VITE_API_BASE_URL</code> / Railway). Данные
-                <b>не</b> приходят из вашего терминала: перезапуск бота или WebApp на сервере этот счётчик не обнуляет —
-                только перезапуск сервиса API. В ответе есть поле <code class="rounded bg-slate-100 px-1 dark:bg-slate-800">api_boot_at</code> (момент старта этого воркера).
+                {{ tt('admin.pulse.info_monitor_p2') }}
               </p>
               <ul v-if="(opsHealth.diagnostics || []).length" class="list-disc space-y-1 pl-4 text-slate-600 dark:text-slate-300">
                 <li v-for="(d, i) in opsHealth.diagnostics" :key="`gp-info-d-${i}`">{{ d }}</li>
@@ -6702,32 +6768,35 @@ watch(
             </section>
 
             <section v-if="opsHealth.railway_redeploy" class="space-y-2 border-b border-slate-200 py-3 dark:border-slate-600">
-              <p class="font-semibold text-slate-800 dark:text-slate-100">Railway и кнопки перезапуска</p>
+              <p class="font-semibold text-slate-800 dark:text-slate-100">{{ tt('admin.pulse.info_railway_heading') }}</p>
               <p>
-                Токен из Railway → Account → Tokens хранится в сервисе API как
-                <code class="rounded bg-slate-100 px-1 dark:bg-slate-800">RAILWAY_API_TOKEN</code> или
-                <code class="rounded bg-slate-100 px-1 dark:bg-slate-800">RAILWAY_TOKEN</code>. Шаги: см. файл
-                <span class="font-medium">DEPLOY-RAILWAY.md</span> (раздел Guard Pulse).
+                {{ tt('admin.pulse.info_railway_p1') }}
               </p>
-              <p>На экране кнопки идут в порядке: <b>1 — API</b>, <b>2 — WebApp</b>, <b>3 — бот</b> (сначала бэкенд, потом фронт, потом polling).</p>
+              <p>{{ tt('admin.pulse.info_railway_p2') }}</p>
               <ul class="space-y-0.5 font-mono text-[11px] text-slate-600 dark:text-slate-300">
-                <li>Токен: {{ opsHealth.railway_redeploy.token_configured ? '✓ задан' : '✗ нет' }}</li>
-                <li>Среда (RAILWAY_ENVIRONMENT_ID): {{ opsHealth.railway_redeploy.environment_configured ? '✓' : '✗' }}</li>
-                <li>ID сервисов — бот: {{ opsHealth.railway_redeploy.service_ids?.bot ? '✓' : '✗' }}, API: {{ opsHealth.railway_redeploy.service_ids?.api ? '✓' : '✗' }}, WebApp: {{ opsHealth.railway_redeploy.service_ids?.webapp ? '✓' : '✗' }}</li>
+                <li>
+                  {{ tt('admin.pulse.railway_token_label') }}
+                  {{ opsHealth.railway_redeploy.token_configured ? tt('admin.pulse.token_ok') : tt('admin.pulse.token_missing') }}
+                </li>
+                <li>{{ tt('admin.pulse.env_label') }} {{ opsHealth.railway_redeploy.environment_configured ? tt('admin.pulse.yes') : tt('admin.pulse.no') }}</li>
+                <li>
+                  {{ tt('admin.pulse.service_ids_label') }} {{ opsHealth.railway_redeploy.service_ids?.bot ? tt('admin.pulse.yes') : tt('admin.pulse.no') }}, API:
+                  {{ opsHealth.railway_redeploy.service_ids?.api ? tt('admin.pulse.yes') : tt('admin.pulse.no') }}, WebApp:
+                  {{ opsHealth.railway_redeploy.service_ids?.webapp ? tt('admin.pulse.yes') : tt('admin.pulse.no') }}
+                </li>
               </ul>
             </section>
 
             <section class="space-y-2 pt-3">
-              <p class="font-semibold text-slate-800 dark:text-slate-100">Журнал сбоев</p>
+              <p class="font-semibold text-slate-800 dark:text-slate-100">{{ tt('admin.pulse.info_journal_heading') }}</p>
               <p>
-                Сюда попадают <b>5xx</b> по API, необработанные исключения в API (если удалось связать с Telegram id из init-data), ошибки <b>бота</b> в polling и сбои <b>оплаты</b> (например, не ушло ЛС после успешной оплаты).
+                {{ tt('admin.pulse.info_journal_p1') }}
               </p>
-              <p>Это не заметки «Замечено» в чатах и не логи авторассылки.</p>
+              <p>{{ tt('admin.pulse.info_journal_p2') }}</p>
               <p>
-                При оранжевом/красном уровне владельцу может прийти ЛС с кнопкой — если заданы админские Telegram id и
-                <code class="rounded bg-slate-100 px-1 dark:bg-slate-800">BOT_TOKEN</code> на сервисе API.
+                {{ tt('admin.pulse.info_journal_p3') }}
               </p>
-              <p class="text-slate-500 dark:text-slate-400">Пустой список: либо всё стабильно, либо журнал недавно включён.</p>
+              <p class="text-slate-500 dark:text-slate-400">{{ tt('admin.pulse.info_journal_footer') }}</p>
             </section>
           </div>
         </div>
@@ -6739,11 +6808,11 @@ watch(
       <template v-if="isOwnerCabinet && !showFullAdminShell">
         <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
           <div class="flex items-center justify-between gap-2">
-            <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">Моя база URL</p>
+            <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">{{ tt('admin.bad_urls.title_my') }}</p>
             <button
               type="button"
               class="inline-flex h-8 min-w-8 items-center justify-center rounded-full border border-sky-300 bg-sky-100 px-2 text-sm font-extrabold text-sky-800 shadow-sm hover:bg-sky-200 dark:border-sky-700 dark:bg-sky-900/30 dark:text-sky-200 dark:hover:bg-sky-900/45"
-              aria-label="Что это за функция"
+              :aria-label="tt('admin.bad_urls.aria_help')"
               @click="showMyGlobalBadUrlInfo = !showMyGlobalBadUrlInfo"
             >
               i
@@ -6753,14 +6822,14 @@ watch(
             v-if="showMyGlobalBadUrlInfo"
             class="mt-2 rounded-xl border border-cyan-300/40 bg-cyan-50 p-3 text-xs leading-relaxed text-slate-700 dark:border-cyan-700/50 dark:bg-cyan-950/25 dark:text-slate-200"
           >
-            <p><b>Твоя личная база:</b> сюда кладёшь куски ссылок, которые Guard будет ловить <b>во всех твоих чатах</b>, если в «Защите» включена проверка по глобальной базе.</p>
-            <p class="mt-1">Наказание — как в настройках чата: удалить / мут / бан.</p>
+            <p>{{ tt('admin.bad_urls.info_my_p1') }}</p>
+            <p class="mt-1">{{ tt('admin.bad_urls.info_my_p2') }}</p>
           </div>
           <div class="mt-2 flex flex-col gap-2 sm:flex-row">
             <input
               v-model="newMyGlobalBadUrl"
               type="text"
-              placeholder="evil.com или t.me/spam"
+              :placeholder="tt('admin.bad_urls.placeholder_pattern')"
               class="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
               :disabled="globalBadUrlLoading"
               @keydown.enter.prevent="addMyGlobalBadUrl()"
@@ -6768,7 +6837,7 @@ watch(
             <input
               v-model="newMyGlobalBadUrlNote"
               type="text"
-              placeholder="Заметка (опционально)"
+              :placeholder="tt('admin.bad_urls.placeholder_note')"
               class="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
               :disabled="globalBadUrlLoading"
             >
@@ -6778,12 +6847,12 @@ watch(
               :disabled="globalBadUrlLoading || !(newMyGlobalBadUrl || '').trim()"
               @click="addMyGlobalBadUrl()"
             >
-              Добавить
+              {{ tt('admin.bad_urls.add') }}
             </button>
           </div>
         </div>
         <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
-          <p class="text-xs font-semibold text-slate-700 dark:text-slate-200">Список ({{ globalBadUrlItems.length }})</p>
+          <p class="text-xs font-semibold text-slate-700 dark:text-slate-200">{{ tt('admin.bad_urls.list_heading', { count: globalBadUrlItems.length }) }}</p>
           <ul v-if="globalBadUrlItems.length" class="mt-2 max-h-72 space-y-1 overflow-y-auto">
             <li
               v-for="it in globalBadUrlItems"
@@ -6800,18 +6869,18 @@ watch(
                 :disabled="globalBadUrlLoading"
                 @click="removeMyGlobalBadUrl(it.pattern)"
               >
-                удалить
+                {{ tt('admin.bad_urls.remove') }}
               </button>
             </li>
           </ul>
-          <p v-else class="mt-2 text-xs text-slate-500">Пока пусто — добавь шаблон выше.</p>
+          <p v-else class="mt-2 text-xs text-slate-500">{{ tt('admin.bad_urls.empty_owner_hint') }}</p>
           <button
             type="button"
             class="mt-3 w-full rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 dark:border-slate-600 dark:text-slate-200"
             :disabled="globalBadUrlLoading"
             @click="loadGlobalBadUrls()"
           >
-            Обновить список
+            {{ tt('admin.bad_urls.refresh_list') }}
           </button>
         </div>
       </template>
@@ -6820,11 +6889,11 @@ watch(
       <template v-else-if="showFullAdminShell">
         <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
           <div class="flex items-center justify-between gap-2">
-            <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">Общая база Guard</p>
+            <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">{{ tt('admin.bad_urls.title_guard_shared') }}</p>
             <button
               type="button"
               class="inline-flex h-8 min-w-8 items-center justify-center rounded-full border border-sky-300 bg-sky-100 px-2 text-sm font-extrabold text-sky-800 shadow-sm hover:bg-sky-200 dark:border-sky-700 dark:bg-sky-900/30 dark:text-sky-200 dark:hover:bg-sky-900/45"
-              aria-label="Что это за функция"
+              :aria-label="tt('admin.bad_urls.aria_help')"
               @click="showGlobalBadUrlInfo = !showGlobalBadUrlInfo"
             >
               i
@@ -6834,14 +6903,14 @@ watch(
             v-if="showGlobalBadUrlInfo"
             class="mt-2 rounded-xl border border-cyan-300/40 bg-cyan-50 p-3 text-xs leading-relaxed text-slate-700 dark:border-cyan-700/50 dark:bg-cyan-950/25 dark:text-slate-200"
           >
-            <p><b>Только для твоих чатов как админа:</b> эти шаблоны подмешиваются к проверке «глобальная база» <b>только там, где ты владелец Guard</b>. У других пользователей сюда не лезет.</p>
-            <p class="mt-1">Наказание задаётся в «Защите» каждого чата.</p>
+            <p>{{ tt('admin.bad_urls.info_guard_p1') }}</p>
+            <p class="mt-1">{{ tt('admin.bad_urls.info_guard_p2') }}</p>
           </div>
           <div class="mt-2 flex flex-col gap-2 sm:flex-row">
             <input
               v-model="newGlobalBadUrl"
               type="text"
-              placeholder="evil.com или t.me/spam"
+              :placeholder="tt('admin.bad_urls.placeholder_pattern')"
               class="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
               :disabled="globalBadUrlLoading"
               @keydown.enter.prevent="addGlobalBadUrl()"
@@ -6849,7 +6918,7 @@ watch(
             <input
               v-model="newGlobalBadUrlNote"
               type="text"
-              placeholder="Заметка (опционально)"
+              :placeholder="tt('admin.bad_urls.placeholder_note')"
               class="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
               :disabled="globalBadUrlLoading"
             >
@@ -6859,12 +6928,12 @@ watch(
               :disabled="globalBadUrlLoading || !(newGlobalBadUrl || '').trim()"
               @click="addGlobalBadUrl()"
             >
-              Добавить
+              {{ tt('admin.bad_urls.add') }}
             </button>
           </div>
         </div>
         <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
-          <p class="text-xs font-semibold text-slate-700 dark:text-slate-200">Общая база — список ({{ globalBadUrlSystemItems.length }})</p>
+          <p class="text-xs font-semibold text-slate-700 dark:text-slate-200">{{ tt('admin.bad_urls.system_list_heading', { count: globalBadUrlSystemItems.length }) }}</p>
           <ul v-if="globalBadUrlSystemItems.length" class="mt-2 max-h-56 space-y-1 overflow-y-auto">
             <li
               v-for="it in globalBadUrlSystemItems"
@@ -6881,21 +6950,21 @@ watch(
                 :disabled="globalBadUrlLoading"
                 @click="removeGlobalBadUrl(it.pattern)"
               >
-                удалить
+                {{ tt('admin.bad_urls.remove') }}
               </button>
             </li>
           </ul>
-          <p v-else class="mt-2 text-xs text-slate-500">Пока пусто.</p>
+          <p v-else class="mt-2 text-xs text-slate-500">{{ tt('admin.bad_urls.empty_short') }}</p>
         </div>
 
         <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
-          <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">Моя личная база URL</p>
-          <p class="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">Как у Premium: только твои чаты, когда в «Защите» включена глобальная проверка.</p>
+          <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">{{ tt('admin.bad_urls.title_my_personal') }}</p>
+          <p class="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">{{ tt('admin.bad_urls.my_personal_hint') }}</p>
           <div class="mt-2 flex flex-col gap-2 sm:flex-row">
             <input
               v-model="newMyGlobalBadUrl"
               type="text"
-              placeholder="evil.com или t.me/spam"
+              :placeholder="tt('admin.bad_urls.placeholder_pattern')"
               class="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
               :disabled="globalBadUrlLoading"
               @keydown.enter.prevent="addMyGlobalBadUrl()"
@@ -6903,7 +6972,7 @@ watch(
             <input
               v-model="newMyGlobalBadUrlNote"
               type="text"
-              placeholder="Заметка (опционально)"
+              :placeholder="tt('admin.bad_urls.placeholder_note')"
               class="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
               :disabled="globalBadUrlLoading"
             >
@@ -6913,7 +6982,7 @@ watch(
               :disabled="globalBadUrlLoading || !(newMyGlobalBadUrl || '').trim()"
               @click="addMyGlobalBadUrl()"
             >
-              Добавить
+              {{ tt('admin.bad_urls.add') }}
             </button>
           </div>
           <ul v-if="globalBadUrlItems.length" class="mt-2 max-h-48 space-y-1 overflow-y-auto">
@@ -6932,15 +7001,15 @@ watch(
                 :disabled="globalBadUrlLoading"
                 @click="removeMyGlobalBadUrl(it.pattern)"
               >
-                удалить
+                {{ tt('admin.bad_urls.remove') }}
               </button>
             </li>
           </ul>
-          <p v-else class="mt-2 text-xs text-slate-500">Пока пусто.</p>
+          <p v-else class="mt-2 text-xs text-slate-500">{{ tt('admin.bad_urls.empty_short') }}</p>
         </div>
 
         <div v-if="globalBadUrlUserBases.length" class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
-          <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">Личные базы других пользователей</p>
+          <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">{{ tt('admin.bad_urls.title_other_users') }}</p>
           <div class="mt-2 max-h-64 space-y-3 overflow-y-auto pr-1">
             <div
               v-for="ub in globalBadUrlUserBases"
@@ -6950,11 +7019,11 @@ watch(
               <button
                 type="button"
                 class="w-full rounded-lg px-1 py-1.5 text-left transition hover:bg-slate-100 dark:hover:bg-slate-700/60"
-                title="Открыть карточку в разделе «Пользователи»"
+                :title="tt('admin.bad_urls.open_user_card_title')"
                 @click="goToAdminUserInList(ub.owner_telegram_id)"
               >
                 <span class="text-xs font-semibold text-slate-900 dark:text-slate-100">
-                  {{ ub.owner_first_name || 'Пользователь' }}
+                  {{ ub.owner_first_name || tt('admin.bad_urls.user_fallback') }}
                   <span v-if="ub.owner_username" class="ml-1 text-cyan-600 dark:text-cyan-300">@{{ ub.owner_username }}</span>
                   <span class="ml-1 text-[11px] font-normal text-slate-500">ID {{ ub.owner_telegram_id }}</span>
                 </span>
@@ -6979,7 +7048,7 @@ watch(
           :disabled="globalBadUrlLoading"
           @click="loadGlobalBadUrls()"
         >
-          Обновить всё
+          {{ tt('admin.bad_urls.refresh_all') }}
         </button>
       </template>
     </div>
@@ -6991,29 +7060,29 @@ watch(
         variant="embedded"
         @update:profile="applyAdminMeSubscription"
       />
-      <div v-else class="rounded-xl border border-slate-600 bg-slate-900/60 p-4 text-sm text-slate-300">Загрузка профиля…</div>
+      <div v-else class="rounded-xl border border-slate-600 bg-slate-900/60 p-4 text-sm text-slate-300">{{ tt('app.loading_profile') }}</div>
     </div>
 
     <div v-else-if="showFullAdminShell && tab === 'insights'" class="space-y-3">
       <div class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
-        <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">Сводка за последние {{ insights.window_hours || 24 }} часов</p>
+        <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">{{ tt('admin.insights.summary_title', { hours: insights.window_hours || 24 }) }}</p>
         <div class="mt-2 grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
-          <div class="rounded-lg bg-slate-100 p-2 dark:bg-slate-900/70">Вступлений в группы: <b>{{ insights.group_joins_count || 0 }}</b></div>
-          <div class="rounded-lg bg-slate-100 p-2 dark:bg-slate-900/70">Нажали /start: <b>{{ insights.starts_count || 0 }}</b></div>
-          <div class="rounded-lg bg-slate-100 p-2 dark:bg-slate-900/70">Оплат: <b>{{ insights.payments_count || 0 }}</b></div>
-          <div class="rounded-lg bg-slate-100 p-2 dark:bg-slate-900/70">Сумма оплат: <b>{{ insights.payments_sum_rub || 0 }} ₽</b></div>
-          <div class="rounded-lg bg-slate-100 p-2 dark:bg-slate-900/70">Шеров рефералки: <b>{{ insights.referral_shares_count || 0 }}</b></div>
+          <div class="rounded-lg bg-slate-100 p-2 dark:bg-slate-900/70">{{ tt('admin.insights.metric_group_joins') }} <b>{{ insights.group_joins_count || 0 }}</b></div>
+          <div class="rounded-lg bg-slate-100 p-2 dark:bg-slate-900/70">{{ tt('admin.insights.metric_starts') }} <b>{{ insights.starts_count || 0 }}</b></div>
+          <div class="rounded-lg bg-slate-100 p-2 dark:bg-slate-900/70">{{ tt('admin.insights.metric_payments') }} <b>{{ insights.payments_count || 0 }}</b></div>
+          <div class="rounded-lg bg-slate-100 p-2 dark:bg-slate-900/70">{{ tt('admin.insights.metric_payments_sum') }} <b>{{ insights.payments_sum_rub || 0 }} ₽</b></div>
+          <div class="rounded-lg bg-slate-100 p-2 dark:bg-slate-900/70">{{ tt('admin.insights.metric_referral_shares') }} <b>{{ insights.referral_shares_count || 0 }}</b></div>
         </div>
-        <p class="mt-3 text-xs font-semibold text-slate-700 dark:text-slate-300">Реферальные уровни</p>
+        <p class="mt-3 text-xs font-semibold text-slate-700 dark:text-slate-300">{{ tt('admin.insights.referral_levels') }}</p>
         <div class="mt-1 space-y-1 text-xs text-slate-700 dark:text-slate-300">
           <div v-for="lvl in (insights.referral_levels || [])" :key="`lvl-${lvl.level}`" class="rounded-lg bg-slate-50 px-2 py-1 dark:bg-slate-900/60">
-            L{{ lvl.level }}: оплат {{ lvl.payments_count }} · продажи {{ lvl.sales_sum_rub }} ₽ · награда {{ lvl.reward_sum_rub }} ₽
+            {{ tt('admin.insights.level_line', { level: lvl.level, payments: lvl.payments_count, sales: lvl.sales_sum_rub, reward: lvl.reward_sum_rub }) }}
           </div>
-          <div v-if="!(insights.referral_levels || []).length" class="text-slate-500">Пока нет данных по уровням.</div>
+          <div v-if="!(insights.referral_levels || []).length" class="text-slate-500">{{ tt('admin.insights.levels_empty') }}</div>
         </div>
       </div>
       <button type="button" class="w-full rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-60" :disabled="insightsLoading" @click="loadInsights()">
-        Обновить сводку
+        {{ tt('admin.insights.refresh') }}
       </button>
     </div>
 
@@ -7021,72 +7090,75 @@ watch(
       <div class="rounded-2xl border border-violet-400/35 bg-gradient-to-br from-slate-900 to-slate-800 p-3 text-slate-100 shadow-[0_0_24px_-10px_rgba(139,92,246,0.55)]">
         <div class="flex items-center justify-between gap-2">
           <div>
-            <p class="text-sm font-semibold">Конструктор системных сообщений</p>
-            <p class="mt-0.5 text-[11px] text-slate-300">Гибко: событие, окно, порог, cooldown, расписание и текст с переменными.</p>
+            <p class="text-sm font-semibold">{{ tt('admin.msg_templates.hero_title') }}</p>
+            <p class="mt-0.5 text-[11px] text-slate-300">{{ tt('admin.msg_templates.hero_sub') }}</p>
           </div>
-          <button type="button" class="rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-violet-500" @click="createMessageTemplate">+ Добавить</button>
+          <button type="button" class="rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-violet-500" @click="createMessageTemplate">{{ tt('admin.msg_templates.add') }}</button>
         </div>
       </div>
-      <div v-pre class="rounded-xl border border-slate-200 bg-white p-2 text-[11px] text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
-        Переменные: <code>{{count}}</code> <code>{{hours}}</code> <code>{{payments_sum}}</code> <code>{{event_label}}</code> <code>{{date}}</code>
+      <div class="rounded-xl border border-slate-200 bg-white p-2 text-[11px] text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
+        <span>{{ tt('admin.msg_templates.variables_intro') }}</span>
+        <span v-pre class="ml-1">
+          <code>{{count}}</code> <code>{{hours}}</code> <code>{{payments_sum}}</code> <code>{{event_label}}</code> <code>{{date}}</code>
+        </span>
       </div>
       <div v-for="item in msgTemplates" :key="`tpl-${item.id}`" class="rounded-2xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
         <div class="flex items-start justify-between gap-2">
           <div class="w-full space-y-1">
-            <input v-model="item.title" class="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-900" placeholder="Название" />
-            <p class="text-[11px] text-slate-500">Ключ: {{ item.template_key }}</p>
+            <input v-model="item.title" class="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-900" :placeholder="tt('admin.msg_templates.title_placeholder')" />
+            <p class="text-[11px] text-slate-500">{{ tt('admin.msg_templates.key_prefix') }} {{ item.template_key }}</p>
           </div>
           <label class="flex items-center gap-1 rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-600 dark:border-slate-600 dark:text-slate-300">
             <input v-model="item.enabled" type="checkbox" />
-            активно
+            {{ tt('admin.msg_templates.enabled_checkbox') }}
           </label>
         </div>
         <div class="mt-2 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-3">
           <label class="space-y-1">
-            <span class="text-slate-500">Событие</span>
+            <span class="text-slate-500">{{ tt('admin.msg_templates.field_event') }}</span>
             <select v-model="item.event_key" class="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 dark:border-slate-600 dark:bg-slate-900">
               <option v-for="o in (msgTemplateOptions.events || [])" :key="`evt-${o.id}`" :value="o.id">{{ o.label }}</option>
             </select>
           </label>
           <label class="space-y-1">
-            <span class="text-slate-500">Кому</span>
+            <span class="text-slate-500">{{ tt('admin.msg_templates.field_target') }}</span>
             <select v-model="item.target_kind" class="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 dark:border-slate-600 dark:bg-slate-900">
               <option v-for="o in (msgTemplateOptions.targets || [])" :key="`tgt-${o.id}`" :value="o.id">{{ o.label }}</option>
             </select>
           </label>
           <label class="space-y-1">
-            <span class="text-slate-500">Окно (часы)</span>
+            <span class="text-slate-500">{{ tt('admin.msg_templates.field_window_hours') }}</span>
             <input v-model="item.trigger_hours" type="number" min="1" max="168" class="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 dark:border-slate-600 dark:bg-slate-900" />
           </label>
           <label class="space-y-1">
-            <span class="text-slate-500">Порог (мин. count)</span>
+            <span class="text-slate-500">{{ tt('admin.msg_templates.field_min_count') }}</span>
             <input v-model="item.min_count" type="number" min="1" class="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 dark:border-slate-600 dark:bg-slate-900" />
           </label>
           <label class="space-y-1">
-            <span class="text-slate-500">Cooldown (мин)</span>
+            <span class="text-slate-500">{{ tt('admin.msg_templates.field_cooldown') }}</span>
             <input v-model="item.cooldown_minutes" type="number" min="1" class="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 dark:border-slate-600 dark:bg-slate-900" />
           </label>
           <label class="space-y-1">
-            <span class="text-slate-500">Время (UTC HH:MM)</span>
-            <input v-model="item.schedule_time_hm" class="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 dark:border-slate-600 dark:bg-slate-900" placeholder="например 09:00" />
+            <span class="text-slate-500">{{ tt('admin.msg_templates.field_schedule_utc') }}</span>
+            <input v-model="item.schedule_time_hm" class="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 dark:border-slate-600 dark:bg-slate-900" :placeholder="tt('admin.msg_templates.ph_schedule')" />
           </label>
           <label class="space-y-1">
-            <span class="text-slate-500">Задержка (мин)</span>
-            <input v-model="item.delay_minutes" type="number" min="1" class="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 dark:border-slate-600 dark:bg-slate-900" placeholder="для reminder-сюжетов" />
+            <span class="text-slate-500">{{ tt('admin.msg_templates.field_delay') }}</span>
+            <input v-model="item.delay_minutes" type="number" min="1" class="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 dark:border-slate-600 dark:bg-slate-900" :placeholder="tt('admin.msg_templates.ph_delay')" />
           </label>
           <label class="space-y-1">
-            <span class="text-slate-500">parse_mode</span>
-            <input v-model="item.parse_mode" class="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 dark:border-slate-600 dark:bg-slate-900" placeholder="Markdown / HTML" />
+            <span class="text-slate-500">{{ tt('admin.msg_templates.field_parse_mode') }}</span>
+            <input v-model="item.parse_mode" class="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 dark:border-slate-600 dark:bg-slate-900" :placeholder="tt('admin.msg_templates.ph_parse_mode')" />
           </label>
         </div>
         <textarea v-model="item.body_text" rows="5" class="mt-2 w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs dark:border-slate-600 dark:bg-slate-900" />
         <div class="mt-2 flex flex-wrap items-center gap-2 text-xs">
-          <button type="button" class="rounded-lg bg-emerald-600 px-3 py-1.5 font-semibold text-white disabled:opacity-60" :disabled="msgTemplateSavingId === item.id" @click="saveMessageTemplate(item)">Сохранить</button>
-          <button v-if="item.is_custom" type="button" class="rounded-lg bg-rose-600 px-3 py-1.5 font-semibold text-white" @click="deleteMessageTemplate(item)">Удалить</button>
+          <button type="button" class="rounded-lg bg-emerald-600 px-3 py-1.5 font-semibold text-white disabled:opacity-60" :disabled="msgTemplateSavingId === item.id" @click="saveMessageTemplate(item)">{{ tt('common.save') }}</button>
+          <button v-if="item.is_custom" type="button" class="rounded-lg bg-rose-600 px-3 py-1.5 font-semibold text-white" @click="deleteMessageTemplate(item)">{{ tt('admin.msg_templates.delete') }}</button>
         </div>
       </div>
       <button type="button" class="w-full rounded-lg bg-slate-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-60" :disabled="msgTemplatesLoading" @click="loadMessageTemplates()">
-        Обновить список
+        {{ tt('admin.msg_templates.refresh_list') }}
       </button>
     </div>
 
@@ -7094,14 +7166,9 @@ watch(
       <div
         class="min-w-0 space-y-2.5 px-4 py-3 md:px-6 pb-[max(5.25rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))] md:pb-[max(6rem,calc(6.5rem+env(safe-area-inset-bottom,0px)))]"
       >
-      <CabinetPremiumTitleBar
-        v-if="isOwnerCabinet && !showFullAdminShell"
-        :profile="meAdminProfile"
-        @go-subscription="goOwnerSubscriptionPage"
-      />
       <div class="rounded-2xl border border-white/[0.08] bg-gradient-to-b from-[#0f141d]/94 via-[#0c1017]/96 to-black/95 px-3 py-3 shadow-[0_18px_48px_-24px_rgba(0,0,0,0.95)] ring-1 ring-white/[0.05]">
-        <p class="text-[24px] font-black leading-none tracking-tight text-white">Рассылки</p>
-        <p class="mt-1 text-[12px] leading-snug text-zinc-300">Отправляйте сообщения один раз в каналы, группы или боты.</p>
+        <p class="text-[24px] font-black leading-none tracking-tight text-white">{{ tt('admin.broadcast_shell.title') }}</p>
+        <p class="mt-1 text-[12px] leading-snug text-zinc-300">{{ tt('admin.broadcast_shell.subtitle') }}</p>
 
         <div class="mt-3 space-y-2">
           <button
@@ -7117,8 +7184,8 @@ watch(
                 </svg>
               </span>
               <span class="min-w-0">
-                <span class="block truncate text-[18px] font-extrabold leading-tight text-white">Одноразовая рассылка</span>
-                <span class="mt-0.5 block text-[12px] text-slate-200/90">Отправить один раз</span>
+                <span class="block truncate text-[18px] font-extrabold leading-tight text-white">{{ tt('admin.broadcast_shell.quick_title') }}</span>
+                <span class="mt-0.5 block text-[12px] text-slate-200/90">{{ tt('admin.broadcast_shell.quick_sub') }}</span>
               </span>
             </span>
           </button>
@@ -7137,8 +7204,8 @@ watch(
                 </svg>
               </span>
               <span class="min-w-0">
-                <span class="block truncate text-[18px] font-extrabold leading-tight text-white">Автокампании</span>
-                <span class="mt-0.5 block text-[12px] text-slate-200/90">Создать и запустить по расписанию</span>
+                <span class="block truncate text-[18px] font-extrabold leading-tight text-white">{{ tt('admin.broadcast_shell.campaigns_title') }}</span>
+                <span class="mt-0.5 block text-[12px] text-slate-200/90">{{ tt('admin.broadcast_shell.campaigns_sub') }}</span>
               </span>
             </span>
           </button>
@@ -7146,14 +7213,14 @@ watch(
 
         <div class="mt-3 border-t border-white/[0.08] pt-3">
           <div class="flex items-center justify-between gap-2">
-            <p class="text-[19px] font-black tracking-tight text-white">Последние рассылки</p>
+            <p class="text-[19px] font-black tracking-tight text-white">{{ tt('admin.broadcast_shell.recent_title') }}</p>
             <button
               type="button"
               class="text-[14px] font-bold text-[#59a6ff] transition hover:text-[#7cbcff]"
               :disabled="!bcRecentBroadcasts.length"
               @click="bcShowAllRecentModal = true"
             >
-              Смотреть все
+              {{ tt('admin.broadcast_shell.view_all') }}
             </button>
           </div>
 
@@ -7165,19 +7232,19 @@ watch(
             >
               <div class="flex items-start justify-between gap-2">
                 <div class="min-w-0">
-                  <p class="truncate text-[15px] font-extrabold text-zinc-100">{{ item.title || ('Рассылка #' + item.id) }}</p>
+                  <p class="truncate text-[15px] font-extrabold text-zinc-100">{{ item.title || tt('admin.broadcast_shell.untitled', { id: item.id }) }}</p>
                   <p class="mt-0.5 text-[11px] text-zinc-400">{{ bcRecentStatusLabel(item) }} • {{ bcRecentWhenLabel(item) }}</p>
                 </div>
                 <span class="text-lg leading-none text-zinc-500">›</span>
               </div>
               <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-zinc-300">
-                <span>Охват <b class="text-zinc-100">{{ Number(item.recipient_total || 0) }}</b></span>
-                <span>Успешно <b class="text-zinc-100">{{ Number(item.recipient_ok || 0) }}</b></span>
-                <span>Ошибки <b class="text-zinc-100">{{ Number(item.recipient_fail || 0) }}</b></span>
+                <span>{{ tt('admin.broadcast_shell.reach') }} <b class="text-zinc-100">{{ Number(item.recipient_total || 0) }}</b></span>
+                <span>{{ tt('admin.broadcast_shell.delivered_ok') }} <b class="text-zinc-100">{{ Number(item.recipient_ok || 0) }}</b></span>
+                <span>{{ tt('admin.broadcast_shell.errors') }} <b class="text-zinc-100">{{ Number(item.recipient_fail || 0) }}</b></span>
               </div>
             </div>
             <p v-if="!bcRecentBroadcastsPreview.length" class="rounded-xl border border-white/[0.07] bg-[#111827]/80 px-3 py-2 text-[12px] text-zinc-400">
-              Пока нет запусков рассылок.
+              {{ tt('admin.broadcast_shell.recent_empty') }}
             </p>
           </div>
         </div>
@@ -7193,13 +7260,13 @@ watch(
             <div class="flex min-h-0 flex-1 flex-col bg-[#0b111b]/95 p-3 text-zinc-100">
           <div class="mb-2 flex items-start justify-between gap-2 pb-2">
             <div class="min-w-0 flex-1">
-              <p class="truncate text-[19px] font-black text-white">Новая рассылка</p>
+              <p class="truncate text-[19px] font-black text-white">{{ tt('admin.broadcast_ui.quick_new_broadcast') }}</p>
               <div class="mt-1.5 flex min-w-0 items-center gap-1.5">
                 <input
                   v-model="bcTitle"
                   type="text"
                   class="min-w-0 flex-1 rounded-lg border border-white/10 bg-zinc-950/80 px-2.5 py-1.5 text-[13px] text-zinc-200 placeholder:text-zinc-500 focus:border-cyan-500/45 focus:outline-none focus:ring-1 focus:ring-cyan-500/25"
-                  placeholder="Название черновика"
+                  :placeholder="tt('admin.broadcast_ui.draft_title_ph')"
                   maxlength="255"
                   :disabled="Number(bcSavingTitleId || 0) === Number(bcSelectedId || 0) && Number(bcSelectedId || 0) > 0"
                   @keydown.enter.prevent="applyBcQuickDraftTitle"
@@ -7209,7 +7276,7 @@ watch(
                   type="button"
                   class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-emerald-500/40 bg-emerald-500/20 text-[16px] font-bold text-emerald-200 shadow-[0_0_20px_-4px_rgba(16,185,129,0.5)] transition active:scale-95 hover:border-emerald-400/55 hover:bg-emerald-500/30 disabled:opacity-50"
                   :disabled="Number(bcSavingTitleId || 0) === Number(bcSelectedId || 0) && Number(bcSelectedId || 0) > 0"
-                  title="Применить название"
+                  :title="tt('admin.broadcast_ui.apply_title')"
                   @click="applyBcQuickDraftTitle"
                 >
                   ✓
@@ -7218,12 +7285,12 @@ watch(
             </div>
             <div class="flex items-center gap-1">
               <button type="button" class="rounded-lg px-2 py-1 text-[13px] font-bold text-[#70a8ff] hover:bg-white/10" :disabled="bcSaving" @click="saveBcDraft">
-                Сохранить
+                {{ tt('common.save') }}
               </button>
               <button
                 type="button"
                 class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-transparent text-sm text-zinc-200 hover:bg-white/[0.08]"
-                aria-label="Закрыть"
+                :aria-label="tt('admin.broadcast_ui.close')"
                 :disabled="bcSaving"
                 @click="closeQuickBroadcastDraft"
               >
@@ -7232,11 +7299,12 @@ watch(
             </div>
           </div>
 
-          <p class="text-[12px] font-semibold text-zinc-300">Текст сообщения</p>
+          <p class="text-[12px] font-semibold text-zinc-300">{{ tt('admin.broadcast_ui.message_text') }}</p>
           <div
             ref="bcBodyRef"
             class="bc-editor mt-2 h-40 overflow-y-auto rounded-xl border border-white/[0.08] bg-zinc-950 px-3 py-2.5 text-sm leading-relaxed focus-within:border-white/20 focus-within:ring-0"
             contenteditable="true"
+            :data-placeholder="tt('admin.broadcast_ui.message_body_ph')"
             @input="onBcEditorInput"
             @click="onBcEditorClick"
             @mouseup="bcUpdateFormatState"
@@ -7253,11 +7321,11 @@ watch(
           </div>
 
           <p class="mt-1 text-[11px]" :class="bcCurrentLen() > bcCurrentMaxLen() ? 'text-rose-400' : 'text-slate-500'">
-            {{ bcCurrentLen() }} / {{ bcCurrentMaxLen() }} символов
+            {{ tt('admin.broadcast_ui.chars_count', { current: bcCurrentLen(), max: bcCurrentMaxLen() }) }}
           </p>
 
           <div class="mt-3">
-            <p class="text-[12px] font-semibold text-zinc-300">Кнопки</p>
+            <p class="text-[12px] font-semibold text-zinc-300">{{ tt('admin.broadcast_ui.buttons_block') }}</p>
             <div v-if="bcQuickButtonPreview.length" class="mt-1.5 space-y-1.5">
               <div
                 v-for="(btn, bi) in bcQuickButtonPreview.slice(0, 3)"
@@ -7268,18 +7336,18 @@ watch(
                 <p v-if="btn.url" class="truncate text-[11px] text-zinc-400">{{ btn.url }}</p>
               </div>
             </div>
-            <button type="button" class="bc-tool-btn mt-1.5 !text-[12px]" @click="bcAuxModal = 'keyboard'">＋ Кнопки под постом</button>
+            <button type="button" class="bc-tool-btn mt-1.5 !text-[12px]" @click="bcAuxModal = 'keyboard'">{{ tt('admin.broadcast_ui.add_post_buttons') }}</button>
           </div>
 
           <div class="mt-3">
-            <p class="text-[12px] font-semibold text-zinc-300">Вложения</p>
+            <p class="text-[12px] font-semibold text-zinc-300">{{ tt('admin.broadcast_ui.attachments') }}</p>
             <div v-if="bcMediaHistory.length" class="mt-1.5 flex flex-wrap gap-2">
               <div v-for="(m, mi) in bcMediaHistory.slice(0, 4)" :key="`quick-pv-${mi}-${m.id || mi}`" class="relative shrink-0">
                 <button
                   v-if="m.previewUrl && (String(m.kind || '').toLowerCase().includes('photo') || String(m.kind || '').toLowerCase().includes('video') || String(m.kind || '').toLowerCase() === 'animation')"
                   type="button"
                   class="group relative block h-14 w-14 overflow-hidden rounded-lg border border-white/15 bg-slate-950/80 shadow-md ring-1 ring-white/[0.06] transition hover:border-cyan-400/35 hover:ring-cyan-400/25"
-                  title="Открыть крупно"
+                  :title="tt('admin.broadcast_ui.open_large')"
                   @click="openBcMediaViewer(m)"
                 >
                   <img
@@ -7304,7 +7372,7 @@ watch(
                 </div>
               </div>
             </div>
-            <button type="button" class="bc-tool-btn mt-1.5 !text-[12px]" @click="bcAuxModal = 'media'">📎 Файл и медиа</button>
+            <button type="button" class="bc-tool-btn mt-1.5 !text-[12px]" @click="bcAuxModal = 'media'">{{ tt('admin.broadcast_ui.file_and_media') }}</button>
           </div>
 
           <button
@@ -7313,7 +7381,7 @@ watch(
             :disabled="!bcHasMessageText()"
             @click="openSendTargetModal"
           >
-            Далее
+            {{ tt('common.next') }}
           </button>
             </div>
           </div>
@@ -7331,11 +7399,11 @@ watch(
           <div class="flex items-center justify-between gap-2">
             <div class="flex min-w-0 items-center gap-1">
               <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-transparent text-[14px] text-white/90 hover:bg-white/[0.08]" @click="bcSendTargetModalOpen = false">←</button>
-              <p class="truncate text-[19px] font-black text-white">Куда отправить</p>
+              <p class="truncate text-[19px] font-black text-white">{{ tt('admin.broadcast_ui.send_where') }}</p>
             </div>
             <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-transparent text-[14px] text-white/90 hover:bg-white/[0.08]" @click="bcSendTargetModalOpen = false">✕</button>
           </div>
-          <p class="mt-2 text-[13px] text-zinc-400">Выберите получателей</p>
+          <p class="mt-2 text-[13px] text-zinc-400">{{ tt('admin.broadcast_ui.choose_recipients') }}</p>
 
           <div class="mt-4 space-y-2.5">
             <button
@@ -7344,8 +7412,8 @@ watch(
               @click="bcSendTargetChannels = !bcSendTargetChannels"
             >
               <span class="min-w-0">
-                <span class="block text-[18px] font-extrabold text-white">Каналы</span>
-                <span class="block text-[12px] text-slate-200/90">Отправить в каналы</span>
+                <span class="block text-[18px] font-extrabold text-white">{{ tt('admin.broadcast_ui.channels_title') }}</span>
+                <span class="block text-[12px] text-slate-200/90">{{ tt('admin.broadcast_ui.channels_sub') }}</span>
               </span>
               <span class="inline-flex h-6 w-6 items-center justify-center rounded-md border text-[14px] font-black" :class="bcSendTargetChannels ? 'border-violet-300/55 bg-violet-600/85 text-white' : 'border-white/35 bg-transparent text-transparent'">✓</span>
             </button>
@@ -7356,8 +7424,8 @@ watch(
               @click="bcSendTargetGroups = !bcSendTargetGroups"
             >
               <span class="min-w-0">
-                <span class="block text-[18px] font-extrabold text-white">Группы</span>
-                <span class="block text-[12px] text-slate-200/90">Отправить в группы</span>
+                <span class="block text-[18px] font-extrabold text-white">{{ tt('admin.broadcast_ui.groups_title') }}</span>
+                <span class="block text-[12px] text-slate-200/90">{{ tt('admin.broadcast_ui.groups_sub') }}</span>
               </span>
               <span class="inline-flex h-6 w-6 items-center justify-center rounded-md border text-[14px] font-black" :class="bcSendTargetGroups ? 'border-violet-300/55 bg-violet-600/85 text-white' : 'border-white/35 bg-transparent text-transparent'">✓</span>
             </button>
@@ -7368,15 +7436,15 @@ watch(
               @click="bcSendTargetBots = !bcSendTargetBots"
             >
               <span class="min-w-0">
-                <span class="block text-[18px] font-extrabold text-white">Боты (лички)</span>
-                <span class="block text-[12px] text-slate-200/90">Отправить в боты</span>
+                <span class="block text-[18px] font-extrabold text-white">{{ tt('admin.broadcast_ui.bots_title') }}</span>
+                <span class="block text-[12px] text-slate-200/90">{{ tt('admin.broadcast_ui.bots_sub') }}</span>
               </span>
               <span class="inline-flex h-6 w-6 items-center justify-center rounded-md border text-[14px] font-black" :class="bcSendTargetBots ? 'border-violet-300/55 bg-violet-600/85 text-white' : 'border-white/35 bg-transparent text-transparent'">✓</span>
             </button>
           </div>
 
           <div class="mt-5">
-            <p class="text-[13px] font-semibold text-zinc-300">Выбрано</p>
+            <p class="text-[13px] font-semibold text-zinc-300">{{ tt('admin.broadcast_ui.selected') }}</p>
             <div class="mt-1.5 space-y-1.5">
               <button
                 v-if="bcSendTargetChannels"
@@ -7384,7 +7452,7 @@ watch(
                 class="flex w-full items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2 text-left text-[14px] font-semibold text-zinc-100"
                 @click="bcShowChannelsPicker = true"
               >
-                <span>{{ `Каналы: ${Number(bcSelectedChannelIds.length || 0)}` }}</span>
+                <span>{{ tt('admin.broadcast_send.target_channels', { n: Number(bcSelectedChannelIds.length || 0) }) }}</span>
                 <span>›</span>
               </button>
               <button
@@ -7393,13 +7461,13 @@ watch(
                 class="flex w-full items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2 text-left text-[14px] font-semibold text-zinc-100"
                 @click="bcShowGroupsPicker = true"
               >
-                <span>{{ `Группы: ${Number(bcSelectedGroupIds.length || 0)}` }}</span>
+                <span>{{ tt('admin.broadcast_send.target_groups', { n: Number(bcSelectedGroupIds.length || 0) }) }}</span>
                 <span>›</span>
               </button>
               <div v-if="bcSendTargetBots" class="rounded-xl bg-white/[0.04] px-3 py-2 text-[14px] font-semibold text-zinc-100">
-                {{ `Боты (личка): ${Number(bcSelectedBotRecipientIds.length || 0)}` }}
+                {{ tt('admin.broadcast_send.target_bots', { n: Number(bcSelectedBotRecipientIds.length || 0) }) }}
               </div>
-              <p v-if="!bcSendTargetSummary.length" class="rounded-xl bg-white/[0.03] px-3 py-2 text-[12px] text-zinc-400">Ничего не выбрано</p>
+              <p v-if="!bcSendTargetSummary.length" class="rounded-xl bg-white/[0.03] px-3 py-2 text-[12px] text-zinc-400">{{ tt('admin.broadcast_ui.nothing_selected') }}</p>
             </div>
           </div>
 
@@ -7409,7 +7477,7 @@ watch(
             :disabled="bcSelectedTargetsCount <= 0"
             @click="proceedSendTargetModal"
           >
-            Далее
+            {{ tt('common.next') }}
           </button>
             </div>
           </div>
@@ -7427,7 +7495,7 @@ watch(
         >
           <div class="flex items-center gap-2">
             <button type="button" class="inline-flex h-7 w-7 items-center justify-center rounded-full bg-transparent text-[13px] text-white/90 hover:bg-white/[0.08]" @click="bcConfirmModalOpen = false">←</button>
-            <p class="text-[19px] font-bold text-white leading-none">Подтверждение</p>
+            <p class="text-[19px] font-bold text-white leading-none">{{ tt('admin.broadcast_ui.confirmation') }}</p>
           </div>
 
           <div class="mt-3 text-center">
@@ -7438,38 +7506,38 @@ watch(
                 <path d="M21.5 4.8 18.4 19c-.2.9-.8 1.1-1.6.7l-4.4-3.2-2.1 2c-.2.2-.4.4-.9.4l.3-4.5 8.3-7.5c.4-.3-.1-.5-.5-.2l-10.2 6.4-4.4-1.4c-.9-.3-.9-.9.2-1.3L19.9 4c.8-.3 1.5.2 1.3.8z" />
               </svg>
             </div>
-            <p class="text-[18px] font-extrabold text-white leading-tight">Готово к отправке</p>
-            <p class="mx-auto mt-1 max-w-[17rem] text-[13px] leading-[1.35] text-zinc-300/95">Проверьте настройки и подтвердите отправку рассылки</p>
+            <p class="text-[18px] font-extrabold text-white leading-tight">{{ tt('admin.broadcast_ui.ready_title') }}</p>
+            <p class="mx-auto mt-1 max-w-[17rem] text-[13px] leading-[1.35] text-zinc-300/95">{{ tt('admin.broadcast_ui.ready_sub') }}</p>
           </div>
 
           <div class="mt-4 rounded-xl border border-white/[0.07] bg-white/[0.02] px-3 py-2">
             <div class="flex items-center justify-between gap-3 py-1.5 text-[13px] leading-snug">
-              <span class="text-zinc-300">Получатели</span>
+              <span class="text-zinc-300">{{ tt('admin.broadcast_ui.row_recipients') }}</span>
               <span class="text-right font-semibold text-zinc-100">{{ bcConfirmRecipientLabel }}</span>
             </div>
             <div class="flex items-center justify-between gap-3 py-1.5 text-[13px] leading-snug">
-              <span class="text-zinc-300">Текст сообщения</span>
+              <span class="text-zinc-300">{{ tt('admin.broadcast_ui.row_message') }}</span>
               <span class="text-right font-semibold text-zinc-100">{{ bcConfirmSymbolsLabel(bcConfirmMessageLen) }}</span>
             </div>
             <div class="flex items-center justify-between gap-3 py-1.5 text-[13px] leading-snug">
-              <span class="text-zinc-300">Кнопки</span>
+              <span class="text-zinc-300">{{ tt('admin.broadcast_ui.row_buttons') }}</span>
               <span class="text-right font-semibold text-zinc-100">{{ bcConfirmButtonsLabel(bcConfirmButtonsCount) }}</span>
             </div>
             <div class="flex items-center justify-between gap-3 py-1.5 text-[13px] leading-snug">
-              <span class="text-zinc-300">Вложения</span>
-              <span class="text-right font-semibold text-zinc-100">{{ bcConfirmHasMedia ? 'Есть' : 'Нет' }}</span>
+              <span class="text-zinc-300">{{ tt('admin.broadcast_ui.row_attachments') }}</span>
+              <span class="text-right font-semibold text-zinc-100">{{ bcConfirmHasMedia ? tt('admin.broadcast_ui.has_yes') : tt('admin.broadcast_ui.has_no') }}</span>
             </div>
           </div>
 
           <div class="mt-2.5 flex items-center justify-between gap-3 rounded-xl border border-white/[0.07] bg-white/[0.02] px-3 py-2">
-            <span class="text-[14px] font-semibold text-zinc-100">Стоимость</span>
+            <span class="text-[14px] font-semibold text-zinc-100">{{ tt('admin.broadcast_ui.cost') }}</span>
             <span class="text-[15px] font-black text-amber-300">{{ bcConfirmLoading ? '...' : `${bcConfirmQuoteTokens} AURUM` }}</span>
           </div>
 
           <div class="mt-auto pt-4">
             <div class="flex gap-2">
-              <button type="button" class="flex-1 rounded-xl border border-white/12 bg-[#171e2e]/95 px-3 py-2 text-[15px] font-semibold text-[#7590d8]" :disabled="bcConfirmSending" @click="bcConfirmModalOpen = false">Отмена</button>
-              <button type="button" class="flex-1 rounded-xl border border-indigo-400/45 bg-gradient-to-r from-[#6d3ef7] to-[#4b67ff] px-3 py-2 text-[15px] font-extrabold text-white" :disabled="bcConfirmSending || bcConfirmLoading" @click="submitBcConfirmedSend">{{ bcConfirmSending ? 'Отправка...' : 'Отправить' }}</button>
+              <button type="button" class="flex-1 rounded-xl border border-white/12 bg-[#171e2e]/95 px-3 py-2 text-[15px] font-semibold text-[#7590d8]" :disabled="bcConfirmSending" @click="bcConfirmModalOpen = false">{{ tt('common.cancel') }}</button>
+              <button type="button" class="flex-1 rounded-xl border border-indigo-400/45 bg-gradient-to-r from-[#6d3ef7] to-[#4b67ff] px-3 py-2 text-[15px] font-extrabold text-white" :disabled="bcConfirmSending || bcConfirmLoading" @click="submitBcConfirmedSend">{{ bcConfirmSending ? tt('admin.broadcast_ui.sending') : tt('admin.broadcast_ui.send') }}</button>
             </div>
           </div>
         </div>
@@ -7483,7 +7551,7 @@ watch(
       >
         <div class="w-full max-w-lg rounded-2xl border border-white/12 bg-[#0b111b]/96 p-3 text-zinc-100 shadow-[0_24px_64px_-24px_rgba(0,0,0,0.92)]">
           <div class="mb-2 flex items-center justify-between border-b border-white/10 pb-2">
-            <p class="text-[16px] font-extrabold text-white">Все последние рассылки</p>
+            <p class="text-[16px] font-extrabold text-white">{{ tt('admin.broadcast_ui.all_recent_title') }}</p>
             <button type="button" class="rounded-lg px-2 py-1 text-sm text-zinc-300 hover:bg-white/10" @click="bcShowAllRecentModal = false">✕</button>
           </div>
           <div class="max-h-[min(70vh,30rem)] space-y-2 overflow-y-auto pr-1">
@@ -7492,16 +7560,16 @@ watch(
               :key="`recent-all-bc-${item.id}`"
               class="rounded-xl border border-white/[0.08] bg-[#121a27]/88 px-3 py-2.5"
             >
-              <p class="truncate text-[14px] font-bold text-zinc-100">{{ item.title || ('Рассылка #' + item.id) }}</p>
+              <p class="truncate text-[14px] font-bold text-zinc-100">{{ item.title || tt('admin.broadcast_shell.untitled', { id: item.id }) }}</p>
               <p class="mt-0.5 text-[11px] text-zinc-400">{{ bcRecentStatusLabel(item) }} • {{ bcRecentWhenLabel(item) }}</p>
               <div class="mt-1.5 flex flex-wrap items-center gap-3 text-[11px] text-zinc-300">
-                <span>Охват <b class="text-zinc-100">{{ Number(item.recipient_total || 0) }}</b></span>
-                <span>Успешно <b class="text-zinc-100">{{ Number(item.recipient_ok || 0) }}</b></span>
-                <span>Ошибки <b class="text-zinc-100">{{ Number(item.recipient_fail || 0) }}</b></span>
+                <span>{{ tt('admin.broadcast_shell.reach') }} <b class="text-zinc-100">{{ Number(item.recipient_total || 0) }}</b></span>
+                <span>{{ tt('admin.broadcast_shell.delivered_ok') }} <b class="text-zinc-100">{{ Number(item.recipient_ok || 0) }}</b></span>
+                <span>{{ tt('admin.broadcast_shell.errors') }} <b class="text-zinc-100">{{ Number(item.recipient_fail || 0) }}</b></span>
               </div>
             </div>
             <p v-if="!bcRecentBroadcasts.length" class="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-[12px] text-zinc-400">
-              Пока нет запусков рассылок.
+              {{ tt('admin.broadcast_shell.recent_empty') }}
             </p>
           </div>
         </div>
@@ -7511,7 +7579,7 @@ watch(
         v-if="false && cabinetMode === 'delegated'"
         class="rounded-lg bg-zinc-950/45 px-2.5 py-1.5 text-[11px] text-zinc-300 ring-1 ring-white/[0.05] backdrop-blur-md"
       >
-        Фиолетовый ADM: рассылка и автопост только по делегированным группам/каналам.
+        {{ tt('admin.broadcast_ui.delegated_strip') }}
       </div>
 
       <div
@@ -7677,7 +7745,7 @@ watch(
 
             <div ref="bcEmojiHostRef" class="mt-4 flex flex-wrap items-center gap-2 border-t border-white/[0.06] pt-4">
               <span class="text-xs font-semibold text-zinc-400">Оформление текста</span>
-              <button type="button" class="bc-tool-btn bc-broadcast-i" title="Справка по оформлению" @click="bcShowFormatHelp = true">
+              <button type="button" class="bc-tool-btn bc-broadcast-i" :title="tt('admin.broadcast_ui.format_help_tooltip')" :aria-label="tt('admin.broadcast_ui.format_help_aria')" @click="bcShowFormatHelp = true">
                 i
               </button>
               <div class="flex flex-wrap gap-1">
@@ -7719,7 +7787,7 @@ watch(
                   v-if="m.previewUrl && (String(m.kind || '').toLowerCase().includes('photo') || String(m.kind || '').toLowerCase().includes('video') || String(m.kind || '').toLowerCase() === 'animation')"
                   type="button"
                   class="group relative block h-16 w-16 overflow-hidden rounded-xl border border-white/15 bg-slate-950/80 shadow-md ring-1 ring-white/[0.06] transition hover:border-cyan-400/35 hover:ring-cyan-400/25"
-                  title="Открыть крупно"
+                  :title="tt('admin.broadcast_ui.open_large')"
                   @click="openBcMediaViewer(m)"
                 >
                   <img
@@ -7763,12 +7831,13 @@ watch(
               <button type="button" class="bc-tool-btn text-[11px]" :class="!bcCanRedo() ? 'opacity-40' : ''" :disabled="!bcCanRedo()" @mousedown.prevent @click="bcRedo">↷ Вперёд</button>
             </div>
             <p class="mt-1 text-[11px]" :class="bcCurrentLen() > bcCurrentMaxLen() ? 'text-rose-400' : 'text-slate-500'">
-              {{ bcCurrentLen() }} / {{ bcCurrentMaxLen() }} символов
+              {{ tt('admin.broadcast_ui.chars_count', { current: bcCurrentLen(), max: bcCurrentMaxLen() }) }}
             </p>
             <div
               ref="bcBodyRef"
               class="bc-editor mt-1.5 h-48 overflow-y-auto rounded-xl border border-white/[0.1] bg-zinc-950 px-3 py-2.5 text-sm leading-relaxed focus-within:border-cyan-500/45 focus-within:ring-1 focus-within:ring-cyan-500/25"
               contenteditable="true"
+              :data-placeholder="tt('admin.broadcast_ui.message_body_ph')"
               @input="onBcEditorInput"
               @click="onBcEditorClick"
               @mouseup="bcUpdateFormatState"
@@ -7817,12 +7886,12 @@ watch(
           >
             <div class="flex flex-wrap items-center justify-between gap-2">
               <div class="flex min-w-0 items-center gap-1.5">
-                <span class="text-[10px] font-semibold uppercase tracking-wide text-zinc-300">Кампании автопоста</span>
+                <span class="text-[10px] font-semibold uppercase tracking-wide text-zinc-300">{{ tt('admin.autopost.campaigns_sidebar_title') }}</span>
                 <button
                   type="button"
                   class="bc-tool-btn bc-broadcast-i shrink-0"
-                  title="Справка по автопосту"
-                  aria-label="Справка по автопосту"
+                  :title="tt('admin.autopost.help_tooltip')"
+                  :aria-label="tt('admin.autopost.help_aria')"
                   @click="bcShowAutopostHelp = true"
                 >
                   i
@@ -7833,11 +7902,11 @@ watch(
                 class="rounded-md border border-cyan-500/40 bg-cyan-950/40 px-2 py-1 text-[10px] font-semibold text-cyan-100"
                 @click="openBcCampaignUxWizard"
               >
-                + Кампания
+                {{ tt('admin.autopost.btn_new_campaign_short') }}
               </button>
             </div>
             <p class="mt-1 text-[10px] leading-snug text-slate-400">
-              Несколько независимых расписаний (разные ротации постов и чаты). Создать: выберите шаблон слева и нажмите «+&nbsp;Кампания». Управление расписанием — только кнопка «Настройка» у нужной кампании.
+              {{ tt('admin.autopost.campaigns_sidebar_hint') }}
             </p>
             <div v-if="bcAutopostCampaigns.length" class="mt-2 space-y-2">
               <div
@@ -8005,15 +8074,15 @@ watch(
         <div class="flex items-center justify-between border-b border-white/10 bg-black/20 px-4 py-3 backdrop-blur-sm">
           <button type="button" class="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/[0.03] text-white/90 transition hover:bg-white/[0.08] active:scale-[0.98]" @click="bcCampaignUxBack">←</button>
           <div class="min-w-0 text-center">
-            <p class="truncate text-[19px] font-extrabold tracking-tight">{{ bcCampaignUxScreen === 'list' ? 'Автокампании' : bcCampaignUxScreen === 'manage' ? (bcCampaignUxManageItem?.title || 'Управление кампанией') : bcCampaignUxScreen === 'stats' ? 'Статистика кампании' : 'Новая кампания' }}</p>
-            <p v-if="bcCampaignUxScreen === 'wizard'" class="text-[11px] font-medium text-slate-400">Шаг {{ bcCampaignUxStep }} из 4</p>
+            <p class="truncate text-[19px] font-extrabold tracking-tight">{{ bcCampaignUxScreen === 'list' ? tt('admin.bc_campaign.title_list') : bcCampaignUxScreen === 'manage' ? (bcCampaignUxManageItem?.title || tt('admin.bc_campaign.title_manage')) : bcCampaignUxScreen === 'stats' ? tt('admin.bc_campaign.title_stats') : tt('admin.bc_campaign.title_new') }}</p>
+            <p v-if="bcCampaignUxScreen === 'wizard'" class="text-[11px] font-medium text-slate-400">{{ tt('admin.bc_campaign.wizard_step', { n: bcCampaignUxStep, max: 5 }) }}</p>
           </div>
           <button type="button" class="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/[0.03] text-white/90 transition hover:bg-white/[0.08] active:scale-[0.98]" @click="bcCampaignUxOpen = false">✕</button>
         </div>
 
         <div v-if="bcCampaignUxScreen === 'list'" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 pb-[max(5.5rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))]">
-          <p class="text-[13px] text-slate-300">Создавайте кампании и отправляйте сообщения по расписанию</p>
-          <button type="button" class="mt-3 w-full rounded-2xl border border-indigo-400/50 bg-gradient-to-r from-[#6d3ef7] via-[#4f46e5] to-[#355dff] px-4 py-3 text-[15px] font-extrabold shadow-[0_20px_44px_-18px_rgba(79,70,229,0.95)] transition hover:brightness-110 active:scale-[0.995]" @click="openBcCampaignUxWizard">+ Новая кампания</button>
+          <p class="text-[13px] text-slate-300">{{ tt('admin.bc_campaign.list_intro') }}</p>
+          <button type="button" class="mt-3 w-full rounded-2xl border border-indigo-400/50 bg-gradient-to-r from-[#6d3ef7] via-[#4f46e5] to-[#355dff] px-4 py-3 text-[15px] font-extrabold shadow-[0_20px_44px_-18px_rgba(79,70,229,0.95)] transition hover:brightness-110 active:scale-[0.995]" @click="openBcCampaignUxWizard">{{ tt('admin.bc_campaign.btn_new') }}</button>
           <div class="mt-4 space-y-2.5">
             <button
               v-for="camp in bcAutopostCampaigns"
@@ -8023,226 +8092,227 @@ watch(
               @click="openBcCampaignUxManage(camp)"
             >
               <div class="flex items-center justify-between gap-2">
-                <p class="truncate text-[16px] font-bold">{{ camp.title || `Кампания #${camp.id}` }}</p>
+                <p class="truncate text-[16px] font-bold">{{ camp.title || tt('admin.bc_campaign.campaign_named', { id: camp.id }) }}</p>
                 <span class="rounded-md border border-emerald-400/25 bg-emerald-500/10 px-2 py-0.5 text-[11px] text-emerald-300">{{ bcCampaignUxStatusLabel(camp) }}</span>
               </div>
               <div class="mt-2 grid grid-cols-2 gap-1 text-[11px] text-slate-300">
-                <span>Получатели: {{ Number((camp?.autopost?.group_chat_ids || []).length || 0) + Number((camp?.autopost?.channel_chat_ids || []).length || 0) }}</span>
-                <span>Постов: {{ Number((camp?.autopost?.broadcast_ids || []).length || 0) || (camp?.autopost?.use_all_broadcasts ? 'Все' : 0) }}</span>
-                <span>Сегодня: {{ bcCampaignUxTodaySent(camp) }}</span>
+                <span>{{ tt('admin.bc_campaign.row_recipients_label') }}: {{ Number((camp?.autopost?.group_chat_ids || []).length || 0) + Number((camp?.autopost?.channel_chat_ids || []).length || 0) }}</span>
+                <span>{{ tt('admin.bc_campaign.row_posts_label') }}: {{ Number((camp?.autopost?.broadcast_ids || []).length || 0) || (camp?.autopost?.use_all_broadcasts ? tt('admin.bc_campaign.word_all') : 0) }}</span>
+                <span>{{ tt('admin.bc_campaign.row_today_label') }}: {{ bcCampaignUxTodaySent(camp) }}</span>
                 <span>CTR: {{ fmtPctTrim(Number(camp?.ctr || 0)) }}</span>
               </div>
             </button>
             <div v-if="!bcAutopostCampaigns.length" class="rounded-2xl border border-dashed border-white/15 bg-[#11151C]/85 px-3 py-5 text-center">
-              <p class="text-[14px] font-semibold text-slate-200">Кампаний пока нет</p>
-              <p class="mt-1 text-[12px] text-slate-400">Создайте первую кампанию по кнопке выше</p>
+              <p class="text-[14px] font-semibold text-slate-200">{{ tt('admin.bc_campaign.empty_title') }}</p>
+              <p class="mt-1 text-[12px] text-slate-400">{{ tt('admin.bc_campaign.empty_sub') }}</p>
             </div>
           </div>
         </div>
 
         <div v-else-if="bcCampaignUxScreen === 'wizard'" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 pb-[max(5.5rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))]">
           <template v-if="bcCampaignUxStep === 1">
-            <p class="text-[12px] text-slate-400">Шаг 1 из 5</p>
-            <label class="mt-2 block text-[12px] font-semibold text-slate-300">Название кампании</label>
-            <input v-model="bcCampaignUxWizard.title" type="text" maxlength="255" class="mt-1 w-full rounded-2xl border border-white/10 bg-[#11151C] px-3 py-2.5 text-sm text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] focus:border-indigo-400/45 focus:outline-none focus:ring-1 focus:ring-indigo-400/30" placeholder="Например: Утренний прогрев" />
-            <p class="mt-3 text-[12px] font-semibold text-slate-300">Посты кампании</p>
+            <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.step_n_of_5', { n: 1 }) }}</p>
+            <label class="mt-2 block text-[12px] font-semibold text-slate-300">{{ tt('admin.bc_campaign.name_label') }}</label>
+            <input v-model="bcCampaignUxWizard.title" type="text" maxlength="255" class="mt-1 w-full rounded-2xl border border-white/10 bg-[#11151C] px-3 py-2.5 text-sm text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] focus:border-indigo-400/45 focus:outline-none focus:ring-1 focus:ring-indigo-400/30" :placeholder="tt('admin.bc_campaign.name_ph')" />
+            <p class="mt-3 text-[12px] font-semibold text-slate-300">{{ tt('admin.bc_campaign.posts_heading') }}</p>
             <div class="mt-2 grid grid-cols-2 gap-2">
-              <button type="button" class="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxOpenPostEditor(0)">+ Создать новый пост</button>
-              <button type="button" class="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxWizard.postIds = [...new Set([...(bcCampaignUxWizard.postIds || []), ...broadcasts.map((b)=>Number(b.id||0)).filter((x)=>x>0)])]">Выбрать из шаблонов</button>
+              <button type="button" class="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxOpenPostEditor(0)">{{ tt('admin.bc_campaign.btn_create_post') }}</button>
+              <button type="button" class="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxWizard.postIds = [...new Set([...(bcCampaignUxWizard.postIds || []), ...broadcasts.map((b)=>Number(b.id||0)).filter((x)=>x>0)])]">{{ tt('admin.bc_campaign.btn_from_templates') }}</button>
             </div>
             <div class="mt-2 max-h-44 space-y-1 overflow-y-auto rounded-2xl border border-white/10 bg-[#11151C] p-2">
               <label v-for="b in broadcasts" :key="`wiz-post-${b.id}`" class="flex items-center gap-2 rounded-lg px-2 py-1.5 text-[12px] transition hover:bg-white/[0.06]">
                 <input type="checkbox" :checked="bcCampaignUxWizard.postIds.includes(Number(b.id))" @change="bcCampaignUxTogglePost(b.id)" />
-                <span class="truncate">{{ b.title || `Пост #${b.id}` }}</span>
+                <span class="truncate">{{ b.title || tt('admin.bc_campaign.post_named', { id: b.id }) }}</span>
               </label>
             </div>
             <div class="mt-2 space-y-1.5 rounded-2xl border border-white/10 bg-[#11151C] p-2">
               <div v-for="(p, pi) in bcCampaignUxWizardPosts" :key="`wiz-cpost-${p.id}`" class="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-2 py-1.5">
                 <span class="w-5 text-center text-[11px] text-slate-400">{{ pi + 1 }}</span>
                 <span class="text-sm">{{ bcCampaignUxPostMeta(p) }}</span>
-                <span class="min-w-0 flex-1 truncate text-[12px] text-slate-200">{{ stripHtml(p?.body_text || '') || p?.title || `Пост #${p.id}` }}</span>
+                <span class="min-w-0 flex-1 truncate text-[12px] text-slate-200">{{ stripHtml(p?.body_text || '') || p?.title || tt('admin.bc_campaign.post_named', { id: p.id }) }}</span>
                 <button type="button" class="rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 text-[10px]" @click="bcCampaignUxOpenPostEditor(p.id)">✎</button>
                 <button type="button" class="rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 text-[10px]" @click="bcCampaignUxMovePost(p.id, -1)">↑</button>
                 <button type="button" class="rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 text-[10px]" @click="bcCampaignUxMovePost(p.id, 1)">↓</button>
                 <button type="button" class="rounded-md border border-rose-500/35 bg-rose-900/35 px-1.5 py-0.5 text-[10px] text-rose-100" @click="bcCampaignUxRemovePost(p.id)">✕</button>
               </div>
             </div>
-            <p class="mt-2 text-[11px] text-slate-500">Совет: 3–7 постов дают лучший результат</p>
+            <p class="mt-2 text-[11px] text-slate-500">{{ tt('admin.bc_campaign.posts_tip') }}</p>
           </template>
 
           <template v-else-if="bcCampaignUxStep === 2">
-            <p class="text-[12px] text-slate-400">Шаг 2 из 5</p>
-            <p class="mt-2 text-[16px] font-bold">Тип кампании</p>
+            <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.step_n_of_5', { n: 2 }) }}</p>
+            <p class="mt-2 text-[16px] font-bold">{{ tt('admin.bc_campaign.type_heading') }}</p>
             <div class="mt-3 space-y-2">
               <button type="button" class="w-full rounded-2xl border px-3 py-3 text-left transition" :class="bcCampaignUxWizard.campaignType === 'progress' ? 'border-violet-400 bg-violet-500/12 shadow-[0_0_30px_-16px_rgba(139,92,246,0.75)]' : 'border-white/10 bg-[#11151C] hover:bg-[#151A22]'" @click="bcCampaignUxWizard.campaignType = 'progress'">
-                <p class="font-semibold">Прогрев</p>
-                <p class="text-[12px] text-slate-400">Посты отправляются по очереди по расписанию</p>
+                <p class="font-semibold">{{ tt('admin.bc_campaign.type_progress') }}</p>
+                <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.type_progress_sub') }}</p>
               </button>
               <button type="button" class="w-full rounded-2xl border px-3 py-3 text-left transition" :class="bcCampaignUxWizard.campaignType === 'rotation' ? 'border-violet-400 bg-violet-500/12 shadow-[0_0_30px_-16px_rgba(139,92,246,0.75)]' : 'border-white/10 bg-[#11151C] hover:bg-[#151A22]'" @click="bcCampaignUxWizard.campaignType = 'rotation'">
-                <p class="font-semibold">Ротация</p>
-                <p class="text-[12px] text-slate-400">Посты повторяются по кругу</p>
+                <p class="font-semibold">{{ tt('admin.bc_campaign.type_rotation') }}</p>
+                <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.type_rotation_sub') }}</p>
               </button>
               <button type="button" class="w-full rounded-2xl border px-3 py-3 text-left transition" :class="bcCampaignUxWizard.campaignType === 'simple' ? 'border-violet-400 bg-violet-500/12 shadow-[0_0_30px_-16px_rgba(139,92,246,0.75)]' : 'border-white/10 bg-[#11151C] hover:bg-[#151A22]'" @click="bcCampaignUxWizard.campaignType = 'simple'">
-                <p class="font-semibold">Простая</p>
-                <p class="text-[12px] text-slate-400">Один пост по расписанию</p>
+                <p class="font-semibold">{{ tt('admin.bc_campaign.type_simple') }}</p>
+                <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.type_simple_sub') }}</p>
               </button>
             </div>
           </template>
 
           <template v-else-if="bcCampaignUxStep === 3">
-            <p class="text-[12px] text-slate-400">Шаг 3 из 5</p>
-            <p class="mt-2 text-[16px] font-bold">Настройка расписания</p>
+            <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.step_n_of_5', { n: 3 }) }}</p>
+            <p class="mt-2 text-[16px] font-bold">{{ tt('admin.bc_campaign.schedule_heading') }}</p>
             <div class="mt-3 space-y-2 rounded-2xl border border-white/10 bg-[#11151C] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
-              <label class="text-[12px] text-slate-300">Частота</label>
+              <label class="text-[12px] text-slate-300">{{ tt('admin.bc_campaign.freq_label') }}</label>
               <select v-model="bcCampaignUxWizard.scheduleMode" class="mt-1 w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none">
-                <option value="every_day">Каждый день</option>
-                <option value="weekdays">Дни недели</option>
-                <option value="interval">Интервал</option>
-                <option value="custom">Свои дни</option>
+                <option value="every_day">{{ tt('admin.bc_campaign.freq_every_day') }}</option>
+                <option value="weekdays">{{ tt('admin.bc_campaign.freq_weekdays') }}</option>
+                <option value="interval">{{ tt('admin.bc_campaign.freq_interval') }}</option>
+                <option value="custom">{{ tt('admin.bc_campaign.freq_custom') }}</option>
               </select>
               <div v-if="bcCampaignUxWizard.scheduleMode === 'weekdays'" class="flex flex-wrap gap-1.5 pt-1">
                 <button v-for="d in BC_WEEKDAY_OPTS" :key="`wiz-wd-${d.v}`" type="button" class="rounded-lg border px-2 py-1 text-[11px] transition" :class="bcCampaignUxWizard.weekdays.includes(d.v) ? 'border-violet-400 bg-violet-500/20 text-violet-100' : 'border-white/15 bg-black/20 hover:bg-white/[0.06]'" @click="bcCampaignUxToggleWeekday(d.v)">{{ d.label }}</button>
               </div>
               <div v-else-if="bcCampaignUxWizard.scheduleMode === 'interval'" class="grid grid-cols-[auto_1fr] items-center gap-2 pt-1">
-                <span class="text-[11px] text-slate-400">каждые</span>
+                <span class="text-[11px] text-slate-400">{{ tt('admin.bc_campaign.every_prefix') }}</span>
                 <input v-model.number="bcCampaignUxWizard.intervalDays" type="number" min="1" max="365" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
               </div>
               <div v-else-if="bcCampaignUxWizard.scheduleMode === 'custom'" class="pt-1">
-                <input v-model="bcCampaignUxWizard.customDays" type="text" placeholder="Например: 1,3,5" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
+                <input v-model="bcCampaignUxWizard.customDays" type="text" :placeholder="tt('admin.bc_campaign.custom_days_ph')" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
               </div>
-              <label class="text-[12px] text-slate-300">Время отправки</label>
+              <label class="text-[12px] text-slate-300">{{ tt('admin.bc_campaign.send_time') }}</label>
               <input v-model="bcCampaignUxWizard.sendTime" type="time" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
-              <label class="text-[12px] text-slate-300">Окно отправки</label>
+              <label class="text-[12px] text-slate-300">{{ tt('admin.bc_campaign.send_window') }}</label>
               <div class="grid grid-cols-2 gap-2">
                 <input v-model="bcCampaignUxWizard.windowStart" type="time" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
                 <input v-model="bcCampaignUxWizard.windowEnd" type="time" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
               </div>
-              <label class="text-[12px] text-slate-300">Часовой пояс</label>
+              <label class="text-[12px] text-slate-300">{{ tt('admin.bc_campaign.timezone') }}</label>
               <input v-model="bcCampaignUxWizard.timezone" type="text" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
-              <label class="text-[12px] text-slate-300">Постов в день</label>
+              <label class="text-[12px] text-slate-300">{{ tt('admin.bc_campaign.posts_per_day') }}</label>
               <input v-model.number="bcCampaignUxWizard.postsPerDay" type="number" min="1" max="288" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
-              <label class="flex items-center gap-2 text-[12px] text-slate-300"><input v-model="bcCampaignUxWizard.spreadInWindow" type="checkbox" /> Равномерно распределять</label>
+              <label class="flex items-center gap-2 text-[12px] text-slate-300"><input v-model="bcCampaignUxWizard.spreadInWindow" type="checkbox" /> {{ tt('admin.bc_campaign.spread_even') }}</label>
             </div>
           </template>
 
           <template v-else-if="bcCampaignUxStep === 4">
-            <p class="text-[12px] text-slate-400">Шаг 4 из 5</p>
-            <p class="mt-2 text-[16px] font-bold">Куда отправлять</p>
+            <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.step_n_of_5', { n: 4 }) }}</p>
+            <p class="mt-2 text-[16px] font-bold">{{ tt('admin.bc_campaign.where_heading') }}</p>
             <div class="mt-3 space-y-2">
-              <label class="flex items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-sm transition hover:bg-[#151A22]"><span>Каналы</span><input v-model="bcCampaignUxWizard.targetChannels" type="checkbox" /></label>
-              <label class="flex items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-sm transition hover:bg-[#151A22]"><span>Группы</span><input v-model="bcCampaignUxWizard.targetGroups" type="checkbox" /></label>
-              <label class="flex items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-sm transition hover:bg-[#151A22]"><span>Боты / личка</span><input v-model="bcCampaignUxWizard.targetBots" type="checkbox" /></label>
+              <label class="flex items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-sm transition hover:bg-[#151A22]"><span>{{ tt('admin.bc_campaign.target_channels') }}</span><input v-model="bcCampaignUxWizard.targetChannels" type="checkbox" /></label>
+              <label class="flex items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-sm transition hover:bg-[#151A22]"><span>{{ tt('admin.bc_campaign.target_groups') }}</span><input v-model="bcCampaignUxWizard.targetGroups" type="checkbox" /></label>
+              <label class="flex items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-sm transition hover:bg-[#151A22]"><span>{{ tt('admin.bc_campaign.target_bots') }}</span><input v-model="bcCampaignUxWizard.targetBots" type="checkbox" /></label>
             </div>
             <div class="mt-3 rounded-2xl border border-white/10 bg-[#11151C] px-3 py-2 text-[12px] text-slate-300">
-              <p>Выбрано</p>
-              <p class="mt-1">Каналы: {{ bcCampaignUxSelectedSummary.channels }}, Группы: {{ bcCampaignUxSelectedSummary.groups }}, Боты: {{ bcCampaignUxSelectedSummary.bots }}</p>
+              <p>{{ tt('admin.bc_campaign.selected_heading') }}</p>
+              <p class="mt-1">{{ tt('admin.bc_campaign.selected_counts', { ch: bcCampaignUxSelectedSummary.channels, gr: bcCampaignUxSelectedSummary.groups, bt: bcCampaignUxSelectedSummary.bots }) }}</p>
             </div>
             <div class="mt-2 flex gap-2">
-              <button type="button" class="flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxOpenRecipientPicker('channels')">Выбрать каналы</button>
-              <button type="button" class="flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxOpenRecipientPicker('groups')">Выбрать группы</button>
+              <button type="button" class="flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxOpenRecipientPicker('channels')">{{ tt('admin.bc_campaign.pick_channels') }}</button>
+              <button type="button" class="flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxOpenRecipientPicker('groups')">{{ tt('admin.bc_campaign.pick_groups') }}</button>
             </div>
           </template>
 
           <div class="sticky bottom-0 mt-5 border-t border-white/10 bg-[#05070B] pt-3">
-            <button type="button" class="w-full rounded-2xl border border-indigo-400/45 bg-gradient-to-r from-[#6d3ef7] via-[#4f46e5] to-[#355dff] px-4 py-3 text-[14px] font-bold shadow-[0_18px_36px_-18px_rgba(79,70,229,0.95)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:brightness-100" :disabled="!bcCampaignUxWizardCanNext" @click="bcCampaignUxNextStep">Далее</button>
+            <button type="button" class="w-full rounded-2xl border border-indigo-400/45 bg-gradient-to-r from-[#6d3ef7] via-[#4f46e5] to-[#355dff] px-4 py-3 text-[14px] font-bold shadow-[0_18px_36px_-18px_rgba(79,70,229,0.95)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:brightness-100" :disabled="!bcCampaignUxWizardCanNext" @click="bcCampaignUxNextStep">{{ tt('admin.bc_campaign.btn_next') }}</button>
           </div>
         </div>
 
         <div v-else-if="bcCampaignUxScreen === 'review'" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 pb-[max(5.5rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))]">
-          <p class="text-[12px] text-slate-400">Шаг 5 из 5</p>
-          <p class="mt-2 text-[18px] font-extrabold">Обзор кампании</p>
+          <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.step_n_of_5', { n: 5 }) }}</p>
+          <p class="mt-2 text-[18px] font-extrabold">{{ tt('admin.bc_campaign.review_heading') }}</p>
           <div class="mt-3 space-y-2 rounded-2xl border border-white/10 bg-[#11151C] p-3 text-[13px] text-slate-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
-            <p>Название: <b>{{ bcCampaignUxWizard.title }}</b></p>
-            <p>Тип: <b>{{ bcCampaignUxWizard.campaignType === 'progress' ? 'Прогрев' : bcCampaignUxWizard.campaignType === 'rotation' ? 'Ротация' : 'Простая' }}</b></p>
-            <p>Расписание: <b>{{ bcCampaignUxWizard.sendTime }} · {{ bcCampaignUxWizard.timezone }}</b></p>
-            <p>Получатели: <b>Каналы {{ bcCampaignUxSelectedSummary.channels }}, Группы {{ bcCampaignUxSelectedSummary.groups }}, Боты {{ bcCampaignUxSelectedSummary.bots }}</b></p>
-            <p>Постов: <b>{{ bcCampaignUxWizard.postIds.length }}</b></p>
-            <p>Примерная стоимость слота: <b class="text-amber-300">{{ bcCampaignUxEstimatedCost }} AURUM</b></p>
-            <p>Баланс AURUM: <b class="text-amber-200">{{ fmtBcTokens(meAdminProfile?.aurum_tokens || 0) }}</b></p>
+            <p>{{ tt('admin.bc_campaign.rv_name') }}: <b>{{ bcCampaignUxWizard.title }}</b></p>
+            <p>{{ tt('admin.bc_campaign.rv_type') }}: <b>{{ bcCampaignUxWizard.campaignType === 'progress' ? tt('admin.bc_campaign.type_progress') : bcCampaignUxWizard.campaignType === 'rotation' ? tt('admin.bc_campaign.type_rotation') : tt('admin.bc_campaign.type_simple') }}</b></p>
+            <p>{{ tt('admin.bc_campaign.rv_schedule') }}: <b>{{ bcCampaignUxWizard.sendTime }} · {{ bcCampaignUxWizard.timezone }}</b></p>
+            <p>{{ tt('admin.bc_campaign.rv_recipients') }}: <b>{{ tt('admin.bc_campaign.selected_counts', { ch: bcCampaignUxSelectedSummary.channels, gr: bcCampaignUxSelectedSummary.groups, bt: bcCampaignUxSelectedSummary.bots }) }}</b></p>
+            <p>{{ tt('admin.bc_campaign.rv_posts_count') }}: <b>{{ bcCampaignUxWizard.postIds.length }}</b></p>
+            <p>{{ tt('admin.bc_campaign.rv_slot_cost') }}: <b class="text-amber-300">{{ bcCampaignUxEstimatedCost }} AURUM</b></p>
+            <p>{{ tt('admin.bc_campaign.rv_balance') }}: <b class="text-amber-200">{{ fmtBcTokens(meAdminProfile?.aurum_tokens || 0) }}</b></p>
           </div>
-          <p class="mt-3 text-[12px] text-slate-400">После запуска кампания будет работать по расписанию.</p>
+          <p class="mt-3 text-[12px] text-slate-400">{{ tt('admin.bc_campaign.after_launch_note') }}</p>
           <div class="mt-4 flex gap-2">
-            <button type="button" class="flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxBack">Назад</button>
-            <button type="button" class="flex-1 rounded-xl border border-emerald-400/45 bg-gradient-to-r from-[#27b35f] to-[#36D67A] px-3 py-2 text-sm font-bold text-[#04130a] shadow-[0_18px_34px_-18px_rgba(54,214,122,0.95)] disabled:cursor-not-allowed disabled:opacity-50" :disabled="bcCampaignUxBusy" @click="bcCampaignUxCreateCampaign">{{ bcCampaignUxBusy ? (bcCampaignUxEditingCampaignId ? 'Сохранение...' : 'Создание...') : (bcCampaignUxEditingCampaignId ? 'Сохранить изменения' : 'Создать кампанию') }}</button>
+            <button type="button" class="flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxBack">{{ tt('admin.bc_campaign.back') }}</button>
+            <button type="button" class="flex-1 rounded-xl border border-emerald-400/45 bg-gradient-to-r from-[#27b35f] to-[#36D67A] px-3 py-2 text-sm font-bold text-[#04130a] shadow-[0_18px_34px_-18px_rgba(54,214,122,0.95)] disabled:cursor-not-allowed disabled:opacity-50" :disabled="bcCampaignUxBusy" @click="bcCampaignUxCreateCampaign">{{ bcCampaignUxBusy ? (bcCampaignUxEditingCampaignId ? tt('admin.bc_campaign.saving') : tt('admin.bc_campaign.creating')) : (bcCampaignUxEditingCampaignId ? tt('admin.bc_campaign.save_changes') : tt('admin.bc_campaign.create_action')) }}</button>
           </div>
         </div>
 
         <div v-else-if="bcCampaignUxScreen === 'success'" class="flex min-h-0 flex-1 flex-col items-center justify-center px-4 py-6 text-center">
           <div class="flex h-28 w-28 items-center justify-center rounded-full border border-emerald-300/45 bg-emerald-500/20 text-5xl text-emerald-300 shadow-[0_0_64px_-12px_rgba(54,214,122,0.7),inset_0_0_20px_rgba(255,255,255,0.12)]">✓</div>
-          <p class="mt-4 text-[26px] font-extrabold">Кампания создана!</p>
-          <p class="mt-1 text-[13px] text-slate-300">Первые отправки запланированы на {{ bcCampaignUxSuccessInfo.nextAt || 'ближайшее окно' }}</p>
+          <p class="mt-4 text-[26px] font-extrabold">{{ tt('admin.bc_campaign.success_title') }}</p>
+          <p class="mt-1 text-[13px] text-slate-300">{{ tt('admin.bc_campaign.success_sub', { when: bcCampaignUxSuccessInfo.nextAt || tt('admin.bc_campaign.success_when_fallback') }) }}</p>
           <div class="mt-5 w-full max-w-sm space-y-2">
-            <button type="button" class="w-full rounded-2xl border border-emerald-400/45 bg-gradient-to-r from-[#27b35f] to-[#36D67A] px-4 py-3 font-bold text-[#04130a] shadow-[0_18px_34px_-18px_rgba(54,214,122,0.95)] transition hover:brightness-110" @click="bcCampaignUxScreen = 'manage'">К кампании</button>
-            <button type="button" class="w-full rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxScreen = 'list'">К списку кампаний</button>
+            <button type="button" class="w-full rounded-2xl border border-emerald-400/45 bg-gradient-to-r from-[#27b35f] to-[#36D67A] px-4 py-3 font-bold text-[#04130a] shadow-[0_18px_34px_-18px_rgba(54,214,122,0.95)] transition hover:brightness-110" @click="bcCampaignUxScreen = 'manage'">{{ tt('admin.bc_campaign.btn_to_campaign') }}</button>
+            <button type="button" class="w-full rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxScreen = 'list'">{{ tt('admin.bc_campaign.btn_to_list') }}</button>
           </div>
         </div>
 
         <div v-else-if="bcCampaignUxScreen === 'manage' && bcCampaignUxManageItem" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 pb-[max(5.5rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))]">
-          <p class="text-[12px] text-slate-400">Статус: <span class="text-slate-200">{{ bcCampaignUxStatusLabel(bcCampaignUxManageItem) }}</span></p>
+          <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.manage_status') }} <span class="text-slate-200">{{ bcCampaignUxStatusLabel(bcCampaignUxManageItem) }}</span></p>
           <div class="mt-3 grid grid-cols-2 gap-2">
             <button type="button" class="rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left transition hover:bg-[#151A22]" @click="openBcCampaignUxEditCampaign(bcCampaignUxManageItem)">
-              <p class="text-[12px] text-slate-400">Посты</p>
-              <p class="mt-1 text-sm font-semibold text-white">{{ Number((bcCampaignUxManageItem?.autopost?.broadcast_ids || []).length || 0) || (bcCampaignUxManageItem?.autopost?.use_all_broadcasts ? 'Все' : 0) }}</p>
+              <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.card_posts') }}</p>
+              <p class="mt-1 text-sm font-semibold text-white">{{ Number((bcCampaignUxManageItem?.autopost?.broadcast_ids || []).length || 0) || (bcCampaignUxManageItem?.autopost?.use_all_broadcasts ? tt('admin.bc_campaign.word_all') : 0) }}</p>
             </button>
             <button type="button" class="rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left transition hover:bg-[#151A22]" @click="openBcCampaignUxEditCampaign(bcCampaignUxManageItem)">
-              <p class="text-[12px] text-slate-400">Расписание</p>
+              <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.card_schedule') }}</p>
               <p class="mt-1 text-sm font-semibold text-white">{{ String(bcCampaignUxManageItem?.autopost?.windowStart || '—') }}</p>
             </button>
             <button type="button" class="rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left transition hover:bg-[#151A22]" @click="openBcCampaignUxEditCampaign(bcCampaignUxManageItem)">
-              <p class="text-[12px] text-slate-400">Получатели</p>
+              <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.card_recipients') }}</p>
               <p class="mt-1 text-sm font-semibold text-white">{{ Number((bcCampaignUxManageItem?.autopost?.group_chat_ids || []).length || 0) + Number((bcCampaignUxManageItem?.autopost?.channel_chat_ids || []).length || 0) }}</p>
             </button>
             <button type="button" class="rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left transition hover:bg-[#151A22]" @click="bcCampaignUxOpenStats(bcCampaignUxManageItem)">
-              <p class="text-[12px] text-slate-400">Статистика</p>
-              <p class="mt-1 text-sm font-semibold text-emerald-300">Открыть</p>
+              <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.card_statistics') }}</p>
+              <p class="mt-1 text-sm font-semibold text-emerald-300">{{ tt('admin.bc_campaign.stat_open') }}</p>
             </button>
           </div>
           <div class="mt-3 flex flex-wrap gap-2">
-            <button v-if="bcCampaignRunState(bcCampaignUxManageItem) === 'running'" type="button" class="rounded-xl border border-amber-400/40 bg-amber-900/50 px-3 py-2 text-xs font-semibold text-amber-100 transition hover:bg-amber-900/70" @click="bcCampaignPause(bcCampaignUxManageItem)">Пауза</button>
-            <button v-else type="button" class="rounded-xl border border-emerald-400/45 bg-emerald-700/85 px-3 py-2 text-xs font-semibold text-emerald-50 transition hover:brightness-110" @click="bcCampaignStartOrResume(bcCampaignUxManageItem)">Запустить</button>
-            <button type="button" class="rounded-xl border border-white/15 bg-white/[0.04] px-3 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignStop(bcCampaignUxManageItem)">Остановить</button>
-            <button type="button" class="rounded-xl border border-indigo-400/45 bg-indigo-900/40 px-3 py-2 text-xs font-semibold transition hover:bg-indigo-900/60" @click="bcCampaignUxOpenStats(bcCampaignUxManageItem)">Статистика</button>
-            <button type="button" class="rounded-xl border border-cyan-400/45 bg-cyan-900/35 px-3 py-2 text-xs font-semibold transition hover:bg-cyan-900/55" @click="bcCampaignUxScreen = 'progress'">Процесс отправки</button>
+            <button v-if="bcCampaignRunState(bcCampaignUxManageItem) === 'running'" type="button" class="rounded-xl border border-amber-400/40 bg-amber-900/50 px-3 py-2 text-xs font-semibold text-amber-100 transition hover:bg-amber-900/70" @click="bcCampaignPause(bcCampaignUxManageItem)">{{ tt('admin.bc_campaign.pause') }}</button>
+            <button v-else type="button" class="rounded-xl border border-emerald-400/45 bg-emerald-700/85 px-3 py-2 text-xs font-semibold text-emerald-50 transition hover:brightness-110" @click="bcCampaignStartOrResume(bcCampaignUxManageItem)">{{ tt('admin.bc_campaign.start') }}</button>
+            <button type="button" class="rounded-xl border border-white/15 bg-white/[0.04] px-3 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignStop(bcCampaignUxManageItem)">{{ tt('admin.bc_campaign.stop') }}</button>
+            <button type="button" class="rounded-xl border border-indigo-400/45 bg-indigo-900/40 px-3 py-2 text-xs font-semibold transition hover:bg-indigo-900/60" @click="bcCampaignUxOpenStats(bcCampaignUxManageItem)">{{ tt('admin.bc_campaign.statistics') }}</button>
+            <button type="button" class="rounded-xl border border-cyan-400/45 bg-cyan-900/35 px-3 py-2 text-xs font-semibold transition hover:bg-cyan-900/55" @click="bcCampaignUxScreen = 'progress'">{{ tt('admin.bc_campaign.sending_progress') }}</button>
           </div>
           <div class="mt-4 space-y-2">
-            <button type="button" class="flex w-full items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left transition hover:bg-[#151A22]" @click="openBcCampaignUxEditCampaign(bcCampaignUxManageItem)"><span>Редактировать</span><span>›</span></button>
-            <button type="button" class="flex w-full items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left transition hover:bg-[#151A22]" @click="bcCampaignUxHydrateWizardFromCampaign(bcCampaignUxManageItem); bcCampaignUxEditingCampaignId = 0; bcCampaignUxStep = 1; bcCampaignUxScreen = 'wizard'"><span>Дублировать</span><span>›</span></button>
-            <button type="button" class="flex w-full items-center justify-between rounded-2xl border border-rose-500/45 bg-rose-950/40 px-3 py-3 text-left text-rose-100 transition hover:bg-rose-950/60" @click="deleteBcAutopostCampaign(bcCampaignUxManageItem)"><span>Удалить кампанию</span><span>›</span></button>
+            <button type="button" class="flex w-full items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left transition hover:bg-[#151A22]" @click="openBcCampaignUxEditCampaign(bcCampaignUxManageItem)"><span>{{ tt('admin.bc_campaign.edit') }}</span><span>›</span></button>
+            <button type="button" class="flex w-full items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left transition hover:bg-[#151A22]" @click="bcCampaignUxHydrateWizardFromCampaign(bcCampaignUxManageItem); bcCampaignUxEditingCampaignId = 0; bcCampaignUxStep = 1; bcCampaignUxScreen = 'wizard'"><span>{{ tt('admin.bc_campaign.duplicate') }}</span><span>›</span></button>
+            <button type="button" class="flex w-full items-center justify-between rounded-2xl border border-rose-500/45 bg-rose-950/40 px-3 py-3 text-left text-rose-100 transition hover:bg-rose-950/60" @click="deleteBcAutopostCampaign(bcCampaignUxManageItem)"><span>{{ tt('admin.bc_campaign.delete_campaign') }}</span><span>›</span></button>
           </div>
         </div>
 
         <div v-else-if="bcCampaignUxScreen === 'postEditor'" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 pb-[max(5.5rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))]">
-          <p class="text-[12px] text-slate-400">{{ bcCampaignUxPostEditorMode === 'edit' ? 'Редактирование поста' : 'Создание нового поста' }}</p>
-          <label class="mt-2 block text-[12px] font-semibold text-slate-300">Текст поста</label>
+          <p class="text-[12px] text-slate-400">{{ bcCampaignUxPostEditorMode === 'edit' ? tt('admin.bc_campaign.post_editor_edit') : tt('admin.bc_campaign.post_editor_new') }}</p>
+          <label class="mt-2 block text-[12px] font-semibold text-slate-300">{{ tt('admin.bc_campaign.post_text') }}</label>
           <div class="mt-1 flex flex-wrap gap-1.5">
-            <button type="button" class="bc-tool-btn text-[11px]" :class="bcFormatState.bold ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatBold"><b>Ж</b></button>
-            <button type="button" class="bc-tool-btn text-[11px]" :class="bcFormatState.italic ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatItalic"><i>К</i></button>
-            <button type="button" class="bc-tool-btn text-[11px]" :class="bcFormatState.underline ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatUnderline"><u>Ч</u></button>
-            <button type="button" class="bc-tool-btn text-[11px]" :class="bcFormatState.strike ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatStrike"><s>З</s></button>
+            <button type="button" class="bc-tool-btn text-[11px]" :class="bcFormatState.bold ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatBold"><b>{{ tt('admin.bc_campaign.fmt_bold') }}</b></button>
+            <button type="button" class="bc-tool-btn text-[11px]" :class="bcFormatState.italic ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatItalic"><i>{{ tt('admin.bc_campaign.fmt_italic') }}</i></button>
+            <button type="button" class="bc-tool-btn text-[11px]" :class="bcFormatState.underline ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatUnderline"><u>{{ tt('admin.bc_campaign.fmt_underline') }}</u></button>
+            <button type="button" class="bc-tool-btn text-[11px]" :class="bcFormatState.strike ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatStrike"><s>{{ tt('admin.bc_campaign.fmt_strike') }}</s></button>
             <button type="button" class="bc-tool-btn text-[11px]" @mousedown.prevent @click="bcFormatLink">🔗</button>
           </div>
           <div
             ref="bcBodyRef"
             class="bc-editor mt-1.5 h-48 overflow-y-auto rounded-xl border border-white/[0.1] bg-zinc-950 px-3 py-2.5 text-sm leading-relaxed focus-within:border-cyan-500/45 focus-within:ring-1 focus-within:ring-cyan-500/25"
             contenteditable="true"
+            :data-placeholder="tt('admin.broadcast_ui.message_body_ph')"
             @input="onBcEditorInput"
             @click="onBcEditorClick"
             @mouseup="bcUpdateFormatState"
             @keyup="bcUpdateFormatState"
           />
-          <p class="mt-1 text-[11px]" :class="bcCurrentLen() > bcCurrentMaxLen() ? 'text-rose-400' : 'text-slate-500'">{{ bcCurrentLen() }} / {{ bcCurrentMaxLen() }} символов</p>
+          <p class="mt-1 text-[11px]" :class="bcCurrentLen() > bcCurrentMaxLen() ? 'text-rose-400' : 'text-slate-500'">{{ bcCurrentLen() }} / {{ bcCurrentMaxLen() }} {{ tt('admin.bc_campaign.chars_count_short') }}</p>
           <div class="mt-3 grid grid-cols-2 gap-2">
-            <button type="button" class="bc-tool-btn !w-full !justify-center text-[12px]" @click="bcAuxModal = 'keyboard'">Кнопки под постом</button>
-            <button type="button" class="bc-tool-btn !w-full !justify-center text-[12px]" @click="bcAuxModal = 'media'">Файл и медиа</button>
+            <button type="button" class="bc-tool-btn !w-full !justify-center text-[12px]" @click="bcAuxModal = 'keyboard'">{{ tt('admin.broadcast_ui.add_post_buttons') }}</button>
+            <button type="button" class="bc-tool-btn !w-full !justify-center text-[12px]" @click="bcAuxModal = 'media'">{{ tt('admin.broadcast_ui.file_and_media') }}</button>
           </div>
           <div class="mt-4 flex gap-2">
-            <button type="button" class="flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm font-semibold" @click="bcCampaignUxScreen = 'wizard'">Назад</button>
-            <button type="button" class="flex-1 rounded-xl border border-emerald-400/45 bg-gradient-to-r from-[#27b35f] to-[#36D67A] px-3 py-2 text-sm font-bold text-[#04130a]" @click="bcCampaignUxSavePostEditor">Сохранить пост</button>
+            <button type="button" class="flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm font-semibold" @click="bcCampaignUxScreen = 'wizard'">{{ tt('admin.bc_campaign.back') }}</button>
+            <button type="button" class="flex-1 rounded-xl border border-emerald-400/45 bg-gradient-to-r from-[#27b35f] to-[#36D67A] px-3 py-2 text-sm font-bold text-[#04130a]" @click="bcCampaignUxSavePostEditor">{{ tt('admin.bc_campaign.btn_save_post') }}</button>
           </div>
         </div>
 
         <div v-else-if="bcCampaignUxScreen === 'progress'" class="flex min-h-0 flex-1 flex-col items-center justify-center px-4 py-6 text-center">
-          <p class="self-start text-[28px] font-bold">Отправка...</p>
+          <p class="self-start text-[28px] font-bold">{{ tt('admin.bc_campaign.progress_title') }}</p>
           <div class="relative mt-8 h-44 w-44">
             <svg class="absolute inset-0 h-full w-full -rotate-90" viewBox="0 0 120 120" aria-hidden="true">
               <defs>
@@ -8260,32 +8330,32 @@ watch(
             </div>
             <span class="absolute bottom-1 -right-10 text-[34px] font-bold tabular-nums">{{ bcSendProgressPercent }}%</span>
           </div>
-          <p class="mt-4 text-[12px] uppercase tracking-[0.14em] text-slate-500">Отправлено</p>
-          <p class="text-3xl font-bold tabular-nums">{{ fmtIntSpace(bcSendProgressDone) }} <span class="text-xl text-slate-400">из</span> {{ fmtIntSpace(bcSendProgressTotal) }}</p>
-          <p class="mt-2 text-sm text-rose-300">Ошибок: {{ Number(bcSendLiveRow?.recipient_fail || 0) }}</p>
-          <button type="button" class="mt-8 w-full max-w-sm rounded-2xl border border-rose-500/45 bg-rose-950/45 px-4 py-3 text-[15px] font-semibold text-rose-100 transition hover:bg-rose-900/55" @click="bcCampaignUxScreen = 'manage'">Остановить отправку</button>
+          <p class="mt-4 text-[12px] uppercase tracking-[0.14em] text-slate-500">{{ tt('admin.bc_campaign.progress_sent') }}</p>
+          <p class="text-3xl font-bold tabular-nums">{{ fmtIntSpace(bcSendProgressDone) }} <span class="text-xl text-slate-400">{{ tt('admin.bc_campaign.progress_of') }}</span> {{ fmtIntSpace(bcSendProgressTotal) }}</p>
+          <p class="mt-2 text-sm text-rose-300">{{ tt('admin.bc_campaign.errors_label') }} {{ Number(bcSendLiveRow?.recipient_fail || 0) }}</p>
+          <button type="button" class="mt-8 w-full max-w-sm rounded-2xl border border-rose-500/45 bg-rose-950/45 px-4 py-3 text-[15px] font-semibold text-rose-100 transition hover:bg-rose-900/55" @click="bcCampaignUxScreen = 'manage'">{{ tt('admin.bc_campaign.btn_stop_sending') }}</button>
         </div>
 
         <div v-else-if="bcCampaignUxScreen === 'stats'" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 pb-[max(5.5rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))]">
           <div class="flex items-center gap-2">
-            <label class="text-[12px] text-slate-400">Период</label>
+            <label class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.stats_period') }}</label>
             <select v-model.number="bcCampaignUxStatsPeriod" class="rounded-lg border border-white/10 bg-white/[0.05] px-2 py-1 text-xs focus:border-indigo-400/45 focus:outline-none" @change="bcCampaignUxOpenStats(bcCampaignUxManageItem)">
-              <option :value="1">Сегодня</option>
-              <option :value="7">7 дней</option>
-              <option :value="30">30 дней</option>
-              <option :value="90">Все время</option>
+              <option :value="1">{{ tt('admin.bc_campaign.period_today') }}</option>
+              <option :value="7">{{ tt('admin.bc_campaign.period_7d') }}</option>
+              <option :value="30">{{ tt('admin.bc_campaign.period_30d') }}</option>
+              <option :value="90">{{ tt('admin.bc_campaign.period_all') }}</option>
             </select>
           </div>
           <div class="mt-3 grid grid-cols-2 gap-2">
-            <div class="rounded-xl border border-white/10 bg-[#11151C] p-2.5"><p class="text-[10px] text-slate-500">Доставлено</p><p class="text-lg font-bold">{{ Number(bcCampaignUxStatsData?.groups?.recipient_ok || 0) }}</p></div>
-            <div class="rounded-xl border border-white/10 bg-[#11151C] p-2.5"><p class="text-[10px] text-slate-500">Клики</p><p class="text-lg font-bold">{{ Number(bcCampaignUxStatsData?.groups?.clicks || 0) }}</p></div>
-            <div class="rounded-xl border border-white/10 bg-[#11151C] p-2.5"><p class="text-[10px] text-slate-500">Переходы</p><p class="text-lg font-bold">{{ Number(bcCampaignUxStatsData?.groups?.transitions || 0) }}</p></div>
+            <div class="rounded-xl border border-white/10 bg-[#11151C] p-2.5"><p class="text-[10px] text-slate-500">{{ tt('admin.bc_campaign.metric_delivered') }}</p><p class="text-lg font-bold">{{ Number(bcCampaignUxStatsData?.groups?.recipient_ok || 0) }}</p></div>
+            <div class="rounded-xl border border-white/10 bg-[#11151C] p-2.5"><p class="text-[10px] text-slate-500">{{ tt('admin.bc_campaign.metric_clicks') }}</p><p class="text-lg font-bold">{{ Number(bcCampaignUxStatsData?.groups?.clicks || 0) }}</p></div>
+            <div class="rounded-xl border border-white/10 bg-[#11151C] p-2.5"><p class="text-[10px] text-slate-500">{{ tt('admin.bc_campaign.metric_transitions') }}</p><p class="text-lg font-bold">{{ Number(bcCampaignUxStatsData?.groups?.transitions || 0) }}</p></div>
             <div class="rounded-xl border border-white/10 bg-[#11151C] p-2.5"><p class="text-[10px] text-slate-500">CTR</p><p class="text-lg font-bold text-emerald-300">{{ fmtPctTrim(Number(bcCampaignUxStatsData?.groups?.ctr || 0)) }}</p></div>
           </div>
           <p class="mt-3 text-[12px] text-slate-400">
-            {{ Number(bcCampaignUxStatsData?.groups?.ctr || 0) >= 8 ? 'CTR выше среднего' : 'Попробуйте сократить текст и усилить кнопку' }}
+            {{ Number(bcCampaignUxStatsData?.groups?.ctr || 0) >= 8 ? tt('admin.bc_campaign.ctr_above') : tt('admin.bc_campaign.ctr_try') }}
           </p>
-          <button type="button" class="mt-4 w-full rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-sm font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxScreen = 'manage'">К кампании</button>
+          <button type="button" class="mt-4 w-full rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-sm font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxScreen = 'manage'">{{ tt('admin.bc_campaign.btn_to_campaign') }}</button>
         </div>
       </div>
     </Teleport>
@@ -8296,11 +8366,11 @@ watch(
         class="fixed inset-0 z-[10220] flex h-[100dvh] min-w-0 flex-col overflow-hidden bg-[#05070B] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] text-white"
       >
         <div class="flex items-center justify-between border-b border-white/10 bg-black/20 px-4 py-3 backdrop-blur-sm">
-          <p class="text-[16px] font-bold">{{ bcCampaignUxRecipientPickerKind === 'channels' ? 'Выбор каналов' : 'Выбор групп' }}</p>
+          <p class="text-[16px] font-bold">{{ bcCampaignUxRecipientPickerKind === 'channels' ? tt('admin.bc_campaign.picker_channels') : tt('admin.bc_campaign.picker_groups') }}</p>
           <button type="button" class="rounded-lg px-2 py-1 text-sm text-zinc-300 transition hover:bg-white/10" @click="bcCampaignUxRecipientPickerOpen = false">✕</button>
         </div>
         <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3 pb-[max(5.5rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))]">
-          <input v-model="bcCampaignUxRecipientQuery" type="text" placeholder="Поиск..." class="w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm placeholder:text-slate-500 focus:border-indigo-400/45 focus:outline-none" />
+          <input v-model="bcCampaignUxRecipientQuery" type="text" :placeholder="tt('admin.bc_campaign.search_ph')" class="w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm placeholder:text-slate-500 focus:border-indigo-400/45 focus:outline-none" />
           <div class="mt-3 space-y-1.5">
             <label
               v-for="c in bcCampaignUxRecipientsFiltered"
@@ -8314,13 +8384,13 @@ watch(
               />
               <span class="truncate">{{ c.title || c.username || bcNormalizeChatId(c) }}</span>
             </label>
-            <p v-if="!bcCampaignUxRecipientsFiltered.length" class="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-[12px] text-slate-400">Ничего не найдено</p>
+            <p v-if="!bcCampaignUxRecipientsFiltered.length" class="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-[12px] text-slate-400">{{ tt('admin.bc_campaign.nothing_found') }}</p>
           </div>
         </div>
         <div class="grid grid-cols-3 gap-2 border-t border-white/10 bg-black/20 px-4 py-3">
-          <button type="button" class="rounded-xl border border-white/10 bg-white/[0.04] px-2 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxSelectAllRecipients">Выбрать все</button>
-          <button type="button" class="rounded-xl border border-white/10 bg-white/[0.04] px-2 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxClearRecipients">Очистить</button>
-          <button type="button" class="rounded-xl border border-emerald-400/40 bg-gradient-to-r from-[#27b35f] to-[#36D67A] px-2 py-2 text-xs font-bold text-[#04130a] shadow-[0_16px_28px_-18px_rgba(54,214,122,0.95)] transition hover:brightness-110" @click="bcCampaignUxRecipientPickerOpen = false">Готово</button>
+          <button type="button" class="rounded-xl border border-white/10 bg-white/[0.04] px-2 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxSelectAllRecipients">{{ tt('admin.bc_campaign.select_all') }}</button>
+          <button type="button" class="rounded-xl border border-white/10 bg-white/[0.04] px-2 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxClearRecipients">{{ tt('admin.bc_campaign.clear') }}</button>
+          <button type="button" class="rounded-xl border border-emerald-400/40 bg-gradient-to-r from-[#27b35f] to-[#36D67A] px-2 py-2 text-xs font-bold text-[#04130a] shadow-[0_16px_28px_-18px_rgba(54,214,122,0.95)] transition hover:brightness-110" @click="bcCampaignUxRecipientPickerOpen = false">{{ tt('admin.bc_campaign.done') }}</button>
         </div>
       </div>
     </Teleport>
@@ -8344,7 +8414,13 @@ watch(
               }}
             </h3>
             <div class="flex items-center gap-1">
-              <button type="button" class="bc-tool-btn bc-broadcast-i" title="Справка по автопосту" @click="bcShowAutopostHelp = true">
+              <button
+                type="button"
+                class="bc-tool-btn bc-broadcast-i"
+                :title="tt('admin.autopost.help_tooltip')"
+                :aria-label="tt('admin.autopost.help_aria')"
+                @click="bcShowAutopostHelp = true"
+              >
                 i
               </button>
               <button type="button" class="bc-tool-btn !px-2 !py-1" @click="bcAutopostingModalOpen = false">✕</button>
@@ -8674,7 +8750,7 @@ watch(
         </div>
         <div class="shrink-0 bg-zinc-900/55 p-4 pt-3 backdrop-blur-md">
           <div class="flex flex-wrap justify-end gap-2">
-            <button type="button" class="bc-tool-btn" @click="bcAutopostingModalOpen = false">Отмена</button>
+            <button type="button" class="bc-tool-btn" @click="bcAutopostingModalOpen = false">{{ tt('common.locale_code') === 'en' ? 'Cancel' : 'Отмена' }}</button>
             <button
               type="button"
               class="rounded-xl border border-fuchsia-400/45 bg-gradient-to-br from-fuchsia-600/95 to-violet-800/90 px-3.5 py-2 text-xs font-semibold text-white shadow-[0_12px_36px_-8px_rgba(192,38,211,0.55)] ring-1 ring-white/10 transition hover:brightness-110"
@@ -8766,22 +8842,22 @@ watch(
         class="w-full max-w-xl max-h-[88vh] overflow-y-auto rounded-2xl border border-white/[0.1] bg-slate-950/[0.94] p-4 shadow-[0_28px_80px_-24px_rgba(0,0,0,0.85)] ring-1 ring-cyan-400/20 backdrop-blur-2xl"
       >
         <div class="mb-3 flex items-center justify-between">
-          <p class="text-base font-semibold text-white">Статистика рассылки</p>
+          <p class="text-base font-semibold text-white">{{ tt('admin.broadcast_stats.title') }}</p>
           <button type="button" class="bc-tool-btn" @click="bcStatsModalOpen = false">✕</button>
         </div>
-        <label class="text-xs text-slate-400">Пост</label>
+        <label class="text-xs text-slate-400">{{ tt('admin.broadcast_stats.post') }}</label>
         <select
           v-model="bcStatsSelectedId"
           class="mt-1 w-full rounded-xl border border-slate-600 bg-slate-950 px-3 py-2 text-sm text-slate-100"
         >
           <option v-for="b in broadcasts" :key="`bstat-${b.id}`" :value="Number(b.id)">
-            {{ b.title || 'Без названия' }}
+            {{ b.title || tt('admin.broadcast_stats.untitled') }}
           </option>
         </select>
         <div class="mt-2 rounded-xl border border-slate-700 bg-slate-950/40 p-2">
           <div class="flex items-center justify-between gap-2">
             <p class="text-xs text-slate-300">{{ statsHistoryTitle() }}</p>
-            <button type="button" class="bc-tool-btn" @click="openStatsHistoryModal">Вся история</button>
+            <button type="button" class="bc-tool-btn" @click="openStatsHistoryModal">{{ tt('admin.broadcast_stats.full_history') }}</button>
           </div>
           <div class="mt-2 space-y-1">
             <button
@@ -8793,24 +8869,24 @@ watch(
             >
               {{ fmtBatchLabel(h) }}
             </button>
-            <p v-if="!bcStatsHistoryPreview.length" class="text-[11px] text-slate-500">Пока нет запусков</p>
+            <p v-if="!bcStatsHistoryPreview.length" class="text-[11px] text-slate-500">{{ tt('admin.broadcast_stats.no_runs_yet') }}</p>
           </div>
         </div>
         <div v-if="bcStatsCurrentItem" class="mt-4 grid grid-cols-2 gap-2 text-xs">
           <div class="rounded-xl border border-slate-700 bg-slate-800/70 p-3">
-            <p class="text-slate-400">Статус</p>
+            <p class="text-slate-400">{{ tt('admin.broadcast_stats.status') }}</p>
             <p class="mt-1 text-sm font-semibold text-white">{{ bcStatusLabel(bcStatsCurrentItem.status) }}</p>
           </div>
           <div class="rounded-xl border border-slate-700 bg-slate-800/70 p-3">
-            <p class="text-slate-400">{{ bcStatsTab === 'groups' ? 'Всего подключено групп' : 'Всего подключено ботов' }}</p>
+            <p class="text-slate-400">{{ bcStatsTab === 'groups' ? tt('admin.broadcast_stats.connected_groups') : tt('admin.broadcast_stats.connected_bots') }}</p>
             <p class="mt-1 text-sm font-semibold text-white">{{ bcStatsTab === 'groups' ? (bcStatsData.connected_groups_total || 0) : (bcStatsData.connected_bots_total || 0) }}</p>
           </div>
           <div class="rounded-xl border border-slate-700 bg-slate-800/70 p-3">
-            <p class="text-slate-400">Создан</p>
+            <p class="text-slate-400">{{ tt('admin.broadcast_stats.created') }}</p>
             <p class="mt-1 text-sm font-semibold text-white">{{ fmtDateTime(bcStatsCurrentItem.created_at) }}</p>
           </div>
           <div class="rounded-xl border border-slate-700 bg-slate-800/70 p-3">
-            <p class="text-slate-400">Разослан</p>
+            <p class="text-slate-400">{{ tt('admin.broadcast_stats.sent') }}</p>
             <p class="mt-1 text-sm font-semibold text-white">{{ fmtDateTime(bcStatsCurrentItem.sent_at) }}</p>
           </div>
         </div>
@@ -8821,7 +8897,7 @@ watch(
             :class="bcStatsTab === 'bots' ? 'bc-tool-active' : ''"
             @click="bcStatsTab = 'bots'"
           >
-            В боты
+            {{ tt('admin.broadcast_stats.to_bots') }}
           </button>
           <button
             type="button"
@@ -8829,16 +8905,16 @@ watch(
             :class="bcStatsTab === 'groups' ? 'bc-tool-active' : ''"
             @click="bcStatsTab = 'groups'"
           >
-            В группы
+            {{ tt('admin.broadcast_stats.to_groups') }}
           </button>
         </div>
         <div v-if="showFullAdminShell && bcStatsTab === 'bots'" class="mt-3 grid grid-cols-2 gap-2 text-xs">
           <div class="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-3">
-            <p class="text-emerald-200">Доставлено</p>
+            <p class="text-emerald-200">{{ tt('admin.broadcast_stats.delivered') }}</p>
             <p class="mt-1 text-sm font-semibold text-emerald-100">{{ bcStatsData.bots.ok || 0 }}</p>
           </div>
           <div class="rounded-xl border border-rose-500/40 bg-rose-500/10 p-3">
-            <p class="text-rose-200">Ошибки</p>
+            <p class="text-rose-200">{{ tt('admin.broadcast_stats.errors') }}</p>
             <p class="mt-1 text-sm font-semibold text-rose-100">{{ bcStatsData.bots.fail || 0 }}</p>
           </div>
         </div>
@@ -8846,17 +8922,17 @@ watch(
           <div v-if="isBroadcastShellLite" class="mb-1 text-[11px] text-slate-400">
             {{
               isDelegatedFreeBroadcastCabinet
-                ? 'Статистика только по отправкам в делегированные группы.'
-                : 'Статистика только по отправкам в ваши группы.'
+                ? tt('admin.broadcast_stats.stats_delegated_only')
+                : tt('admin.broadcast_stats.stats_own_only')
             }}
           </div>
           <div class="grid grid-cols-2 gap-2 text-xs">
             <div class="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-3">
-              <p class="text-emerald-200">Доставлено</p>
+              <p class="text-emerald-200">{{ tt('admin.broadcast_stats.delivered') }}</p>
               <p class="mt-1 text-sm font-semibold text-emerald-100">{{ bcStatsData.groups.ok || 0 }}</p>
             </div>
             <div class="rounded-xl border border-rose-500/40 bg-rose-500/10 p-3">
-              <p class="text-rose-200">Ошибки</p>
+              <p class="text-rose-200">{{ tt('admin.broadcast_stats.errors') }}</p>
               <p class="mt-1 text-sm font-semibold text-rose-100">{{ bcStatsData.groups.fail || 0 }}</p>
             </div>
           </div>
@@ -8870,26 +8946,25 @@ watch(
               <span class="shrink-0 text-emerald-300">✓ {{ g.ok }}</span>
               <span class="shrink-0 text-rose-300">✕ {{ g.fail }}</span>
             </div>
-            <p v-if="!bcStatsData.per_groups.length" class="p-2 text-center text-xs text-slate-500">Детализация по группам пока пуста</p>
+            <p v-if="!bcStatsData.per_groups.length" class="p-2 text-center text-xs text-slate-500">{{ tt('admin.broadcast_stats.per_group_empty') }}</p>
           </div>
         </div>
         <div class="mt-3 rounded-xl border border-slate-700 bg-slate-950/40 p-2">
-          <p class="text-xs font-semibold text-slate-300">Ошибки по выбранному периоду</p>
+          <p class="text-xs font-semibold text-slate-300">{{ tt('admin.broadcast_stats.errors_period') }}</p>
           <div class="mt-2 max-h-40 space-y-1 overflow-y-auto">
             <div
               v-for="(er, ei) in bcStatsData.errors"
               :key="`berr-${ei}`"
               class="rounded-lg border border-rose-500/30 bg-rose-950/20 px-2 py-1.5 text-[11px] text-rose-100"
             >
-              <p>{{ fmtDateTime(er.created_at) }} · {{ er.target_kind === 'group' ? 'Группа' : 'Бот' }} {{ er.target_id }}</p>
-              <p class="mt-0.5 text-rose-200/90">{{ er.error_message || 'Неизвестная ошибка' }}</p>
+              <p>{{ fmtDateTime(er.created_at) }} · {{ er.target_kind === 'group' ? tt('admin.broadcast_stats.target_group') : tt('admin.broadcast_stats.target_bot') }} {{ er.target_id }}</p>
+              <p class="mt-0.5 text-rose-200/90">{{ er.error_message || tt('admin.broadcast_stats.unknown_error') }}</p>
             </div>
-            <p v-if="!bcStatsData.errors.length" class="text-[11px] text-slate-500">Ошибок нет</p>
+            <p v-if="!bcStatsData.errors.length" class="text-[11px] text-slate-500">{{ tt('admin.broadcast_stats.no_errors') }}</p>
           </div>
         </div>
         <p class="mt-3 text-[11px] text-slate-400">
-          Telegram Bot API не отдает просмотры/комментарии/пересылки по постам в группах для ботов.
-          Здесь показывается точная техническая статистика доставки.
+          {{ tt('admin.broadcast_stats.api_note') }}
         </p>
       </div>
     </div>
@@ -8907,15 +8982,15 @@ watch(
           <button type="button" class="bc-tool-btn" @click="bcStatsHistoryModalOpen = false">✕</button>
         </div>
         <div class="mt-1 flex flex-wrap gap-1.5">
-          <button type="button" class="bc-tool-btn" :class="bcStatsPreset === 'today' ? 'bc-tool-active' : ''" @click="applyStatsPreset('today')">Сегодня</button>
-          <button type="button" class="bc-tool-btn" :class="bcStatsPreset === '24h' ? 'bc-tool-active' : ''" @click="applyStatsPreset('24h')">24ч</button>
-          <button type="button" class="bc-tool-btn" :class="bcStatsPreset === '7d' ? 'bc-tool-active' : ''" @click="applyStatsPreset('7d')">7 дней</button>
-          <button type="button" class="bc-tool-btn" :class="bcStatsPreset === '30d' ? 'bc-tool-active' : ''" @click="applyStatsPreset('30d')">30 дней</button>
-          <button type="button" class="bc-tool-btn" @click="bcStatsPreset=''; bcStatsFrom=''; bcStatsTo=nowLocalInputValue()">Сброс</button>
+          <button type="button" class="bc-tool-btn" :class="bcStatsPreset === 'today' ? 'bc-tool-active' : ''" @click="applyStatsPreset('today')">{{ tt('admin.broadcast_stats.preset_today') }}</button>
+          <button type="button" class="bc-tool-btn" :class="bcStatsPreset === '24h' ? 'bc-tool-active' : ''" @click="applyStatsPreset('24h')">{{ tt('admin.broadcast_stats.preset_24h') }}</button>
+          <button type="button" class="bc-tool-btn" :class="bcStatsPreset === '7d' ? 'bc-tool-active' : ''" @click="applyStatsPreset('7d')">{{ tt('admin.broadcast_stats.preset_7d') }}</button>
+          <button type="button" class="bc-tool-btn" :class="bcStatsPreset === '30d' ? 'bc-tool-active' : ''" @click="applyStatsPreset('30d')">{{ tt('admin.broadcast_stats.preset_30d') }}</button>
+          <button type="button" class="bc-tool-btn" @click="bcStatsPreset=''; bcStatsFrom=''; bcStatsTo=nowLocalInputValue()">{{ tt('admin.broadcast_stats.preset_reset') }}</button>
         </div>
         <div class="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
           <div>
-            <label class="text-xs text-slate-400">С даты и времени</label>
+            <label class="text-xs text-slate-400">{{ tt('admin.broadcast_stats.date_from') }}</label>
             <input
               v-model="bcStatsFrom"
               type="datetime-local"
@@ -8923,7 +8998,7 @@ watch(
             />
           </div>
           <div>
-            <label class="text-xs text-slate-400">По дату и время</label>
+            <label class="text-xs text-slate-400">{{ tt('admin.broadcast_stats.date_to') }}</label>
             <input
               v-model="bcStatsTo"
               type="datetime-local"
@@ -8959,7 +9034,7 @@ watch(
         <div class="flex shrink-0 items-center justify-between border-b border-slate-700/60 p-3">
           <p class="text-sm font-semibold text-white">Кнопки под постом</p>
           <div class="flex items-center gap-2">
-            <button type="button" class="bc-tool-btn !px-2.5 !py-1 text-[11px]" :disabled="bcSaving" @click="saveBcDraft">Сохранить</button>
+            <button type="button" class="bc-tool-btn !px-2.5 !py-1 text-[11px]" :disabled="bcSaving" @click="saveBcDraft">{{ tt('common.locale_code') === 'en' ? 'Save' : 'Сохранить' }}</button>
             <button type="button" class="bc-tool-btn" @click="bcAuxModal = ''">✕</button>
           </div>
         </div>
@@ -9181,27 +9256,17 @@ watch(
         class="w-full max-w-lg rounded-2xl bg-zinc-950/[0.93] p-4 shadow-[0_28px_80px_-24px_rgba(0,0,0,0.88)] ring-1 ring-white/[0.08] backdrop-blur-2xl"
       >
         <div class="mb-2 flex items-center justify-between">
-          <p class="text-base font-semibold text-zinc-100">😈 Автопост — без магии</p>
+          <p class="text-base font-semibold text-zinc-100">{{ tt('admin.autopost.help_modal_title') }}</p>
           <button type="button" class="bc-tool-btn" @click="bcShowAutopostHelp = false">✕</button>
         </div>
         <div class="max-h-[min(60vh,28rem)] space-y-3 overflow-y-auto pr-0.5 text-left text-sm leading-snug text-zinc-400">
           <p class="rounded-lg bg-white/[0.05] px-2.5 py-2 text-zinc-200 backdrop-blur-md">
-            <span class="font-semibold text-zinc-100">Кампания</span> — это отдельное «расписание + кому слать + какие посты крутить». Слева выбери шаблон, жми «+ Кампания», потом «Настройка» у нужной строки. Кампаний может быть несколько — например, разные группы или разные наборы постов.
+            {{ tt('admin.autopost.help_p1') }}
           </p>
-          <p>
-            <span class="font-semibold text-amber-200/95">Окно и галка «Равномерно»</span> — посты только между «с» и «до» по твоему часовому поясу. Если галка включена (по умолчанию), шаг между соседними постами ровно
-            <span class="font-mono text-cyan-200/90">длина окна / число публикаций за день</span>
-            — например, час и 10 постов ≈ каждые 6 минут, без выплёвывания пачки в начало окна. Без галки — старая схема «первая у старта, последняя у финиша».
-          </p>
-          <p class="text-zinc-500">
-            Если я был офлайн и слот «протух» примерно больше <span class="font-medium text-zinc-300">50 минут</span> — этот слот <span class="font-medium text-zinc-300">пропускаю</span>, AURUM за него не снимаю. Так не наказываю за то, что бот не дышал сетью.
-          </p>
-          <p>
-            <span class="font-semibold text-emerald-200/95">За AURUM ✨</span> — с каждого <b>удачного</b> выхода в свет столько же, сколько за одну ручную отправку с тем же списком чатов: <b>1 ✨ на каждый выбранный групповой или канальный чат</b> (подписчики не умножают цену), до {{ BC_BROADCAST_MAX_TOKENS }} ✨ за слот. Один и тот же слот не спишу дважды; отдельной пачковой оплаты «за день» пока нет.
-          </p>
-          <p class="text-[13px] text-zinc-500">
-            Фиолетовый ADM — шлю туда, куда тебя пустили делегатом. Голубой — твои чаты и привычные сценарии владельца.
-          </p>
+          <p>{{ tt('admin.autopost.help_p2') }}</p>
+          <p class="text-zinc-500">{{ tt('admin.autopost.help_p3') }}</p>
+          <p>{{ tt('admin.autopost.help_p4', { max: BC_BROADCAST_MAX_TOKENS }) }}</p>
+          <p class="text-[13px] text-zinc-500">{{ tt('admin.autopost.help_p5') }}</p>
         </div>
       </div>
     </div>
@@ -9313,7 +9378,7 @@ watch(
               </p>
             </div>
           </template>
-          <p v-if="!(partnerHourlyData?.chats || []).length" class="py-6 text-center text-[11px] text-slate-500">Список пуст.</p>
+          <p v-if="!(partnerHourlyData?.chats || []).length" class="py-6 text-center text-[11px] text-slate-500">{{ tt('admin.partner_ui.joins_list_empty') }}</p>
         </div>
       </div>
     </div>
@@ -9329,7 +9394,7 @@ watch(
       >
         <div class="mb-2 flex shrink-0 items-center justify-between gap-2">
           <div>
-            <p class="text-base font-semibold text-white">Подключились: подробная статистика</p>
+            <p class="text-base font-semibold text-white">{{ tt('admin.partner_ui.joins_modal_title') }}</p>
             <p v-if="partnerActivityPeriodLine" class="text-[10px] text-violet-200/80">{{ partnerActivityPeriodLine }}</p>
           </div>
           <button type="button" class="bc-tool-btn" @click="showPartnerJoinsModal = false">✕</button>
@@ -9340,14 +9405,14 @@ watch(
             class="rounded-lg border border-slate-600 bg-black/40 px-2 py-1 text-xs text-white"
             @change="loadPartnerHourlyActivity"
           >
-            <option value="all">Все объекты</option>
-            <optgroup v-if="(partnerChatsGrouped.groups || []).length" label="Группы">
+            <option value="all">{{ tt('admin.partner_ui.opt_all') }}</option>
+            <optgroup v-if="(partnerChatsGrouped.groups || []).length" :label="tt('admin.partner_ui.opt_groups')">
               <option v-for="c in partnerChatsGrouped.groups" :key="`pj-gr-${c.id}`" :value="String(c.id)">{{ c.title }}</option>
             </optgroup>
-            <optgroup v-if="(partnerChatsGrouped.channels || []).length" label="Каналы">
+            <optgroup v-if="(partnerChatsGrouped.channels || []).length" :label="tt('admin.partner_ui.opt_channels')">
               <option v-for="c in partnerChatsGrouped.channels" :key="`pj-ch-${c.id}`" :value="String(c.id)">{{ c.title }}</option>
             </optgroup>
-            <optgroup v-if="(partnerChatsGrouped.linked || []).length" label="Обсуждения каналов">
+            <optgroup v-if="(partnerChatsGrouped.linked || []).length" :label="tt('admin.partner_ui.opt_linked')">
               <option v-for="c in partnerChatsGrouped.linked" :key="`pj-lg-${c.id}`" :value="String(c.id)">{{ c.title }}</option>
             </optgroup>
           </select>
@@ -9364,10 +9429,7 @@ watch(
           </button>
         </div>
         <div class="relative mb-2 shrink-0 pr-10">
-          <p class="text-[11px] text-slate-300">
-            Подключились за период: <b>{{ Number(partnerHourlyData?.totals?.joins || 0) }}</b> ·
-            Событий всего: <b>{{ Number(partnerHourlyData?.totals?.events || 0) }}</b>
-          </p>
+          <p class="text-[11px] text-slate-300">{{ partnerJoinsPeriodSummary }}</p>
           <button
             type="button"
             v-bind="partnerHelpBind('events', 'trailing')"
@@ -9383,14 +9445,14 @@ watch(
             class="rounded-md border border-violet-500/50 bg-violet-950/30 px-2 py-1 text-[10px] font-semibold text-violet-100"
             @click="partnerSegmentModalTab = 'joins'; showPartnerSegmentModal = true"
           >
-            Подробнее: вступления
+            {{ tt('admin.partner_ui.more_joins') }}
           </button>
           <button
             type="button"
             class="rounded-md border border-rose-500/50 bg-rose-950/30 px-2 py-1 text-[10px] font-semibold text-rose-100"
             @click="partnerSegmentModalTab = 'spam'; showPartnerSegmentModal = true"
           >
-            Подробнее: спам-фильтры
+            {{ tt('admin.partner_ui.more_spam') }}
           </button>
         </div>
         <div class="min-h-0 flex-1 touch-pan-y space-y-1 overflow-y-auto overscroll-y-contain pr-1">
@@ -9402,9 +9464,9 @@ watch(
             @click="openPartnerSlotDetail(row.slot_start, row.slot_end, row.label)"
           >
             <p class="font-semibold text-violet-100/90">{{ row.label }}</p>
-            <p>подключились: <b>{{ Number(row.joins || 0) }}</b> · событий: {{ Number(row.events || 0) }}</p>
+            <p>{{ partnerSlotRowMeta(row) }}</p>
           </button>
-          <p v-if="!partnerHourlySlots.length" class="py-6 text-center text-[11px] text-slate-500">Нет данных.</p>
+          <p v-if="!partnerHourlySlots.length" class="py-6 text-center text-[11px] text-slate-500">{{ tt('admin.partner_ui.hourly_empty') }}</p>
         </div>
       </div>
     </div>
@@ -9416,18 +9478,18 @@ watch(
     >
       <div class="w-full max-w-sm rounded-2xl border border-violet-400/50 bg-slate-950 p-4 shadow-2xl">
         <div class="mb-2 flex items-center justify-between">
-          <p class="text-sm font-semibold text-white">{{ partnerSegmentModalTab === 'joins' ? 'Вступления по типам' : 'Спам по типам чатов' }}</p>
+          <p class="text-sm font-semibold text-white">{{ partnerSegmentModalTitle }}</p>
           <button type="button" class="bc-tool-btn" @click="showPartnerSegmentModal = false">✕</button>
         </div>
         <div v-if="partnerSegmentModalTab === 'joins'" class="space-y-1 text-[11px] text-slate-200">
-          <p>Каналы (в обсуждении): <b>{{ Number(partnerHourlyData?.segment_joins?.channel || 0) }}</b></p>
-          <p>Группы: <b>{{ Number(partnerHourlyData?.segment_joins?.group || 0) }}</b></p>
-          <p>Обсуждения (как отдельный чат): <b>{{ Number(partnerHourlyData?.segment_joins?.linked_group || 0) }}</b></p>
+          <p>{{ tt('admin.partner_ui.seg_join_channel_disc', { n: Number(partnerHourlyData?.segment_joins?.channel || 0) }) }}</p>
+          <p>{{ tt('admin.partner_ui.seg_join_group', { n: Number(partnerHourlyData?.segment_joins?.group || 0) }) }}</p>
+          <p>{{ tt('admin.partner_ui.seg_join_linked', { n: Number(partnerHourlyData?.segment_joins?.linked_group || 0) }) }}</p>
         </div>
         <div v-else class="space-y-1 text-[11px] text-slate-200">
-          <p>Каналы: <b>{{ Number(partnerHourlyData?.segment_spam?.channel || 0) }}</b></p>
-          <p>Группы: <b>{{ Number(partnerHourlyData?.segment_spam?.group || 0) }}</b></p>
-          <p>Обсуждения: <b>{{ Number(partnerHourlyData?.segment_spam?.linked_group || 0) }}</b></p>
+          <p>{{ tt('admin.partner_ui.seg_spam_channel', { n: Number(partnerHourlyData?.segment_spam?.channel || 0) }) }}</p>
+          <p>{{ tt('admin.partner_ui.seg_spam_group', { n: Number(partnerHourlyData?.segment_spam?.group || 0) }) }}</p>
+          <p>{{ tt('admin.partner_ui.seg_spam_linked', { n: Number(partnerHourlyData?.segment_spam?.linked_group || 0) }) }}</p>
         </div>
       </div>
     </div>
@@ -9445,11 +9507,11 @@ watch(
           <p class="text-sm font-semibold text-white">{{ partnerSlotDetailTitle }}</p>
           <button type="button" class="bc-tool-btn" @click="showPartnerSlotDetailModal = false">✕</button>
         </div>
-        <div v-if="partnerSlotDetailLoading" class="shrink-0 py-6 text-center text-xs text-slate-400">Загрузка…</div>
+        <div v-if="partnerSlotDetailLoading" class="shrink-0 py-6 text-center text-xs text-slate-400">{{ tt('admin.partner_ui.slot_detail_loading') }}</div>
         <div v-else class="min-h-0 flex-1 touch-pan-y space-y-2 overflow-y-auto overscroll-y-contain pr-1 text-[11px] text-slate-200">
-          <p class="font-semibold text-cyan-200/90">Вступили</p>
+          <p class="font-semibold text-cyan-200/90">{{ tt('admin.partner_ui.slot_detail_joined') }}</p>
           <div v-for="(j, ji) in (partnerSlotDetailData?.joins || [])" :key="`jd-${ji}-${j.user_id}`" class="rounded border border-slate-700/80 bg-slate-900/60 px-2 py-1">
-            {{ j.joined_at }} · чат {{ j.chat_title }} ·
+            {{ j.joined_at }} · {{ tt('admin.partner_ui.slot_detail_chat', { title: j.chat_title }) }} ·
             <a
               v-if="partnerUserHref(j)"
               href="#"
@@ -9458,10 +9520,10 @@ watch(
             >{{ partnerUserLabel(j) }}</a>
             <span v-else>{{ partnerUserLabel(j) }}</span>
           </div>
-          <p v-if="!(partnerSlotDetailData?.joins || []).length" class="text-slate-500">Нет вступлений в этом слоте.</p>
-          <p class="font-semibold text-amber-200/90">Модерация</p>
+          <p v-if="!(partnerSlotDetailData?.joins || []).length" class="text-slate-500">{{ tt('admin.partner_ui.slot_detail_no_joins') }}</p>
+          <p class="font-semibold text-amber-200/90">{{ tt('admin.partner_ui.slot_detail_moderation') }}</p>
           <div v-for="(m, mi) in partnerSlotDetailModerationDisplay" :key="`md-${mi}-${m.user_id}`" class="rounded border border-slate-700/80 bg-slate-900/60 px-2 py-1">
-            {{ m.created_at }} · {{ partnerActionLabelRu(m.action) }} · {{ partnerReasonRu(m.reason) }} ·
+            {{ m.created_at }} · {{ partnerActionLabel(m.action) }} · {{ partnerReasonLabel(m.reason) }} ·
             <a
               v-if="partnerUserHref(m)"
               href="#"
@@ -9470,7 +9532,7 @@ watch(
             >{{ partnerUserLabel(m) }}</a>
             <span v-else>{{ partnerUserLabel(m) }}</span>
           </div>
-          <p v-if="!partnerSlotDetailModerationDisplay.length" class="text-slate-500">Нет записей модерации в этом слоте.</p>
+          <p v-if="!partnerSlotDetailModerationDisplay.length" class="text-slate-500">{{ tt('admin.partner_ui.slot_detail_no_moderation') }}</p>
         </div>
       </div>
     </div>
@@ -9486,20 +9548,20 @@ watch(
       >
         <div class="mb-2 flex shrink-0 items-center justify-between gap-2">
           <div>
-            <p class="text-base font-semibold text-white">Активность по времени</p>
+            <p class="text-base font-semibold text-white">{{ tt('admin.partner_ui.activity_modal_title') }}</p>
             <p v-if="partnerActivityPeriodLine" class="text-[10px] text-indigo-200/80">{{ partnerActivityPeriodLine }}</p>
           </div>
           <button type="button" class="bc-tool-btn" @click="showPartnerHourlyModal = false">✕</button>
         </div>
         <div class="relative mb-2 shrink-0 rounded-xl border border-slate-700/80 bg-slate-900/60 p-2 pr-11">
-          <p class="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-300">Выбор чата/канала</p>
+          <p class="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-300">{{ tt('admin.partner_ui.chat_pick_label') }}</p>
           <button
             type="button"
             class="w-full rounded-lg border border-indigo-400/45 bg-indigo-500/15 px-3 py-2 text-left text-xs font-semibold text-indigo-100 hover:bg-indigo-500/25"
             @click="showPartnerHourlyChatPicker = true"
           >
-            {{ partnerSelectedChatMeta?.title || 'Все подключенные объекты' }}
-            <span class="ml-2 text-[10px] text-indigo-200/80">Нажмите, чтобы выбрать</span>
+            {{ partnerSelectedChatMeta?.title || tt('admin.partner_ui.all_connected') }}
+            <span class="ml-2 text-[10px] text-indigo-200/80">{{ tt('admin.partner_ui.tap_to_select') }}</span>
           </button>
           <button
             type="button"
@@ -9511,7 +9573,7 @@ watch(
           </button>
         </div>
         <div class="min-h-0 flex-1 touch-pan-y overflow-y-auto overscroll-y-contain pr-1">
-          <div v-if="partnerHourlyLoading" class="py-8 text-center text-sm text-slate-400">Загрузка…</div>
+          <div v-if="partnerHourlyLoading" class="py-8 text-center text-sm text-slate-400">{{ tt('common.loading') }}</div>
           <div v-else class="space-y-2">
             <div class="rounded-xl border border-slate-600/70 bg-slate-900/75 p-3 text-slate-100">
               <div class="flex items-start justify-between gap-3">
@@ -9989,7 +10051,7 @@ watch(
             <p class="text-base font-semibold text-white">Ошибка отправки</p>
             <button type="button" class="bc-tool-btn" @click="closeBcSendModal">✕</button>
           </div>
-          <p class="mt-3 text-sm leading-relaxed text-slate-200">{{ bcSendModalText || 'Не удалось выполнить рассылку.' }}</p>
+          <p class="mt-3 text-sm leading-relaxed text-slate-200">{{ bcSendModalText || tt('admin.dlg.bc_run_failed') }}</p>
           <button
             type="button"
             class="mt-5 w-full rounded-xl border border-white/[0.08] bg-white/[0.06] py-3 text-sm font-semibold text-white hover:bg-white/[0.09]"
@@ -10152,21 +10214,21 @@ watch(
       >
         <div class="shrink-0 border-b border-slate-700/60 p-4 pb-2">
           <div class="flex items-center justify-between">
-            <p class="text-[26px] font-black text-white leading-none">Выбор ботов</p>
+            <p class="text-[26px] font-black text-white leading-none">{{ tt('admin.partner_ui.bots_modal_title') }}</p>
             <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-transparent text-sm text-white/90 hover:bg-white/[0.08]" @click="bcShowBotsPicker = false">✕</button>
           </div>
-          <p class="mt-2 text-[14px] text-slate-300">Выберите получателей в личку</p>
+          <p class="mt-2 text-[14px] text-slate-300">{{ tt('admin.partner_ui.bots_modal_sub') }}</p>
           <div class="mt-2 flex items-center justify-between gap-2 text-[14px]">
-            <span class="text-slate-300">Выбрано: {{ bcSelectedBotRecipientIds.length }}</span>
+            <span class="text-slate-300">{{ tt('admin.partner_ui.bots_selected', { n: bcSelectedBotRecipientIds.length }) }}</span>
             <div class="flex items-center gap-3">
-              <button type="button" class="font-semibold text-indigo-300" @click="bcSelectedBotRecipientIds = bcBotRecipients.map((x) => Number(x.id))">Выбрать все</button>
-              <button type="button" class="font-semibold text-indigo-300" @click="bcSelectedBotRecipientIds = []">Очистить</button>
+              <button type="button" class="font-semibold text-indigo-300" @click="bcSelectedBotRecipientIds = bcBotRecipients.map((x) => Number(x.id))">{{ tt('admin.partner_ui.bots_select_all') }}</button>
+              <button type="button" class="font-semibold text-indigo-300" @click="bcSelectedBotRecipientIds = []">{{ tt('admin.partner_ui.bots_clear') }}</button>
             </div>
           </div>
           <input
             v-model="bcBotsSearch"
             type="text"
-            placeholder="Поиск ботов"
+            :placeholder="tt('admin.partner_ui.bots_search_ph')"
             class="mt-2 w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500"
           />
         </div>
@@ -10181,12 +10243,12 @@ watch(
               :checked="bcSelectedBotRecipientIds.includes(Number(b.id))"
               @change="toggleBotRecipientSelection(Number(b.id))"
             />
-            <span class="text-sm text-slate-200">{{ b.title }}</span>
+            <span class="text-sm text-slate-200">{{ bcBotRowTitle(b) }}</span>
           </label>
-          <p v-if="!bcFilteredBots.length" class="px-2 py-3 text-center text-xs text-slate-500">Нет доступных получателей</p>
+          <p v-if="!bcFilteredBots.length" class="px-2 py-3 text-center text-xs text-slate-500">{{ tt('admin.partner_ui.bots_empty') }}</p>
         </div>
         <div class="shrink-0 border-t border-slate-700/60 p-4 pt-3">
-          <button type="button" class="w-full rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white" @click="chooseBotRecipients">Выбрать</button>
+          <button type="button" class="w-full rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white" @click="chooseBotRecipients">{{ tt('admin.partner_ui.bots_choose') }}</button>
         </div>
       </div>
     </div>
@@ -10294,11 +10356,12 @@ watch(
           ref="bcEditBodyRef"
           class="bc-editor mt-2 h-56 overflow-y-auto rounded-xl border border-slate-600 bg-slate-950 px-3 py-2.5 text-sm leading-relaxed"
           contenteditable="true"
+          :data-placeholder="tt('admin.broadcast_ui.message_body_ph')"
           @input="onBcEditInput"
         />
         <div class="mt-3 flex gap-2">
-          <button type="button" class="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white" :disabled="bcSaving" @click="saveBcEditModal">Сохранить</button>
-          <button type="button" class="bc-tool-btn" @click="bcEditModalOpen = false">Отмена</button>
+          <button type="button" class="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white" :disabled="bcSaving" @click="saveBcEditModal">{{ tt('common.locale_code') === 'en' ? 'Save' : 'Сохранить' }}</button>
+          <button type="button" class="bc-tool-btn" @click="bcEditModalOpen = false">{{ tt('common.locale_code') === 'en' ? 'Cancel' : 'Отмена' }}</button>
         </div>
       </div>
     </div>
@@ -10321,7 +10384,7 @@ watch(
         />
         <div class="mt-3 flex gap-2">
           <button type="button" class="rounded-xl bg-violet-600 px-4 py-2 text-sm font-semibold text-white" @click="bcApplyLinkModal">Применить</button>
-          <button type="button" class="bc-tool-btn" @click="bcLinkModalOpen = false">Отмена</button>
+          <button type="button" class="bc-tool-btn" @click="bcLinkModalOpen = false">{{ tt('common.locale_code') === 'en' ? 'Cancel' : 'Отмена' }}</button>
         </div>
       </div>
     </div>
@@ -10460,7 +10523,7 @@ watch(
   -webkit-text-fill-color: #f8fafc;
 }
 .bc-editor:empty:before {
-  content: "Напиши сообщение…";
+  content: attr(data-placeholder);
   color: #94a3b8 !important;
   -webkit-text-fill-color: #94a3b8;
 }

@@ -26,6 +26,7 @@ from app.services.user_service import (
 )
 from app.services.chat_limit_enforcer import restore_owner_chats_after_premium
 from app.texts.guardian_billing import PREMIUM_PLANS
+from app.i18n import normalize_locale, t as i18n_t
 
 log = logging.getLogger(__name__)
 
@@ -371,7 +372,8 @@ async def create_yookassa_subscription_payment(
     await session.flush()
 
     _, _, return_url = _yookassa_env(mode)
-    desc = f"Guard Premium {months} мес."
+    loc = normalize_locale(getattr(user, "language", None))
+    desc = i18n_t(loc, "billing.guardian.yk_desc_premium_months", months=months)
 
     try:
         payload_meta = {
@@ -453,7 +455,8 @@ async def create_yookassa_tokens_payment(
     session.add(pay)
     await session.flush()
     _, _, return_url = _yookassa_env(mode)
-    desc = f"Guard Tokens {token_count} шт."
+    loc = normalize_locale(getattr(user, "language", None))
+    desc = i18n_t(loc, "billing.guardian.yk_desc_tokens", count=token_count)
     try:
         data = await _yookassa_create_payment(
             amount_str,
@@ -509,7 +512,8 @@ async def create_yookassa_binding_probe_payment(
     session.add(pay)
     await session.flush()
     _, _, return_url = _yookassa_env(mode)
-    desc = "Guard binding probe 2d / 1RUB"
+    loc = normalize_locale(getattr(user, "language", None))
+    desc = i18n_t(loc, "billing.guardian.yk_desc_binding_probe")
     try:
         data = await _yookassa_create_payment(
             amount_str,
@@ -755,17 +759,24 @@ async def _fulfill_payment(session: AsyncSession, yookassa_id: str, payment_obj:
         )
         session.add(comm)
 
-        ref_notify_texts.append((
-            int(owner_tg_id),
+        bal_tok = round(float(getattr(ref_user, "bonus_credits", 0.0) or 0.0), 2)
+        bal_rub = round(bal_tok * PARTNER_TOKEN_RUB_RATE, 2)
+        ref_lang = normalize_locale(getattr(ref_user, "language", None))
+        ref_notify_texts.append(
             (
-                "🎉 *Guard: партнерское начисление*\n\n"
-                f"Уровень: *{level}*\n"
-                f"Процент: *{int(rate * 100)}%*\n"
-                f"Начислено: *{reward_tokens}* ⚡ (*{reward_rub} ₽*)\n"
-                f"Текущий баланс: *{round(float(getattr(ref_user, 'bonus_credits', 0.0) or 0.0), 2)}* ⚡ "
-                f"(*{round(float(getattr(ref_user, 'bonus_credits', 0.0) or 0.0) * PARTNER_TOKEN_RUB_RATE, 2)} ₽*)"
+                int(owner_tg_id),
+                i18n_t(
+                    ref_lang,
+                    "billing.guardian.partner_commission",
+                    level=level,
+                    rate_pct=int(rate * 100),
+                    reward_tokens=reward_tokens,
+                    reward_rub=f"{reward_rub:.2f}",
+                    balance_tokens=f"{bal_tok:.2f}",
+                    balance_rub=f"{bal_rub:.2f}",
+                ),
             )
-        ))
+        )
     row.status = "succeeded"
     await session.commit()
 
@@ -773,39 +784,42 @@ async def _fulfill_payment(session: AsyncSession, yookassa_id: str, payment_obj:
         from app.texts.guardian_billing import build_premium_payment_success_text
         from app.services.telegram_notify import send_user_dm
 
+        pay_lang = normalize_locale(getattr(user, "language", None))
+
         if is_tokens_payment:
             pack_n = int(getattr(row, "months", 0) or 0)
             added_tokens = pack_n if pack_n > 0 else int(round(float(row.amount or 0.0) / _TOKEN_TO_RUB))
-            text = (
-                "✅ *Оплата AURUM прошла успешно*\n\n"
-                f"Начислено: *{added_tokens}* ✨AURUM\n"
-                f"Сумма: *{float(row.amount):.0f}* ₽\n\n"
-                "AURUM тратится на рассылки и будущие ИИ-функции. "
-                "Когда AURUM закончится — докупите пакет в разделе «Токены»."
+            text = i18n_t(
+                pay_lang,
+                "billing.guardian.tokens_payment_success",
+                added=added_tokens,
+                amount=f"{float(row.amount):.0f}",
             )
         elif is_binding_probe:
-            text = (
-                "✅ Тестовый тариф *2 дня / 1 ₽* активирован.\n\n"
-                f"Карта привязана: *{'да' if pm_saved else 'нет'}*"
-                + (f" · ****{pm_last4}" if pm_last4 else "")
-                + "\n\nИспользуйте этот сценарий для проверки напоминаний о продлении."
+            saved_key = (
+                "billing.guardian.probe_card_saved_yes" if pm_saved else "billing.guardian.probe_card_saved_no"
+            )
+            saved_txt = i18n_t(pay_lang, saved_key)
+            card_tail = f" · ****{pm_last4}" if pm_last4 else ""
+            text = i18n_t(
+                pay_lang,
+                "billing.guardian.probe_binding_success",
+                saved=saved_txt,
+                card_tail=card_tail,
             )
         else:
             aurum_bal, bonus_credits = await _user_aurum_and_bonus(session, int(user.id))
             gift_aurum = round(float(row.amount or 0.0) / _TOKEN_TO_RUB / 2.0, 2)
-            text = build_premium_payment_success_text(
+            body = build_premium_payment_success_text(
                 months=row.months,
                 amount_rub=float(row.amount),
                 subscription_until=user.subscription_until,
                 gift_aurum=float(gift_aurum),
                 aurum_balance=float(aurum_bal),
                 bonus_credits=bonus_credits,
+                lang=pay_lang,
             )
-            text = (
-                "✅ Продление *Guard* прошло успешно.\n\n"
-                "Спасибо, что остаётесь с нами — продолжаем держать ваши чаты под защитой 🛡\n\n"
-                f"{text}"
-            )
+            text = f"{i18n_t(pay_lang, 'billing.guardian.subscription_renewal_header')}\n\n{body}"
         admin_broadcast_url = _mini_app_admin_broadcast_url()
         receipt_url = _extract_receipt_url(payment_obj) or str(getattr(row, "receipt_url", "") or "").strip()
         reply_markup = None
@@ -813,14 +827,14 @@ async def _fulfill_payment(session: AsyncSession, yookassa_id: str, payment_obj:
         if admin_broadcast_url:
             buttons_row.append(
                 {
-                    "text": "🔵 Настроить рассылку",
+                    "text": i18n_t(pay_lang, "billing.guardian.btn_configure_broadcast"),
                     "web_app": {"url": admin_broadcast_url},
                 }
             )
         if receipt_url:
             buttons_row.append(
                 {
-                    "text": "🧾 Чек",
+                    "text": i18n_t(pay_lang, "billing.guardian.btn_receipt"),
                     "url": receipt_url,
                 }
             )
@@ -830,13 +844,14 @@ async def _fulfill_payment(session: AsyncSession, yookassa_id: str, payment_obj:
         for tg_id, msg in ref_notify_texts:
             await send_user_dm(tg_id, msg)
         if not is_tokens_payment and not receipt_url:
-            warn = (
-                "⚠️ *Guard billing alert*\n\n"
-                "Успешная оплата пришла без `receipt_url`.\n"
-                f"user_tg_id: `{int(getattr(user, 'telegram_id', 0) or 0)}`\n"
-                f"payment_db_id: `{int(getattr(row, 'id', 0) or 0)}`\n"
-                f"yookassa_payment_id: `{str(getattr(row, 'payment_id', '') or '')}`\n"
-                f"amount: `{float(getattr(row, 'amount', 0.0) or 0.0):.2f}` RUB"
+            alert_loc = normalize_locale(os.getenv("ADMIN_ALERT_LOCALE", "en"))
+            warn = i18n_t(
+                alert_loc,
+                "billing.guardian.admin_missing_receipt_dm",
+                user_tg_id=int(getattr(user, "telegram_id", 0) or 0),
+                payment_db_id=int(getattr(row, "id", 0) or 0),
+                yookassa_payment_id=str(getattr(row, "payment_id", "") or ""),
+                amount=f"{float(getattr(row, 'amount', 0.0) or 0.0):.2f}",
             )
             for admin_tg_id in sorted(_parse_admin_ids()):
                 try:
@@ -858,11 +873,7 @@ async def _fulfill_payment(session: AsyncSession, yookassa_id: str, payment_obj:
             await record_user_incident(
                 kind="payment_notify",
                 category="payment",
-                summary_ru=(
-                    "После успешной оплаты не удалось отправить пользователю сообщение в ЛС (Telegram или сеть). "
-                    "Частая причина — пользователь не нажал «Start» у бота или заблокировал бота. "
-                    "Проверьте также BOT_TOKEN на сервисе API."
-                ),
+                summary_ru=i18n_t("ru", "billing.guardian.incident_payment_notify_failed"),
                 telegram_ids=[tid] if tid > 0 else [],
                 detail_snippet=f"telegram_id={tid} payment_db_id={int(getattr(row, 'id', 0) or 0)}",
                 method="WEBHOOK",
@@ -881,15 +892,13 @@ async def _mark_payment_canceled(session: AsyncSession, yookassa_id: str) -> Non
         await session.commit()
 
 
-async def _notify_autorenew_card_revoked(telegram_id: int, *, bot: Any = None) -> None:
+async def _notify_autorenew_card_revoked(
+    telegram_id: int, *, lang: str | None = None, bot: Any = None
+) -> None:
     if not telegram_id:
         return
-    text = (
-        "⚠️ *Guard*\n\n"
-        "Автопродление Premium не прошло: банк или ЮKassa отозвали разрешение на автосписание.\n\n"
-        "Привязка карты сброшена. Чтобы снова включить автопродление, оплатите подписку в приложении "
-        "и сохраните способ оплаты."
-    )
+    loc = normalize_locale(lang)
+    text = i18n_t(loc, "billing.guardian.autorenew_card_revoked")
     try:
         from app.services.telegram_notify import send_user_dm
 
@@ -918,7 +927,7 @@ async def _handle_autorenew_canceled(
         session.add(user)
     tid = int(getattr(user, "telegram_id", 0) or 0)
     if revoke and tid > 0:
-        await _notify_autorenew_card_revoked(tid, bot=bot)
+        await _notify_autorenew_card_revoked(tid, lang=getattr(user, "language", None), bot=bot)
 
 
 async def try_yookassa_autorenew_for_user(
@@ -1002,7 +1011,8 @@ async def try_yookassa_autorenew_for_user(
 
     tg_id = int(getattr(user, "telegram_id", 0) or 0)
     idem = f"autorenew-u{user.id}-until{sub_until.date().isoformat()}"
-    desc = f"Guard Premium автопродление {months} мес."
+    loc = normalize_locale(getattr(user, "language", None))
+    desc = i18n_t(loc, "billing.guardian.yk_desc_autorenew", months=months)
     meta = {
         "telegram_user_id": str(tg_id),
         "months": str(months),

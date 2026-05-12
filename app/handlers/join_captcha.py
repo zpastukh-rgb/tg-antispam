@@ -32,6 +32,8 @@ from sqlalchemy import delete, select
 
 from app.db.models import JoinCaptchaSession
 from app.db.session import get_session
+from app.i18n import DEFAULT_LOCALE, normalize_locale, t
+from app.services.chat_owner_locale import owner_locale_for_chat, user_locale
 from app.services.diagnostics_incidents import record_join_captcha_expire_delete_failed
 from app.handlers.moderation import (
     _welcome_keyboard_from_json,
@@ -90,6 +92,14 @@ WORD_GUESS_BANK = (
     "время", "осень", "книга", "мир", "ночь", "утро", "слово", "место", "дверь", "окно",
     "солнце", "зима", "лето", "весна", "дорога", "число", "ответ", "вопрос", "работа", "друг",
 )
+WORD_SEND_BANK_EN = (
+    "spring", "river", "field", "stone", "flame", "quest", "light", "cloud", "eagle", "track",
+    "silver", "amber", "forest", "harbor", "clever", "circle", "spirit", "garden", "rocket", "harvest",
+)
+WORD_GUESS_BANK_EN = (
+    "bridge", "planet", "shadow", "canvas", "signal", "fusion", "orchard", "puzzle", "harvest", "meadow",
+    "ember", "canvas", "window", "harbor", "silver", "thunder", "packet", "velvet", "compass", "moment",
+)
 # слово на экране → правильный эмодзи; остальные пять — отвлекающие
 WORD_EMOJI_SETS = (
     ("Вишня", "🍒", ("🍐", "🍊", "🍇", "🍓", "🍋")),
@@ -100,6 +110,22 @@ WORD_EMOJI_SETS = (
     ("Кот", "🐱", ("🐶", "🐰", "🐻", "🦊", "🐼")),
 )
 
+WORD_EMOJI_SETS_EN: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("Cherry", "🍒", ("🍐", "🍊", "🍇", "🍓", "🍋")),
+    ("Apple", "🍎", ("🍐", "🍊", "🍌", "🍇", "🥝")),
+    ("Carrot", "🥕", ("🌽", "🥦", "🧅", "🥔", "🍅")),
+    ("Cheese", "🧀", ("🥛", "🧈", "🥚", "🥓", "🍞")),
+    ("Fish", "🐟", ("🐠", "🐡", "🦐", "🦀", "🐙")),
+    ("Cat", "🐱", ("🐶", "🐰", "🐻", "🦊", "🐼")),
+)
+
+
+def _word_banks(locale: str) -> tuple[tuple[str, ...], tuple[str, ...], tuple[tuple[str, str, tuple[str, ...]], ...]]:
+    """Слова и наборы word→emoji для RU/EN."""
+    if normalize_locale(locale) == "en":
+        return WORD_SEND_BANK_EN, WORD_GUESS_BANK_EN, WORD_EMOJI_SETS_EN
+    return WORD_SEND_BANK, WORD_GUESS_BANK, WORD_EMOJI_SETS
+
 
 def _gen_token() -> str:
     return secrets.token_hex(6)
@@ -109,12 +135,13 @@ def _cb_data(token: str, idx: int) -> str:
     return f"{CB_PREFIX}{token}:{idx}"
 
 
-def _display_name(u: User) -> str:
+def _display_name(u: User, locale: str) -> str:
+    loc = normalize_locale(locale)
     if u.first_name or u.last_name:
         return (f"{u.first_name or ''} {u.last_name or ''}").strip()
     if u.username:
         return f"@{u.username}"
-    return "Участник"
+    return t(loc, "guard.join_captcha.member")
 
 
 def _pack_options(labels: list[str], expected: str | None = None, is_photo: bool = False) -> str:
@@ -216,9 +243,9 @@ async def _finish_success(bot, chat_id: int, user_id: int, message_chat_id: int,
         logger.warning("welcome after captcha failed chat=%s user=%s err=%s", chat_id, user_id, e)
     if not sent_welcome:
         try:
-            # Это системное подтверждение после капчи (не админское приветствие) —
-            # всегда удаляем короткой задержкой, чтобы не зашумлять чат.
-            ok_msg = await bot.send_message(int(chat_id), "✅ Проверка пройдена. Добро пожаловать.")
+            async with await get_session() as session:
+                loc = await owner_locale_for_chat(session, int(chat_id))
+            ok_msg = await bot.send_message(int(chat_id), t(loc, "guard.join_captcha.ok_passed"))
             ok_mid = int(getattr(ok_msg, "message_id", 0) or 0)
             if ok_mid > 0:
                 asyncio.create_task(_delete_message_later(bot, int(chat_id), ok_mid, 3.0))
@@ -382,6 +409,9 @@ async def maybe_start_join_captcha(bot, session, tg_chat: Chat, chat_row: Any, r
     if await is_admin(bot, chat_id, user_id):
         return
 
+    loc = await owner_locale_for_chat(session, int(chat_id))
+    send_bank, guess_bank, emoji_sets = _word_banks(loc)
+
     ttl = max(1, min(5, int(getattr(rule, "join_captcha_ttl_minutes", 3) or 3)))
     kind = (getattr(rule, "join_captcha_kind", None) or "button").strip().lower()
     if kind not in ALL_KINDS:
@@ -398,7 +428,7 @@ async def maybe_start_join_captcha(bot, session, tg_chat: Chat, chat_row: Any, r
 
     token = _gen_token()
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=ttl)
-    name = html.escape(_display_name(user))
+    name = html.escape(_display_name(user, loc))
 
     options: list[str] = []
     correct_idx = 0
@@ -408,7 +438,7 @@ async def maybe_start_join_captcha(bot, session, tg_chat: Chat, chat_row: Any, r
     photo_bytes: Optional[bytes] = None
 
     if kind == "button":
-        labels = [("Я бот 🤖", False), ("Я человек ✅", True)]
+        labels = [(t(loc, "guard.join_captcha.btn_bot"), False), (t(loc, "guard.join_captcha.btn_human"), True)]
         random.shuffle(labels)
         options = [x[0] for x in labels]
         correct_idx = next(i for i, x in enumerate(labels) if x[1])
@@ -417,11 +447,7 @@ async def maybe_start_join_captcha(bot, session, tg_chat: Chat, chat_row: Any, r
                 [InlineKeyboardButton(text=options[i], callback_data=_cb_data(token, i)) for i in range(2)]
             ]
         )
-        text = (
-            f"😈 <b>{name}</b>, это проверка «ты не бот».\n"
-            f"Выбери вариант честно. Время: <b>{ttl}</b> мин.\n\n"
-            f"<i>Нажать за тебя другие не смогут: я смотрю Telegram ID нажимающего.</i>"
-        )
+        text = t(loc, "guard.join_captcha.button_intro", name=name, ttl=ttl)
         options_payload = _pack_options(options)
     elif kind == "math":
         a, b = random.randint(3, 12), random.randint(3, 12)
@@ -440,11 +466,7 @@ async def maybe_start_join_captcha(bot, session, tg_chat: Chat, chat_row: Any, r
                 [InlineKeyboardButton(text=options[i], callback_data=_cb_data(token, i)) for i in range(4)]
             ]
         )
-        text = (
-            f"😈 <b>{name}</b>, сколько будет <b>{a} + {b}</b>?\n"
-            f"Время: <b>{ttl}</b> мин.\n\n"
-            f"<i>Чужой палец — ответ не засчитаю.</i>"
-        )
+        text = t(loc, "guard.join_captcha.math", name=name, ttl=ttl, a=a, b=b)
         options_payload = _pack_options(options, expected=str(ans))
     elif kind == "emoji":
         pool = ["🐷", "⭐", "🔥", "❤️", "🌈", "☀️"]
@@ -466,14 +488,10 @@ async def maybe_start_join_captcha(bot, session, tg_chat: Chat, chat_row: Any, r
                 ],
             ]
         )
-        text = (
-            f"😈 <b>{name}</b>, нажми тот же смайл, что я загадал:\n<b>{target}</b>\n"
-            f"Время: <b>{ttl}</b> мин.\n\n"
-            f"<i>В группе текст видят все — кнопку должен жать только ты (проверка ID).</i>"
-        )
+        text = t(loc, "guard.join_captcha.emoji", name=name, ttl=ttl, target=target)
         options_payload = _pack_options(options)
     elif kind == "word_emoji":
-        w, ans_emoji, distr = random.choice(WORD_EMOJI_SETS)
+        w, ans_emoji, distr = random.choice(emoji_sets)
         pool = [ans_emoji] + list(distr)
         random.shuffle(pool)
         options = pool[:6]
@@ -492,37 +510,24 @@ async def maybe_start_join_captcha(bot, session, tg_chat: Chat, chat_row: Any, r
                 ],
             ]
         )
-        text = (
-            f"😈 <b>{name}</b>, на экране слово <b>{html.escape(w)}</b>.\n"
-            f"Нажми смайл, который ему подходит. Время: <b>{ttl}</b> мин.\n\n"
-            f"<i>Как всегда: чужой клик не засчитаю.</i>"
-        )
+        text = t(loc, "guard.join_captcha.word_emoji", name=name, ttl=ttl, word=html.escape(w))
         options_payload = _pack_options(options)
     elif kind == "digits":
         digits = "".join(str(random.randint(0, 9)) for _ in range(4))
         photo_bytes = _make_digits_png(digits)
-        text = (
-            f"😈 <b>{name}</b>, пришли <b>цифры с картинки</b> одним <b>текстовым</b> сообщением в этот чат.\n"
-            f"Время: <b>{ttl}</b> мин. Без пробелов и букв — только цифры.\n"
-            f"<i>Пока проверка не пройдена, в группе можно только такой ответ; фото, стикеры и файлы — нет.</i>\n\n"
-            f"<i>Ответ видят в группе все; «за тебя» напечатать могут, но тогда это уже модераторы.</i>"
-        )
+        text = t(loc, "guard.join_captcha.digits", name=name, ttl=ttl)
         options_payload = _pack_options([], expected=digits, is_photo=bool(photo_bytes))
         kb = None
     elif kind == "word_send":
-        word = random.choice(WORD_SEND_BANK)
-        text = (
-            f"😈 <b>{name}</b>, пришли одним <b>текстовым</b> сообщением слово:\n<b>{html.escape(word)}</b>\n"
-            f"Время: <b>{ttl}</b> мин. Регистр не важен.\n"
-            f"<i>Пока проверка не пройдена, в группе можно только ответ текстом; фото, стикеры и ссылки — нет.</i>\n\n"
-            f"<i>Только сообщение от твоего аккаунта засчитаю.</i>"
-        )
+        word = random.choice(send_bank)
+        text = t(loc, "guard.join_captcha.word_send", name=name, ttl=ttl, word=html.escape(word))
         options_payload = _pack_options([], expected=word)
         kb = None
     else:  # word_guess
-        word = random.choice(WORD_GUESS_BANK)
+        word = random.choice(guess_bank)
         if len(word) < 4:
-            word = "книга"
+            long_choices = [w for w in guess_bank if len(w) >= 4]
+            word = random.choice(long_choices) if long_choices else word
         pos = random.randint(0, len(word) - 1)
         masked = list(word)
         masked[pos] = "*"
@@ -530,13 +535,7 @@ async def maybe_start_join_captcha(bot, session, tg_chat: Chat, chat_row: Any, r
             pos2 = random.choice([i for i in range(len(word)) if i != pos])
             masked[pos2] = "*"
         hint = "".join(masked)
-        text = (
-            f"😈 <b>{name}</b>, отгадай слово и пришли его <b>целиком</b> одним <b>текстовым</b> сообщением.\n"
-            f"Подсказка: <b>{html.escape(hint)}</b> (звёздочки — скрытые буквы).\n"
-            f"Время: <b>{ttl}</b> мин.\n"
-            f"<i>Пока проверка не пройдена, в группе можно только ответ текстом; фото, стикеры и файлы — нет.</i>\n\n"
-            f"<i>Нужно именно целое слово, как в словаре.</i>"
-        )
+        text = t(loc, "guard.join_captcha.word_guess", name=name, ttl=ttl, hint=html.escape(hint))
         options_payload = _pack_options([], expected=word)
         kb = None
 
@@ -577,12 +576,16 @@ async def maybe_start_join_captcha(bot, session, tg_chat: Chat, chat_row: Any, r
     if kind == "digits" and not sent_msg:
         dfb = digits_plain or "0000"
         try:
+            async with await get_session() as session:
+                loc = await owner_locale_for_chat(session, int(chat_id))
             sent_msg = await bot.send_message(
                 chat_id,
-                (
-                    f"😈 <b>{name}</b>, не вышло отправить картинку — лови цифры текстом.\n"
-                    f"Пришли их <b>подряд без пробелов</b>: <code>{html.escape(dfb)}</code>\n"
-                    f"Время: <b>{ttl}</b> мин."
+                t(
+                    loc,
+                    "guard.join_captcha.digits_plain_fallback",
+                    name=name,
+                    digits=html.escape(dfb),
+                    ttl=ttl,
                 ),
                 parse_mode="HTML",
             )
@@ -670,25 +673,29 @@ async def on_join_captcha_cb(cb: CallbackQuery) -> None:
     async with await get_session() as session:
         res = await session.execute(select(JoinCaptchaSession).where(JoinCaptchaSession.token == token).limit(1))
         row = res.scalar_one_or_none()
+        loc_fallback = DEFAULT_LOCALE
+        if cb.from_user:
+            loc_fallback = await user_locale(session, int(cb.from_user.id))
         if not row:
-            await cb.answer("Проверка уже неактуальна.", show_alert=True)
+            await cb.answer(t(loc_fallback, "guard.join_captcha.cb_stale"), show_alert=True)
             return
+        loc = await owner_locale_for_chat(session, int(row.chat_id))
         if (row.kind or "") not in KIND_CALLBACK:
             await cb.answer()
             return
         if datetime.now(timezone.utc) > row.expires_at:
             session.delete(row)
             await session.commit()
-            await cb.answer("Время вышло. Зайди снова в чат.", show_alert=True)
+            await cb.answer(t(loc, "guard.join_captcha.cb_timeout"), show_alert=True)
             return
 
         uid = int(cb.from_user.id)
         if uid != int(row.user_id):
-            await cb.answer("Это не твоя капча — я принимаю только от того, кто только что вошёл.", show_alert=True)
+            await cb.answer(t(loc, "guard.join_captcha.cb_wrong_user"), show_alert=True)
             return
 
         if picked != int(row.correct_idx):
-            await cb.answer("Мимо. Попробуй ещё раз.", show_alert=True)
+            await cb.answer(t(loc, "guard.join_captcha.cb_wrong_answer"), show_alert=True)
             return
 
         chat_id = int(row.chat_id)
@@ -699,5 +706,5 @@ async def on_join_captcha_cb(cb: CallbackQuery) -> None:
         session.delete(row)
         await session.commit()
 
-    await cb.answer("✅ Готово, можешь писать в чате.")
+    await cb.answer(t(loc, "guard.join_captcha.cb_ok"))
     await _finish_success(cb.bot, chat_id, target_uid, mcid, mid, payload)

@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import { useApi, messageFromApiError } from '../composables/useApi'
 import { api as rawApi } from '../api/client'
 import NavIcon from '../components/NavIcon.vue'
@@ -16,10 +17,14 @@ import { openTelegramDeepLink } from '../utils/openTelegramDeepLink'
 
 const router = useRouter()
 const route = useRoute()
+const { t, tm } = useI18n()
 const { api, loading, error, fetchSilent, hasInitData } = useApi()
 const { showToast } = useToast()
 const bootError = ref('')
-const { dashboardSection, setDashboardSection, billingFromGroupStats } = useDashboardSection()
+const dashCtx = useDashboardSection()
+/** Единое сравниваемое значение для шаблона (вкладки главной). */
+const dashSection = computed(() => dashCtx.dashboardSection.value || 'account')
+const billingFromGroupStats = dashCtx.billingFromGroupStats
 const me = ref(null)
 const {
   pinGateOpen,
@@ -187,12 +192,12 @@ let lastActivitySummaryOkAt = 0
 const dashboardStatsPeriod = ref('today')
 const dashboardPeriodBreakdown = ref(null)
 const dashboardPeriodLoading = ref(false)
-const DASHBOARD_STATS_PERIOD_OPTIONS = [
-  { key: 'today', label: 'Сегодня' },
-  { key: '7d', label: '7 дней' },
-  { key: '14d', label: '14 дней' },
-  { key: '30d', label: '30 дней' },
-]
+const DASHBOARD_STATS_PERIOD_OPTIONS = computed(() => [
+  { key: 'today', label: t('dashboard.period.today') },
+  { key: '7d', label: t('dashboard.period.7d') },
+  { key: '14d', label: t('dashboard.period.14d') },
+  { key: '30d', label: t('dashboard.period.30d') },
+])
 
 /** Компактная карточка рассылки под статистикой (те же правила, что «Рассылка» в таббаре). */
 const broadcastMiniEligibleCount = ref(null)
@@ -359,7 +364,7 @@ function restartStatBroadcastNudge() {
     clearInterval(statBroadcastNudgeTimer)
     statBroadcastNudgeTimer = null
   }
-  if (dashboardSection.value !== 'account' || !accountShowBroadcastMiniCard.value) return
+  if (dashCtx.dashboardSection.value !== 'account' || !accountShowBroadcastMiniCard.value) return
   statBroadcastNudgeTimer = setInterval(() => {
     if (homeStatBroadcastSlide.value !== 0) return
     if (statBroadcastDragging.value) return
@@ -370,21 +375,21 @@ function restartStatBroadcastNudge() {
   }, 3000)
 }
 
-const currentUpdateSlide = computed(() => UPDATES_SLIDES[updatesIndex.value] || UPDATES_SLIDES[0])
+const currentUpdateSlide = computed(() => UPDATES_SLIDES.value[updatesIndex.value] || UPDATES_SLIDES.value[0])
 
 function restartUpdatesRotation() {
   if (updatesTimer) {
     clearInterval(updatesTimer)
     updatesTimer = null
   }
-  if (dashboardSection.value !== 'account') return
+  if (dashCtx.dashboardSection.value !== 'account') return
   updatesTimer = setInterval(() => {
-    updatesIndex.value = (updatesIndex.value + 1) % UPDATES_SLIDES.length
+    updatesIndex.value = (updatesIndex.value + 1) % UPDATES_SLIDES.value.length
   }, 4000)
 }
 
 function selectUpdatesSlide(i) {
-  const n = UPDATES_SLIDES.length
+  const n = UPDATES_SLIDES.value.length
   if (i < 0 || i >= n) return
   updatesIndex.value = i
   restartUpdatesRotation()
@@ -394,7 +399,7 @@ function applyUpdatePrimaryAction() {
   const slide = currentUpdateSlide.value
   const a = slide?.primaryAction
   if (!a) return
-  if (a === 'partner') setDashboardSection('partner')
+  if (a === 'partner') dashCtx.setDashboardSection('partner')
   if (a === 'protection') router.push('/protection')
 }
 
@@ -408,10 +413,10 @@ function normalizeAction(action) {
 
 function actionLabelRu(action) {
   const key = normalizeAction(action)
-  if (key === 'ban') return 'Блокировка'
-  if (key === 'mute') return 'Ограничение'
-  if (key === 'observe') return 'Замечено (без удаления)'
-  return 'Удаление'
+  if (key === 'ban') return t('dashboard.actions.ban')
+  if (key === 'mute') return t('dashboard.actions.mute')
+  if (key === 'observe') return t('dashboard.actions.observe')
+  return t('dashboard.actions.delete')
 }
 
 /** Человекочитаемая причина срабатывания фильтра (ключи из moderation_logs.reason). */
@@ -419,32 +424,25 @@ function moderationReasonRu(reason) {
   const raw = String(reason || '').trim().toLowerCase()
   if (!raw) return '—'
   const base = raw.replace(/_newbie$/i, '')
-  const map = {
-    link: 'Ссылки',
-    media: 'Медиа / стикеры',
-    buttons: 'Сообщения с кнопками',
-    mention: 'Упоминания',
-    stopword: 'Стоп-слова',
-    profanity: 'Мат',
-    jobs: 'Подработки',
-    casino: 'Казино / ставки',
-    politics: 'Анти-политика',
-    religion: 'Религия',
-    esoteric: 'Эзотерика / магия',
-    silence: 'Режим тишины',
-    antinakrutka: 'Анти-накрутка',
-    captcha: 'Капча',
-    flood: 'Флуд',
-    global_antispam: 'Глобальная база',
-    raid: 'Рейд',
-    spam: 'Спам',
-    forward: 'Репосты',
+  const keyFor = (k) => {
+    const direct = t(`dashboard.reasons.${k}`)
+    return direct && direct !== `dashboard.reasons.${k}` ? direct : null
   }
-  if (map[raw]) return map[raw]
-  if (map[base]) return raw.endsWith('_newbie') ? `${map[base]} (новички)` : map[base]
-  if (base.includes('profanity')) return 'Мат'
-  if (base.includes('stopword')) return 'Стоп-слова'
-  if (base.includes('newbie')) return 'Новички'
+  const knownKeys = new Set([
+    'link', 'media', 'buttons', 'mention', 'stopword', 'profanity', 'jobs', 'casino',
+    'politics', 'religion', 'esoteric', 'silence', 'antinakrutka', 'captcha', 'flood',
+    'global_antispam', 'raid', 'spam', 'forward',
+  ])
+  if (knownKeys.has(raw)) return keyFor(raw) || raw
+  if (knownKeys.has(base)) {
+    const labelBase = keyFor(base) || base
+    return raw.endsWith('_newbie')
+      ? t('dashboard.reasons.newbie_suffix', { base: labelBase })
+      : labelBase
+  }
+  if (base.includes('profanity')) return t('dashboard.reasons.profanity')
+  if (base.includes('stopword')) return t('dashboard.reasons.stopword')
+  if (base.includes('newbie')) return t('dashboard.reasons.newbies')
   return raw.replace(/_/g, ' ')
 }
 
@@ -482,7 +480,8 @@ function journalTriggerDescription(item) {
   const mp = String(item?.message_preview || '').trim().replace(/\s+/g, ' ')
   if (mp) {
     const snip = mp.length > 140 ? `${mp.slice(0, 140)}…` : mp
-    return `${cat} · фрагмент: «${snip}»`
+    const fragLabel = t('dashboard.journal_ui.snippet')
+    return `${cat} · ${fragLabel}: «${snip}»`
   }
   return cat
 }
@@ -516,10 +515,10 @@ async function postChatMemberPrivilege(kind, chatId, userId, rowKey) {
       if (kind === 'unban') modUnbanDone.value = { ...modUnbanDone.value, [rowKey]: true }
       else modUnmuteDone.value = { ...modUnmuteDone.value, [rowKey]: true }
     }
-    showToast(kind === 'unban' ? 'Разбан выполнен в Telegram' : 'Размут выполнен в Telegram')
+    showToast(kind === 'unban' ? t('dashboard.toasts.unban_ok') : t('dashboard.toasts.unmute_ok'))
     await loadGroupActivityFull()
   } catch (e) {
-    const d = e?.body?.detail || e?.message || 'Не удалось выполнить действие'
+    const d = e?.body?.detail || e?.message || t('errors.action_failed')
     showToast(String(d))
   } finally {
     modPrivilegeBusyKey.value = ''
@@ -540,9 +539,10 @@ const activityOverview = computed(() => {
 })
 
 const activityByGroup = computed(() => {
+  const groupFallback = t('dashboard.home_shell.group_fallback')
   const map = new Map((activityChats.value || []).map((c) => [Number(c.id || 0), {
     chat_id: Number(c.id || 0),
-    chat_title: String(c.title || c.id || 'Группа'),
+    chat_title: String(c.title || c.id || groupFallback),
     total: 0,
     deleted: 0,
     muted: 0,
@@ -551,7 +551,7 @@ const activityByGroup = computed(() => {
   }]))
   for (const item of activityJournal.value || []) {
     const chatId = Number(item?.chat_id || 0)
-    const title = String(item?.chat_title || chatId || 'Группа')
+    const title = String(item?.chat_title || chatId || groupFallback)
     if (!map.has(chatId)) {
       map.set(chatId, { chat_id: chatId, chat_title: title, total: 0, deleted: 0, muted: 0, banned: 0, observed: 0 })
     }
@@ -586,7 +586,7 @@ const groupPeriodLabel = computed(() => {
   if (b?.period_from && b?.period_to) {
     return `${formatDateTimeShortRu(b.period_from)} — ${formatDateTimeShortRu(b.period_to)}`
   }
-  return 'Период'
+  return t('dashboard.period.fallback')
 })
 
 /** Все события журнала по выбранной группе и периоду (удаление / мут / бан). */
@@ -597,17 +597,17 @@ const groupJournalForModal = computed(() => {
 })
 
 function filterStatCardTone(tone) {
-  const t = String(tone || 'emerald')
-  if (t === 'rose') {
+  const k = String(tone || 'emerald')
+  if (k === 'rose') {
     return 'border-rose-500/70 bg-rose-950/35'
   }
-  if (t === 'amber') {
+  if (k === 'amber') {
     return 'border-amber-500/70 bg-amber-950/30'
   }
-  if (t === 'violet') {
+  if (k === 'violet') {
     return 'border-violet-500/70 bg-violet-950/30'
   }
-  if (t === 'slate') {
+  if (k === 'slate') {
     return 'border-slate-500/70 bg-slate-900/50'
   }
   return 'border-emerald-400/80 bg-emerald-950/35'
@@ -668,8 +668,8 @@ const dashboardProtectionLevelMeta = computed(() => {
   if (n <= 0) return empty
 
   const del = Math.max(0, Math.round(Number(activitySummary.value?.today?.deleted || 0)))
-  const t = String(activitySummary.value?.tariff || 'free').toLowerCase()
-  const premium = ['premium', 'pro', 'business'].includes(t)
+  const tariffCode = String(activitySummary.value?.tariff || 'free').toLowerCase()
+  const premium = ['premium', 'pro', 'business'].includes(tariffCode)
   const protOn = !!activitySummary.value?.protection_active
   const usage = Math.max(0, Math.min(100, activityGroupsProgress.value))
 
@@ -689,22 +689,22 @@ const dashboardProtectionLevelMeta = computed(() => {
 
   const tiers = {
     1: {
-      label: 'Слабый',
+      label: t('dashboard.hero.protection_weak'),
       fillSegmentClass: 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.35)]',
       labelClass: 'text-rose-400',
     },
     2: {
-      label: 'Базовый',
+      label: t('dashboard.hero.protection_basic'),
       fillSegmentClass: 'bg-orange-500 shadow-[0_0_6px_rgba(249,115,22,0.32)]',
       labelClass: 'text-orange-400',
     },
     3: {
-      label: 'Средний',
+      label: t('dashboard.hero.protection_medium'),
       fillSegmentClass: 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.38)]',
       labelClass: 'text-amber-300',
     },
     4: {
-      label: 'Сильный',
+      label: t('dashboard.hero.protection_strong'),
       fillSegmentClass: 'bg-lime-400 shadow-[0_0_6px_rgba(163,230,53,0.38)]',
       labelClass: 'text-lime-400',
     },
@@ -722,22 +722,28 @@ const dashboardProtectionLevelMeta = computed(() => {
 
 /** Оценка часов, сэкономленных админам (25 ₽/удаление, ориентир 1500 ₽/ч модератора). */
 const dashboardSavedHoursLabel = computed(() => {
+  const isEn = t('common.locale_code') === 'en'
   const d = Math.max(0, Math.round(Number(activitySummary.value?.today?.deleted || 0)))
-  if (d === 0) return '0 ч'
+  if (d === 0) return isEn ? '0 h' : '0 ч'
   const hours = (d * 25) / 1500
-  if (hours < 0.05) return '< 0,1 ч'
-  return `${hours.toFixed(1).replace('.', ',')} ч`
+  if (hours < 0.05) return isEn ? '< 0.1 h' : '< 0,1 ч'
+  return isEn
+    ? `${hours.toFixed(1)} h`
+    : `${hours.toFixed(1).replace('.', ',')} ч`
 })
 
 /** Сравнение с предыдущим днём (понятные формулировки, не «к вчера»). */
 function statTrendPctLine(todayVal, yesterdayVal) {
-  const t = Math.max(0, Math.round(Number(todayVal) || 0))
+  const td = Math.max(0, Math.round(Number(todayVal) || 0))
   const y = Math.max(0, Math.round(Number(yesterdayVal) || 0))
-  if (t === 0 && y === 0) return 'нет данных'
-  if (y === 0) return t > 0 ? 'вчера: 0' : 'без изменений к прошлому дню'
-  const pct = Math.round(((t - y) / y) * 100)
+  if (td === 0 && y === 0) return t('dashboard.hero.no_data')
+  if (y === 0)
+    return td > 0
+      ? t('dashboard.hero.vs_yesterday_zero_today')
+      : t('dashboard.hero.vs_yesterday_zero_diff')
+  const pct = Math.round(((td - y) / y) * 100)
   const sign = pct > 0 ? '+' : ''
-  return `${sign}${pct}% к прошлому дню`
+  return t('dashboard.hero.vs_yesterday_pct', { sign, pct })
 }
 
 const statTrendDeleted = computed(() =>
@@ -747,13 +753,13 @@ const statTrendSaved = computed(() =>
   statTrendPctLine(activitySummary.value?.today?.deleted, activitySummary.value?.yesterday?.deleted),
 )
 const statTrendJoins = computed(() => {
-  const t = Math.max(0, Math.round(Number(activitySummary.value?.today?.joins ?? 0)))
+  const td = Math.max(0, Math.round(Number(activitySummary.value?.today?.joins ?? 0)))
   const y = Math.max(0, Math.round(Number(activitySummary.value?.yesterday?.joins ?? 0)))
-  if (t === 0 && y === 0) return 'нет вступлений'
-  const diff = t - y
-  if (diff === 0) return 'столько же, как вчера'
-  if (diff > 0) return `на ${diff} больше, чем вчера`
-  return `на ${Math.abs(diff)} меньше, чем вчера`
+  if (td === 0 && y === 0) return t('dashboard.hero.no_joins')
+  const diff = td - y
+  if (diff === 0) return t('dashboard.hero.vs_yesterday_same')
+  if (diff > 0) return t('dashboard.hero.vs_yesterday_more', { n: diff })
+  return t('dashboard.hero.vs_yesterday_less', { n: Math.abs(diff) })
 })
 
 const statsCardUsesPeriod = computed(() => dashboardStatsPeriod.value !== 'today')
@@ -772,33 +778,41 @@ const statsCardJoins = computed(() => {
   return Math.max(0, Math.round(Number(dashboardPeriodBreakdown.value?.total_joined ?? 0)))
 })
 const statsCardSavedHoursLabel = computed(() => {
-  if (dashboardStatsPremiumLocked.value) return '0 ч'
+  const isEn = t('common.locale_code') === 'en'
+  if (dashboardStatsPremiumLocked.value) return isEn ? '0 h' : '0 ч'
   const d = statsCardDeleted.value
-  if (d === 0) return '0 ч'
+  if (d === 0) return isEn ? '0 h' : '0 ч'
   const hours = (d * 25) / 1500
-  if (hours < 0.05) return '< 0,1 ч'
-  return `${hours.toFixed(1).replace('.', ',')} ч`
+  if (hours < 0.05) return isEn ? '< 0.1 h' : '< 0,1 ч'
+  return isEn ? `${hours.toFixed(1)} h` : `${hours.toFixed(1).replace('.', ',')} ч`
 })
 const statsCardTrendDeleted = computed(() => {
-  if (dashboardStatsPremiumLocked.value) return 'нужен Premium Guard'
+  if (dashboardStatsPremiumLocked.value) return t('dashboard.hero.need_premium')
   if (statsCardUsesPeriod.value) {
-    const p = DASHBOARD_STATS_PERIOD_OPTIONS.find((x) => x.key === dashboardStatsPeriod.value)
-    return p ? `за ${p.label.toLowerCase()}` : 'за период'
+    const p = DASHBOARD_STATS_PERIOD_OPTIONS.value.find((x) => x.key === dashboardStatsPeriod.value)
+    return p
+      ? t('dashboard.hero.for_period', { period: p.label.toLowerCase() })
+      : t('dashboard.hero.for_period_fallback')
   }
   return statTrendDeleted.value
 })
 const statsCardTrendSaved = computed(() => {
-  if (dashboardStatsPremiumLocked.value) return 'нужен Premium Guard'
+  if (dashboardStatsPremiumLocked.value) return t('dashboard.hero.need_premium')
   if (statsCardUsesPeriod.value) {
-    const p = DASHBOARD_STATS_PERIOD_OPTIONS.find((x) => x.key === dashboardStatsPeriod.value)
-    return p ? `за ${p.label.toLowerCase()}` : 'за период'
+    const p = DASHBOARD_STATS_PERIOD_OPTIONS.value.find((x) => x.key === dashboardStatsPeriod.value)
+    return p
+      ? t('dashboard.hero.for_period', { period: p.label.toLowerCase() })
+      : t('dashboard.hero.for_period_fallback')
   }
   return statTrendSaved.value
 })
 const statsCardTrendJoins = computed(() => {
-  if (dashboardStatsPremiumLocked.value) return 'нужен Premium Guard'
+  if (dashboardStatsPremiumLocked.value) return t('dashboard.hero.need_premium')
   if (statsCardUsesPeriod.value) {
-    return statsCardJoins.value > 0 ? `всего: ${statsCardJoins.value}` : 'нет вступлений'
+    if (statsCardJoins.value > 0) {
+      return t('dashboard.home_shell.joins_total_suffix', { n: statsCardJoins.value })
+    }
+    return t('dashboard.hero.no_joins')
   }
   return statTrendJoins.value
 })
@@ -812,12 +826,12 @@ const statGroupsLimitPercent = computed(() => {
 })
 
 const statGroupsLimitFoot = computed(() => {
-  if (dashboardStatsPremiumLocked.value) return 'оформите Premium'
+  if (dashboardStatsPremiumLocked.value) return t('dashboard.statsCard.slots_status_premium_needed')
   const left = Math.max(0, Math.round(Number(activityGroupsLimit.value || 0) - Number(activityGroupsCount.value || 0)))
-  if (Number(activityGroupsLimit.value || 0) <= 0) return 'тариф'
-  if (left === 0) return 'лимит'
-  if (left <= 3) return 'мало слотов'
-  return 'в норме'
+  if (Number(activityGroupsLimit.value || 0) <= 0) return t('dashboard.statsCard.slots_status_no_tariff')
+  if (left === 0) return t('dashboard.statsCard.slots_status_limit')
+  if (left <= 3) return t('dashboard.statsCard.slots_status_low')
+  return t('dashboard.statsCard.slots_status_ok')
 })
 
 function fmtRubInt(n) {
@@ -831,22 +845,28 @@ function fmtRubInt(n) {
 
 function ruChatsCountLabel(count) {
   const n = Math.abs(Math.trunc(Number(count) || 0))
+  if (t('common.locale_code') === 'en') {
+    return t(n === 1 ? 'dashboard.counters.n_chats_one' : 'dashboard.counters.n_chats', { n })
+  }
   const k = n % 100
   const l = n % 10
-  if (k > 10 && k < 20) return `${n} чатов`
-  if (l === 1) return `${n} чат`
-  if (l >= 2 && l <= 4) return `${n} чата`
-  return `${n} чатов`
+  if (k > 10 && k < 20) return t('dashboard.counters.n_chats', { n })
+  if (l === 1) return t('dashboard.counters.n_chats_one', { n })
+  if (l >= 2 && l <= 4) return t('dashboard.counters.n_chats_few', { n })
+  return t('dashboard.counters.n_chats', { n })
 }
 
 function ruGroupsProtectedLabel(count) {
   const n = Math.abs(Math.trunc(Number(count) || 0))
+  if (t('common.locale_code') === 'en') {
+    return t(n === 1 ? 'dashboard.counters.n_groups_one' : 'dashboard.counters.n_groups', { n })
+  }
   const k = n % 100
   const l = n % 10
-  if (k > 10 && k < 20) return `${n} групп`
-  if (l === 1) return `${n} группа`
-  if (l >= 2 && l <= 4) return `${n} группы`
-  return `${n} групп`
+  if (k > 10 && k < 20) return t('dashboard.counters.n_groups', { n })
+  if (l === 1) return t('dashboard.counters.n_groups_one', { n })
+  if (l >= 2 && l <= 4) return t('dashboard.counters.n_groups_few', { n })
+  return t('dashboard.counters.n_groups', { n })
 }
 
 function goManageChats() {
@@ -900,25 +920,24 @@ watch(showUpdatesRoadmapModal, (open) => {
   if (!open) updatesRoadmapExpanded.value = {}
 })
 
-const ACCOUNT_HOME_PREMIUM_BULLETS = [
-  'AI-фильтр нового поколения',
-  'Автобан и анти-рейды',
-  'Приоритетная поддержка',
-  'Расширенная статистика',
-]
+const ACCOUNT_HOME_PREMIUM_BULLETS = computed(() => [
+  t('dashboard.hero.premium_feature_ai'),
+  t('dashboard.hero.premium_feature_autoban'),
+  t('dashboard.hero.premium_feature_support'),
+  t('dashboard.hero.premium_feature_stats'),
+])
 
 /** Лента обновлений: от новых к более ранним; на главной — только первые UPDATES_HOME_PREVIEW_N */
 const UPDATES_HOME_PREVIEW_N = 3
 
-const UPDATES_SLIDES = [
+const UPDATES_SLIDES = computed(() => [
   {
     key: 'stats_growth',
     version: '2.4',
     publishedAt: '2026-05-06T15:30:00+03:00',
-    headline: 'Статистика защиты и роста',
-    teaser:
-      'Один экран: удаления по фильтрам, динамика, подписки и сообщения — без прыжков по разделам.',
-    body: 'Мы переработали блок статистики в Premium-кабинете: видно, что сработало в защите, как растёт аудитория и какие чаты самые активные. Это экономит время модераторам: не нужно собирать картину по кускам — всё рядом и обновляется автоматически.',
+    headline: t('dashboard.feed_items.stats.headline'),
+    teaser: t('dashboard.feed_items.stats.teaser'),
+    body: t('dashboard.feed_items.stats.body'),
     primaryLabel: null,
     primaryAction: null,
     imageUrl: null,
@@ -927,9 +946,9 @@ const UPDATES_SLIDES = [
     key: 'filters_wave',
     version: '2.3',
     publishedAt: '2026-05-05T18:00:00+03:00',
-    headline: 'Новые фильтры и точнее триггеры',
-    teaser: 'Казино, ссылки, медиа и «глобальные» правила — меньше шума, больше контроля.',
-    body: 'Добавлены и уточнены фильтры под реальные сценарии: ставки и казино, подозрительные URL, медиа и жёсткие словари. Настройки стали понятнее: проще включить нужное и не ловить ложные срабатывания.',
+    headline: t('dashboard.feed_items.filters.headline'),
+    teaser: t('dashboard.feed_items.filters.teaser'),
+    body: t('dashboard.feed_items.filters.body'),
     primaryLabel: null,
     primaryAction: null,
     imageUrl: null,
@@ -938,9 +957,9 @@ const UPDATES_SLIDES = [
     key: 'launch_public',
     version: '2.2',
     publishedAt: '2026-05-04T12:00:00+03:00',
-    headline: 'Запуск AntiSpam Guard',
-    teaser: 'Мы вышли в прод: защита групп и каналов, статистика и регулярные улучшения по дорожной карте.',
-    body: 'Официальный запуск сервиса для администраторов Telegram. Вы можете подключать чаты, настраивать защиту, смотреть статистику и получать обновления без простоя. Мы на связи и продолжаем усиливать продукт после старта.',
+    headline: t('dashboard.feed_items.launch.headline'),
+    teaser: t('dashboard.feed_items.launch.teaser'),
+    body: t('dashboard.feed_items.launch.body'),
     primaryLabel: null,
     primaryAction: null,
     imageUrl: null,
@@ -949,10 +968,10 @@ const UPDATES_SLIDES = [
     key: 'earn',
     version: '2.1',
     publishedAt: '2026-05-03T11:00:00+03:00',
-    headline: 'Заработок с Guard',
-    teaser: 'Приглашайте пользователей — получайте токены за их оплаты.',
-    body: 'Реферальная программа помогает монетизировать аудиторию: вы делитесь ссылкой, подписчики оформляют Premium или пополняют баланс — вам начисляются токены. Меньше ручной работы, прозрачнее мотивация развивать сообщество.',
-    primaryLabel: 'Заработать',
+    headline: t('dashboard.feed_items.referrals.headline'),
+    teaser: t('dashboard.feed_items.referrals.teaser'),
+    body: t('dashboard.feed_items.referrals.body'),
+    primaryLabel: t('dashboard.feed_items.referrals.primary'),
     primaryAction: 'partner',
     imageUrl: null,
   },
@@ -960,10 +979,10 @@ const UPDATES_SLIDES = [
     key: 'casino',
     version: '2.0',
     publishedAt: '2026-05-02T09:30:00+03:00',
-    headline: 'Фильтр казино и ставок',
-    teaser: 'Убираем ставки, казино-спам и навязчивые рассылки до того, как они испортят чат.',
-    body: 'Добавлен отдельный контур правил для ставок и казино: меньше флуда, чище лента. Проверьте профиль фильтров в защите чата — можно включить под ваш стиль общения.',
-    primaryLabel: 'Посмотреть',
+    headline: t('dashboard.feed_items.casino.headline'),
+    teaser: t('dashboard.feed_items.casino.teaser'),
+    body: t('dashboard.feed_items.casino.body'),
+    primaryLabel: t('dashboard.feed_items.casino.primary'),
     primaryAction: 'protection',
     imageUrl: null,
   },
@@ -971,9 +990,9 @@ const UPDATES_SLIDES = [
     key: 'premium_cabinet',
     version: '1.9',
     publishedAt: '2026-05-01T14:15:00+03:00',
-    headline: 'Premium-кабинет в одном стиле',
-    teaser: 'Синий ADM: защита, статистика роста, рассылки — без устаревших экранов.',
-    body: 'Обновили навигацию и визуал кабинета: меньше отвлекающих рамок, больше воздуха и понятных действий. Удобнее вести несколько чатов и следить за состоянием защиты.',
+    headline: t('dashboard.feed_items.cabinet.headline'),
+    teaser: t('dashboard.feed_items.cabinet.teaser'),
+    body: t('dashboard.feed_items.cabinet.body'),
     primaryLabel: null,
     primaryAction: null,
     imageUrl: null,
@@ -982,35 +1001,65 @@ const UPDATES_SLIDES = [
     key: 'ai',
     version: '1.8',
     publishedAt: '2026-04-28T10:00:00+03:00',
-    headline: 'Скоро: ИИ-помощник модерации',
-    teaser: 'Умные подсказки и авторазбор спорных сообщений — в разработке.',
-    body: 'Готовим модель, которая поможет администраторам быстрее принимать решения: контекст, риск и рекомендации по настройке антиспама. Следите за лентой — выпустим отдельным релизом.',
+    headline: t('dashboard.feed_items.ai.headline'),
+    teaser: t('dashboard.feed_items.ai.teaser'),
+    body: t('dashboard.feed_items.ai.body'),
     primaryLabel: null,
     primaryAction: null,
     imageUrl: null,
   },
-]
+])
 
-const updatesHomePreview = computed(() => UPDATES_SLIDES.slice(0, UPDATES_HOME_PREVIEW_N))
+const updatesHomePreview = computed(() => UPDATES_SLIDES.value.slice(0, UPDATES_HOME_PREVIEW_N))
 
-const GROUP_STATS_PRESETS = [
-  { key: '24h', label: '24 ч' },
-  { key: '7d', label: '7 дн.' },
-  { key: '30d', label: '30 дн.' },
-  { key: '6m', label: 'Полгода' },
-  { key: '1y', label: 'Год' },
-]
+const GROUP_STATS_PRESETS = computed(() => [
+  { key: '24h', label: t('dashboard.period.24h') },
+  { key: '7d', label: t('dashboard.period.7d_short') },
+  { key: '30d', label: t('dashboard.period.30d_short') },
+  { key: '6m', label: t('dashboard.period.6m') },
+  { key: '1y', label: t('dashboard.period.1y') },
+])
+function formatPlanRub(amount) {
+  const n = Math.round(Number(amount) || 0)
+  const loc = t('common.locale_code') === 'en' ? 'en-US' : 'ru-RU'
+  return n.toLocaleString(loc)
+}
+
+/** @returns {string[]} */
+function infoParagraphList(key) {
+  const raw = tm(key)
+  return Array.isArray(raw) ? raw.map((x) => String(x)) : []
+}
+
 /** Подарок AURUM с Premium: сумма ₽ / 4 ✨ (в 2 раза меньше старого «₽/2»). */
 const SUBSCRIPTION_GIFT_RUB_PER_AURUM = 4
 
-const PREMIUM_PLANS = [
-  { months: 1, icon: '🛡', label: '1 месяц', price: '490 ₽', priceRub: 490, savings: '' },
-  { months: 3, icon: '⚡', label: '3 месяца', price: '990 ₽', priceRub: 990, savings: 'Экономия 480 ₽' },
-  { months: 6, icon: '📅', label: '6 месяцев', price: '1590 ₽', priceRub: 1590, savings: 'Экономия 1350 ₽' },
-  { months: 12, icon: '👑', label: '12 месяцев', price: '2790 ₽', priceRub: 2790, savings: 'Экономия 3090 ₽' },
-  { months: 24, icon: '💎', label: '24 месяца', price: '4790 ₽', priceRub: 4790, savings: 'Экономия 6970 ₽' },
-  { months: 72, icon: '🚀', label: '72 месяца', price: '10 990 ₽', priceRub: 10990, savings: 'Экономия 24 290 ₽' },
+const PREMIUM_PLANS_SPEC = [
+  { months: 1, icon: '🛡', priceRub: 490, savingsRub: 0 },
+  { months: 3, icon: '⚡', priceRub: 990, savingsRub: 480 },
+  { months: 6, icon: '📅', priceRub: 1590, savingsRub: 1350 },
+  { months: 12, icon: '👑', priceRub: 2790, savingsRub: 3090 },
+  { months: 24, icon: '💎', priceRub: 4790, savingsRub: 6970 },
+  { months: 72, icon: '🚀', priceRub: 10990, savingsRub: 24290 },
 ]
+
+const premiumPlansCatalog = computed(() =>
+  PREMIUM_PLANS_SPEC.map((p) => {
+    const savings =
+      p.savingsRub > 0
+        ? t('dashboard.plans.savings_full', { rub: formatPlanRub(p.savingsRub) })
+        : ''
+    return {
+      months: p.months,
+      icon: p.icon,
+      label: t(`dashboard.plans.months_${p.months}`),
+      price: `${formatPlanRub(p.priceRub)} ₽`,
+      priceRub: p.priceRub,
+      savings,
+      savingsRub: p.savingsRub,
+    }
+  }),
+)
 
 const premiumPayMethodSummary = computed(() => {
   if (premiumPayMethodFlow.value === 'tokens') {
@@ -1022,7 +1071,7 @@ const premiumPayMethodSummary = computed(() => {
   }
   const m = premiumPayMethodMonths.value
   if (!m) return ''
-  const p = PREMIUM_PLANS.find((x) => x.months === m)
+  const p = premiumPlansCatalog.value.find((x) => x.months === m)
   return p ? `${p.label} · ${p.price}` : ''
 })
 
@@ -1030,34 +1079,45 @@ const premiumPayMethodSummary = computed(() => {
  * Лендинг «Free vs Premium»: сверху рефералка и фильтр ссылок/упоминаний (во Free тоже ✓),
  * затем остальное; внизу лимит чатов. Premium в рефералке: «3 уровня» зелёным.
  */
-const billingCompareRows = [
-  { id: 'referral', kind: 'referral', label: 'Реферальная программа' },
-  { id: 'links_mentions', kind: 'ok', label: 'Фильтр ссылок и упоминаний', free: 'ok', premium: 'ok' },
-  { id: 'panel', kind: 'ok', label: 'Панель в Telegram, базовая работа', free: 'ok', premium: 'ok' },
-  { id: 'spam', kind: 'ok', label: 'Расширенная защита от спама', free: 'no', premium: 'ok' },
-  { id: 'autodel', kind: 'ok', label: 'Автоудаление', free: 'no', premium: 'ok' },
-  { id: 'bcast', kind: 'ok', label: 'Рассылки', free: 'no', premium: 'ok' },
-  { id: 'autopost', kind: 'ok', label: 'Автопостинг', free: 'no', premium: 'ok' },
-  { id: 'stats', kind: 'ok', label: 'Расширенная статистика', free: 'no', premium: 'ok' },
-  { id: 'reports_track', kind: 'ok', label: 'Отслеживание отчетов', free: 'no', premium: 'ok' },
-  { id: 'support', kind: 'ok', label: 'Приоритетная поддержка', free: 'no', premium: 'ok' },
-  { id: 'chat_limit', kind: 'limits', label: 'Макс. каналов / групп' },
-]
+const billingCompareRows = computed(() => [
+  { id: 'referral', kind: 'referral', label: t('dashboard.referralRow.label') },
+  {
+    id: 'links_mentions',
+    kind: 'ok',
+    label: t('dashboard.sections.links_mentions'),
+    free: 'ok',
+    premium: 'ok',
+  },
+  { id: 'panel', kind: 'ok', label: t('dashboard.sections.panel'), free: 'ok', premium: 'ok' },
+  { id: 'spam', kind: 'ok', label: t('dashboard.sections.spam'), free: 'no', premium: 'ok' },
+  { id: 'autodel', kind: 'ok', label: t('dashboard.sections.autodel'), free: 'no', premium: 'ok' },
+  { id: 'bcast', kind: 'ok', label: t('dashboard.sections.bcast'), free: 'no', premium: 'ok' },
+  { id: 'autopost', kind: 'ok', label: t('dashboard.sections.autopost'), free: 'no', premium: 'ok' },
+  { id: 'stats', kind: 'ok', label: t('dashboard.sections.stats'), free: 'no', premium: 'ok' },
+  { id: 'reports_track', kind: 'ok', label: t('dashboard.sections.reports_track'), free: 'no', premium: 'ok' },
+  { id: 'support', kind: 'ok', label: t('dashboard.sections.support'), free: 'no', premium: 'ok' },
+  { id: 'chat_limit', kind: 'limits', label: t('dashboard.sections.chat_limit') },
+])
 
 const LANDING_PLAN_UI = [
   { months: 1 },
   { months: 3 },
   { months: 6 },
-  { months: 12, tag: 'Популярно' },
+  { months: 12, tagKey: 'popular' },
 ]
 
 const landingPlanShowcase = computed(() =>
   LANDING_PLAN_UI.map((ui) => {
-    const plan = PREMIUM_PLANS.find((p) => p.months === ui.months)
+    const plan = premiumPlansCatalog.value.find((p) => p.months === ui.months)
     if (!plan) return null
-    const discountLabel =
-      Number(plan.months) === 1 ? '' : premiumSavingsCornerBadge(plan)
-    return { ...plan, discountLabel, tag: ui.tag || '' }
+    const discountLabel = Number(plan.months) === 1 ? '' : premiumSavingsCornerBadge(plan)
+    const tag =
+      ui.tagKey === 'popular'
+        ? t('dashboard.plans.popular_tag')
+        : ui.tagKey === 'best'
+          ? t('dashboard.plans.best_tag')
+          : ''
+    return { ...plan, discountLabel, tag }
   }).filter(Boolean),
 )
 
@@ -1065,11 +1125,13 @@ const landingPlanCards = computed(() => {
   const base = landingPlanShowcase.value
   if (!showAllLandingPlans.value) return base
   const featuredMonths = new Set(base.map((x) => Number(x.months)))
-  const extra = PREMIUM_PLANS.filter((p) => !featuredMonths.has(Number(p.months))).map((p) => ({
-    ...p,
-    discountLabel: premiumSavingsCornerBadge(p),
-    tag: Number(p.months) === 24 ? 'Выгодно' : '',
-  }))
+  const extra = premiumPlansCatalog.value
+    .filter((p) => !featuredMonths.has(Number(p.months)))
+    .map((p) => ({
+      ...p,
+      discountLabel: premiumSavingsCornerBadge(p),
+      tag: Number(p.months) === 24 ? t('dashboard.plans.best_tag') : '',
+    }))
   return [...base, ...extra]
 })
 
@@ -1088,15 +1150,11 @@ function subscriptionTokensForPlan(plan) {
   return Math.round(rub / SUBSCRIPTION_GIFT_RUB_PER_AURUM)
 }
 
-/** Короткая подпись для угла карточки: из «Экономия 480 ₽» → «−480 ₽» */
+/** Короткая подпись для угла карточки: «−480 ₽» */
 function premiumSavingsCornerBadge(plan) {
-  const s = String(plan?.savings || '').trim()
-  if (!s) return ''
-  const m = s.match(/Экономия\s+([\d\s\u00a0]+)\s*₽/i)
-  if (!m) return ''
-  const num = m[1].replace(/[\s\u00a0]+/g, ' ').trim()
-  if (!num) return ''
-  return `−${num} ₽`
+  const rub = Number(plan?.savingsRub ?? 0)
+  if (!rub) return ''
+  return t('dashboard.plans.savings_short', { rub: formatPlanRub(rub) })
 }
 function applyMeState(nextMe) {
   const wasPremium = !!me.value?.is_premium
@@ -1193,7 +1251,7 @@ async function loadMeInitial() {
       bootError.value =
         d && !/^load failed$/i.test(d)
           ? d
-          : 'Не удалось загрузить профиль. Проверьте интернет или задеплойте API (сервис zealous-bravery).'
+          : t('errors.cannot_load_profile')
     }
     if (actRes.status === 'fulfilled' && actGen === activitySummaryFetchGen) {
       activitySummary.value = actRes.value
@@ -1224,8 +1282,8 @@ onMounted(async () => {
   } else {
     setTimeout(() => preloadTokenLandingOrbit(), 1800)
   }
-  if (!dashboardSection.value) setDashboardSection('account')
-  if (dashboardSection.value === 'partner') {
+  if (!dashCtx.dashboardSection.value) dashCtx.setDashboardSection('account')
+  if (dashCtx.dashboardSection.value === 'partner') {
     await ensurePartnerData()
     await ensureReferralPeople()
     await ensurePartnerPayouts()
@@ -1296,7 +1354,7 @@ function scheduleBroadcastMiniSnapshot() {
   if (broadcastMiniDebounceTimer) clearTimeout(broadcastMiniDebounceTimer)
   broadcastMiniDebounceTimer = setTimeout(() => {
     broadcastMiniDebounceTimer = null
-    const sec = dashboardSection.value || 'account'
+    const sec = dashCtx.dashboardSection.value || 'account'
     if (sec !== 'account' && sec !== 'subscription') return
     if (!accountShowBroadcastMiniCard.value) return
     void loadBroadcastMiniSnapshot()
@@ -1304,7 +1362,7 @@ function scheduleBroadcastMiniSnapshot() {
 }
 
 watch(
-  () => [dashboardSection.value, accountShowBroadcastMiniCard.value, me.value?.telegram_id, route.path],
+  () => [dashCtx.dashboardSection.value, accountShowBroadcastMiniCard.value, me.value?.telegram_id, route.path],
   () => {
     scheduleBroadcastMiniSnapshot()
     restartStatBroadcastNudge()
@@ -1345,8 +1403,14 @@ watch(
   () => [String(route.path || ''), String(route.query?.section || '').trim().toLowerCase()],
   ([path, sec]) => {
     if (path !== '/') return
-    if (sec === 'billing' || sec === 'partner' || sec === 'account' || sec === 'subscription') {
-      setDashboardSection(sec)
+    if (
+      sec === 'billing' ||
+      sec === 'partner' ||
+      sec === 'account' ||
+      sec === 'subscription' ||
+      sec === 'tokens'
+    ) {
+      dashCtx.setDashboardSection(sec)
     }
   },
   { immediate: true },
@@ -1367,7 +1431,7 @@ watch(
   },
 )
 
-watch(dashboardSection, (section) => {
+watch(dashCtx.dashboardSection, (section) => {
   restartUpdatesRotation()
   dashSwitchBusy.value = true
   if (dashSwitchTimer) clearTimeout(dashSwitchTimer)
@@ -1431,7 +1495,7 @@ function onLandingContinue() {
     return
   }
   scrollToBillingPremiumPlans()
-  showToast('Выберите срок на карточке или в списке ниже')
+  showToast(t('dashboard.toasts.choose_period'))
 }
 
 function closePremiumPayMethodModal() {
@@ -1468,7 +1532,7 @@ async function onPremiumPayMethodProceed() {
   if (method === 'card') {
     const okPin = await requestPinIfNeeded('payments')
     if (!okPin) {
-      if (shouldAskPinForAction('payments')) showToast('Нужен код из «Настройки → Безопасность»')
+      if (shouldAskPinForAction('payments')) showToast(t('errors.pin_required'))
       return
     }
     premiumPayMethodProceedLoading.value = true
@@ -1481,7 +1545,7 @@ async function onPremiumPayMethodProceed() {
     }
     return
   }
-  showToast('Telegram Stars скоро будет доступно. Выберите оплату картой / СБП через ЮKassa.')
+  showToast(t('dashboard.toasts.stars_soon'))
 }
 
 const billingScrollTargets = {
@@ -1493,7 +1557,7 @@ const billingScrollTargets = {
 
 watch(
   () =>
-    `${dashboardSection.value}|${String(route.query.scroll || '').trim().toLowerCase()}|${me.value ? '1' : '0'}`,
+    `${dashCtx.dashboardSection.value}|${String(route.query.scroll || '').trim().toLowerCase()}|${me.value ? '1' : '0'}`,
   (key) => {
     const [section, scroll, ready] = key.split('|')
     if (ready !== '1' || section !== 'billing') return
@@ -1614,12 +1678,12 @@ function providerLabel(v) {
 function tokenReasonLabel(v) {
   const raw = String(v || '').trim().toLowerCase()
   if (!raw) return '—'
-  if (raw === 'tokens_purchase') return 'Покупка токенов'
-  if (raw === 'broadcast_bonus') return 'Рассылка (списано с бонусных ⚡)'
-  if (raw === 'broadcast_sub') return 'Рассылка (исторический остаток)'
-  if (raw === 'daily_burn') return 'Ежедневное списание подписки'
-  if (raw === 'bonus_to_sub') return 'Перевод: партнерские -> подписочные (списание)'
-  if (raw === 'bonus_to_sub_target') return 'Перевод: партнерские -> подписочные (зачисление)'
+  if (raw === 'tokens_purchase') return t('history.kinds.tokens_purchase')
+  if (raw === 'broadcast_bonus') return t('history.kinds.broadcast_bonus')
+  if (raw === 'broadcast_sub') return t('history.kinds.broadcast_sub')
+  if (raw === 'daily_burn') return t('history.kinds.daily_burn')
+  if (raw === 'bonus_to_sub') return t('history.kinds.bonus_to_sub')
+  if (raw === 'bonus_to_sub_target') return t('history.kinds.bonus_to_sub_target')
   return raw
 }
 
@@ -1630,7 +1694,7 @@ async function ensurePartnerData() {
   try {
     partnerData.value = await rawApi.referral()
   } catch (e) {
-    partnerError.value = String(e?.body?.detail || e?.message || 'Не удалось загрузить партнерские данные')
+    partnerError.value = String(e?.body?.detail || e?.message || t('dashboard.toasts.partner_load_failed'))
   } finally {
     partnerLoading.value = false
   }
@@ -1706,14 +1770,14 @@ async function openYookassaUrlFromResponse(r) {
 }
 
 async function startTokenPackPayment(tokens) {
-  const t = Number(tokens || 0)
-  if (!t) return
-  payLoadingTokenPack.value = t
+  const tok = Number(tokens || 0)
+  if (!tok) return
+  payLoadingTokenPack.value = tok
   try {
-    const r = await fetchSilent(() => api.yookassaCreateTokensPayment(t))
+    const r = await fetchSilent(() => api.yookassaCreateTokensPayment(tok))
     const url = r?.confirmation_url
     if (!url) {
-      showToast('Нет ссылки на оплату')
+      showToast(t('errors.payment_link_missing'))
       return
     }
     beginPaymentRedirect(url)
@@ -1727,31 +1791,31 @@ function buyTokenPackYookassa(tokens) {
 }
 
 function selectTokenPack(tokens) {
-  const t = Number(tokens || 0)
-  if (!t) return
-  selectedTokenPack.value = selectedTokenPack.value === t ? null : t
+  const n = Number(tokens || 0)
+  if (!n) return
+  selectedTokenPack.value = selectedTokenPack.value === n ? null : n
 }
 
 function continueTokenPackCheckout() {
-  const t = Number(selectedTokenPack.value || 0)
-  if (!t) {
-    showToast('Выберите пакет токенов')
+  const tok = Number(selectedTokenPack.value || 0)
+  if (!tok) {
+    showToast(t('dashboard.toasts.select_pack'))
     return
   }
-  buyTokenPackYookassa(t)
+  buyTokenPackYookassa(tok)
 }
 
 async function buyTokenPackAdminTest(tokens) {
-  const t = Number(tokens || 0)
-  if (!t) return
+  const tk = Number(tokens || 0)
+  if (!tk) return
   const okPin = await requestPinIfNeeded('payments')
   if (!okPin) {
-    if (shouldAskPinForAction('payments')) showToast('Нужен код из «Настройки → Безопасность»')
+    if (shouldAskPinForAction('payments')) showToast(t('errors.pin_required'))
     return
   }
   testTokenPayLoading.value = true
   try {
-    const r = await fetchSilent(() => rawApi.adminTestCreateTokensPayment(t))
+    const r = await fetchSilent(() => rawApi.adminTestCreateTokensPayment(tk))
     await openYookassaUrlFromResponse(r)
   } finally {
     testTokenPayLoading.value = false
@@ -1763,17 +1827,20 @@ const AURUM_LIST_RUB_PER_TOKEN = 2.0
 function showAurumTokensHelp() {
   const packs = tokenPacks.value || []
   const sample = packs[0]
-  let packLine = ''
+  let exampleSuffix = ''
   if (sample && Number(sample.tokens) > 0 && sample.price_rub != null) {
     const per = Number(sample.price_rub) / Number(sample.tokens)
-    packLine = `Сейчас в каталоге, например, пакет ${Number(sample.tokens)} AURUM за ${Math.round(Number(sample.price_rub))} ₽ — это примерно ${per.toFixed(2)} ₽ за один AURUM.`
+    exampleSuffix = t('dashboard.info.aurum_example_suffix', {
+      tokens: Number(sample.tokens),
+      rub: Math.round(Number(sample.price_rub)),
+      per: per.toFixed(2),
+    })
   }
-  const paras = [
-    'AURUM ✨ — «топливо» для рассылок и ИИ в кабинете.',
-    `Ориентир по цене в лоб: около ${AURUM_LIST_RUB_PER_TOKEN} ₽ за 1 AURUM; в пакетах обычно выгоднее за счёт скидок.${packLine ? ` ${packLine}` : ''}`,
-    'С Premium в подарок начисляется AURUM ✨ (меньше суммы в рублях, чтобы подписка и докупка не дублировали выгоду). Партнёрские ⚡ лежат отдельно — их можно перевести в AURUM. Рассылка списывает сначала AURUM ✨.',
+  aurumHelpParagraphs.value = [
+    t('dashboard.info.aurum_p0'),
+    t('dashboard.info.aurum_p1', { rate: AURUM_LIST_RUB_PER_TOKEN, example_suffix: exampleSuffix }),
+    t('dashboard.info.aurum_p2'),
   ]
-  aurumHelpParagraphs.value = paras
   showAurumHelpModal.value = true
 }
 
@@ -1787,69 +1854,54 @@ const tokensInfoBtnAmberClass =
   'inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-amber-400/40 bg-amber-950/45 text-[9px] font-extrabold text-amber-100 shadow-[inset_0_1px_0_rgba(251,191,36,0.12)] backdrop-blur-md transition hover:bg-amber-900/35 active:scale-95'
 
 function openTokensSubscriptionInfo() {
-  tokensInfoTitle.value = 'Пакеты и подписка'
-  tokensInfoParagraphs.value = [
-    'Пакеты AURUM можно оплатить только при активной подписке Guard Premium.',
-    'Так расход токенов остаётся связанным с тарифом, а риск злоупотреблений ниже.',
-  ]
+  tokensInfoTitle.value = t('dashboard.info.tokens_subscription_title')
+  tokensInfoParagraphs.value = infoParagraphList('dashboard.info.tokens_subscription_body')
   showTokensInfoModal.value = true
 }
 
 function openTokensCheckoutInfo() {
-  tokensInfoTitle.value = 'Оплата'
-  tokensInfoParagraphs.value = [
-    'Нажмите на карточку пакета — откроется страница оплаты YooKassa с уже выбранной суммой.',
-    'Возврат средств выполняется по правилам банка и платёжной системы.',
-  ]
+  tokensInfoTitle.value = t('dashboard.info.tokens_checkout_title')
+  tokensInfoParagraphs.value = infoParagraphList('dashboard.info.tokens_checkout_body')
   showTokensInfoModal.value = true
 }
 
 function openTokensAdminTestInfo() {
-  tokensInfoTitle.value = 'Тестовая оплата'
-  tokensInfoParagraphs.value = [
-    'Видно только администраторам. Создаёт тот же платёж YooKassa, что и в админке, без дополнительной проверки Premium.',
-  ]
+  tokensInfoTitle.value = t('dashboard.info.tokens_test_title')
+  tokensInfoParagraphs.value = infoParagraphList('dashboard.info.tokens_test_body')
   showTokensInfoModal.value = true
 }
 
 function openPremiumHeaderInfo() {
-  tokensInfoTitle.value = 'Guard Premium'
-  const bullets = PREMIUM_PLANS.filter((p) => p.savings).map((p) => `${p.label} · ${p.price} — ${p.savings}.`)
-  tokensInfoParagraphs.value = [
-    'Промокод: введите в поле и нажмите «Готово». Скидка или бонус — по правилам акции.',
-    'Оплата: нажмите срок в сетке — откроется YooKassa. К подписке в подарок начисляется AURUM ✨ (ориентир: сумма в рублях / 4 ≈ число ✨).',
-    'Длинные периоды выгоднее, чем платить каждый месяц по отдельности:',
-    ...bullets,
-  ]
+  tokensInfoTitle.value = t('dashboard.info.premium_header_title')
+  const introArr = infoParagraphList('dashboard.info.premium_header_intro')
+  const bullets = premiumPlansCatalog.value
+    .filter((p) => p.savings)
+    .map((p) =>
+      t('dashboard.info.premium_plan_bullet', { label: p.label, price: p.price, savings: p.savings }),
+    )
+  tokensInfoParagraphs.value = [...introArr, ...bullets]
   showTokensInfoModal.value = true
 }
 
 function openPremiumPayMethodInfo() {
-  tokensInfoTitle.value = 'Как проходит оплата'
-  tokensInfoParagraphs.value = [
-    'Мы не вводим карту внутри Telegram: после выбора периода открывается защищённая страница ЮKassa — там карта, СБП и другие способы, которые включены в вашем магазине.',
-    '1. Нажмите срок подписки ниже и выберите «Банковская карта».',
-    '2. Оплатите на стороне ЮKassa.',
-    '3. Вернитесь в Guard; при необходимости обновите экран — Premium подтянется.',
-    'Автопродление привязано к сохранённой карте в ЮKassa — блок «Авто» ниже после первой оплаты.',
-  ]
+  tokensInfoTitle.value = t('dashboard.info.pay_flow_title')
+  const key =
+    premiumPayMethodFlow.value === 'tokens'
+      ? 'dashboard.info.pay_flow_tokens'
+      : 'dashboard.info.pay_flow_subscribe'
+  tokensInfoParagraphs.value = infoParagraphList(key)
   showTokensInfoModal.value = true
 }
 
 function openPremiumAutorenewInfo() {
-  tokensInfoTitle.value = 'Автосписание'
-  tokensInfoParagraphs.value = [
-    'При включённом автосписании продление идёт по сохранённой карте, чтобы защита не прерывалась.',
-    'Отключить автосписание можно в любой момент — доступ сохранится до конца уже оплаченного периода.',
-  ]
+  tokensInfoTitle.value = t('dashboard.info.autorenew_title')
+  tokensInfoParagraphs.value = infoParagraphList('dashboard.info.autorenew_body')
   showTokensInfoModal.value = true
 }
 
 function openPremiumTestTariffInfo() {
-  tokensInfoTitle.value = 'Тест тарифов'
-  tokensInfoParagraphs.value = [
-    'Блок виден только вашему аккаунту. Создаёт тот же платёж YooKassa, что и у обычных кнопок выше.',
-  ]
+  tokensInfoTitle.value = t('dashboard.info.test_tariff_title')
+  tokensInfoParagraphs.value = infoParagraphList('dashboard.info.test_tariff_body')
   showTokensInfoModal.value = true
 }
 
@@ -1862,7 +1914,7 @@ watch(showAllTokenPacks, (open) => {
 })
 
 watch(
-  () => dashboardSection.value,
+  () => dashCtx.dashboardSection.value,
   (section) => {
     if (section === 'partner') {
       ensurePartnerData()
@@ -1880,9 +1932,11 @@ watch(
       return
     }
     if (section === 'account') {
+      if (!hasInitData.value || !me.value) return
       if (Date.now() - lastActivitySummaryOkAt > 4500) refreshActivitySummarySilent()
     }
-  }
+  },
+  { immediate: true },
 )
 
 const partnerAurumTokens = computed(() => {
@@ -1903,20 +1957,20 @@ async function copyPartnerLink() {
   try {
     if (navigator?.clipboard?.writeText) {
       await navigator.clipboard.writeText(link)
-      alert('Ссылка скопирована')
+      alert(t('dashboard.partner_ui.link_copied'))
       return
     }
   } catch {
     //
   }
-  alert('Скопируйте ссылку вручную')
+  alert(t('dashboard.partner_ui.link_copy_manual'))
 }
 
 function sharePartnerLink() {
   const link = String(partnerData.value?.ref_link || '')
   if (!link) return
   fetchSilent(() => api.referralShareHit()).catch(() => {})
-  const text = 'Guard защищает чаты от спама. Подключайся по моей ссылке.'
+  const text = t('dashboard.partner_ui.share_text')
   const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(text)}`
   const tg = window.Telegram?.WebApp
   if (typeof tg?.openTelegramLink === 'function') {
@@ -1937,7 +1991,7 @@ function displayReferralName(item) {
   if (username) return `@${username}`
   const tgId = Number(item?.telegram_id || 0)
   if (tgId > 0) return `ID ${tgId}`
-  return 'Пользователь'
+  return t('dashboard.partner_ui.user_fallback')
 }
 
 async function setDashboardStatsPeriod(key) {
@@ -2164,7 +2218,7 @@ async function tryOpenProtectionReportFromRoute() {
     }
   }
   if (!mustOpen) return
-  setDashboardSection('account')
+  dashCtx.setDashboardSection('account')
   await nextTick()
   await openActivityDetails()
   try {
@@ -2181,7 +2235,7 @@ async function openGroupActivityDetails(row) {
   const cid = Number(row?.chat_id || 0)
   if (!cid) return
   groupActivityChatId.value = String(cid)
-  groupActivityTitle.value = String(row?.chat_title || `Чат ${cid}`)
+  groupActivityTitle.value = String(row?.chat_title || t('dashboard.home_shell.chat_fallback', { id: cid }))
   groupStatsPreset.value = '24h'
   groupStatsUseCustom.value = false
   groupStatsRangeExpanded.value = false
@@ -2201,14 +2255,14 @@ function closeGroupActivityModal() {
 
 function goBillingCloseGroupModal() {
   billingFromGroupStats.value = true
-  setDashboardSection('billing')
+  dashCtx.setDashboardSection('billing')
   showGroupActivityModal.value = false
   showActivityModal.value = false
 }
 
 async function backFromBillingToGroupStats() {
   billingFromGroupStats.value = false
-  setDashboardSection('account')
+  dashCtx.setDashboardSection('account')
   if (groupActivityChatId.value) {
     showGroupActivityModal.value = true
     await loadGroupActivityFull()
@@ -2222,7 +2276,7 @@ function openBillingSection(opts = {}) {
   } else if (opts.scrollLanding) {
     void router.push({ path: '/', query: { ...route.query, section: 'billing', scroll: 'landing' } })
   } else {
-    setDashboardSection('billing')
+    dashCtx.setDashboardSection('billing')
     const q = { ...route.query, section: 'billing' }
     delete q.scroll
     void router.push({ path: '/', query: q })
@@ -2237,7 +2291,7 @@ function openPremiumLandingFromAurumGate() {
 function openTokenPacksFromShowcase() {
   showPremiumAurumShowcaseModal.value = false
   showPremiumTokenLanding.value = true
-  setDashboardSection('tokens')
+  dashCtx.setDashboardSection('tokens')
   // Делаем несколько попыток после переключения секции/отрисовки, чтобы скролл
   // стабильно срабатывал и заголовок AURUM был в зоне видимости.
   const scrollToTitle = () => {
@@ -2347,7 +2401,7 @@ async function submitPayoutRequest() {
   if (!amount) return
   const minPayout = Number(partnerPayouts.value?.min_payout_rub || 1500)
   if (amount < minPayout) {
-    alert('Сумма недостаточна для вывода')
+    alert(t('dashboard.partner_ui.payout_too_low'))
     return
   }
   payoutSubmitting.value = true
@@ -2361,9 +2415,9 @@ async function submitPayoutRequest() {
     payoutAmountRub.value = ''
     payoutRequisites.value = ''
     await ensurePartnerPayouts()
-    alert('Заявка на вывод отправлена')
+    alert(t('dashboard.partner_ui.payout_sent'))
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось отправить заявку'))
+    alert(String(e?.body?.detail || e?.message || t('dashboard.partner_ui.payout_failed')))
   } finally {
     payoutSubmitting.value = false
   }
@@ -2381,12 +2435,12 @@ async function transferPartnerBonusToAurum() {
       ensurePartnerPayouts(),
     ])
     if (moved > 0) {
-      alert(`Переведено в AURUM: ${fmtAmount(moved)} ✨`)
+      alert(t('dashboard.partner_ui.bonus_transferred', { amount: fmtAmount(moved) }))
     } else {
-      alert('Партнерских токенов для перевода нет')
+      alert(t('dashboard.partner_ui.bonus_none'))
     }
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || 'Не удалось перевести токены'))
+    alert(String(e?.body?.detail || e?.message || t('dashboard.partner_ui.bonus_failed')))
   } finally {
     bonusTransferLoading.value = false
   }
@@ -2422,12 +2476,12 @@ async function startPayment(months) {
     const r = await fetchSilent(() => api.yookassaCreatePayment(months))
     const url = r?.confirmation_url
     if (!url) {
-      showToast('Нет ссылки на оплату')
+      showToast(t('errors.payment_link_missing'))
       return
     }
     beginPaymentRedirect(url)
   } catch (e) {
-    showToast(String(e?.body?.detail || e?.message || 'Не удалось создать платёж'))
+    showToast(String(e?.body?.detail || e?.message || t('errors.payment_failed')))
   } finally {
     payLoadingMonths.value = null
   }
@@ -2489,7 +2543,7 @@ function beginPaymentRedirect(url) {
 
 function closePremiumActivatedModalToHome() {
   showPremiumActivatedModal.value = false
-  setDashboardSection('account')
+  dashCtx.setDashboardSection('account')
   const q = { ...route.query, section: 'account' }
   delete q.scroll
   void router.push({ path: '/', query: q }).catch(() => {})
@@ -2501,7 +2555,7 @@ function onPremiumActivatedGoSubscription() {
 }
 
 function openSubscriptionScreen() {
-  setDashboardSection('subscription')
+  dashCtx.setDashboardSection('subscription')
   const q = { ...route.query, section: 'subscription' }
   delete q.scroll
   void router.push({ path: '/', query: q }).catch(() => {})
@@ -2517,7 +2571,7 @@ function closePromoCodeModal() {
 }
 
 function openTariffFromSubscription() {
-  setDashboardSection('billing')
+  dashCtx.setDashboardSection('billing')
   const q = { ...route.query, section: 'billing' }
   delete q.scroll
   void router.push({ path: '/', query: q }).catch(() => {})
@@ -2597,11 +2651,11 @@ async function submitReceipt() {
   } catch (e) {
     const detail = String(e?.body?.detail || e?.message || '')
     if (detail.includes('EMAIL_NOT_CONFIGURED')) {
-      alert('Отправка чека по email временно недоступна: почтовый сервер не настроен.')
+      alert(t('dashboard.billing.receipt_alert_email_down'))
     } else if (detail) {
       alert(detail)
     } else {
-      alert('Не удалось отправить чек. Попробуйте позже.')
+      alert(t('dashboard.billing.receipt_alert_send_failed'))
     }
   } finally {
     receiptSending.value = false
@@ -2614,7 +2668,7 @@ async function submitReceipt() {
   <div class="space-y-3">
 
     <div v-if="!hasInitData" class="rounded-xl border border-amber-200 bg-amber-50 p-4 text-amber-800 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-200">
-      Откройте панель из Telegram (бот → команда или кнопка меню), чтобы данные подгрузились.
+      {{ t('dashboard.home_shell.boot_hint') }}
     </div>
 
     <div v-else-if="bootError" class="rounded-xl border border-red-200 bg-red-50 p-4 text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300">
@@ -2624,7 +2678,7 @@ async function submitReceipt() {
         class="mt-3 w-full rounded-lg bg-slate-800 px-3 py-2 text-sm font-semibold text-white dark:bg-slate-200 dark:text-slate-900"
         @click="loadMeInitial"
       >
-        Повторить
+        {{ t('dashboard.home_shell.retry') }}
       </button>
     </div>
 
@@ -2637,7 +2691,7 @@ async function submitReceipt() {
       class="relative isolate -mx-4 min-h-0 px-4 pb-1.5 pt-0 font-display md:-mx-6 md:px-6 md:pt-0"
     >
       <SubscriptionManagementPanel
-        v-if="dashboardSection === 'subscription'"
+        v-if="dashSection === 'subscription'"
         :profile="me"
         variant="page"
         @update:profile="applyMeState"
@@ -2649,7 +2703,7 @@ async function submitReceipt() {
         class="pointer-events-none absolute inset-x-0 top-1 z-30 flex justify-center"
         aria-hidden="true"
       >
-        <span class="text-xs font-medium text-white/90 drop-shadow-[0_1px_4px_rgba(0,0,0,0.85)]">Секундочку…</span>
+        <span class="text-xs font-medium text-white/90 drop-shadow-[0_1px_4px_rgba(0,0,0,0.85)]">{{ t('dashboard.home_shell.moment') }}</span>
       </div>
       <div class="mt-0 space-y-0">
         <div
@@ -2712,9 +2766,9 @@ async function submitReceipt() {
                     class="text-[11px] font-extrabold leading-tight tracking-tight md:text-[12px]"
                     :class="protectionStatusOk ? 'text-lime-400' : protectionStatusNoChats ? 'text-rose-400' : 'text-amber-400'"
                   >
-                    <template v-if="protectionStatusOk">Защита активна</template>
-                    <template v-else-if="protectionStatusNoChats">Защита отключена</template>
-                    <template v-else>Защита не активна</template>
+                    <template v-if="protectionStatusOk">{{ t('dashboard.hero.protection_active') }}</template>
+                    <template v-else-if="protectionStatusNoChats">{{ t('dashboard.hero.protection_status_no_chats') }}</template>
+                    <template v-else>{{ t('dashboard.hero.protection_status_limbo') }}</template>
                   </p>
                 </div>
 
@@ -2723,22 +2777,22 @@ async function submitReceipt() {
                     class="flex w-full min-w-0 items-stretch justify-between divide-x divide-white/[0.07]"
                   >
                     <div class="flex min-w-0 flex-1 flex-col items-center px-1.5 text-center sm:px-2">
-                      <p class="w-full text-[8px] font-semibold uppercase tracking-wide text-white/45">Удалено</p>
+                      <p class="w-full text-[8px] font-semibold uppercase tracking-wide text-white/45">{{ t('dashboard.hero.col_deleted') }}</p>
                       <p class="mt-0.5 w-full text-[15px] font-extrabold tabular-nums leading-none text-white sm:text-[16px]">
                         {{ activitySummary?.today?.deleted ?? 0 }}
                       </p>
-                      <p class="mt-0.5 w-full text-[9px] font-medium leading-tight text-lime-400/95">сообщения</p>
+                      <p class="mt-0.5 w-full text-[9px] font-medium leading-tight text-lime-400/95">{{ t('dashboard.hero.col_deleted_sub') }}</p>
                     </div>
                     <div class="flex min-w-0 flex-1 flex-col items-center px-1.5 text-center sm:px-2">
-                      <p class="w-full text-[8px] font-semibold uppercase tracking-wide text-white/45">Сэкономлено</p>
+                      <p class="w-full text-[8px] font-semibold uppercase tracking-wide text-white/45">{{ t('dashboard.hero.col_saved') }}</p>
                       <p class="mt-0.5 w-full whitespace-nowrap text-center text-[12px] font-extrabold tabular-nums leading-none text-white sm:text-[13px]">
                         ~ {{ fmtRubInt(dashboardEstimatedSavedRub) }} ₽
                       </p>
-                      <p class="mt-0.5 w-full text-[9px] font-medium leading-tight text-lime-400/95">админам</p>
+                      <p class="mt-0.5 w-full text-[9px] font-medium leading-tight text-lime-400/95">{{ t('dashboard.hero.col_saved_sub') }}</p>
                     </div>
                     <div class="flex min-w-0 flex-1 flex-col items-center px-1.5 text-center sm:px-2">
                       <p class="w-full whitespace-nowrap text-[8px] font-semibold uppercase leading-tight tracking-wide text-white/45">
-                        Уровень защиты
+                        {{ t('dashboard.hero.col_level') }}
                       </p>
                       <div class="mt-0.5 flex w-full min-w-0 flex-col items-stretch gap-1">
                         <p
@@ -2750,7 +2804,7 @@ async function submitReceipt() {
                         <!-- Полоска на всю ширину колонки; незаполнено — серым как в группах TG -->
                         <div
                           class="flex h-1 w-full min-w-0 gap-1"
-                          :title="`Оценка: ${dashboardProtectionLevelMeta.score ?? '—'}/100 (тариф, Guard не на паузе, защищённые группы, удаления за сутки, лимит групп)`"
+                          :title="t('dashboard.hero.score_tooltip', { score: dashboardProtectionLevelMeta.score ?? '—' })"
                         >
                           <span
                             v-for="seg in 4"
@@ -2780,29 +2834,30 @@ async function submitReceipt() {
                       <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
                     </svg>
                   </span>
-                  <span class="min-w-0 flex-1 text-[11px] font-semibold leading-tight text-white sm:text-[12px]">
-                    Защищено сегодня: <span class="text-lime-400">{{ ruGroupsProtectedLabel(activityProtectedGroupsCount) }}</span>
-                  </span>
+                  <span class="min-w-0 flex-1 text-[11px] font-semibold leading-tight text-white sm:text-[12px]"
+                    >{{ t('dashboard.hero.protected_today_prefix') }}
+                    <span class="text-lime-400">{{ ruGroupsProtectedLabel(activityProtectedGroupsCount) }}</span></span
+                  >
                   <span class="shrink-0 text-sm font-light text-white/40" aria-hidden="true">›</span>
                 </button>
               </div>
             </div>
           </div>
 
-          <template v-if="dashboardSection === 'account'">
+          <template v-if="dashSection === 'account'">
           <!-- Нижний ряд: AURUM (уже) | чаты (шире) -->
           <div class="mt-1 grid min-w-0 grid-cols-[minmax(0,40%)_minmax(0,60%)] gap-1.5 md:grid-cols-[minmax(0,38%)_minmax(0,62%)] md:gap-2">
             <div class="relative min-w-0 rounded-xl border border-amber-400/15 bg-gradient-to-b from-black/45 to-zinc-950/90 px-1 pb-0.5 pt-1 shadow-[0_10px_36px_-18px_rgba(0,0,0,0.65)] backdrop-blur-md md:px-1.5">
               <div class="flex items-start justify-between gap-1.5">
                 <div class="min-w-0">
                   <p class="flex items-center gap-0.5 text-[8px] font-bold uppercase tracking-wide text-amber-200/90">
-                    <span aria-hidden="true">⚡</span> Токены AURUM
+                    <span aria-hidden="true">⚡</span> {{ t('dashboard.hero.aurum_heading') }}
                   </p>
                   <p class="mt-0.5 flex items-baseline gap-0.5 text-[18px] font-extrabold tabular-nums leading-none text-white">
                     {{ fmtAmount(me?.aurum_tokens || 0) }}
                     <span class="text-sm">✨</span>
                   </p>
-                  <p class="mt-0.5 text-[9px] text-white/45">Ваш баланс</p>
+                  <p class="mt-0.5 text-[9px] text-white/45">{{ t('dashboard.hero.your_balance') }}</p>
                 </div>
                 <div class="relative grid h-9 w-9 shrink-0 place-items-center">
                   <span class="absolute inset-0 rounded-full border border-lime-400/25" />
@@ -2820,7 +2875,7 @@ async function submitReceipt() {
                     <circle cx="9" cy="21" r="1" /><circle cx="20" cy="21" r="1" />
                     <path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6" />
                   </svg>
-                  Купить
+                  {{ t('dashboard.hero.buy_short') }}
                 </button>
                 <button
                   type="button"
@@ -2831,7 +2886,7 @@ async function submitReceipt() {
                     <circle cx="12" cy="12" r="10" />
                     <path d="M12 6v6l4 2" />
                   </svg>
-                  История
+                  {{ t('dashboard.hero.history_short') }}
                 </button>
               </div>
             </div>
@@ -2841,8 +2896,8 @@ async function submitReceipt() {
                 v-if="spikeActiveShared"
                 type="button"
                 class="absolute right-1 top-1 z-[1] inline-flex items-center justify-center"
-                title="Есть чат под угрозой"
-                aria-label="Открыть делегированные чаты под угрозой"
+                :title="t('dashboard.chats_mini.threat_tooltip')"
+                :aria-label="t('dashboard.chats_mini.threat_aria')"
                 @click.stop="openSharedThreatChats"
               >
                 <span class="absolute inline-flex h-3 w-3 animate-ping rounded-full bg-yellow-400/55" />
@@ -2852,7 +2907,7 @@ async function submitReceipt() {
                 <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-sky-300/90" aria-hidden="true">
                   <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
                 </svg>
-                Ваши чаты
+                {{ t('dashboard.chats_mini.title') }}
               </p>
               <div class="space-y-1.5">
                 <div class="flex min-w-0 items-center gap-1.5">
@@ -2871,7 +2926,7 @@ async function submitReceipt() {
                     </svg>
                   </span>
                   <span class="shrink-0 whitespace-nowrap text-[10px] font-semibold leading-tight text-lime-200">
-                    Группы
+                    {{ t('dashboard.hero.groups_short') }}
                     <span class="ml-0.5 tabular-nums font-medium text-white/90">
                       {{ activityGroupsCount }} / {{ activityGroupsLimit }}
                     </span>
@@ -2885,7 +2940,7 @@ async function submitReceipt() {
                   <button
                     type="button"
                     class="grid h-4 w-4 shrink-0 place-items-center rounded-md border border-lime-300/35 bg-gradient-to-b from-lime-400 to-lime-600 text-[10px] font-bold leading-none text-lime-950 shadow-[0_0_10px_rgba(132,204,22,0.45)]"
-                    aria-label="Подключить группу"
+                    :aria-label="t('dashboard.chats_mini.connect_group_aria')"
                     @click="$router.push({ path: '/connect', query: { kind: 'group' } })"
                   >
                     +
@@ -2909,10 +2964,7 @@ async function submitReceipt() {
                     </svg>
                   </span>
                   <span class="shrink-0 whitespace-nowrap text-[10px] font-semibold leading-tight text-white/95">
-                    Каналы
-                    <span class="ml-0.5 tabular-nums font-medium text-white/90">
-                      {{ activityChannelsCount }} / {{ activityChannelsLimit }}
-                    </span>
+                    {{ t('dashboard.hero.channels_short') }}
                   </span>
                   <div class="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-white/10">
                     <div
@@ -2923,7 +2975,7 @@ async function submitReceipt() {
                   <button
                     type="button"
                     class="grid h-4 w-4 shrink-0 place-items-center rounded-md border border-amber-300/40 bg-gradient-to-b from-amber-400 to-amber-600 text-[10px] font-bold leading-none text-amber-950 shadow-[0_0_10px_rgba(251,191,36,0.4)]"
-                    aria-label="Подключить канал"
+                    :aria-label="t('dashboard.chats_mini.connect_channel_aria')"
                     @click="$router.push({ path: '/connect', query: { kind: 'channel' } })"
                   >
                     +
@@ -2935,7 +2987,7 @@ async function submitReceipt() {
                 class="mt-1 flex w-full items-center justify-center gap-0.5 rounded-lg bg-black/30 py-1 text-[10px] font-semibold text-white/90 transition hover:bg-black/45"
                 @click="goManageChats"
               >
-                Управление
+                {{ t('dashboard.chats_mini.manage') }}
                 <span class="text-white/40">›</span>
               </button>
             </div>
@@ -2967,15 +3019,15 @@ async function submitReceipt() {
                           <path d="M18 20V10M12 20V4M6 20v-6" stroke-linecap="round" />
                         </svg>
                       </span>
-                      <span class="truncate text-[13px] font-semibold leading-none text-white sm:text-[14px]">Статистика</span>
+                      <span class="truncate text-[13px] font-semibold leading-none text-white sm:text-[14px]">{{ t('dashboard.stats_strip.title') }}</span>
                     </div>
                     <label class="relative shrink-0 pt-px">
-                      <span class="sr-only">Период статистики</span>
+                      <span class="sr-only">{{ t('dashboard.stats_strip.period_sr_only') }}</span>
                       <select
                         class="pointer-events-auto max-w-[8.5rem] cursor-pointer appearance-none rounded-lg border border-lime-500/40 bg-black/50 py-0.5 pl-2 pr-7 text-[11px] font-semibold leading-none text-lime-400 outline-none ring-0 sm:max-w-none sm:py-1 sm:pl-2 sm:text-[12px] disabled:cursor-not-allowed disabled:opacity-45"
                         :disabled="dashboardStatsPremiumLocked"
                         :value="dashboardStatsPeriod"
-                        title="Период для показателей ниже"
+                        :title="t('dashboard.stats_strip.period_hint')"
                         @change="onDashboardStatsPeriodChange"
                       >
                         <option
@@ -2998,8 +3050,7 @@ async function submitReceipt() {
                     v-if="dashboardStatsPremiumLocked"
                     class="mt-1.5 rounded-lg border border-violet-500/30 bg-violet-950/35 px-2 py-1.5 text-[10px] leading-snug text-violet-100/95 ring-1 ring-violet-400/15"
                   >
-                    <span class="font-semibold text-violet-200">😈 Guard:</span>
-                    на Free счётчики скрыты — ниже нули. Подключите Premium, чтобы видеть реальную статистику защиты и роста.
+                    {{ t('dashboard.stats_strip.free_locked_banner') }}
                   </div>
 
                   <div
@@ -3018,7 +3069,7 @@ async function submitReceipt() {
                         </span>
                         <span class="text-[14px] font-extrabold tabular-nums leading-none text-white sm:text-[15px]">{{ statsCardDeleted }}</span>
                       </div>
-                      <p class="mt-1 w-full text-[10px] font-medium leading-snug text-white/60 sm:text-[11px]">Удалено</p>
+                      <p class="mt-1 w-full text-[10px] font-medium leading-snug text-white/60 sm:text-[11px]">{{ t('dashboard.stats_strip.col_deleted') }}</p>
                       <p class="mt-0.5 line-clamp-2 w-full text-[9px] font-medium leading-snug text-lime-400/90 sm:text-[10px]">{{ statsCardTrendDeleted }}</p>
                     </div>
 
@@ -3032,7 +3083,7 @@ async function submitReceipt() {
                         </span>
                         <span class="text-[14px] font-extrabold tabular-nums leading-none text-white sm:text-[15px]">{{ statsCardSavedHoursLabel }}</span>
                       </div>
-                      <p class="mt-1 w-full text-[10px] font-medium leading-snug text-white/60 sm:text-[11px]">Сэкономлено</p>
+                      <p class="mt-1 w-full text-[10px] font-medium leading-snug text-white/60 sm:text-[11px]">{{ t('dashboard.stats_strip.col_saved') }}</p>
                       <p class="mt-0.5 line-clamp-2 w-full text-[9px] font-medium leading-snug text-lime-400/90 sm:text-[10px]">{{ statsCardTrendSaved }}</p>
                     </div>
 
@@ -3047,7 +3098,7 @@ async function submitReceipt() {
                         </span>
                         <span class="text-[14px] font-extrabold tabular-nums leading-none text-white sm:text-[15px]">{{ statsCardJoins }}</span>
                       </div>
-                      <p class="mt-1 w-full text-[10px] font-medium leading-snug text-white/60 sm:text-[11px]">Вступили</p>
+                      <p class="mt-1 w-full text-[10px] font-medium leading-snug text-white/60 sm:text-[11px]">{{ t('dashboard.stats_strip.col_joined') }}</p>
                       <p class="mt-0.5 line-clamp-2 w-full text-[9px] font-medium leading-snug text-lime-400/90 sm:text-[10px]">{{ statsCardTrendJoins }}</p>
                     </div>
 
@@ -3060,7 +3111,7 @@ async function submitReceipt() {
                         </span>
                         <span class="text-[14px] font-extrabold tabular-nums leading-none text-white sm:text-[15px]">{{ statGroupsLimitPercent }}</span>
                       </div>
-                      <p class="mt-1 w-full text-[10px] font-medium leading-snug text-white/60 sm:text-[11px]">Лимит групп</p>
+                      <p class="mt-1 w-full text-[10px] font-medium leading-snug text-white/60 sm:text-[11px]">{{ t('dashboard.stats_strip.col_group_slots') }}</p>
                       <p class="mt-0.5 line-clamp-2 w-full text-[9px] font-medium leading-snug text-lime-400/90 sm:text-[10px]">{{ statGroupsLimitFoot }}</p>
                     </div>
                   </div>
@@ -3082,9 +3133,9 @@ async function submitReceipt() {
                       <NavIcon name="telegram" class="h-[17px] w-[17px] text-white drop-shadow-[0_1px_8px_rgba(255,255,255,0.35)]" />
                     </div>
                     <div class="min-w-0 flex-1">
-                      <span class="text-[12px] font-extrabold leading-tight text-white sm:text-[13px]">Рассылки</span>
+                      <span class="text-[12px] font-extrabold leading-tight text-white sm:text-[13px]">{{ t('dashboard.broadcast_mini.title') }}</span>
                       <p class="mt-0.5 line-clamp-2 text-[8px] leading-snug text-white/50 sm:text-[9px]">
-                        Отправляйте сообщения во все ваши чаты за секунды
+                        {{ t('dashboard.broadcast_mini.sub') }}
                       </p>
                     </div>
                     <span
@@ -3096,7 +3147,7 @@ async function submitReceipt() {
                         class="flex min-w-0 items-center gap-0.5 rounded-full bg-gradient-to-b from-zinc-800 to-black px-2 py-1 text-[9px] font-bold leading-tight text-white ring-1 ring-inset ring-white/10 transition hover:brightness-110 active:scale-[0.98] sm:px-2.5 sm:text-[10px]"
                         @click.stop="goBroadcastMiniCreate"
                       >
-                        <span class="truncate">Создать</span>
+                        <span class="truncate">{{ t('dashboard.broadcast_mini.create') }}</span>
                         <span class="shrink-0 text-xs font-light text-violet-200/90" aria-hidden="true">›</span>
                       </button>
                     </span>
@@ -3113,7 +3164,7 @@ async function submitReceipt() {
                           {{ broadcastMiniLoading ? '…' : (broadcastMiniEligibleCount ?? '—') }}
                         </span>
                       </div>
-                      <p class="w-full text-[8px] font-medium leading-tight text-white/48 sm:text-[9px]">Доступно чатов</p>
+                      <p class="w-full text-[8px] font-medium leading-tight text-white/48 sm:text-[9px]">{{ t('dashboard.broadcast_mini.eligible') }}</p>
                     </div>
                     <div class="flex min-w-0 flex-col gap-0.5 px-1 py-0.5">
                       <div class="flex items-center gap-1">
@@ -3126,7 +3177,7 @@ async function submitReceipt() {
                           {{ broadcastMiniLoading ? '…' : (broadcastMiniSentToday ?? '—') }}
                         </span>
                       </div>
-                      <p class="w-full text-[8px] font-medium leading-tight text-white/48 sm:text-[9px]">Сколько отправлено сегодня</p>
+                      <p class="w-full text-[8px] font-medium leading-tight text-white/48 sm:text-[9px]">{{ t('dashboard.broadcast_mini.sent_today') }}</p>
                     </div>
                     <div class="flex min-w-0 flex-col gap-0.5 px-1 py-0.5">
                       <div class="flex items-center gap-1">
@@ -3140,7 +3191,7 @@ async function submitReceipt() {
                           {{ broadcastMiniLoading ? '…' : (broadcastMiniScheduledCount ?? 0) }}
                         </span>
                       </div>
-                      <p class="w-full text-[8px] font-medium leading-tight text-white/48 sm:text-[9px]">Запланировано</p>
+                      <p class="w-full text-[8px] font-medium leading-tight text-white/48 sm:text-[9px]">{{ t('dashboard.broadcast_mini.scheduled') }}</p>
                     </div>
                   </div>
                 </div>
@@ -3167,7 +3218,7 @@ async function submitReceipt() {
                   "
                   @click="setUpdatesPremiumSlide(0)"
                 >
-                  Premium защита
+                  {{ t('dashboard.hero.home_tab_premium') }}
                 </button>
                 <button
                   type="button"
@@ -3179,7 +3230,7 @@ async function submitReceipt() {
                   "
                   @click="setUpdatesPremiumSlide(1)"
                 >
-                  Обновления
+                  {{ t('dashboard.hero.home_tab_updates') }}
                 </button>
               </div>
             </div>
@@ -3207,7 +3258,7 @@ async function submitReceipt() {
                         @click="openBillingSection({ scrollPlans: true })"
                       >
                         <span aria-hidden="true">🛡</span>
-                        Усилить защиту
+                        {{ t('dashboard.hero.strengthen_protection') }}
                       </button>
                       <button
                         v-else
@@ -3216,7 +3267,7 @@ async function submitReceipt() {
                         @click="openBillingSection()"
                       >
                         <span aria-hidden="true">👑</span>
-                        Продлить Premium
+                        {{ t('dashboard.plans.cta_renew') }}
                       </button>
                     </div>
                   </div>
@@ -3238,7 +3289,7 @@ async function submitReceipt() {
                       class="flex w-full items-center justify-between gap-1 text-left text-[10px] font-semibold text-white/55 transition hover:text-white/90 sm:text-[11px]"
                       @click="showUpdatesRoadmapModal = true"
                     >
-                      <span>Смотреть все обновления</span>
+                      <span>{{ t('dashboard.hero.view_all_updates') }}</span>
                       <span class="text-base font-light text-white/35" aria-hidden="true">›</span>
                     </button>
                   </div>
@@ -3251,8 +3302,8 @@ async function submitReceipt() {
 
       </div>
 
-      <div v-if="dashboardSection === 'partner'" class="mt-1 space-y-3">
-        <p class="text-center text-xl font-extrabold uppercase tracking-[0.03em] text-white">PARTNER</p>
+      <div v-if="dashSection === 'partner'" class="mt-1 space-y-3">
+        <p class="text-center text-xl font-extrabold uppercase tracking-[0.03em] text-white">{{ t('partner.title') }}</p>
         <div class="grid grid-cols-3 gap-2">
           <button
             type="button"
@@ -3263,7 +3314,7 @@ async function submitReceipt() {
             <div class="mx-auto mb-1 inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/10 text-white">
               <NavIcon name="billing" class="h-3.5 w-3.5" />
             </div>
-            Баланс
+            {{ t('partner.tab_balance') }}
           </button>
           <button
             type="button"
@@ -3274,7 +3325,7 @@ async function submitReceipt() {
             <div class="mx-auto mb-1 inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/10 text-white">
               <NavIcon name="partner" class="h-3.5 w-3.5" />
             </div>
-            <span class="whitespace-nowrap">Мои рефералы</span>
+            <span class="whitespace-nowrap">{{ t('partner.tab_refs') }}</span>
           </button>
           <button
             type="button"
@@ -3285,12 +3336,12 @@ async function submitReceipt() {
             <div class="mx-auto mb-1 inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/10 text-white">
               <NavIcon name="reports" class="h-3.5 w-3.5" />
             </div>
-            Документация
+            {{ t('partner.tab_docs') }}
           </button>
         </div>
 
         <div v-if="partnerLoading" class="py-3 text-center text-sm text-white/75">
-          Секундочку…
+          {{ t('partner.loading') }}
         </div>
         <div v-else-if="partnerError" class="rounded-xl border border-rose-400/40 bg-rose-900/20 p-4 text-sm text-rose-200">
           {{ partnerError }}
@@ -3298,59 +3349,58 @@ async function submitReceipt() {
         <div v-else-if="partnerData && partnerTab === 'balance'" class="rounded-xl border border-slate-700 bg-slate-900/80 p-4 text-sm text-slate-200">
           <div class="space-y-1.5">
             <p>
-              Доступ: ✅ {{ partnerData.access_label || '—' }}<br>
-              ├ Осталось дней: <b>{{ partnerData.days_left ?? 0 }}</b><br>
-              └ Активен до: <b>{{ partnerActiveUntilLabel }}</b>
+              {{ t('partner.access', { label: partnerData.access_label || '—' }) }}<br>
+              ├ {{ t('partner.days_left') }} <b>{{ partnerData.days_left ?? 0 }}</b><br>
+              └ {{ t('partner.active_until') }} <b>{{ partnerActiveUntilLabel }}</b>
             </p>
             <p>
-              Баланс:<br>
-              ├ AURUM: <b>{{ partnerAurumTokens }} ✨</b> (рассылки и ИИ)<br>
-              └ Партнёрские: <b>{{ partnerBonusTokens }} ⚡</b> (1 ⚡ = 2 ₽)
+              {{ t('partner.balance_header') }}<br>
+              ├ {{ t('partner.aurum_line', { amt: partnerAurumTokens }) }}<br>
+              └ {{ t('partner.bonus_line', { amt: partnerBonusTokens }) }}
             </p>
             <p class="text-xs leading-relaxed text-slate-400">
-              AURUM пополняется подарком с Premium и покупкой пакетов. Партнёрские ⚡ можно перевести в AURUM кнопкой ниже.
-              При рассылке списание идёт с AURUM.
+              {{ t('partner.balance_hint') }}
             </p>
             <p v-if="partnerData.ref_link">
-              Ваша партнерская ссылка:<br>
+              {{ t('partner.your_link') }}<br>
               └ <button type="button" class="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-xs text-left text-cyan-300" @click="copyPartnerLink">{{ partnerData.ref_link }}</button>
             </p>
             <p>
-              Приглашенных людей:<br>
-              └ Всего: <b>{{ partnerData.invited_count || 0 }}</b>, Оплачивают: <b>{{ partnerData.paid_count || 0 }}</b>
+              {{ t('partner.invited') }}<br>
+              └ {{ t('partner.invited_total') }} <b>{{ partnerData.invited_count || 0 }}</b>, {{ t('partner.paying') }} <b>{{ partnerData.paid_count || 0 }}</b>
             </p>
           </div>
           <div class="mt-3 flex flex-wrap gap-2">
             <button type="button" class="guard-green-soft rounded-lg px-3 py-1.5 text-xs font-semibold disabled:opacity-60" :disabled="bonusTransferLoading" @click="transferPartnerBonusToAurum">
-              Партнёрские → AURUM ✨
+              {{ t('partner.transfer_cta') }}
             </button>
             <button type="button" class="rounded-lg border border-sky-400/40 bg-sky-500/10 px-3 py-1.5 text-xs font-semibold text-sky-300" @click="sharePartnerLink">
-              Поделиться
+              {{ t('partner.share') }}
             </button>
           </div>
           <div class="mt-4 rounded-xl border border-slate-700 bg-slate-800/70 p-3">
-            <p>Доступно к выводу: <b>{{ fmtAmount(partnerPayouts.available_rub || 0) }} ₽</b></p>
-            <p class="mt-0.5">Ожидает разблокировки <span class="text-slate-400">(комиссии до ~7 дней после оплаты реферала)</span>: <b>{{ fmtAmount(partnerPayouts.pending_rub || 0) }} ₽</b></p>
-            <p class="mt-0.5">В заявках: <b>{{ fmtAmount(partnerPayouts.reserved_rub || 0) }} ₽</b></p>
-            <p class="mt-0.5">Уже выплачено: <b>{{ fmtAmount(partnerPayouts.paid_total_rub || 0) }} ₽</b></p>
-            <p class="mt-0.5 text-xs text-slate-400">Курс партнерских токенов: 1 ⚡ = {{ fmtAmount(partnerPayouts.token_rub_rate || 2) }} ₽</p>
-            <p class="mt-0.5 text-sm font-semibold text-amber-300">Минимум на вывод: {{ fmtAmount(partnerPayouts.min_payout_rub || 1500) }} ₽</p>
+            <p>{{ t('partner.available_payout') }} <b>{{ fmtAmount(partnerPayouts.available_rub || 0) }} ₽</b></p>
+            <p class="mt-0.5">{{ t('partner.pending_unlock') }} <b>{{ fmtAmount(partnerPayouts.pending_rub || 0) }} ₽</b></p>
+            <p class="mt-0.5">{{ t('partner.in_requests') }} <b>{{ fmtAmount(partnerPayouts.reserved_rub || 0) }} ₽</b></p>
+            <p class="mt-0.5">{{ t('partner.paid_out') }} <b>{{ fmtAmount(partnerPayouts.paid_total_rub || 0) }} ₽</b></p>
+            <p class="mt-0.5 text-xs text-slate-400">{{ t('partner.token_rate', { rate: fmtAmount(partnerPayouts.token_rub_rate || 2) }) }}</p>
+            <p class="mt-0.5 text-sm font-semibold text-amber-300">{{ t('partner.min_payout', { rub: fmtAmount(partnerPayouts.min_payout_rub || 1500) }) }}</p>
             <div class="mt-2 grid gap-2 sm:grid-cols-2">
-              <input v-model="payoutAmountRub" type="number" min="0" step="1" placeholder="Сумма RUB" class="rounded-lg border border-slate-600 bg-slate-900 px-2.5 py-2 text-xs text-white">
+              <input v-model="payoutAmountRub" type="number" min="0" step="1" :placeholder="t('partner.amount_placeholder')" class="rounded-lg border border-slate-600 bg-slate-900 px-2.5 py-2 text-xs text-white">
               <select v-model="payoutMethod" class="rounded-lg border border-slate-600 bg-slate-900 px-2.5 py-2 text-xs text-white">
-                <option value="sbp">СБП</option>
-                <option value="card">Карта</option>
+                <option value="sbp">{{ t('partner.method_sbp') }}</option>
+                <option value="card">{{ t('partner.method_card') }}</option>
               </select>
-              <input v-model="payoutRequisites" type="text" placeholder="Реквизиты (телефон/карта)" class="sm:col-span-2 rounded-lg border border-slate-600 bg-slate-900 px-2.5 py-2 text-xs text-white">
-              <input v-model="payoutFullName" type="text" placeholder="ФИО получателя" class="sm:col-span-2 rounded-lg border border-slate-600 bg-slate-900 px-2.5 py-2 text-xs text-white">
+              <input v-model="payoutRequisites" type="text" :placeholder="t('partner.requisites_placeholder')" class="sm:col-span-2 rounded-lg border border-slate-600 bg-slate-900 px-2.5 py-2 text-xs text-white">
+              <input v-model="payoutFullName" type="text" :placeholder="t('partner.fullname_placeholder')" class="sm:col-span-2 rounded-lg border border-slate-600 bg-slate-900 px-2.5 py-2 text-xs text-white">
             </div>
             <button type="button" class="mt-2 guard-green-soft rounded-lg px-3 py-1.5 text-xs font-semibold disabled:opacity-60" :disabled="payoutSubmitting || partnerPayoutsLoading" @click="submitPayoutRequest">
-              Запросить вывод
+              {{ t('partner.request_payout') }}
             </button>
             <div v-if="(partnerPayouts.commissions || []).length" class="mt-3 rounded-lg border border-slate-700 bg-slate-900/70 p-2">
-              <p class="text-[11px] font-semibold text-slate-300">Последние начисления:</p>
+              <p class="text-[11px] font-semibold text-slate-300">{{ t('partner.recent_commissions') }}</p>
               <div v-for="c in (partnerPayouts.commissions || []).slice(0, 5)" :key="`pc-${c.id}`" class="mt-1 text-[11px] text-slate-300">
-                L{{ c.level }} · +{{ fmtAmount(c.reward_amount_rub) }} ₽ · {{ c.status }}
+                {{ t('partner.level_line', { level: c.level, amount: fmtAmount(c.reward_amount_rub), status: c.status }) }}
               </div>
             </div>
           </div>
@@ -3364,7 +3414,7 @@ async function submitReceipt() {
                 :class="refsMode === 'full' ? 'border-b-4 border-sky-500 text-sky-600' : 'text-slate-400'"
                 @click="refsMode = 'full'"
               >
-                Полный список
+                {{ t('partner.refs_mode_full') }}
               </button>
               <button
                 type="button"
@@ -3372,18 +3422,18 @@ async function submitReceipt() {
                 :class="refsMode === 'active' ? 'border-b-4 border-sky-500 text-sky-600' : 'text-slate-400'"
                 @click="refsMode = 'active'"
               >
-                Самые активные
+                {{ t('partner.refs_mode_active') }}
               </button>
             </div>
 
             <div v-if="referralPeopleLoading" class="py-4 text-center text-sm text-slate-500">
-              Секундочку…
+              {{ t('partner.refs_loading') }}
             </div>
             <div
               v-else-if="(refsMode === 'full' ? paidFullRefs : paidActiveRefs).length === 0"
               class="py-8 text-center text-[18px] font-medium text-slate-700"
             >
-              Рефералы отсутствуют.
+              {{ t('partner.refs_empty') }}
             </div>
             <div v-else class="mt-3 space-y-2">
               <div
@@ -3394,11 +3444,11 @@ async function submitReceipt() {
                 <div class="flex items-center justify-between gap-2">
                   <p class="truncate text-sm font-semibold text-slate-900">{{ displayReferralName(item) }}</p>
                   <span class="text-xs font-semibold" :class="item.is_paid ? 'text-emerald-600' : 'text-slate-500'">
-                    {{ item.is_paid ? 'Платит' : 'Без оплаты' }}
+                    {{ item.is_paid ? t('partner.refs_status_paying') : t('partner.refs_status_free') }}
                   </span>
                 </div>
                 <p class="mt-0.5 text-xs text-slate-600">
-                  Оплат: {{ item.payments_count || 0 }} · Токены ИИ: {{ item.tokens_purchased || 0 }} ⚡
+                  {{ t('partner.refs_stats_line', { p: item.payments_count || 0, t: item.tokens_purchased || 0 }) }}
                 </p>
               </div>
             </div>
@@ -3406,68 +3456,64 @@ async function submitReceipt() {
         </div>
         <div v-else-if="partnerData && partnerTab === 'docs'" class="space-y-2">
           <div class="rounded-2xl border border-fuchsia-300/35 bg-white p-4 text-slate-900">
-            <p class="text-lg font-extrabold text-[#4bbf67]">❓ Как работает партнерская программа?</p>
+            <p class="text-lg font-extrabold text-[#4bbf67]">{{ t('partner.docs_q_program') }}</p>
             <p class="mt-2 text-sm">
-              Вы приглашаете пользователей по своей ссылке и получаете вознаграждение с их оплат.
-              Программа трехуровневая:
+              {{ t('partner.docs_program_intro') }}
             </p>
             <div class="mt-2 space-y-1 text-sm">
-              <p><span class="inline-flex h-5 w-5 items-center justify-center rounded bg-slate-900 text-xs font-bold text-white">1</span> <b class="ml-1">Уровень:</b> 15%</p>
-              <p><span class="inline-flex h-5 w-5 items-center justify-center rounded bg-slate-900 text-xs font-bold text-white">2</span> <b class="ml-1">Уровень:</b> 10%</p>
-              <p><span class="inline-flex h-5 w-5 items-center justify-center rounded bg-slate-900 text-xs font-bold text-white">3</span> <b class="ml-1">Уровень:</b> 5%</p>
+              <p><span class="inline-flex h-5 w-5 items-center justify-center rounded bg-slate-900 text-xs font-bold text-white">1</span> {{ t('partner.docs_lvl_1') }}</p>
+              <p><span class="inline-flex h-5 w-5 items-center justify-center rounded bg-slate-900 text-xs font-bold text-white">2</span> {{ t('partner.docs_lvl_2') }}</p>
+              <p><span class="inline-flex h-5 w-5 items-center justify-center rounded bg-slate-900 text-xs font-bold text-white">3</span> {{ t('partner.docs_lvl_3') }}</p>
             </div>
             <p class="mt-2 text-sm text-slate-600">
-              Выплаты выполняются вручную в RUB. Заявки принимаются раз в неделю (по понедельникам),
-              чтобы снизить риск мошенничества.
+              {{ t('partner.docs_payouts_note') }}
             </p>
             <p class="mt-2 text-sm text-slate-700">
-              💸 Вознаграждение начисляется за <b>оплату подписки</b> и за <b>покупку токенов ИИ</b>.
+              {{ t('partner.docs_reward_for') }}
             </p>
             <p class="mt-1 text-sm text-slate-700">
-              💱 Фиксированный курс: <b>1 партнерский токен = 2 ₽</b>.
+              {{ t('partner.docs_token_rate_line') }}
             </p>
           </div>
           <div class="rounded-2xl border border-fuchsia-300/35 bg-white p-4 text-slate-900">
-            <p class="text-lg font-extrabold text-[#4bbf67]">❓ Как начисляется вознаграждение?</p>
+            <p class="text-lg font-extrabold text-[#4bbf67]">{{ t('partner.docs_q_accrual') }}</p>
             <p class="mt-2 text-sm">
-              Пример: ваш реферал 1-го уровня оплатил 10 000 ₽ — начисление 1 500 ₽.
-              Если его реферал оплатил 10 000 ₽ — вам 1 000 ₽ (2-й уровень).
-              На 3-м уровне — 500 ₽.
+              {{ t('partner.docs_accrual_example') }}
             </p>
             <p class="mt-2 text-sm italic text-slate-600">
-              💡 Начисления за покупки токенов и подписок учитываются автоматически.
+              {{ t('partner.docs_accrual_auto') }}
             </p>
             <div class="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
-              <p class="text-sm font-semibold">Калькулятор примера</p>
+              <p class="text-sm font-semibold">{{ t('partner.docs_calc_title') }}</p>
               <input v-model="docsExampleSale" type="number" min="0" step="100" class="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm">
-              <p class="mt-2 text-xs">Сумма оплаты: <b>{{ fmtAmount(docsCalc.amount) }} ₽</b></p>
-              <p class="text-xs"><span class="inline-flex h-4 w-4 items-center justify-center rounded bg-slate-900 text-[10px] font-bold text-white">+</span> 1 уровень (15%): <b>{{ fmtAmount(docsCalc.l1) }} ₽</b></p>
-              <p class="text-xs"><span class="inline-flex h-4 w-4 items-center justify-center rounded bg-slate-900 text-[10px] font-bold text-white">+</span> 2 уровень (10%): <b>{{ fmtAmount(docsCalc.l2) }} ₽</b></p>
-              <p class="text-xs"><span class="inline-flex h-4 w-4 items-center justify-center rounded bg-slate-900 text-[10px] font-bold text-white">+</span> 3 уровень (5%): <b>{{ fmtAmount(docsCalc.l3) }} ₽</b></p>
-              <p class="text-xs">Итого: <b>{{ fmtAmount(docsCalc.total) }} ₽</b></p>
+              <p class="mt-2 text-xs">{{ t('partner.docs_sale_label') }} <b>{{ fmtAmount(docsCalc.amount) }} ₽</b></p>
+              <p class="text-xs"><span class="inline-flex h-4 w-4 items-center justify-center rounded bg-slate-900 text-[10px] font-bold text-white">+</span> {{ t('partner.docs_lvl1_calc') }} <b>{{ fmtAmount(docsCalc.l1) }} ₽</b></p>
+              <p class="text-xs"><span class="inline-flex h-4 w-4 items-center justify-center rounded bg-slate-900 text-[10px] font-bold text-white">+</span> {{ t('partner.docs_lvl2_calc') }} <b>{{ fmtAmount(docsCalc.l2) }} ₽</b></p>
+              <p class="text-xs"><span class="inline-flex h-4 w-4 items-center justify-center rounded bg-slate-900 text-[10px] font-bold text-white">+</span> {{ t('partner.docs_lvl3_calc') }} <b>{{ fmtAmount(docsCalc.l3) }} ₽</b></p>
+              <p class="text-xs">{{ t('partner.docs_total') }} <b>{{ fmtAmount(docsCalc.total) }} ₽</b></p>
             </div>
           </div>
           <div class="rounded-2xl border border-fuchsia-300/35 bg-white p-4 text-slate-900">
-            <p class="text-lg font-extrabold text-[#4bbf67]">❓ Как вывести средства?</p>
+            <p class="text-lg font-extrabold text-[#4bbf67]">{{ t('partner.docs_q_withdraw') }}</p>
             <ol class="mt-2 list-decimal space-y-1 pl-4 text-sm">
-              <li>Укажите сумму и реквизиты (СБП или карта) в разделе Баланс.</li>
-              <li>Отправьте заявку на вывод.</li>
-              <li>После проверки администратор вручную переводит средства.</li>
-              <li>После статуса «Выплачено» вы получите уведомление в личку.</li>
+              <li>{{ t('partner.docs_withdraw_1') }}</li>
+              <li>{{ t('partner.docs_withdraw_2') }}</li>
+              <li>{{ t('partner.docs_withdraw_3') }}</li>
+              <li>{{ t('partner.docs_withdraw_4') }}</li>
             </ol>
           </div>
           <div class="rounded-2xl border border-emerald-300/35 bg-white p-4 text-slate-900">
-            <p class="text-lg font-extrabold text-[#4bbf67]">❓ За что начисляется вознаграждение?</p>
-            <p class="mt-2 text-sm"><b>✅ Начисляется:</b> оплата подписки, покупка токенов ИИ.</p>
+            <p class="text-lg font-extrabold text-[#4bbf67]">{{ t('partner.docs_q_what_counts') }}</p>
+            <p class="mt-2 text-sm">{{ t('partner.docs_counts_yes') }}</p>
             <p class="mt-1 text-sm text-slate-700">
-              ℹ️ В спорных или подозрительных случаях начисления могут быть пересмотрены администратором.
+              {{ t('partner.docs_counts_note') }}
             </p>
           </div>
         </div>
       </div>
 
       <div
-        v-if="dashboardSection === 'tokens'"
+        v-if="dashSection === 'tokens'"
         :class="
           showPremiumTokenLanding
             ? 'relative mx-auto mt-1 w-full max-w-md text-white md:max-w-lg'
@@ -3495,29 +3541,29 @@ async function submitReceipt() {
             >
               <div
                 class="rounded-md border border-white/[0.1] bg-white/[0.05] px-1.5 py-0.5 text-right shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-md"
-                title="Всего доступных токенов"
+                :title="t('dashboard.billing.aurum_gate_total_hint')"
               >
-                <p class="text-[8px] font-medium uppercase leading-none tracking-[0.12em] text-white/38">Всего</p>
+                <p class="text-[8px] font-medium uppercase leading-none tracking-[0.12em] text-white/38">{{ t('dashboard.billing.aurum_gate_total_label') }}</p>
                 <p class="text-xs font-bold leading-tight tabular-nums text-lime-200">{{ totalTokens }}<span class="ml-px text-[9px]">⚡</span></p>
               </div>
               <div
                 v-if="tariffIsPremium"
                 :class="tokensInfoToolbarClass"
                 role="group"
-                aria-label="Справка по токенам и оплате"
+                :aria-label="t('dashboard.tokens.toolbar_help_aria')"
               >
                 <button
                   type="button"
                   :class="tokensInfoBtnClass"
-                  title="Счета, AURUM и расход"
-                  aria-label="Счета, AURUM и расход"
+                  :title="t('dashboard.tokens.help_balances_tooltip')"
+                  :aria-label="t('dashboard.tokens.help_balances_aria')"
                   @click="showAurumTokensHelp"
                 >i</button>
                 <button
                   type="button"
                   :class="tokensInfoBtnClass"
-                  title="Оплата пакетов и возвраты"
-                  aria-label="Оплата пакетов и возвраты"
+                  :title="t('dashboard.tokens.help_checkout_tooltip')"
+                  :aria-label="t('dashboard.tokens.help_checkout_aria')"
                   @click="openTokensCheckoutInfo"
                 >i</button>
               </div>
@@ -3525,8 +3571,8 @@ async function submitReceipt() {
                 v-else
                 type="button"
                 :class="tokensInfoBtnClass"
-                title="Что такое AURUM и как считаются токены"
-                aria-label="Что такое AURUM и как считаются токены"
+                :title="t('dashboard.tokens.help_what_aurum_tooltip')"
+                :aria-label="t('dashboard.tokens.help_what_aurum_aria')"
                 @click="showAurumTokensHelp"
               >i</button>
             </div>
@@ -3535,7 +3581,7 @@ async function submitReceipt() {
             v-if="tariffIsPremium && Number(me?.broadcast_spend_tokens || 0) > 0"
             class="text-[9px] leading-tight text-amber-200/80"
           >
-            Рассылки: −{{ fmtAmount(me.broadcast_spend_tokens) }} ⚡
+            {{ t('dashboard.tokens.broadcast_spend', { amt: fmtAmount(me.broadcast_spend_tokens) }) }}
           </p>
 
           <template v-if="!tariffIsPremium">
@@ -3554,9 +3600,9 @@ async function submitReceipt() {
                   <circle cx="12" cy="16" r="1.2" fill="currentColor" />
                 </svg>
               </div>
-              <p class="text-[13px] font-semibold leading-tight text-white">Токены недоступны на Free-тарифе</p>
+              <p class="text-[13px] font-semibold leading-tight text-white">{{ t('dashboard.billing.aurum_gate_unavailable') }}</p>
               <p class="mt-2 text-[11px] leading-snug text-white/55">
-                Токены нужны для рассылок, автопостинга и других функций.
+                {{ t('dashboard.billing.aurum_gate_sub') }}
               </p>
             </div>
             <button
@@ -3574,7 +3620,7 @@ async function submitReceipt() {
               "
               @click="openBillingSection({ scrollLanding: true })"
             >
-              Получить Premium
+              {{ t('dashboard.billing.gate_get_premium') }}
             </button>
             <ul class="space-y-2.5 pt-1 text-left text-[11px] leading-snug text-white/75">
               <li class="flex items-start gap-2.5">
@@ -3589,7 +3635,7 @@ async function submitReceipt() {
                     <rect x="5.5" y="11" width="13" height="10.5" rx="2.2" stroke="#ff9f1c" stroke-width="1.85" />
                   </svg>
                 </span>
-                <span>Разблокируйте все возможности</span>
+                <span>{{ t('dashboard.billing.gate_li_unlock') }}</span>
               </li>
               <li class="flex items-start gap-2.5">
                 <span class="mt-0.5 inline-flex h-[1.375rem] w-[1.375rem] shrink-0 items-center justify-center" aria-hidden="true">
@@ -3603,7 +3649,7 @@ async function submitReceipt() {
                     />
                   </svg>
                 </span>
-                <span>Делайте рассылки и автопостинг</span>
+                <span>{{ t('dashboard.billing.gate_li_broadcast') }}</span>
               </li>
               <li class="flex items-start gap-2.5">
                 <span class="mt-0.5 inline-flex h-[1.375rem] w-[1.375rem] shrink-0 items-center justify-center" aria-hidden="true">
@@ -3617,7 +3663,7 @@ async function submitReceipt() {
                     />
                   </svg>
                 </span>
-                <span>Привлекайте клиентов и зарабатывайте</span>
+                <span>{{ t('dashboard.billing.gate_li_clients') }}</span>
               </li>
             </ul>
           </template>
@@ -3636,25 +3682,25 @@ async function submitReceipt() {
                 />
                 <div class="relative z-[1] space-y-4">
                   <div>
-                    <h4 ref="premiumTokenLandingTitleRef" class="text-center text-[17px] font-extrabold leading-tight text-white">AURUM — топливо для роста вашего сообщества</h4>
+                    <h4 ref="premiumTokenLandingTitleRef" class="text-center text-[17px] font-extrabold leading-tight text-white">{{ t('dashboard.tokens.fuel_title') }}</h4>
                     <p class="mx-auto mt-2 max-w-[20rem] text-center text-[12px] leading-snug text-white/65">
-                      Токены дают возможность автоматизировать канал, делать рассылки и привлекать новых клиентов.
+                      {{ t('dashboard.tokens.fuel_sub') }}
                     </p>
                     <img
                       :src="tokenLandingOrbitSrc"
-                      alt="Схема возможностей токенов"
+                      :alt="t('dashboard.tokens.orbit_alt')"
                       class="mx-auto mt-2.5 w-full max-w-[23rem] bg-transparent object-contain"
                       draggable="false"
                       @dragstart.prevent
                     >
                   </div>
                   <div class="rounded-xl border border-white/[0.1] bg-zinc-950/50 px-3 py-2.5">
-                    <p class="text-[12px] font-bold text-white">Почему это выгодно?</p>
+                    <p class="text-[12px] font-bold text-white">{{ t('dashboard.tokens.why_title') }}</p>
                     <ul class="mt-1.5 space-y-1.5 text-[12px] leading-snug text-white/82">
-                      <li class="flex items-center gap-2"><span class="inline-flex h-4 w-4 items-center justify-center text-[15px] font-black leading-none text-lime-300 drop-shadow-[0_0_6px_rgba(163,230,53,0.85)]">✓</span><span>Экономите время — автоматизация рутины</span></li>
-                      <li class="flex items-center gap-2"><span class="inline-flex h-4 w-4 items-center justify-center text-[15px] font-black leading-none text-lime-300 drop-shadow-[0_0_6px_rgba(163,230,53,0.85)]">✓</span><span>Увеличиваете охваты и вовлеченность</span></li>
-                      <li class="flex items-center gap-2"><span class="inline-flex h-4 w-4 items-center justify-center text-[15px] font-black leading-none text-lime-300 drop-shadow-[0_0_6px_rgba(163,230,53,0.85)]">✓</span><span>Привлекаете новых клиентов и зарабатываете</span></li>
-                      <li class="flex items-center gap-2"><span class="inline-flex h-4 w-4 items-center justify-center text-[15px] font-black leading-none text-lime-300 drop-shadow-[0_0_6px_rgba(163,230,53,0.85)]">✓</span><span>Платите только за результат</span></li>
+                      <li class="flex items-center gap-2"><span class="inline-flex h-4 w-4 items-center justify-center text-[15px] font-black leading-none text-lime-300 drop-shadow-[0_0_6px_rgba(163,230,53,0.85)]">✓</span><span>{{ t('dashboard.tokens.why_1') }}</span></li>
+                      <li class="flex items-center gap-2"><span class="inline-flex h-4 w-4 items-center justify-center text-[15px] font-black leading-none text-lime-300 drop-shadow-[0_0_6px_rgba(163,230,53,0.85)]">✓</span><span>{{ t('dashboard.tokens.why_2') }}</span></li>
+                      <li class="flex items-center gap-2"><span class="inline-flex h-4 w-4 items-center justify-center text-[15px] font-black leading-none text-lime-300 drop-shadow-[0_0_6px_rgba(163,230,53,0.85)]">✓</span><span>{{ t('dashboard.tokens.why_3') }}</span></li>
+                      <li class="flex items-center gap-2"><span class="inline-flex h-4 w-4 items-center justify-center text-[15px] font-black leading-none text-lime-300 drop-shadow-[0_0_6px_rgba(163,230,53,0.85)]">✓</span><span>{{ t('dashboard.tokens.why_4') }}</span></li>
                     </ul>
                   </div>
                   <div class="space-y-2">
@@ -3664,14 +3710,14 @@ async function submitReceipt() {
                       style="background: linear-gradient(90deg, #f39c12 0%, #df5a3b 34%, #b043cc 56%, #5c2dc1 74%, #2a1a83 100%);"
                       @click="scrollToPremiumTokenPacks"
                     >
-                      Выбрать пакет токенов
+                      {{ t('dashboard.tokens.cta_choose_pack') }}
                     </button>
                     <button
                       type="button"
                       class="w-full text-center text-[13px] font-medium text-slate-300 underline decoration-slate-500 underline-offset-4 transition hover:text-white"
                       @click="scrollToTokenHowItWorks"
                     >
-                      Как это работает
+                      {{ t('dashboard.tokens.link_how_it_works') }}
                     </button>
                   </div>
                 </div>
@@ -3691,7 +3737,7 @@ async function submitReceipt() {
                 />
                 <div class="relative z-[1] space-y-4">
                   <div>
-                    <h4 class="text-center text-[17px] font-extrabold leading-tight text-white">Токены = новые клиенты и больше продаж</h4>
+                    <h4 class="text-center text-[17px] font-extrabold leading-tight text-white">{{ t('dashboard.tokens.how_headline') }}</h4>
                     <div
                       class="mt-2.5 divide-y divide-white/[0.07] rounded-xl border border-white/[0.1] bg-zinc-950/78 shadow-[0_0_36px_-10px_rgba(99,102,241,0.22),inset_0_1px_0_rgba(255,255,255,0.04)]"
                     >
@@ -3710,8 +3756,8 @@ async function submitReceipt() {
                       <div
                         class="min-w-0 flex-1 rounded-lg border border-sky-400/15 bg-black/58 px-2.5 py-2 shadow-[inset_0_0_28px_rgba(56,189,248,0.07),0_0_22px_-8px_rgba(56,189,248,0.2)]"
                       >
-                        <p class="text-[12px] font-bold text-white">Рассылки по чатам</p>
-                        <p class="mt-0.5 text-[11px] leading-snug text-white/70">Отправляйте рекламные предложения, акции и новости в активные чаты.</p>
+                        <p class="text-[12px] font-bold text-white">{{ t('dashboard.tokens.feat_broadcast_title') }}</p>
+                        <p class="mt-0.5 text-[11px] leading-snug text-white/70">{{ t('dashboard.tokens.feat_broadcast_body') }}</p>
                       </div>
                     </div>
                     <div class="flex items-start gap-2.5 px-2.5 py-2.5">
@@ -3728,8 +3774,8 @@ async function submitReceipt() {
                       <div
                         class="min-w-0 flex-1 rounded-lg border border-sky-400/15 bg-black/58 px-2.5 py-2 shadow-[inset_0_0_28px_rgba(56,189,248,0.07),0_0_22px_-8px_rgba(56,189,248,0.2)]"
                       >
-                        <p class="text-[12px] font-bold text-white">Автопостинг в каналы</p>
-                        <p class="mt-0.5 text-[11px] leading-snug text-white/70">Регулярные публикации привлекают новую аудиторию и удерживают старую.</p>
+                        <p class="text-[12px] font-bold text-white">{{ t('dashboard.tokens.feat_autopost_title') }}</p>
+                        <p class="mt-0.5 text-[11px] leading-snug text-white/70">{{ t('dashboard.tokens.feat_autopost_body') }}</p>
                       </div>
                     </div>
                     <div class="flex items-start gap-2.5 px-2.5 py-2.5">
@@ -3747,14 +3793,14 @@ async function submitReceipt() {
                       <div
                         class="min-w-0 flex-1 rounded-lg border border-sky-400/15 bg-black/58 px-2.5 py-2 shadow-[inset_0_0_28px_rgba(56,189,248,0.07),0_0_22px_-8px_rgba(56,189,248,0.2)]"
                       >
-                        <p class="text-[12px] font-bold text-white">Привлечение клиентов</p>
-                        <p class="mt-0.5 text-[11px] leading-snug text-white/70">Используйте рассылки и контент, чтобы превращать подписчиков в клиентов.</p>
+                        <p class="text-[12px] font-bold text-white">{{ t('dashboard.tokens.feat_clients_title') }}</p>
+                        <p class="mt-0.5 text-[11px] leading-snug text-white/70">{{ t('dashboard.tokens.feat_clients_body') }}</p>
                       </div>
                     </div>
                   </div>
                 </div>
                 <div class="rounded-2xl border border-white/[0.08] bg-gradient-to-b from-zinc-900/82 to-black/95 px-3.5 py-3 shadow-[0_12px_32px_-16px_rgba(0,0,0,0.86)]">
-                  <p class="text-center text-[16px] font-extrabold text-white">Как это работает</p>
+                  <p class="text-center text-[16px] font-extrabold text-white">{{ t('dashboard.tokens.how_steps_title') }}</p>
                   <div class="mt-2.5 flex items-center justify-between gap-0.5">
                     <div class="flex min-w-0 flex-1 flex-col items-center gap-1.5 text-center">
                       <div class="flex h-[3.75rem] w-[3.75rem] items-center justify-center rounded-[1rem] border border-[#7dd8fc]/45 bg-gradient-to-br from-[#2fa8f0] via-[#1b8fe0] to-[#1464b8] shadow-[0_0_22px_-2px_rgba(56,189,248,0.95),inset_0_1px_0_rgba(255,255,255,0.26)]">
@@ -3762,7 +3808,7 @@ async function submitReceipt() {
                           <path d="M21.5 4.8 18.4 19c-.2.9-.8 1.1-1.6.7l-4.4-3.2-2.1 2c-.2.2-.4.4-.9.4l.3-4.5 8.3-7.5c.4-.3-.1-.5-.5-.2l-10.2 6.4-4.4-1.4c-.9-.3-.9-.9.2-1.3L19.9 4c.8-.3 1.5.2 1.3.8z" />
                         </svg>
                       </div>
-                      <p class="text-[10px] font-semibold leading-tight text-white">Рассылка</p>
+                      <p class="text-[10px] font-semibold leading-tight text-white">{{ t('dashboard.tokens.how_step_broadcast') }}</p>
                     </div>
                     <span class="pb-6 text-[26px] font-black leading-none text-white/90">→</span>
                     <div class="flex min-w-0 flex-1 flex-col items-center gap-1.5 text-center">
@@ -3777,7 +3823,7 @@ async function submitReceipt() {
                           <path d="M8.6 11.4h7M8.6 13.8h4.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
                         </svg>
                       </div>
-                      <p class="text-[10px] font-semibold leading-tight text-white">Отклики</p>
+                      <p class="text-[10px] font-semibold leading-tight text-white">{{ t('dashboard.tokens.how_step_replies') }}</p>
                     </div>
                     <span class="pb-6 text-[26px] font-black leading-none text-white/90">→</span>
                     <div class="flex min-w-0 flex-1 flex-col items-center gap-1.5 text-center">
@@ -3789,7 +3835,7 @@ async function submitReceipt() {
                           <path d="M13.7 17a3.6 3.6 0 0 1 5.4.7" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" />
                         </svg>
                       </div>
-                      <p class="text-[10px] font-semibold leading-tight text-white">Клиенты</p>
+                      <p class="text-[10px] font-semibold leading-tight text-white">{{ t('dashboard.tokens.how_step_clients') }}</p>
                     </div>
                     <span class="pb-6 text-[26px] font-black leading-none text-amber-300">→</span>
                     <div class="flex min-w-0 flex-1 flex-col items-center gap-1.5 text-center">
@@ -3801,7 +3847,7 @@ async function submitReceipt() {
                           <rect x="15.5" y="5.6" width="3.1" height="13" rx="0.55" fill="currentColor" />
                         </svg>
                       </div>
-                      <p class="text-[10px] font-semibold leading-tight text-white">Прибыль</p>
+                      <p class="text-[10px] font-semibold leading-tight text-white">{{ t('dashboard.tokens.how_step_profit') }}</p>
                     </div>
                   </div>
                 </div>
@@ -3810,9 +3856,9 @@ async function submitReceipt() {
                   class="mt-2 w-full rounded-[1.05rem] border border-[#f6cc55]/75 bg-gradient-to-b from-[#ffd94a] via-[#f2b705] to-[#a96a00] px-4 py-2 text-center text-[17px] font-black tracking-tight text-black shadow-[0_18px_30px_-14px_rgba(235,160,0,0.96),0_0_28px_-10px_rgba(255,190,0,0.72),inset_0_1px_0_rgba(255,237,176,0.5),inset_0_-9px_14px_rgba(107,63,0,0.45)] transition active:scale-[0.99]"
                   @click="scrollToPremiumTokenPacks({ reloadPacks: false })"
                 >
-                  ⚡ Запустить рассылку
+                  {{ t('dashboard.tokens.cta_run_broadcast') }}
                 </button>
-                <p class="mt-2 text-center text-[13px] font-extrabold text-amber-300">Следите за обновлениями!</p>
+                <p class="mt-2 text-center text-[13px] font-extrabold text-amber-300">{{ t('dashboard.tokens.follow_updates') }}</p>
                 </div>
               </section>
 
@@ -3820,12 +3866,12 @@ async function submitReceipt() {
                 ref="tokenLandingPackChoiceRef"
                 class="scroll-mt-[5.75rem] relative overflow-hidden rounded-[1.125rem] border border-white/[0.14] bg-black px-4 py-6 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] ring-1 ring-inset ring-white/[0.08]"
               >
-                <div v-if="tokenPacksLoading" class="py-4 text-center text-[11px] text-white/45">Загрузка…</div>
+                <div v-if="tokenPacksLoading" class="py-4 text-center text-[11px] text-white/45">{{ t('dashboard.tokens.loading') }}</div>
                 <div v-else class="space-y-2">
                   <h4
                     ref="tokenLandingPackChoiceTitleRef"
                     class="scroll-mt-[5.75rem] text-center text-[16px] font-extrabold tracking-tight text-white"
-                  >Выбор пакета</h4>
+                  >{{ t('dashboard.tokens.pack_choice_title') }}</h4>
                   <div
                     v-if="tokenPacksError"
                     class="rounded-xl border border-red-400/40 bg-red-950/40 px-2.5 py-2.5 text-[11px] leading-snug text-red-100/95"
@@ -3836,20 +3882,20 @@ async function submitReceipt() {
                       class="mt-2 w-full rounded-lg border border-white/15 bg-white/10 py-2 text-[12px] font-semibold text-white transition hover:bg-white/14"
                       @click="loadTokenPacksFromApi"
                     >
-                      Обновить
+                      {{ t('dashboard.tokens.refresh') }}
                     </button>
                   </div>
                   <div
                     v-else-if="!tokenPacks.length"
                     class="rounded-xl border border-white/[0.1] bg-zinc-900/70 px-2.5 py-3 text-center text-[11px] leading-snug text-white/60"
                   >
-                    Каталог пакетов пуст. Проверьте соединение или обновите список.
+                    {{ t('dashboard.tokens.packs_empty') }}
                     <button
                       type="button"
                       class="mt-2 w-full rounded-lg border border-white/15 bg-white/10 py-2 text-[12px] font-semibold text-white transition hover:bg-white/14"
                       @click="loadTokenPacksFromApi"
                     >
-                      Обновить
+                      {{ t('dashboard.tokens.refresh') }}
                     </button>
                   </div>
                   <div v-else class="space-y-0">
@@ -3898,7 +3944,7 @@ async function submitReceipt() {
                       class="mt-3 w-full py-2 text-center text-[13px] font-medium text-slate-400 underline decoration-slate-600 underline-offset-4 transition hover:text-slate-300"
                       @click="showAllTokenPacks = !showAllTokenPacks"
                     >
-                      {{ showAllTokenPacks ? 'Скрыть дополнительные пакеты' : 'Показать ещё пакеты' }}
+                      {{ showAllTokenPacks ? t('dashboard.tokens.hide_extra_packs') : t('dashboard.tokens.show_more_packs') }}
                     </button>
                   </div>
                 </div>
@@ -3910,7 +3956,7 @@ async function submitReceipt() {
                   :disabled="selectedTokenPack === null || payLoadingTokenPack !== null"
                   @click="continueTokenPackCheckout"
                 >
-                  {{ payLoadingTokenPack !== null ? 'Готовим оплату...' : 'Продолжить' }}
+                  {{ payLoadingTokenPack !== null ? t('dashboard.billing.pay_preparing') : t('dashboard.billing.continue') }}
                 </button>
                 <button
                   v-if="tokenPacks.length"
@@ -3918,18 +3964,18 @@ async function submitReceipt() {
                   class="mt-2 w-full py-2 text-center text-[13px] font-medium text-slate-400 underline decoration-slate-500 underline-offset-4 transition hover:text-slate-300"
                   @click="openPromoCodeModal"
                 >
-                  Есть промокод?
+                  {{ t('dashboard.billing.have_promo') }}
                 </button>
                 <div
                   v-if="me?.is_admin"
                   class="flex flex-wrap items-center gap-x-1.5 gap-y-1 rounded-lg border border-amber-400/22 bg-amber-500/[0.05] px-1.5 py-1 backdrop-blur-xl"
                 >
-                  <span class="text-[9px] font-semibold uppercase tracking-wide text-amber-200/90">Тест</span>
+                  <span class="text-[9px] font-semibold uppercase tracking-wide text-amber-200/90">{{ t('dashboard.tokens.test_label') }}</span>
                   <button
                     type="button"
                     :class="tokensInfoBtnAmberClass"
-                    title="Тестовая оплата для администраторов"
-                    aria-label="Тестовая оплата для администраторов"
+                    :title="t('dashboard.tokens.test_pay_tooltip')"
+                    :aria-label="t('dashboard.tokens.test_pay_info_aria')"
                     @click="openTokensAdminTestInfo"
                   >i</button>
                   <div class="flex min-w-0 flex-1 flex-wrap gap-0.5">
@@ -3949,18 +3995,18 @@ async function submitReceipt() {
               <section
                 class="relative overflow-hidden rounded-[1.125rem] border border-white/[0.14] bg-black px-4 py-3 text-center text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] ring-1 ring-inset ring-white/[0.08]"
               >
-                <p class="text-[10px] font-medium text-white/45">© {{ new Date().getFullYear() }} AI Guard. Все права защищены.</p>
-                <p class="mt-1 text-[10px] text-white/38">Соцсети: Telegram · VK · YouTube</p>
+                <p class="text-[10px] font-medium text-white/45">{{ t('dashboard.billing.footer_rights', { year: new Date().getFullYear() }) }}</p>
+                <p class="mt-1 text-[10px] text-white/38">{{ t('dashboard.billing.footer_social') }}</p>
               </section>
             </div>
 
-            <div v-if="!showPremiumTokenLanding && tokenPacksLoading" class="py-4 text-center text-[11px] text-white/45">Загрузка…</div>
+            <div v-if="!showPremiumTokenLanding && tokenPacksLoading" class="py-4 text-center text-[11px] text-white/45">{{ t('dashboard.tokens.loading') }}</div>
             <div
               v-else-if="!showPremiumTokenLanding"
               ref="premiumTokenPacksRef"
               class="mt-1 space-y-2"
             >
-              <h4 class="text-center text-[16px] font-extrabold tracking-tight text-white">Выбор пакета</h4>
+              <h4 class="text-center text-[16px] font-extrabold tracking-tight text-white">{{ t('dashboard.tokens.pack_choice_title') }}</h4>
               <div
                 v-if="tokenPacksError"
                 class="rounded-xl border border-red-400/40 bg-red-950/40 px-2.5 py-2.5 text-[11px] leading-snug text-red-100/95"
@@ -3971,20 +4017,20 @@ async function submitReceipt() {
                   class="mt-2 w-full rounded-lg border border-white/15 bg-white/10 py-2 text-[12px] font-semibold text-white transition hover:bg-white/14"
                   @click="loadTokenPacksFromApi"
                 >
-                  Обновить
+                  {{ t('dashboard.tokens.refresh') }}
                 </button>
               </div>
               <div
                 v-else-if="!tokenPacks.length"
                 class="rounded-xl border border-white/[0.1] bg-zinc-900/70 px-2.5 py-3 text-center text-[11px] leading-snug text-white/60"
               >
-                Каталог пакетов пуст. Проверьте соединение или обновите список.
+                {{ t('dashboard.tokens.packs_empty') }}
                 <button
                   type="button"
                   class="mt-2 w-full rounded-lg border border-white/15 bg-white/10 py-2 text-[12px] font-semibold text-white transition hover:bg-white/14"
                   @click="loadTokenPacksFromApi"
                 >
-                  Обновить
+                  {{ t('dashboard.tokens.refresh') }}
                 </button>
               </div>
               <div v-else class="space-y-0">
@@ -4033,7 +4079,7 @@ async function submitReceipt() {
                   class="mt-3 w-full py-2 text-center text-[13px] font-medium text-slate-400 underline decoration-slate-600 underline-offset-4 transition hover:text-slate-300"
                   @click="showAllTokenPacks = !showAllTokenPacks"
                 >
-                  {{ showAllTokenPacks ? 'Скрыть дополнительные пакеты' : 'Показать ещё пакеты' }}
+                  {{ showAllTokenPacks ? t('dashboard.tokens.hide_extra_packs') : t('dashboard.tokens.show_more_packs') }}
                 </button>
               </div>
             </div>
@@ -4045,7 +4091,7 @@ async function submitReceipt() {
               :disabled="selectedTokenPack === null || payLoadingTokenPack !== null"
               @click="continueTokenPackCheckout"
             >
-              {{ payLoadingTokenPack !== null ? 'Готовим оплату...' : 'Продолжить' }}
+              {{ payLoadingTokenPack !== null ? t('dashboard.billing.pay_preparing') : t('dashboard.billing.continue') }}
             </button>
             <button
               v-if="!showPremiumTokenLanding && tokenPacks.length"
@@ -4053,18 +4099,18 @@ async function submitReceipt() {
               class="mt-2 w-full py-2 text-center text-[13px] font-medium text-slate-400 underline decoration-slate-500 underline-offset-4 transition hover:text-slate-300"
               @click="openPromoCodeModal"
             >
-              Есть промокод?
+              {{ t('dashboard.billing.have_promo') }}
             </button>
             <div
               v-if="!showPremiumTokenLanding && me?.is_admin"
               class="flex flex-wrap items-center gap-x-1.5 gap-y-1 rounded-lg border border-amber-400/22 bg-amber-500/[0.05] px-1.5 py-1 backdrop-blur-xl"
             >
-              <span class="text-[9px] font-semibold uppercase tracking-wide text-amber-200/90">Тест</span>
+              <span class="text-[9px] font-semibold uppercase tracking-wide text-amber-200/90">{{ t('dashboard.tokens.test_label') }}</span>
               <button
                 type="button"
                 :class="tokensInfoBtnAmberClass"
-                title="Тестовая оплата для администраторов"
-                aria-label="Тестовая оплата для администраторов"
+                :title="t('dashboard.tokens.test_pay_tooltip')"
+                :aria-label="t('dashboard.tokens.test_pay_info_aria')"
                 @click="openTokensAdminTestInfo"
               >i</button>
               <div class="flex min-w-0 flex-1 flex-wrap gap-0.5">
@@ -4085,7 +4131,7 @@ async function submitReceipt() {
       </div>
 
       <div
-        v-if="dashboardSection === 'billing'"
+        v-if="dashSection === 'billing'"
         class="mx-auto mt-1 w-full max-w-md space-y-4 md:max-w-lg"
       >
         <!-- Лендинг тарифов: узкая колонка как в телефоне, на десктопе то же визуально; Free — только после /me и без подписки -->
@@ -4106,31 +4152,31 @@ async function submitReceipt() {
                 🔒
               </div>
               <p class="mt-5 text-center text-[11px] font-extrabold uppercase tracking-[0.22em] text-violet-300">
-                Ограничения Free
+                {{ t('dashboard.billing.free_limits_title') }}
               </p>
               <p class="mt-2 max-w-[19rem] text-center text-[13px] leading-relaxed text-slate-400">
-                Вы используете бесплатный тариф. Некоторые функции недоступны в Free версии
+                {{ t('dashboard.billing.free_limits_sub') }}
               </p>
               <ul class="mt-5 w-full max-w-md space-y-3 rounded-2xl border border-white/[0.08] bg-zinc-950/90 px-4 py-4">
                 <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
                   <span class="mt-0.5 shrink-0 text-violet-400" aria-hidden="true">🔒</span>
-                  Автоудаление спама
+                  {{ t('dashboard.billing.free_li_autodel') }}
                 </li>
                 <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
                   <span class="mt-0.5 shrink-0 text-violet-400" aria-hidden="true">🔒</span>
-                  Фильтр ссылок и упоминаний
+                  {{ t('dashboard.billing.free_li_links') }}
                 </li>
                 <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
                   <span class="mt-0.5 shrink-0 text-violet-400" aria-hidden="true">🔒</span>
-                  Рассылки по чатам и каналам
+                  {{ t('dashboard.billing.free_li_broadcast') }}
                 </li>
                 <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
                   <span class="mt-0.5 shrink-0 text-violet-400" aria-hidden="true">🔒</span>
-                  Расширенная статистика
+                  {{ t('dashboard.billing.free_li_stats') }}
                 </li>
                 <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
                   <span class="mt-0.5 shrink-0 text-amber-400/95 drop-shadow-[0_0_8px_rgba(251,191,36,0.45)]" aria-hidden="true">🔒</span>
-                  Приоритетная поддержка
+                  {{ t('dashboard.billing.free_li_support') }}
                 </li>
               </ul>
               <button
@@ -4138,7 +4184,7 @@ async function submitReceipt() {
                 class="mt-6 w-full max-w-md rounded-2xl bg-violet-600 py-3.5 text-[15px] font-bold text-white shadow-[0_12px_32px_-8px_rgba(124,58,237,0.55)] transition hover:bg-violet-500 active:scale-[0.99]"
                 @click="scrollToBillingPremiumPitch"
               >
-                Подробнее о Premium
+                {{ t('dashboard.billing.cta_learn_premium') }}
               </button>
             </div>
           </section>
@@ -4159,31 +4205,31 @@ async function submitReceipt() {
                 <span class="text-[15px] font-bold tracking-tight text-white">Premium</span>
               </div>
               <p class="mt-4 text-center text-[1.05rem] font-bold leading-snug text-amber-300 sm:text-lg">
-                Раскройте полный потенциал Guard
+                {{ t('dashboard.billing.premium_pitch_title') }}
               </p>
               <p class="mx-auto mt-2 max-w-[20rem] text-center text-[13px] leading-relaxed text-slate-400">
-                Больше защиты, больше функций, больше возможностей для роста
+                {{ t('dashboard.billing.premium_pitch_sub') }}
               </p>
               <ul class="mx-auto mt-5 max-w-md space-y-3">
                 <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
                   <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-amber-500/15 text-sm text-amber-300" aria-hidden="true">✦</span>
-                  Чистый чат без спама 24/7
+                  {{ t('dashboard.billing.pf_clean_chat') }}
                 </li>
                 <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
                   <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-amber-500/15 text-sm text-amber-300" aria-hidden="true">✦</span>
-                  Автоматическое удаление
+                  {{ t('dashboard.billing.pf_autodel') }}
                 </li>
                 <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
                   <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-amber-500/15 text-sm text-amber-300" aria-hidden="true">✦</span>
-                  Рассылки и автопостинг
+                  {{ t('dashboard.billing.pf_broadcast') }}
                 </li>
                 <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
                   <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-amber-500/15 text-sm text-amber-300" aria-hidden="true">✦</span>
-                  Расширенная аналитика
+                  {{ t('dashboard.billing.pf_analytics') }}
                 </li>
                 <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
                   <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-amber-500/15 text-sm text-amber-300" aria-hidden="true">✦</span>
-                  Приоритетная поддержка
+                  {{ t('dashboard.billing.pf_support') }}
                 </li>
               </ul>
               <button
@@ -4192,14 +4238,14 @@ async function submitReceipt() {
                 style="background: linear-gradient(90deg, #f39c12 0%, #df5a3b 34%, #b043cc 56%, #5c2dc1 74%, #2a1a83 100%);"
                 @click="scrollToBillingLandingPlans"
               >
-                Выбрать тариф
+                {{ t('dashboard.billing.cta_pick_plan') }}
               </button>
               <button
                 type="button"
                 class="mt-3 w-full py-2 text-center text-[13px] font-medium text-slate-500 underline decoration-slate-600 underline-offset-4 transition hover:text-slate-400"
                 @click="scrollToBillingPremiumCompare"
               >
-                Сравнить тарифы
+                {{ t('dashboard.billing.link_compare_plans') }}
               </button>
             </div>
           </section>
@@ -4220,7 +4266,7 @@ async function submitReceipt() {
             />
             <div class="relative z-[1]">
               <h2 class="text-center text-lg font-extrabold tracking-tight text-white sm:text-xl">
-                Сравнение тарифов
+                {{ t('dashboard.billing.compare_title') }}
               </h2>
 
               <div
@@ -4252,7 +4298,7 @@ async function submitReceipt() {
                 >
                 <span
                   class="min-w-0 border-b border-white/[0.08] bg-white/[0.03] py-2.5 pl-2 pr-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500 sm:pl-2.5"
-                >Функция</span>
+                >{{ t('dashboard.billing.compare_feature_col') }}</span>
                 <span
                   class="flex min-w-0 items-center justify-center border-b border-l border-white/[0.08] bg-white/[0.03] px-1.5 py-2.5 text-center text-[10px] font-bold uppercase text-violet-300/85"
                 >Free</span>
@@ -4276,13 +4322,13 @@ async function submitReceipt() {
                       :class="idx % 2 === 1 ? 'bg-white/[0.02]' : 'bg-white/[0.01]'"
                     >
                       <span class="text-[15px] font-bold leading-none text-emerald-400">✓</span>
-                      <span class="mt-1 w-full text-center text-[9px] font-medium leading-none text-slate-400">1 уровень</span>
+                      <span class="mt-1 w-full text-center text-[9px] font-medium leading-none text-slate-400">{{ t('dashboard.billing.referral_tier_free') }}</span>
                     </div>
                     <div
                       class="flex min-w-0 flex-col items-center justify-center border-b border-l border-amber-400/15 bg-amber-500/[0.05] px-1.5 py-2.5 text-center"
                     >
                       <span class="text-[15px] font-bold leading-none text-emerald-400">✓</span>
-                      <span class="mt-1 w-full text-center text-[9px] font-semibold leading-tight text-emerald-300">3 уровня</span>
+                      <span class="mt-1 w-full text-center text-[9px] font-semibold leading-tight text-emerald-300">{{ t('dashboard.billing.referral_tier_premium') }}</span>
                     </div>
                   </template>
                   <template v-else-if="row.kind === 'limits'">
@@ -4299,7 +4345,7 @@ async function submitReceipt() {
                     <div
                       class="flex min-w-0 flex-col items-center justify-center border-b border-l border-amber-400/15 bg-amber-500/[0.05] px-1.5 py-2.5 text-center"
                     >
-                      <span class="text-[11px] font-semibold leading-tight text-amber-200/95">Без лимитов</span>
+                      <span class="text-[11px] font-semibold leading-tight text-amber-200/95">{{ t('dashboard.billing.limits_unlimited') }}</span>
                     </div>
                   </template>
                   <template v-else>
@@ -4325,7 +4371,7 @@ async function submitReceipt() {
               style="background: linear-gradient(90deg, #f39c12 0%, #df5a3b 34%, #b043cc 56%, #5c2dc1 74%, #2a1a83 100%);"
                 @click="scrollToBillingLandingPlans"
               >
-                Выбрать Premium
+                {{ t('dashboard.billing.cta_choose_premium_btn') }}
               </button>
             </div>
           </section>
@@ -4337,7 +4383,7 @@ async function submitReceipt() {
             class="relative overflow-hidden rounded-[1.125rem] border border-white/[0.12] bg-black px-4 py-6 text-white ring-1 ring-inset ring-white/[0.06]"
           >
             <h2 class="text-center text-lg font-extrabold tracking-tight text-white sm:text-xl">
-              Выбор тарифа
+              {{ t('dashboard.billing.plan_choice_title') }}
             </h2>
             <div class="mt-5 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
               <button
@@ -4375,7 +4421,7 @@ async function submitReceipt() {
               class="mt-3 w-full py-2 text-center text-[13px] font-medium text-slate-400 underline decoration-slate-600 underline-offset-4 transition hover:text-slate-300"
               @click="showAllLandingPlans = !showAllLandingPlans"
             >
-              {{ showAllLandingPlans ? 'Скрыть дополнительные тарифы' : 'Показать все тарифы' }}
+              {{ showAllLandingPlans ? t('dashboard.billing.hide_extra_plans') : t('dashboard.billing.show_all_plans') }}
             </button>
             <button
               type="button"
@@ -4383,14 +4429,14 @@ async function submitReceipt() {
               style="background: linear-gradient(90deg, #f39c12 0%, #df5a3b 34%, #b043cc 56%, #5c2dc1 74%, #2a1a83 100%);"
               @click="onLandingContinue"
             >
-              Продолжить
+              {{ t('dashboard.billing.continue') }}
             </button>
             <button
               type="button"
               class="mt-2 w-full py-2 text-center text-[13px] font-medium text-slate-500 underline decoration-slate-600 underline-offset-4 transition hover:text-slate-400"
               @click="openPromoCodeModal"
             >
-              Есть промокод?
+              {{ t('dashboard.billing.have_promo') }}
             </button>
             <!-- Оплата и все периоды — внутри того же лендинга, без отдельной «страницы Guard Premium» -->
             <div class="mt-8 space-y-3 border-t border-white/[0.1] pt-7">
@@ -4400,7 +4446,7 @@ async function submitReceipt() {
                 class="flex w-full items-center justify-center gap-1 rounded-lg border border-white/[0.12] bg-white/[0.06] py-1.5 text-[12px] font-semibold text-lime-200/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-md transition hover:bg-white/[0.1] active:scale-[0.99]"
                 @click="backFromBillingToGroupStats"
               >
-                ← К статистике группы
+                {{ t('dashboard.billing.back_to_group_stats') }}
               </button>
 
           <div id="billing-premium-plans" ref="billingPremiumPlansRef" class="scroll-mt-4 space-y-2"></div>
@@ -4410,18 +4456,18 @@ async function submitReceipt() {
             class="flex flex-col gap-1 rounded-lg border border-amber-400/22 bg-amber-500/[0.05] px-1.5 py-1.5 backdrop-blur-xl"
           >
             <div class="flex flex-wrap items-center gap-x-1.5 gap-y-1">
-              <span class="text-[9px] font-semibold uppercase tracking-wide text-amber-200/90">Тест тарифов</span>
+              <span class="text-[9px] font-semibold uppercase tracking-wide text-amber-200/90">{{ t('dashboard.billing.test_tariffs_label') }}</span>
               <button
                 type="button"
                 :class="tokensInfoBtnAmberClass"
-                title="Что это за блок"
-                aria-label="Тестовая оплата тарифов"
+                :title="t('dashboard.billing.test_block_tooltip')"
+                :aria-label="t('dashboard.billing.test_block_aria')"
                 @click="openPremiumTestTariffInfo"
               >i</button>
             </div>
             <div class="grid grid-cols-2 gap-1 sm:grid-cols-3">
               <button
-                v-for="plan in PREMIUM_PLANS"
+                v-for="plan in premiumPlansCatalog"
                 :key="`test-tariff-${plan.months}`"
                 type="button"
                 class="relative min-h-[3.1rem] overflow-hidden rounded-lg border border-amber-500/30 bg-black/25 px-1.5 py-1 text-left backdrop-blur-md transition hover:border-amber-400/45 hover:bg-amber-950/20 disabled:opacity-55"
@@ -4440,7 +4486,7 @@ async function submitReceipt() {
                   <span class="text-[10px] font-bold leading-tight text-amber-100">{{ plan.label }}</span>
                   <span class="text-[9px] font-semibold tabular-nums text-amber-200/85">{{ plan.price }}</span>
                   <span class="text-[8px] font-semibold tabular-nums text-amber-300/90">+{{ subscriptionTokensForPlan(plan) }} ⚡</span>
-                  <span class="text-[7px] font-bold uppercase tracking-wide text-amber-400/80">тест</span>
+                  <span class="text-[7px] font-bold uppercase tracking-wide text-amber-400/80">{{ t('dashboard.billing.test_tariff_corner') }}</span>
                 </div>
                 <span
                   v-if="payLoadingTestMonths === plan.months"
@@ -4454,27 +4500,27 @@ async function submitReceipt() {
               class="mt-1 w-full rounded-md border border-white/15 bg-white/[0.06] py-1.5 text-[11px] font-semibold text-slate-100 transition hover:bg-white/10"
               @click="openSubscriptionScreen"
             >
-              Открыть экран подписки
+              {{ t('dashboard.billing.open_sub_screen') }}
             </button>
           </div>
           <div class="mt-4 border-t border-white/[0.08] pt-3 text-center">
-            <p class="text-[10px] font-medium text-white/45">© {{ new Date().getFullYear() }} AI Guard. Все права защищены.</p>
-            <p class="mt-1 text-[10px] text-white/38">Соцсети: Telegram · VK · YouTube</p>
+            <p class="text-[10px] font-medium text-white/45">{{ t('dashboard.billing.footer_rights', { year: new Date().getFullYear() }) }}</p>
+            <p class="mt-1 text-[10px] text-white/38">{{ t('dashboard.billing.footer_social') }}</p>
           </div>
         </div>
         </section>
       </div>
 
-      <div v-if="dashboardSection === 'faq'" class="mt-1 rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800">
+      <div v-if="dashSection === 'faq'" class="mt-1 rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800">
         <h3 class="text-base font-semibold text-slate-900 dark:text-white">FAQ</h3>
         <ul class="mt-2 list-disc space-y-1 pl-4 text-sm text-slate-700 dark:text-slate-300">
-          <li>Токены подписки отвечают за доступ по периоду.</li>
-          <li>Счёт «сверх подписки» объединяет партнёрские начисления и докупку «⚡ для рассылки».</li>
-          <li>Их можно перевести в подписочные токены (кнопка в партнёрке).</li>
+          <li>{{ t('dashboard.billing.faq_li_sub') }}</li>
+          <li>{{ t('dashboard.billing.faq_li_bonus') }}</li>
+          <li>{{ t('dashboard.billing.faq_li_convert') }}</li>
         </ul>
       </div>
 
-      <div v-if="dashboardSection === 'history'" class="mt-1">
+      <div v-if="dashSection === 'history'" class="mt-1">
         <div class="rounded-2xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
           <div class="grid grid-cols-2 gap-2">
             <button
@@ -4483,7 +4529,7 @@ async function submitReceipt() {
               :class="historyTab === 'payments' ? 'bg-sky-100 text-sky-800 dark:bg-sky-900/30 dark:text-sky-200' : 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200'"
               @click="historyTab = 'payments'"
             >
-              История платежей
+              {{ t('dashboard.billing.history_payments_tab') }}
             </button>
             <button
               type="button"
@@ -4491,13 +4537,13 @@ async function submitReceipt() {
               :class="historyTab === 'tokens' ? 'bg-sky-100 text-sky-800 dark:bg-sky-900/30 dark:text-sky-200' : 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200'"
               @click="historyTab = 'tokens'"
             >
-              История токенов
+              {{ t('dashboard.billing.history_tokens_tab') }}
             </button>
           </div>
-          <div v-if="historyLoading" class="py-6 text-center text-sm text-slate-500 dark:text-slate-400">Секундочку…</div>
+          <div v-if="historyLoading" class="py-6 text-center text-sm text-slate-500 dark:text-slate-400">{{ t('dashboard.billing.history_wait') }}</div>
           <div v-else-if="historyTab === 'payments'" class="mt-3 space-y-2">
             <div v-if="historyPayments.length === 0" class="rounded-xl bg-slate-50 p-4 text-center text-sm text-slate-500 dark:bg-slate-700/40 dark:text-slate-400">
-              Платежей пока нет.
+              {{ t('dashboard.billing.history_no_payments') }}
             </div>
             <div v-for="(item, idx) in historyPayments" :key="`dp-${idx}`" class="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
               <p class="text-xs text-slate-500 dark:text-slate-400">{{ item.created_at || '—' }}</p>
@@ -4508,7 +4554,7 @@ async function submitReceipt() {
                       {{ fmtAmount(item.amount_rub) }} ₽ · {{ item.months }} ⚡
                     </template>
                     <template v-else>
-                      {{ fmtAmount(item.amount_rub) }} ₽ · {{ item.months }} мес.
+                      {{ fmtAmount(item.amount_rub) }} ₽ · {{ t('dashboard.billing.months_short', { n: item.months }) }}
                     </template>
                   </p>
                   <p class="text-xs text-slate-500 dark:text-slate-400">
@@ -4522,14 +4568,14 @@ async function submitReceipt() {
                     class="rounded-xl bg-emerald-300 px-3 py-2 text-sm font-extrabold text-slate-900"
                     @click="openReceiptLink(item)"
                   >
-                    🧾 Чек
+                    {{ t('dashboard.billing.receipt_btn') }}
                   </button>
                   <button
                     type="button"
                     class="rounded-xl bg-cyan-300 px-3 py-2 text-sm font-extrabold text-slate-900"
                     @click="openReceiptModal(item)"
                   >
-                    Получить чек
+                    {{ t('dashboard.billing.get_receipt') }}
                   </button>
                 </div>
               </div>
@@ -4537,7 +4583,7 @@ async function submitReceipt() {
           </div>
           <div v-else class="mt-3 space-y-2">
             <div v-if="historyTokens.length === 0" class="rounded-xl bg-slate-50 p-4 text-center text-sm text-slate-500 dark:bg-slate-700/40 dark:text-slate-400">
-              Движения токенов пока нет.
+              {{ t('dashboard.billing.history_no_tokens') }}
             </div>
             <div v-for="(item, idx) in historyTokens" :key="`dt-${idx}`" class="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
               <p class="text-xs text-slate-500 dark:text-slate-400">{{ item.created_at || '—' }}</p>
@@ -4560,6 +4606,20 @@ async function submitReceipt() {
     </div>
 
     <div
+      v-else
+      class="rounded-xl border border-white/10 bg-white/[0.06] p-4 text-sm text-white/85 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"
+    >
+      <p>{{ t('app.profile_error') }}</p>
+      <button
+        type="button"
+        class="mt-3 w-full rounded-lg bg-lime-500/20 px-3 py-2 text-sm font-semibold text-lime-100 ring-1 ring-lime-500/30"
+        @click="loadMeInitial"
+      >
+        {{ t('common.refresh') }}
+      </button>
+    </div>
+
+    <div
       v-if="showQuickStartModal"
       class="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-3 md:items-center"
       @click.self="showQuickStartModal = false"
@@ -4576,13 +4636,13 @@ async function submitReceipt() {
           </button>
         </div>
         <ol class="list-decimal space-y-2 pl-4 text-sm text-gray-700 dark:text-gray-300">
-          <li>Подключите группу и откройте раздел Защита.</li>
-          <li>Токены подписки отвечают за доступ по периоду.</li>
-          <li>Партнерские токены начисляются за оплаты рефералов.</li>
-          <li>Партнерские токены можно переводить в подписку.</li>
+          <li>{{ t('dashboard.home_shell.quick_faq.li1') }}</li>
+          <li>{{ t('dashboard.home_shell.quick_faq.li2') }}</li>
+          <li>{{ t('dashboard.home_shell.quick_faq.li3') }}</li>
+          <li>{{ t('dashboard.home_shell.quick_faq.li4') }}</li>
         </ol>
         <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">
-          Совет: сначала группа и отчёты, потом тонкая настройка фильтров.
+          {{ t('dashboard.home_shell.quick_faq.tip') }}
         </p>
       </div>
     </div>
@@ -4592,7 +4652,7 @@ async function submitReceipt() {
       class="fixed inset-0 z-[56] flex items-end justify-center bg-black/40 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-md md:items-center md:pb-3"
       role="dialog"
       aria-modal="true"
-      aria-label="История платежей и токенов"
+      :aria-label="t('dashboard.home_shell.history_modal.aria')"
       @click.self="showAccountHistoryModal = false"
     >
       <div
@@ -4600,11 +4660,11 @@ async function submitReceipt() {
         @click.stop
       >
         <div class="flex shrink-0 items-center justify-between px-4 pb-2 pt-3">
-          <h2 class="text-[17px] font-semibold tracking-tight text-black dark:text-white">История</h2>
+          <h2 class="text-[17px] font-semibold tracking-tight text-black dark:text-white">{{ t('dashboard.home_shell.history_modal.title') }}</h2>
           <button
             type="button"
             class="flex h-8 w-8 items-center justify-center rounded-full bg-black/[0.06] text-[17px] font-light leading-none text-black/45 transition active:scale-95 dark:bg-white/[0.12] dark:text-white/55 dark:hover:bg-white/[0.18]"
-            aria-label="Закрыть"
+            :aria-label="t('common.close')"
             @click="showAccountHistoryModal = false"
           >
             ✕
@@ -4622,7 +4682,7 @@ async function submitReceipt() {
               "
               @click="historyTab = 'payments'"
             >
-              Платежи
+              {{ t('dashboard.home_shell.history_modal.payments') }}
             </button>
             <button
               type="button"
@@ -4634,17 +4694,17 @@ async function submitReceipt() {
               "
               @click="historyTab = 'tokens'"
             >
-              Токены
+              {{ t('dashboard.home_shell.history_modal.tokens') }}
             </button>
           </div>
 
-          <div v-if="historyLoading" class="py-8 text-center text-[15px] text-black/35 dark:text-white/35">Секундочку…</div>
+          <div v-if="historyLoading" class="py-8 text-center text-[15px] text-black/35 dark:text-white/35">{{ t('dashboard.home_shell.moment') }}</div>
           <div v-else-if="historyTab === 'payments'" class="space-y-2">
             <div
               v-if="historyPayments.length === 0"
               class="rounded-[14px] bg-white px-4 py-6 text-center text-[15px] text-black/45 dark:bg-white/[0.06] dark:text-white/45"
             >
-              Платежей пока нет.
+              {{ t('dashboard.home_shell.history_modal.no_payments') }}
             </div>
             <div
               v-for="(item, idx) in historyPayments"
@@ -4659,7 +4719,7 @@ async function submitReceipt() {
                       {{ fmtAmount(item.amount_rub) }} ₽ · {{ item.months }} ⚡
                     </template>
                     <template v-else>
-                      {{ fmtAmount(item.amount_rub) }} ₽ · {{ item.months }} мес.
+                      {{ fmtAmount(item.amount_rub) }} ₽ · {{ t('dashboard.billing.months_short', { n: item.months }) }}
                     </template>
                   </p>
                   <p class="mt-0.5 text-[13px] text-black/45 dark:text-white/45">
@@ -4673,14 +4733,7 @@ async function submitReceipt() {
                     class="rounded-full bg-emerald-500/90 px-3 py-1.5 text-[13px] font-semibold text-white"
                     @click="openReceiptLink(item)"
                   >
-                    Чек
-                  </button>
-                  <button
-                    type="button"
-                    class="rounded-full bg-sky-500/90 px-3 py-1.5 text-[13px] font-semibold text-white"
-                    @click="openReceiptModal(item)"
-                  >
-                    Получить чек
+                    {{ t('dashboard.billing.get_receipt') }}
                   </button>
                 </div>
               </div>
@@ -4691,7 +4744,7 @@ async function submitReceipt() {
               v-if="historyTokens.length === 0"
               class="rounded-[14px] bg-white px-4 py-6 text-center text-[15px] text-black/45 dark:bg-white/[0.06] dark:text-white/45"
             >
-              Движения токенов пока нет.
+              {{ t('dashboard.billing.history_no_tokens') }}
             </div>
             <div
               v-for="(item, idx) in historyTokens"
@@ -4718,43 +4771,43 @@ async function submitReceipt() {
         class="flex min-h-0 max-h-[min(86vh,calc(100dvh-5rem))] w-full max-w-xl flex-col overflow-hidden rounded-[1.35rem] border border-white/12 bg-zinc-950/82 p-3 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.92)] ring-1 ring-white/10 backdrop-blur-2xl"
       >
         <div class="mb-3 flex shrink-0 items-center justify-between gap-2">
-          <h3 class="text-sm font-semibold text-white">Подробный отчет по защите</h3>
+          <h3 class="text-sm font-semibold text-white">{{ t('dashboard.home_shell.activity_modal.title') }}</h3>
           <button type="button" class="rounded-lg px-2 py-1 text-sm text-zinc-400 hover:bg-white/10 hover:text-white" @click="showActivityModal = false">✕</button>
         </div>
-        <div v-if="activityLoading" class="shrink-0 py-5 text-center text-sm text-zinc-400">Секундочку…</div>
-        <div v-else-if="activityChats.length === 0" class="shrink-0 py-6 text-center text-sm text-zinc-500">Групп пока нет.</div>
+        <div v-if="activityLoading" class="shrink-0 py-5 text-center text-sm text-zinc-400">{{ t('dashboard.home_shell.moment') }}</div>
+        <div v-else-if="activityChats.length === 0" class="shrink-0 py-6 text-center text-sm text-zinc-500">{{ t('dashboard.home_shell.activity_modal.no_groups') }}</div>
         <div v-else class="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-y-contain pr-1 [-webkit-overflow-scrolling:touch]">
           <section class="overflow-hidden rounded-[1.1rem] border border-white/10 bg-black/35 p-2.5 ring-1 ring-white/10 backdrop-blur-xl">
-            <p class="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Общий отчёт</p>
+            <p class="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">{{ t('dashboard.home_shell.activity_modal.overall') }}</p>
             <div class="mt-1 grid grid-cols-2 gap-1.5 text-xs sm:grid-cols-3 md:grid-cols-5">
               <div class="rounded-lg border border-white/10 bg-zinc-950/50 p-2 ring-1 ring-white/5 backdrop-blur-md">
-                <p class="text-[10px] text-zinc-500">Всего</p>
+                <p class="text-[10px] text-zinc-500">{{ t('dashboard.home_shell.activity_modal.col_total') }}</p>
                 <p class="text-base font-bold text-white">{{ activityOverview.total }}</p>
               </div>
               <div class="rounded-lg border border-rose-500/35 bg-rose-950/25 p-2 ring-1 ring-rose-500/15 backdrop-blur-md">
-                <p class="text-[10px] text-rose-200/85">Удалено</p>
+                <p class="text-[10px] text-rose-200/85">{{ t('dashboard.home_shell.activity_modal.col_deleted') }}</p>
                 <p class="text-base font-bold text-rose-200">{{ activityOverview.deleted }}</p>
               </div>
               <div class="rounded-lg border border-red-500/40 bg-red-950/30 p-2 ring-1 ring-red-400/20 backdrop-blur-md">
-                <p class="text-[10px] text-red-200/90">Замечено</p>
+                <p class="text-[10px] text-red-200/90">{{ t('dashboard.home_shell.activity_modal.col_observed') }}</p>
                 <p class="text-base font-bold text-red-200">{{ activityOverview.observed }}</p>
               </div>
               <div class="rounded-lg border border-amber-500/35 bg-amber-950/25 p-2 ring-1 ring-amber-400/15 backdrop-blur-md">
-                <p class="text-[10px] text-amber-200/85">Ограничено (мут)</p>
+                <p class="text-[10px] text-amber-200/85">{{ t('dashboard.home_shell.activity_modal.col_muted') }}</p>
                 <p class="text-base font-bold text-amber-200">{{ activityOverview.muted }}</p>
               </div>
               <div class="rounded-lg border border-fuchsia-500/35 bg-fuchsia-950/25 p-2 ring-1 ring-fuchsia-400/15 backdrop-blur-md">
-                <p class="text-[10px] text-fuchsia-200/85">Заблокировано</p>
+                <p class="text-[10px] text-fuchsia-200/85">{{ t('dashboard.home_shell.activity_modal.col_banned') }}</p>
                 <p class="text-base font-bold text-fuchsia-200">{{ activityOverview.banned }}</p>
               </div>
             </div>
           </section>
 
           <section class="overflow-hidden rounded-[1.1rem] border border-white/10 bg-black/35 p-2.5 ring-1 ring-white/10 backdrop-blur-xl">
-            <p class="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Группы</p>
+            <p class="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">{{ t('dashboard.home_shell.activity_modal.groups') }}</p>
             <div class="mt-1.5 space-y-3">
               <div v-if="activityByGroupDelegated.length">
-                <p class="mb-1 text-[10px] font-semibold uppercase tracking-wide text-violet-200/90">Делегированные</p>
+                <p class="mb-1 text-[10px] font-semibold uppercase tracking-wide text-violet-200/90">{{ t('dashboard.home_shell.activity_modal.delegated') }}</p>
                 <div class="space-y-1.5">
                   <div
                     v-for="group in activityByGroupDelegated"
@@ -4764,23 +4817,21 @@ async function submitReceipt() {
                     <div class="flex items-start justify-between gap-2">
                       <div>
                         <p class="text-xs font-semibold text-white">{{ group.chat_title }}</p>
-                        <p class="mt-0.5 text-[11px] text-zinc-300">
-                          Всего: <b>{{ group.total }}</b> · Удалено: <b>{{ group.deleted }}</b> · <span class="font-semibold text-red-300/95">Замечено: <b>{{ group.observed }}</b></span> · Ограничено (мут): <b>{{ group.muted }}</b> · Заблокировано: <b>{{ group.banned }}</b>
-                        </p>
+                        <p class="mt-0.5 text-[11px] text-zinc-300" v-text="t('dashboard.home_shell.activity_modal.group_line', { total: group.total, deleted: group.deleted, observed: group.observed, muted: group.muted, banned: group.banned })"></p>
                       </div>
                       <button
                         type="button"
                         class="shrink-0 rounded-lg border border-white/15 bg-white/8 px-2 py-0.5 text-[11px] font-semibold text-zinc-100 hover:bg-white/14"
                         @click="openGroupActivityDetails(group)"
                       >
-                        Подробнее
+                        {{ t('dashboard.home_shell.activity_modal.details') }}
                       </button>
                     </div>
                   </div>
                 </div>
               </div>
               <div v-if="activityByGroupMine.length">
-                <p class="mb-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Мои чаты</p>
+                <p class="mb-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">{{ t('dashboard.home_shell.activity_modal.mine') }}</p>
                 <div class="space-y-1.5">
                   <div
                     v-for="group in activityByGroupMine"
@@ -4790,16 +4841,14 @@ async function submitReceipt() {
                     <div class="flex items-start justify-between gap-2">
                       <div>
                         <p class="text-xs font-semibold text-white">{{ group.chat_title }}</p>
-                        <p class="mt-0.5 text-[11px] text-zinc-300">
-                          Всего: <b>{{ group.total }}</b> · Удалено: <b>{{ group.deleted }}</b> · <span class="font-semibold text-red-300/95">Замечено: <b>{{ group.observed }}</b></span> · Ограничено (мут): <b>{{ group.muted }}</b> · Заблокировано: <b>{{ group.banned }}</b>
-                        </p>
+                        <p class="mt-0.5 text-[11px] text-zinc-300" v-text="t('dashboard.home_shell.activity_modal.group_line', { total: group.total, deleted: group.deleted, observed: group.observed, muted: group.muted, banned: group.banned })"></p>
                       </div>
                       <button
                         type="button"
                         class="shrink-0 rounded-lg border border-white/15 bg-white/8 px-2 py-0.5 text-[11px] font-semibold text-zinc-100 hover:bg-white/14"
                         @click="openGroupActivityDetails(group)"
                       >
-                        Подробнее
+                        {{ t('dashboard.home_shell.activity_modal.details') }}
                       </button>
                     </div>
                   </div>
@@ -4846,19 +4895,19 @@ async function submitReceipt() {
               :class="groupStatsUseCustom ? 'ring-1 ring-amber-400/60' : ''"
               @click="toggleGroupStatsRangePanel"
             >
-              {{ groupStatsRangeExpanded ? '▾ Скрыть свой период' : '▸ Свой период (с даты по дату)' }}
+              {{ groupStatsRangeExpanded ? t('dashboard.home_shell.group_stats.range_hide') : t('dashboard.home_shell.group_stats.range_show') }}
             </button>
             <div v-if="groupStatsRangeExpanded" class="space-y-1.5 rounded-xl border border-white/12 bg-black/35 p-2 backdrop-blur-md">
-              <label class="block text-[10px] text-zinc-500">С даты и времени</label>
+              <label class="block text-[10px] text-zinc-500">{{ t('dashboard.home_shell.group_stats.from_dt') }}</label>
               <input v-model="groupStatsFromInput" type="datetime-local" class="w-full rounded-lg border border-white/12 bg-zinc-950/80 px-2 py-1 text-[11px] text-white">
-              <label class="block text-[10px] text-zinc-500">По дату и время</label>
+              <label class="block text-[10px] text-zinc-500">{{ t('dashboard.home_shell.group_stats.to_dt') }}</label>
               <input v-model="groupStatsToInput" type="datetime-local" class="w-full rounded-lg border border-white/12 bg-zinc-950/80 px-2 py-1 text-[11px] text-white">
               <button
                 type="button"
                 class="mt-1 w-full rounded-lg bg-lime-500/90 py-1.5 text-[11px] font-bold text-slate-900"
                 @click="applyGroupCustomRange"
               >
-                Применить период
+                {{ t('dashboard.home_shell.group_stats.apply_range') }}
               </button>
             </div>
           </div>
@@ -4888,9 +4937,9 @@ async function submitReceipt() {
             </div>
           </div>
           <div class="mt-2 shrink-0 overflow-hidden rounded-xl border border-white/10 bg-black/35 ring-1 ring-white/5 backdrop-blur-md">
-            <p class="border-b border-white/10 px-2 py-1.5 text-[10px] uppercase tracking-wide text-zinc-500">События за период</p>
+            <p class="border-b border-white/10 px-2 py-1.5 text-[10px] uppercase tracking-wide text-zinc-500">{{ t('dashboard.home_shell.group_stats.events_title') }}</p>
             <div class="space-y-1 px-2 py-2 pb-3">
-              <div v-if="groupJournalForModal.length === 0" class="py-4 text-center text-[11px] text-zinc-500">Событий за период нет.</div>
+              <div v-if="groupJournalForModal.length === 0" class="py-4 text-center text-[11px] text-zinc-500">{{ t('dashboard.home_shell.group_stats.events_empty') }}</div>
               <div
                 v-for="(item, idx) in groupJournalForModal"
                 :key="`gj-${idx}-${item.created_at}-${item.user_id}-${item.action}`"
@@ -4905,7 +4954,7 @@ async function submitReceipt() {
                     <button
                       type="button"
                       class="mt-0.5 block max-w-full truncate text-left text-[11px] font-semibold text-cyan-200 underline decoration-cyan-500/35 underline-offset-2 hover:text-cyan-100"
-                      :aria-label="`Профиль ${violatorLabel(item)}`"
+                      :aria-label="t('dashboard.home_shell.group_stats.profile_aria', { name: violatorLabel(item) })"
                       @click="openViolatorProfile(item)"
                     >
                       {{ violatorLabel(item) }}
@@ -4923,8 +4972,8 @@ async function submitReceipt() {
                     <span
                       v-if="modUnmuteDone[journalEventKey(item)]"
                       class="inline-flex h-8 min-w-[2rem] items-center justify-center rounded-full bg-emerald-600/30 text-sm font-bold text-emerald-200 ring-1 ring-emerald-400/40"
-                      title="Размут выполнен"
-                      aria-label="Размут выполнен"
+                      :title="t('dashboard.home_shell.group_stats.unmute_done')"
+                      :aria-label="t('dashboard.home_shell.group_stats.unmute_done')"
                     >✓</span>
                     <button
                       v-else
@@ -4933,15 +4982,15 @@ async function submitReceipt() {
                       :disabled="!!modPrivilegeBusyKey"
                       @click="postChatMemberPrivilege('unmute', groupActivityChatId, item.user_id, journalEventKey(item))"
                     >
-                      Размутить
+                      {{ t('dashboard.home_shell.group_stats.unmute') }}
                     </button>
                   </div>
                   <div v-if="normalizeAction(item.action) === 'ban'" class="flex shrink-0 items-center gap-1">
                     <span
                       v-if="modUnbanDone[journalEventKey(item)]"
                       class="inline-flex h-8 min-w-[2rem] items-center justify-center rounded-full bg-emerald-600/30 text-sm font-bold text-emerald-200 ring-1 ring-emerald-400/40"
-                      title="Разбан выполнен"
-                      aria-label="Разбан выполнен"
+                      :title="t('dashboard.home_shell.group_stats.unban_done')"
+                      :aria-label="t('dashboard.home_shell.group_stats.unban_done')"
                     >✓</span>
                     <button
                       v-else
@@ -4950,7 +4999,7 @@ async function submitReceipt() {
                       :disabled="!!modPrivilegeBusyKey"
                       @click="postChatMemberPrivilege('unban', groupActivityChatId, item.user_id, journalEventKey(item))"
                     >
-                      Разбанить
+                      {{ t('dashboard.home_shell.group_stats.unban') }}
                     </button>
                   </div>
                 </div>
@@ -4976,7 +5025,7 @@ async function submitReceipt() {
       >
         <div class="shrink-0 p-4 pb-2">
           <div class="flex items-center justify-between gap-2">
-            <h3 id="updates-roadmap-title" class="text-[17px] font-semibold tracking-tight text-white">Лента обновлений</h3>
+            <h3 id="updates-roadmap-title" class="text-[17px] font-semibold tracking-tight text-white">{{ t('dashboard.home_shell.updates_roadmap.title') }}</h3>
             <button
               type="button"
               class="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-slate-900/55 text-sm text-slate-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] transition hover:bg-slate-800/75 hover:text-white"
@@ -4986,7 +5035,7 @@ async function submitReceipt() {
             </button>
           </div>
           <p class="mt-1 text-[12px] leading-snug text-slate-400/95">
-            На главной показаны последние {{ UPDATES_HOME_PREVIEW_N }} релиза — здесь полный список.
+            {{ t('dashboard.home_shell.updates_roadmap.subtitle', { n: UPDATES_HOME_PREVIEW_N }) }}
           </p>
         </div>
         <div class="min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-4 pb-4 [-webkit-overflow-scrolling:touch]">
@@ -5010,7 +5059,7 @@ async function submitReceipt() {
                 class="mt-3 text-[13px] font-semibold text-cyan-300 transition hover:text-cyan-200"
                 @click="toggleUpdatesRoadmapExpand(s.key)"
               >
-                {{ updatesRoadmapExpanded[s.key] ? 'Скрыть' : 'Показать полностью' }}
+                {{ updatesRoadmapExpanded[s.key] ? t('dashboard.home_shell.updates_roadmap.hide') : t('dashboard.home_shell.updates_roadmap.show_full') }}
               </button>
             </li>
           </ul>
@@ -5031,7 +5080,7 @@ async function submitReceipt() {
         aria-labelledby="funds-modal-title"
       >
         <div class="flex shrink-0 items-center justify-between gap-2 border-b border-slate-200 px-3 py-2.5 dark:border-slate-700">
-          <h3 id="funds-modal-title" class="text-sm font-semibold text-slate-900 dark:text-white">Движение средств</h3>
+          <h3 id="funds-modal-title" class="text-sm font-semibold text-slate-900 dark:text-white">{{ t('dashboard.home_shell.funds_modal.title') }}</h3>
           <button
             type="button"
             class="rounded-lg px-2 py-1 text-sm text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
@@ -5048,7 +5097,7 @@ async function submitReceipt() {
               :class="historyTab === 'payments' ? 'bg-sky-100 text-sky-800 dark:bg-sky-900/30 dark:text-sky-200' : 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200'"
               @click="historyTab = 'payments'"
             >
-              История платежей
+              {{ t('dashboard.home_shell.funds_modal.tab_payments') }}
             </button>
             <button
               type="button"
@@ -5056,13 +5105,13 @@ async function submitReceipt() {
               :class="historyTab === 'tokens' ? 'bg-sky-100 text-sky-800 dark:bg-sky-900/30 dark:text-sky-200' : 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200'"
               @click="historyTab = 'tokens'"
             >
-              История токенов
+              {{ t('dashboard.home_shell.funds_modal.tab_tokens') }}
             </button>
           </div>
-          <div v-if="historyLoading" class="py-6 text-center text-sm text-slate-500 dark:text-slate-400">Секундочку…</div>
+          <div v-if="historyLoading" class="py-6 text-center text-sm text-slate-500 dark:text-slate-400">{{ t('dashboard.home_shell.moment') }}</div>
           <div v-else-if="historyTab === 'payments'" class="mt-3 space-y-2">
             <div v-if="historyPayments.length === 0" class="rounded-xl bg-slate-50 p-4 text-center text-sm text-slate-500 dark:bg-slate-700/40 dark:text-slate-400">
-              Платежей пока нет.
+              {{ t('dashboard.home_shell.funds_modal.no_payments') }}
             </div>
             <div v-for="(item, idx) in historyPayments" :key="`mf-dp-${idx}`" class="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
               <p class="text-xs text-slate-500 dark:text-slate-400">{{ item.created_at || '—' }}</p>
@@ -5073,7 +5122,7 @@ async function submitReceipt() {
                       {{ fmtAmount(item.amount_rub) }} ₽ · {{ item.months }} ⚡
                     </template>
                     <template v-else>
-                      {{ fmtAmount(item.amount_rub) }} ₽ · {{ item.months }} мес.
+                      {{ fmtAmount(item.amount_rub) }} ₽ · {{ t('dashboard.billing.months_short', { n: item.months }) }}
                     </template>
                   </p>
                   <p class="text-xs text-slate-500 dark:text-slate-400">
@@ -5087,14 +5136,14 @@ async function submitReceipt() {
                     class="rounded-xl bg-emerald-300 px-3 py-2 text-sm font-extrabold text-slate-900"
                     @click="openReceiptLink(item)"
                   >
-                    🧾 Чек
+                    {{ t('dashboard.billing.receipt_btn') }}
                   </button>
                   <button
                     type="button"
                     class="rounded-xl bg-cyan-300 px-3 py-2 text-sm font-extrabold text-slate-900"
                     @click="openReceiptModal(item)"
                   >
-                    Получить чек
+                    {{ t('dashboard.billing.get_receipt') }}
                   </button>
                 </div>
               </div>
@@ -5102,7 +5151,7 @@ async function submitReceipt() {
           </div>
           <div v-else class="mt-3 space-y-2">
             <div v-if="historyTokens.length === 0" class="rounded-xl bg-slate-50 p-4 text-center text-sm text-slate-500 dark:bg-slate-700/40 dark:text-slate-400">
-              Движения токенов пока нет.
+              {{ t('dashboard.billing.history_no_tokens') }}
             </div>
             <div v-for="(item, idx) in historyTokens" :key="`mf-dt-${idx}`" class="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
               <p class="text-xs text-slate-500 dark:text-slate-400">{{ item.created_at || '—' }}</p>
@@ -5123,7 +5172,7 @@ async function submitReceipt() {
     >
       <div class="w-full max-w-md rounded-2xl bg-white p-4 shadow-2xl dark:bg-gray-800">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-base font-semibold text-gray-900 dark:text-white">Получить чек</h3>
+          <h3 class="text-base font-semibold text-gray-900 dark:text-white">{{ t('dashboard.billing.receipt_modal_title') }}</h3>
           <button
             type="button"
             class="rounded-lg px-2 py-1 text-sm text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700"
@@ -5132,11 +5181,11 @@ async function submitReceipt() {
             ✕
           </button>
         </div>
-        <p class="mb-3 text-sm font-semibold text-slate-900 dark:text-slate-100">
-          Если поля не заполнены, укажите данные вручную и нажмите «Получить чек».
+        <p class="mb-3 text-sm text-gray-600 dark:text-gray-300">
+          {{ t('dashboard.billing.receipt_modal_hint') }}
         </p>
         <div class="space-y-2">
-          <label class="block text-sm text-slate-700 dark:text-slate-300">Имя фамилия:</label>
+          <label class="block text-sm text-slate-700 dark:text-slate-300">{{ t('dashboard.billing.receipt_full_name_label') }}</label>
           <input
             v-model="receiptFullName"
             type="text"
@@ -5144,7 +5193,7 @@ async function submitReceipt() {
             autocomplete="name"
             class="w-full rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 text-sm text-slate-900"
           >
-          <label class="block text-sm text-slate-700 dark:text-slate-300">E-mail:</label>
+          <label class="block text-sm text-slate-700 dark:text-slate-300">{{ t('dashboard.billing.receipt_email_label') }}</label>
           <input
             v-model="receiptEmail"
             type="email"
@@ -5153,7 +5202,7 @@ async function submitReceipt() {
             class="w-full rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 text-sm text-slate-900"
           >
           <p class="rounded-xl border border-cyan-300 px-3 py-2 text-sm text-slate-700 dark:text-slate-300">
-            Поле email обязательное для отправки чека.
+            {{ t('dashboard.billing.receipt_email_required') }}
           </p>
           <button
             type="button"
@@ -5161,7 +5210,7 @@ async function submitReceipt() {
             :disabled="receiptSending || !receiptEmail"
             @click="submitReceipt"
           >
-            Получить чек
+            {{ t('dashboard.billing.get_receipt') }}
           </button>
         </div>
       </div>
@@ -5177,7 +5226,7 @@ async function submitReceipt() {
         @click.stop
       >
         <div class="mb-3 flex items-center justify-between gap-2 border-b border-white/10 pb-2">
-          <h3 class="text-sm font-semibold tracking-tight text-white">AURUM и счета</h3>
+          <h3 class="text-sm font-semibold tracking-tight text-white">{{ t('dashboard.billing.aurum_modal_title') }}</h3>
           <button
             type="button"
             class="rounded-lg px-2 py-1 text-sm text-white/50 hover:bg-white/10 hover:text-white"
@@ -5202,19 +5251,19 @@ async function submitReceipt() {
         @click.stop
       >
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="min-w-0 truncate text-[14px] font-semibold tracking-tight text-white/95">Токены AURUM</h3>
+          <h3 class="min-w-0 truncate text-[14px] font-semibold tracking-tight text-white/95">{{ t('dashboard.tokens.title') }}</h3>
           <div class="flex shrink-0 items-center gap-2">
             <div
               class="rounded-md border border-white/[0.1] bg-white/[0.05] px-2 py-0.5 text-right shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"
-              title="Всего доступных токенов"
+              :title="t('dashboard.billing.aurum_gate_total_hint')"
             >
-              <p class="text-[8px] font-medium uppercase leading-none tracking-[0.12em] text-white/38">Всего</p>
+              <p class="text-[8px] font-medium uppercase leading-none tracking-[0.12em] text-white/38">{{ t('dashboard.billing.aurum_gate_total_label') }}</p>
               <p class="text-xs font-bold leading-tight tabular-nums text-amber-200">{{ totalTokens }}<span class="ml-px text-[9px]">⚡</span></p>
             </div>
             <button
               type="button"
               class="rounded-lg px-2 py-1 text-sm text-white/50 hover:bg-white/10 hover:text-white"
-              aria-label="Закрыть"
+              :aria-label="t('dashboard.billing.close_aria')"
               @click="showPremiumAurumShowcaseModal = false"
             >
               ✕
@@ -5222,7 +5271,7 @@ async function submitReceipt() {
           </div>
         </div>
         <div class="rounded-xl border border-white/[0.1] bg-zinc-900/85 px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
-          <p class="text-center text-[13px] font-semibold text-white">С токенами вы сможете:</p>
+          <p class="text-center text-[13px] font-semibold text-white">{{ t('dashboard.billing.showcase_intro') }}</p>
           <div class="mt-3 grid grid-cols-4 gap-1.5 sm:gap-2">
             <div
               class="flex min-h-0 flex-col items-center rounded-lg border border-white/[0.12] bg-black/35 px-1 py-2.5 text-center shadow-[inset_0_1px_0_rgba(255,255,255,0.09)]"
@@ -5232,7 +5281,7 @@ async function submitReceipt() {
                   <path d="M21.5 4.8 18.4 19c-.2.9-.8 1.1-1.6.7l-4.4-3.2-2.1 2c-.2.2-.4.4-.9.4l.3-4.5 8.3-7.5c.4-.3-.1-.5-.5-.2l-10.2 6.4-4.4-1.4c-.9-.3-.9-.9.2-1.3L19.9 4c.8-.3 1.5.2 1.3.8z" fill="currentColor" />
                 </svg>
               </div>
-              <p class="mt-1.5 w-full text-balance text-center text-[9px] font-semibold leading-[1.2] text-white/88 sm:text-[10px]">Рассылки по чатам</p>
+              <p class="mt-1.5 w-full text-balance text-center text-[9px] font-semibold leading-[1.2] text-white/88 sm:text-[10px]">{{ t('dashboard.billing.showcase_f1') }}</p>
             </div>
             <div
               class="flex min-h-0 flex-col items-center rounded-lg border border-white/[0.12] bg-black/35 px-1 py-2.5 text-center shadow-[inset_0_1px_0_rgba(255,255,255,0.09)]"
@@ -5245,7 +5294,7 @@ async function submitReceipt() {
                   <rect x="4.8" y="18" width="14.4" height="1.8" rx="0.9" fill="currentColor" />
                 </svg>
               </div>
-              <p class="mt-1.5 w-full text-balance text-center text-[9px] font-semibold leading-[1.2] text-white/88 sm:text-[10px]">Автопостинг в каналы</p>
+              <p class="mt-1.5 w-full text-balance text-center text-[9px] font-semibold leading-[1.2] text-white/88 sm:text-[10px]">{{ t('dashboard.billing.showcase_f2') }}</p>
             </div>
             <div
               class="flex min-h-0 flex-col items-center rounded-lg border border-white/[0.12] bg-black/35 px-1 py-2.5 text-center shadow-[inset_0_1px_0_rgba(255,255,255,0.09)]"
@@ -5258,7 +5307,7 @@ async function submitReceipt() {
                   <circle cx="15" cy="10" r="1" fill="currentColor" />
                 </svg>
               </div>
-              <p class="mt-1.5 w-full text-balance text-center text-[9px] font-semibold leading-[1.2] text-white/88 sm:text-[10px]">AI-ответы (скоро)</p>
+              <p class="mt-1.5 w-full text-balance text-center text-[9px] font-semibold leading-[1.2] text-white/88 sm:text-[10px]">{{ t('dashboard.billing.showcase_f3') }}</p>
             </div>
             <div
               class="flex min-h-0 flex-col items-center rounded-lg border border-white/[0.12] bg-black/35 px-1 py-2.5 text-center shadow-[inset_0_1px_0_rgba(255,255,255,0.09)]"
@@ -5271,7 +5320,7 @@ async function submitReceipt() {
                   <path d="M13.9 17.3a3.8 3.8 0 0 1 5.7.7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
                 </svg>
               </div>
-              <p class="mt-1.5 w-full text-balance text-center text-[9px] font-semibold leading-[1.2] text-white/88 sm:text-[10px]">Привлечение клиентов</p>
+              <p class="mt-1.5 w-full text-balance text-center text-[9px] font-semibold leading-[1.2] text-white/88 sm:text-[10px]">{{ t('dashboard.billing.showcase_f4') }}</p>
             </div>
           </div>
         </div>
@@ -5281,7 +5330,7 @@ async function submitReceipt() {
           style="background: linear-gradient(90deg, #f39c12 0%, #df5a3b 34%, #b043cc 56%, #5c2dc1 74%, #2a1a83 100%);"
           @click="openTokenPacksFromShowcase"
         >
-          Купить токены
+          {{ t('dashboard.billing.buy_tokens') }}
         </button>
       </div>
     </div>
@@ -5296,19 +5345,19 @@ async function submitReceipt() {
         @click.stop
       >
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="min-w-0 truncate text-[14px] font-semibold tracking-tight text-white/95">Токены AURUM</h3>
+          <h3 class="min-w-0 truncate text-[14px] font-semibold tracking-tight text-white/95">{{ t('dashboard.tokens.title') }}</h3>
           <div class="flex shrink-0 items-center gap-2">
             <div
               class="rounded-md border border-white/[0.1] bg-white/[0.05] px-2 py-0.5 text-right shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"
-              title="Всего доступных токенов"
+              :title="t('dashboard.billing.aurum_gate_total_hint')"
             >
-              <p class="text-[8px] font-medium uppercase leading-none tracking-[0.12em] text-white/38">Всего</p>
+              <p class="text-[8px] font-medium uppercase leading-none tracking-[0.12em] text-white/38">{{ t('dashboard.billing.aurum_gate_total_label') }}</p>
               <p class="text-xs font-bold leading-tight tabular-nums text-amber-200">0<span class="ml-px text-[9px]">⚡</span></p>
             </div>
             <button
               type="button"
               class="rounded-lg px-2 py-1 text-sm text-white/50 hover:bg-white/10 hover:text-white"
-              aria-label="Закрыть"
+              :aria-label="t('dashboard.billing.close_aria')"
               @click="showFreeAurumGateModal = false"
             >
               ✕
@@ -5330,9 +5379,9 @@ async function submitReceipt() {
               <circle cx="12" cy="16" r="1.2" fill="currentColor" />
             </svg>
           </div>
-          <p class="text-[13px] font-semibold leading-tight text-white">Токены недоступны на Free-тарифе</p>
+          <p class="text-[13px] font-semibold leading-tight text-white">{{ t('dashboard.billing.aurum_gate_unavailable') }}</p>
           <p class="mt-2 text-[11px] leading-snug text-white/55">
-            Токены нужны для рассылок, автопостинга и других функций.
+            {{ t('dashboard.billing.aurum_gate_sub') }}
           </p>
         </div>
         <button
@@ -5350,7 +5399,7 @@ async function submitReceipt() {
           "
           @click="openPremiumLandingFromAurumGate"
         >
-          Получить Premium
+          {{ t('dashboard.billing.gate_get_premium') }}
         </button>
         <ul class="mt-3 space-y-2.5 text-left text-[11px] leading-snug text-white/75">
           <li class="flex items-start gap-2.5">
@@ -5365,7 +5414,7 @@ async function submitReceipt() {
                 <rect x="5.5" y="11" width="13" height="10.5" rx="2.2" stroke="#ff9f1c" stroke-width="1.85" />
               </svg>
             </span>
-            <span>Разблокируйте все возможности</span>
+            <span>{{ t('dashboard.billing.gate_li_unlock') }}</span>
           </li>
           <li class="flex items-start gap-2.5">
             <span class="mt-0.5 inline-flex h-[1.375rem] w-[1.375rem] shrink-0 items-center justify-center" aria-hidden="true">
@@ -5379,7 +5428,7 @@ async function submitReceipt() {
                 />
               </svg>
             </span>
-            <span>Делайте рассылки и автопостинг</span>
+            <span>{{ t('dashboard.billing.gate_li_broadcast') }}</span>
           </li>
           <li class="flex items-start gap-2.5">
             <span class="mt-0.5 inline-flex h-[1.375rem] w-[1.375rem] shrink-0 items-center justify-center" aria-hidden="true">
@@ -5393,7 +5442,7 @@ async function submitReceipt() {
                 />
               </svg>
             </span>
-            <span>Привлекайте клиентов и зарабатывайте</span>
+            <span>{{ t('dashboard.billing.gate_li_clients') }}</span>
           </li>
         </ul>
       </div>
@@ -5401,7 +5450,7 @@ async function submitReceipt() {
 
     <div
       v-if="showTokensInfoModal"
-      class="fixed inset-0 z-[281] flex items-end justify-center bg-black/70 p-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-[3px] md:items-center md:pb-6"
+      class="fixed inset-0 z-[340] flex items-end justify-center bg-black/70 p-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-[3px] md:items-center md:pb-6"
       @click.self="showTokensInfoModal = false"
     >
       <div
@@ -5437,21 +5486,25 @@ async function submitReceipt() {
           <div class="min-w-0">
             <div class="flex items-center gap-2">
               <h3 class="text-base font-bold tracking-tight text-white">
-                {{ premiumPayMethodFlow === 'tokens' ? 'Купить токены' : 'Способ оплаты' }}
+                {{
+                  premiumPayMethodFlow === 'tokens'
+                    ? t('dashboard.billing.pay_method_title_tokens')
+                    : t('dashboard.billing.pay_method_title_subscribe')
+                }}
               </h3>
               <button
                 type="button"
                 :class="tokensInfoBtnClass"
-                title="Как проходит оплата"
-                aria-label="Как проходит оплата"
+                :title="t('dashboard.info.pay_method_hint_title')"
+                :aria-label="t('dashboard.info.pay_method_hint_aria')"
                 @click="openPremiumPayMethodInfo"
               >i</button>
             </div>
             <p class="mt-0.5 text-[13px] text-white/50">
               {{
                 premiumPayMethodFlow === 'tokens'
-                  ? 'Вы будете перенаправлены на защищенную страницу ЮKassa для покупки токенов'
-                  : 'Вы будете перенаправлены на защищенную страницу ЮKassa'
+                  ? t('dashboard.billing.pay_subtitle_tokens')
+                  : t('dashboard.billing.pay_subtitle_subscribe')
               }}
             </p>
             <p
@@ -5464,8 +5517,7 @@ async function submitReceipt() {
           <button
             type="button"
             class="shrink-0 rounded-lg px-2 py-1 text-sm text-white/50 hover:bg-white/10 hover:text-white"
-            aria-label="Закрыть"
-            :disabled="premiumPayMethodProceedLoading"
+            :aria-label="t('dashboard.billing.close_aria')"
             @click="closePremiumPayMethodModal"
           >
             ✕
@@ -5485,8 +5537,8 @@ async function submitReceipt() {
           >
             <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-white/10 text-xl" aria-hidden="true">💳</span>
             <span class="min-w-0 flex-1">
-              <span class="block text-[14px] font-bold text-white">Банковская карта / СБП</span>
-              <span class="mt-0.5 block text-[12px] text-white/55">Visa, Mastercard, МИР · ЮKassa (СБП и др. — если включены в кассе)</span>
+              <span class="block text-[14px] font-bold text-white">{{ t('dashboard.billing.pay_card_title') }}</span>
+              <span class="mt-0.5 block text-[12px] text-white/55">{{ t('dashboard.billing.pay_card_hint') }}</span>
             </span>
             <span class="text-white/35" aria-hidden="true">{{ premiumPayMethodSelected === 'card' ? '✓' : '○' }}</span>
           </button>
@@ -5504,16 +5556,16 @@ async function submitReceipt() {
             <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-amber-400/20 text-xl" aria-hidden="true">⭐</span>
             <span class="min-w-0 flex-1">
               <span class="block text-[14px] font-bold text-white">Telegram Stars</span>
-              <span class="mt-0.5 block text-[12px] text-white/55">Скоро в приложении</span>
+              <span class="mt-0.5 block text-[12px] text-white/55">{{ t('dashboard.billing.pay_stars_hint') }}</span>
             </span>
             <span class="text-white/35" aria-hidden="true">{{ premiumPayMethodSelected === 'stars' ? '✓' : '○' }}</span>
           </button>
         </div>
 
         <div class="mt-4 space-y-1 border-t border-white/10 pt-3 text-[11px] text-white/55">
-          <p class="flex items-center gap-2"><span class="text-emerald-400">✓</span><span>Безопасная оплата через ЮKassa</span></p>
-          <p class="flex items-center gap-2"><span class="text-emerald-400">✓</span><span>Карты, СБП и другие способы</span></p>
-          <p class="flex items-center gap-2"><span class="text-emerald-400">✓</span><span>Данные карты не хранятся в Guard</span></p>
+          <p class="flex items-center gap-2"><span class="text-emerald-400">✓</span><span>{{ t('dashboard.billing.pay_trust_1') }}</span></p>
+          <p class="flex items-center gap-2"><span class="text-emerald-400">✓</span><span>{{ t('dashboard.billing.pay_trust_2') }}</span></p>
+          <p class="flex items-center gap-2"><span class="text-emerald-400">✓</span><span>{{ t('dashboard.billing.pay_trust_3') }}</span></p>
         </div>
 
         <button
@@ -5523,14 +5575,14 @@ async function submitReceipt() {
           :disabled="premiumPayMethodProceedLoading"
           @click="onPremiumPayMethodProceed"
         >
-          {{ premiumPayMethodProceedLoading ? 'Готовим оплату...' : 'Перейти к оплате' }}
+          {{ premiumPayMethodProceedLoading ? t('dashboard.billing.pay_preparing') : t('dashboard.billing.pay_proceed') }}
         </button>
 
         <p class="mt-2 text-center text-[10px] text-white/40">
           {{
             premiumPayMethodFlow === 'tokens'
-              ? 'Нажимая кнопку, вы соглашаетесь с офертой и условиями покупки.'
-              : 'Нажимая кнопку, вы соглашаетесь с офертой и условиями подписки.'
+              ? t('dashboard.billing.pay_legal_tokens')
+              : t('dashboard.billing.pay_legal_subscribe')
           }}
         </p>
       </div>
@@ -5547,13 +5599,13 @@ async function submitReceipt() {
       >
         <div class="mb-2 flex items-start justify-between gap-2">
           <div class="min-w-0">
-            <h3 class="text-base font-bold tracking-tight text-white">Есть промокод?</h3>
-            <p class="mt-0.5 text-[13px] text-white/55">Введите код и активируйте Premium.</p>
+            <h3 class="text-base font-bold tracking-tight text-white">{{ t('dashboard.billing.promo_title') }}</h3>
+            <p class="mt-0.5 text-[13px] text-white/55">{{ t('dashboard.billing.promo_sub') }}</p>
           </div>
           <button
             type="button"
             class="shrink-0 rounded-lg px-2 py-1 text-sm text-white/50 hover:bg-white/10 hover:text-white"
-            aria-label="Закрыть"
+            :aria-label="t('dashboard.billing.close_aria')"
             :disabled="promoLoading"
             @click="closePromoCodeModal"
           >
@@ -5564,7 +5616,7 @@ async function submitReceipt() {
           <input
             v-model="promoCode"
             type="text"
-            placeholder="Промокод"
+            :placeholder="t('dashboard.billing.promo_placeholder')"
             class="min-w-0 flex-1 rounded-xl border border-white/[0.12] bg-white/[0.06] px-3 py-2.5 text-[14px] text-white placeholder:text-white/35 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-md"
           >
           <button
@@ -5573,7 +5625,7 @@ async function submitReceipt() {
             :disabled="promoLoading || !(promoCode || '').trim()"
             @click="applyPromo()"
           >
-            {{ promoLoading ? '...' : 'Готово' }}
+            {{ promoLoading ? '...' : t('dashboard.billing.promo_done') }}
           </button>
         </div>
       </div>
@@ -5587,19 +5639,19 @@ async function submitReceipt() {
         <div class="mx-auto flex h-28 w-28 items-center justify-center rounded-full border border-violet-500/35 bg-violet-500/10 shadow-[0_0_36px_-8px_rgba(139,92,246,0.55)]">
           <span class="text-5xl leading-none text-violet-300" aria-hidden="true">◌</span>
         </div>
-        <h3 class="mt-6 text-center text-2xl font-bold tracking-tight">Переход на страницу оплаты</h3>
+        <h3 class="mt-6 text-center text-2xl font-bold tracking-tight">{{ t('dashboard.billing.redirect_title') }}</h3>
         <p class="mx-auto mt-3 max-w-xs text-center text-sm leading-relaxed text-white/65">
-          Сейчас вы будете перенаправлены на защищённую страницу ЮKassa для завершения оплаты.
+          {{ t('dashboard.billing.redirect_sub') }}
         </p>
 
         <div class="mx-auto mt-6 max-w-xs space-y-2 text-sm text-white/72">
-          <p class="flex items-center gap-2"><span class="text-emerald-400">✓</span><span>Безопасное соединение</span></p>
-          <p class="flex items-center gap-2"><span class="text-emerald-400">✓</span><span>Передача данных по защищённому каналу</span></p>
-          <p class="flex items-center gap-2"><span class="text-emerald-400">✓</span><span>Мы не храним данные карты</span></p>
+          <p class="flex items-center gap-2"><span class="text-emerald-400">✓</span><span>{{ t('dashboard.billing.redirect_trust_1') }}</span></p>
+          <p class="flex items-center gap-2"><span class="text-emerald-400">✓</span><span>{{ t('dashboard.billing.redirect_trust_2') }}</span></p>
+          <p class="flex items-center gap-2"><span class="text-emerald-400">✓</span><span>{{ t('dashboard.billing.redirect_trust_3') }}</span></p>
         </div>
 
         <p class="mt-6 text-center text-sm font-semibold text-violet-300">
-          Открываем оплату через {{ paymentRedirectCountdown }}...
+          {{ t('dashboard.billing.redirect_opening', { n: paymentRedirectCountdown }) }}
         </p>
 
         <button
@@ -5608,7 +5660,7 @@ async function submitReceipt() {
           style="background: linear-gradient(90deg, #f39c12 0%, #df5a3b 34%, #b043cc 56%, #5c2dc1 74%, #2a1a83 100%);"
           @click="proceedToPaymentNow"
         >
-          Перейти к оплате сейчас
+          {{ t('dashboard.billing.redirect_cta') }}
         </button>
       </div>
     </div>
@@ -5622,15 +5674,15 @@ async function submitReceipt() {
           <span class="text-5xl leading-none" aria-hidden="true">🛡️</span>
         </div>
 
-        <h3 class="mt-5 text-center text-[2rem] font-bold leading-tight">Premium активирован!</h3>
+        <h3 class="mt-5 text-center text-[2rem] font-bold leading-tight">{{ t('dashboard.billing.activated_title') }}</h3>
         <p class="mx-auto mt-2 max-w-xs text-center text-[15px] leading-relaxed text-white/70">
-          Спасибо, что выбрали Guard. Теперь вам доступны все возможности защиты.
+          {{ t('dashboard.billing.activated_sub') }}
         </p>
 
         <div class="mt-5 space-y-2 rounded-xl border border-white/10 bg-white/[0.03] p-3 text-[14px] text-white/80">
-          <p class="flex items-center gap-2"><span class="text-emerald-400">✓</span><span>Чат под защитой 24/7</span></p>
-          <p class="flex items-center gap-2"><span class="text-emerald-400">✓</span><span>Все функции разблокированы</span></p>
-          <p class="flex items-center gap-2"><span class="text-emerald-400">✓</span><span>Мы всегда рядом, если что-то нужно</span></p>
+          <p class="flex items-center gap-2"><span class="text-emerald-400">✓</span><span>{{ t('dashboard.billing.activated_1') }}</span></p>
+          <p class="flex items-center gap-2"><span class="text-emerald-400">✓</span><span>{{ t('dashboard.billing.activated_2') }}</span></p>
+          <p class="flex items-center gap-2"><span class="text-emerald-400">✓</span><span>{{ t('dashboard.billing.activated_3') }}</span></p>
         </div>
 
         <button
@@ -5638,7 +5690,7 @@ async function submitReceipt() {
           class="mt-5 w-full rounded-2xl bg-gradient-to-r from-violet-600 via-violet-500 to-indigo-600 py-3.5 text-[15px] font-extrabold text-white shadow-[0_14px_44px_-16px_rgba(124,58,237,0.72)] transition hover:brightness-105 active:scale-[0.99]"
           @click="closePremiumActivatedModalToHome"
         >
-          Отлично!
+          {{ t('dashboard.billing.activated_ok') }}
         </button>
 
         <button
@@ -5646,7 +5698,7 @@ async function submitReceipt() {
           class="mt-2 w-full text-center text-[13px] font-medium text-violet-300 underline decoration-violet-400/55 underline-offset-4 transition hover:text-violet-200"
           @click="onPremiumActivatedGoSubscription"
         >
-          Моя подписка
+          {{ t('dashboard.billing.activated_my_sub') }}
         </button>
       </div>
     </div>

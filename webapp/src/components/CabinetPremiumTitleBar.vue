@@ -1,7 +1,10 @@
 <script setup>
 /** Полоска 👑 «Кабинет Free/Premium» — текст ближе к короне, справа шеврон. */
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import NavIcon from './NavIcon.vue'
+
+const { t } = useI18n()
 
 const props = defineProps({
   profile: { type: Object, default: () => ({}) },
@@ -15,7 +18,9 @@ const cabinetPremium = computed(
     ['premium', 'pro', 'business'].includes(String(props.profile?.tariff || '').toLowerCase()),
 )
 
-const title = computed(() => (cabinetPremium.value ? 'Кабинет Premium' : 'Кабинет Free'))
+const title = computed(() =>
+  cabinetPremium.value ? t('cabinet_stats.hero.title_bar_premium') : t('cabinet_stats.hero.title_bar_free'),
+)
 </script>
 
 <template>

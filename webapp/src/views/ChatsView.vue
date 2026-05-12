@@ -1,7 +1,8 @@
 <script setup>
 import { ref, onMounted, onUnmounted, watch, computed, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { useApi } from '../composables/useApi'
+import { useI18n } from 'vue-i18n'
+import { useApi, messageFromApiError } from '../composables/useApi'
 import { guardLog, guardWarn } from '../utils/guardDebugLog'
 import { useCabinetMode } from '../composables/useCabinetMode'
 import { useToast } from '../composables/useToast'
@@ -9,6 +10,9 @@ import ChannelPostRulesModal from '../components/ChannelPostRulesModal.vue'
 import SecurityPinGateModal from '../components/SecurityPinGateModal.vue'
 import { useSecurityPinGate } from '../composables/useSecurityPinGate'
 import { shouldAskPinForAction } from '../utils/settingsSecurity'
+
+const { t } = useI18n()
+const isEn = computed(() => t('common.locale_code') === 'en')
 
 const router = useRouter()
 const route = useRoute()
@@ -55,10 +59,10 @@ function _resetAddManagerForm() {
 function managerPermEntries(perms) {
   const p = perms || {}
   const out = []
-  if (p.protection) out.push({ key: 'protection', label: 'Защита' })
-  if (p.broadcast) out.push({ key: 'broadcast', label: 'Рассылка' })
-  if (p.reports || p.stats) out.push({ key: 'reports', label: 'Отчёты / Статистика' })
-  if (p.first_post_settings) out.push({ key: 'first_post_settings', label: 'Первое сообщение' })
+  if (p.protection) out.push({ key: 'protection', label: t('chats.perms.protection') })
+  if (p.broadcast) out.push({ key: 'broadcast', label: t('chats.perms.broadcast') })
+  if (p.reports || p.stats) out.push({ key: 'reports', label: t('chats.perms.reports') })
+  if (p.first_post_settings) out.push({ key: 'first_post_settings', label: t('chats.perms.first_post_settings') })
   return out
 }
 
@@ -148,12 +152,12 @@ async function openChannelPostRules(chat) {
     }
   }
   if (!did) {
-    showToast('У канала нет привязанного обсуждения в Telegram — настрой в канале «Обсуждение»')
+    showToast(t('chats.toasts.no_discussion'))
     return
   }
   channelPostRulesDiscussionId.value = did
   channelPostRulesChannelId.value = Number(chat.id || 0)
-  channelPostRulesChannelTitle.value = String(chat.title || '').trim() || 'Канал'
+  channelPostRulesChannelTitle.value = String(chat.title || '').trim() || t('chats.labels.channel')
   channelPostRulesOpen.value = true
 }
 
@@ -254,6 +258,7 @@ function chatSpikeAlert(chat) {
 }
 
 onMounted(async () => {
+  error.value = null
   await loadChats()
   const onVis = () => {
     if (document.visibilityState === 'visible') loadChats()
@@ -305,12 +310,16 @@ async function removeChat(chat) {
   const okPin = await requestPinIfNeeded('chat_remove')
   if (!okPin) {
     if (shouldAskPinForAction('chat_remove')) {
-      showToast('Нужен код из «Настройки → Безопасность»')
+      showToast(t('chats.toasts.pin_required'))
     }
     return
   }
-  const kindLabel = isChannelRow(chat) ? 'канал' : 'группу'
-  const ok = window.confirm(`Удалить ${kindLabel} «${chat.title || chat.id}» из подключённых?`)
+  const kindLabel = isChannelRow(chat)
+    ? t('chats.confirm.remove_kind_channel')
+    : t('chats.confirm.remove_kind_group')
+  const ok = window.confirm(
+    t('chats.confirm.remove_title', { kind: kindLabel, title: chat.title || chat.id }),
+  )
   if (!ok) return
   try {
     const data = await fetchSilent(() => api.removeChat(chat.id))
@@ -354,7 +363,7 @@ async function activatePendingFromEmpty() {
     const data = await fetchSilent(() => api.connectActivatePending())
     await loadChats()
     if (!data?.connected) {
-      window.alert('Бот должен быть администратором в группе. Выдайте права и повторите.')
+      window.alert(t('chats.toasts.bot_must_be_admin'))
     }
   } finally {
     pendingLoading.value = false
@@ -366,7 +375,7 @@ function protectionActive(chat) {
 }
 
 function ownerLabelPlain(chat) {
-  if (!isDelegatedCabinetChat(chat)) return 'Мой кабинет'
+  if (!isDelegatedCabinetChat(chat)) return t('chats.role.mine')
   const u = (chat.owner_username || '').trim().replace(/^@+/, '')
   if (u) return u
   const n = (chat.owner_first_name || '').trim()
@@ -488,22 +497,37 @@ async function openManagers(chat) {
   if (!chat?.id) return
   managersModalChat.value = chat
   managersLoading.value = true
+  managersStats.value = null
   try {
     const [md, gs] = await Promise.all([
-      fetchSilent(() => api.chatManagers(chat.id)),
-      fetchSilent(() => api.activityGroupBreakdown(chat.id, { hours: 24 * 7 })).catch(() => null),
+      api.chatManagers(chat.id),
+      api.activityGroupBreakdown(chat.id, { hours: 24 * 7 }).catch(() => null),
     ])
-    managersData.value = md
+    managersData.value = {
+      managers: [],
+      can_manage_access: false,
+      limit: 3,
+      chat_kind: 'group',
+      ...(md && typeof md === 'object' ? md : {}),
+    }
     managersStats.value = gs
     if (managersPollTimer) clearInterval(managersPollTimer)
     managersPollTimer = setInterval(async () => {
       if (!managersModalChat.value?.id) return
       try {
-        managersData.value = await fetchSilent(() => api.chatManagers(managersModalChat.value.id))
+        const row = await api.chatManagers(managersModalChat.value.id)
+        managersData.value = {
+          ...managersData.value,
+          ...(row && typeof row === 'object' ? row : {}),
+        }
       } catch {
         //
       }
     }, 7000)
+  } catch (e) {
+    guardWarn('Chats', 'openManagers failed', e)
+    showToast(messageFromApiError(e))
+    closeManagers()
   } finally {
     managersLoading.value = false
   }
@@ -524,7 +548,7 @@ async function addManager() {
   const raw = String(addManagerValue.value || '').trim()
   if (!raw) return
   if (!canSubmitNewManager.value) {
-    window.alert('Выберите хотя бы одно право для админа.')
+    window.alert(t('chats.toasts.pick_perms'))
     return
   }
   const base = raw.startsWith('@') || Number.isNaN(Number(raw))
@@ -542,7 +566,7 @@ async function addManager() {
     _resetAddManagerForm()
     await loadChats()
   } catch (e) {
-    const d = e?.body?.detail || e?.message || 'Не удалось добавить админа'
+    const d = e?.body?.detail || e?.message || t('chats.toasts.add_admin_failed')
     window.alert(String(d))
   } finally {
     managersLoading.value = false
@@ -606,9 +630,9 @@ async function cancelInvite(inviteId) {
 
 function inviteStatusLabel(s) {
   const v = String(s || '').toLowerCase()
-  if (v === 'connected') return 'Подключился'
-  if (v === 'connecting') return 'Подключается'
-  return 'Отправлено'
+  if (v === 'connected') return t('chats.invite_status.connected')
+  if (v === 'connecting') return t('chats.invite_status.connecting')
+  return t('chats.invite_status.sent')
 }
 
 function canOpenManagers(chat) {
@@ -655,10 +679,10 @@ function openChannelBroadcast(chat) {
 
 <template>
   <div class="space-y-5">
-    <h1 class="text-xl font-semibold text-gray-900 dark:text-white md:text-2xl">Подключённые чаты и каналы</h1>
+    <h1 class="text-xl font-semibold text-gray-900 dark:text-white md:text-2xl">{{ t('chats.title') }}</h1>
 
     <div v-if="!hasInitData" class="rounded-xl border border-amber-200 bg-amber-50 p-4 text-amber-800 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-200">
-      Откройте панель из Telegram.
+      {{ t('chats.init_required') }}
     </div>
 
     <div v-else-if="error" class="rounded-xl border border-red-200 bg-red-50 p-4 text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300">
@@ -672,7 +696,7 @@ function openChannelBroadcast(chat) {
     >
       <div class="mx-auto mb-3 inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/8 px-3 py-1.5 text-xs font-semibold text-slate-100 shadow-[0_0_20px_-10px_rgba(255,255,255,0.35)]">
         <span class="inline-block hourglass-flip">⏳</span>
-        {{ delegatedChatsOnly ? 'Загружаю делегированный кабинет…' : 'Загружаю список чатов…' }}
+        {{ delegatedChatsOnly ? t('chats.loading_delegated') : t('chats.loading') }}
       </div>
       <div class="space-y-2.5">
         <div class="mx-auto h-3 w-2/3 max-w-[14rem] animate-pulse rounded bg-white/15" />
@@ -682,8 +706,8 @@ function openChannelBroadcast(chat) {
     </div>
 
     <div v-else-if="!chats.length" class="rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-800">
-      <p class="text-gray-600 dark:text-gray-400">Пока нет подключённых чатов.</p>
-      <p class="mt-2 text-sm text-gray-500 dark:text-gray-500">Добавьте бота в группу и подключите чат в разделе «Подключить группу».</p>
+      <p class="text-gray-600 dark:text-gray-400">{{ t('chats.empty') }}</p>
+      <p class="mt-2 text-sm text-gray-500 dark:text-gray-500">{{ t('chats.empty_hint') }}</p>
       <div class="mt-4 flex flex-wrap gap-2">
         <button
           v-if="pendingCount > 0"
@@ -692,14 +716,14 @@ function openChannelBroadcast(chat) {
           :disabled="pendingLoading"
           @click="activatePendingFromEmpty"
         >
-          Подключить ожидающие ({{ pendingCount }})
+          {{ t('chats.pending_connect', { count: pendingCount }) }}
         </button>
         <button
           type="button"
           class="rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-100 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"
           @click="router.push('/connect')"
         >
-          Перейти в «Подключить группу»
+          {{ t('chats.open_panel') }}
         </button>
       </div>
     </div>
@@ -710,17 +734,17 @@ function openChannelBroadcast(chat) {
           <button type="button" class="rounded-lg px-2 py-1 text-[11px] font-semibold"
             :class="cabinetTab==='all' ? 'guard-green-soft' : 'border border-white/20 bg-white/10 text-slate-100'"
             @click="cabinetTab='all'">
-            Все кабинеты
+            {{ t('chats.tabs.all') }}
           </button>
           <button type="button" class="rounded-lg px-2 py-1 text-[11px] font-semibold"
             :class="cabinetTab==='mine' ? 'guard-green-soft' : 'border border-white/20 bg-white/10 text-slate-100'"
             @click="cabinetTab='mine'">
-            Мой кабинет
+            {{ t('chats.tabs.mine') }}
           </button>
           <button type="button" class="rounded-lg px-2 py-1 text-[11px] font-semibold"
             :class="cabinetTab==='shared' ? 'guard-green-soft' : 'border border-white/20 bg-white/10 text-slate-100'"
             @click="cabinetTab='shared'">
-            Доступы
+            {{ t('chats.tabs.shared') }}
           </button>
           <button
             type="button"
@@ -746,7 +770,7 @@ function openChannelBroadcast(chat) {
             ]"
             @click="kindPreset = 'all'"
           >
-            Все
+            {{ t('chats.presets.all') }}
           </button>
           <button
             type="button"
@@ -763,7 +787,7 @@ function openChannelBroadcast(chat) {
             ]"
             @click="kindPreset = 'groups'"
           >
-            Группы
+            {{ t('chats.presets.groups') }}
           </button>
           <button
             type="button"
@@ -780,7 +804,7 @@ function openChannelBroadcast(chat) {
             ]"
             @click="kindPreset = 'channels'"
           >
-            Каналы
+            {{ t('chats.presets.channels') }}
           </button>
           <button
             v-if="delegatedChatsOnly"
@@ -801,18 +825,18 @@ function openChannelBroadcast(chat) {
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M4 4h12l4 4v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" /><path d="M16 4v4h4" /><path d="M7 14h10M7 18h6M7 10h4" />
             </svg>
-            Отчёты по группам
+            {{ t('chats.actions.group_reports') }}
           </button>
         </div>
       </div>
         <div v-if="cabinetTab === 'shared' && !delegatedChatsOnly" class="rounded-xl border border-white/[0.08] bg-black/30 p-2.5 backdrop-blur-md">
           <div class="flex items-center justify-between gap-2">
             <div>
-              <p class="text-sm font-semibold text-white">Админы и доступы</p>
-              <p class="text-[11px] text-slate-300">Настройка доступна в Premium и только владельцу кабинета.</p>
+              <p class="text-sm font-semibold text-white">{{ isEn ? 'Admins and access' : 'Админы и доступы' }}</p>
+              <p class="text-[11px] text-slate-300">{{ isEn ? 'Available on Premium and only to the cabinet owner.' : 'Настройка доступна в Premium и только владельцу кабинета.' }}</p>
             </div>
             <span class="rounded-full border border-violet-400/25 bg-violet-500/12 px-2 py-0.5 text-[10px] font-semibold text-violet-200/95">
-              Доступы: {{ sharedCabinetsCount() }}
+              {{ (isEn ? 'Access:' : 'Доступы:') }} {{ sharedCabinetsCount() }}
             </span>
           </div>
         </div>
@@ -820,7 +844,7 @@ function openChannelBroadcast(chat) {
           v-if="chats.length && !frameDelegated.length && !frameOwnChannels.length && !frameOwnGroups.length"
           class="rounded-lg border border-white/[0.08] bg-black/35 px-2 py-2 text-center text-[11px] text-slate-300 backdrop-blur-sm"
         >
-          Нет сущностей для выбранного пресета. Переключите «Все», «Группы» или «Каналы».
+          {{ t('chats.presets.empty') }}
         </p>
 
         <div v-if="frameDelegated.length" class="mb-5 space-y-2">
@@ -834,12 +858,12 @@ function openChannelBroadcast(chat) {
             <span
               class="pl-2 text-[11px] font-extrabold uppercase leading-tight tracking-[0.16em] text-violet-50 drop-shadow-[0_0_14px_rgba(167,139,250,0.55)]"
             >
-              {{ cabinetTab === 'shared' || delegatedChatsOnly ? 'Делегированные чаты и каналы' : 'Делегированные' }}
+              {{ cabinetTab === 'shared' || delegatedChatsOnly ? t('chats.sections.delegated_long') : t('chats.sections.delegated') }}
             </span>
             <span
               v-if="frameDelegatedHasThreat"
               class="relative inline-flex items-center justify-center"
-              title="В делегированном кабинете есть чат под угрозой"
+              :title="isEn ? 'A delegated cabinet has a chat at risk' : 'В делегированном кабинете есть чат под угрозой'"
             >
               <span class="absolute inline-flex h-3.5 w-3.5 animate-ping rounded-full bg-yellow-400/40" />
               <span class="relative text-[11px] leading-none text-yellow-300">⚠</span>
@@ -851,7 +875,7 @@ function openChannelBroadcast(chat) {
                 <p class="truncate text-sm font-bold leading-tight text-white">{{ chat.title }}</p>
                 <div class="mt-0.5 flex flex-wrap items-center gap-1">
                   <template v-if="(chat.owner_username || '').trim()">
-                    <span class="text-[10px] text-slate-300">Кабинет</span>
+                    <span class="text-[10px] text-slate-300">{{ t('chats.labels.cabinet') }}</span>
                     <button
                       type="button"
                       class="text-[10px] font-semibold text-cyan-300 underline decoration-cyan-500/40"
@@ -860,38 +884,38 @@ function openChannelBroadcast(chat) {
                       @{{ String(chat.owner_username).replace(/^@+/, '') }}
                     </button>
                   </template>
-                  <p v-else class="text-[10px] text-slate-300">Кабинет {{ ownerLabelPlain(chat) }}</p>
+                  <p v-else class="text-[10px] text-slate-300">{{ t('chats.labels.cabinet') }} {{ ownerLabelPlain(chat) }}</p>
                   <span
                     v-if="isChannelRow(chat)"
                     class="rounded-full border border-emerald-400/40 bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-emerald-100"
-                  >Канал</span>
+                  >{{ t('chats.labels.channel') }}</span>
                   <span
                     v-else
                     class="rounded-full border border-violet-400/35 bg-violet-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-violet-100"
-                  >Группа</span>
+                  >{{ t('chats.labels.group') }}</span>
                   <span
                     v-if="chatSpikeAlert(chat)"
                     class="rounded-full border border-yellow-400/45 bg-yellow-500/20 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-yellow-100"
-                  >⚠ под угрозой</span>
+                  >{{ t('chats.labels.threat') }}</span>
                 </div>
                 <p
                   v-if="isChannelRow(chat) && (chat.linked_discussion_title || chat.linked_discussion_chat_id)"
                   class="mt-0.5 text-[10px] text-slate-400"
                 >
-                  Обсуждение:
+                  {{ t('chats.labels.discussion') }}
                   <span class="font-medium text-slate-200">{{ chat.linked_discussion_title || ('#' + chat.linked_discussion_chat_id) }}</span>
                 </p>
-                <p v-if="chat.locked_by_limit" class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">Лимит Free: нужен Premium</p>
+                <p v-if="chat.locked_by_limit" class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">{{ t('chats.labels.free_limit') }}</p>
                 <p v-else-if="protectionActive(chat)" class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-lime-300">
-                  {{ isChannelRow(chat) ? 'Подключён' : 'Активен' }}
+                  {{ isChannelRow(chat) ? t('chats.labels.connected') : t('chats.labels.active') }}
                 </p>
-                <p v-else class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-400">Не активен</p>
+                <p v-else class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-400">{{ t('chats.labels.inactive') }}</p>
               </div>
               <button
                 v-if="!chat.locked_by_limit"
                 type="button"
                 class="shrink-0 rounded-lg border border-red-500/35 bg-red-950/25 px-2 py-1 text-xs text-red-200 hover:bg-red-950/40"
-                :aria-label="isChannelRow(chat) ? 'Удалить канал' : 'Удалить группу'"
+                :aria-label="isChannelRow(chat) ? t('chats.labels.remove_channel') : t('chats.labels.remove_group')"
                 @click="removeChat(chat)"
               >✕</button>
             </div>
@@ -902,13 +926,13 @@ function openChannelBroadcast(chat) {
                   type="button"
                   class="guard-green-soft rounded-lg px-2 py-1 text-[11px] font-semibold leading-tight"
                   @click="openChannelBroadcast(chat)"
-                >Рассылка</button>
+                >{{ t('chats.actions.broadcast') }}</button>
                 <button
                   v-if="!chat.locked_by_limit && delegatedCan(chat, 'first_post_settings')"
                   type="button"
                   class="rounded-lg border border-slate-700/70 bg-zinc-900/75 px-2 py-1 text-[11px] font-semibold leading-tight text-slate-100 hover:bg-zinc-800/80"
                   @click="openChannelPostRules(chat)"
-                >Настройки</button>
+                >{{ t('chats.actions.settings') }}</button>
                 <button
                   v-if="chat.locked_by_limit"
                   type="button"
@@ -922,19 +946,19 @@ function openChannelBroadcast(chat) {
                   type="button"
                   class="guard-green-soft rounded-lg px-2 py-1 text-[11px] font-semibold leading-tight"
                   @click="goToProtection(chat.id)"
-                >Защита <span v-if="chatSpikeAlert(chat)">⚠</span></button>
+                >{{ t('chats.actions.protection') }} <span v-if="chatSpikeAlert(chat)">⚠</span></button>
                 <button
                   v-else-if="chat.locked_by_limit"
                   type="button"
                   class="rounded-lg border border-amber-400/40 bg-amber-900/30 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-100"
                   @click="goToPremiumBilling"
-                >💳 Premium: открыть и защитить</button>
+                >{{ t('chats.actions.protection_premium') }}</button>
                 <button
                   v-if="delegatedCan(chat, 'broadcast')"
                   type="button"
                   class="rounded-lg border border-violet-400/35 bg-violet-900/30 px-2 py-1 text-[11px] font-semibold leading-tight text-violet-200"
                   @click="openDelegatedBroadcast(chat.id)"
-                >Рассылка в группы</button>
+                >{{ t('chats.actions.groups_broadcast') }}</button>
               </template>
               <button
                 v-if="canOpenManagers(chat)"
@@ -942,7 +966,7 @@ function openChannelBroadcast(chat) {
                 class="inline-flex min-w-0 max-w-full items-center justify-center gap-1 rounded-lg border border-slate-700/70 bg-zinc-900/75 px-2.5 py-1 text-[11px] font-semibold leading-tight text-slate-100 hover:bg-zinc-800/80"
                 @click="openManagers(chat)"
               >
-                <span>Админы</span>
+                <span>{{ t('chats.actions.managers') }}</span>
                 <span v-if="(Number(chat.managers_count) || 0) > 0" class="min-w-[1.1rem] shrink-0 tabular-nums text-cyan-200/95">{{ Number(chat.managers_count) || 0 }}</span>
               </button>
               <button
@@ -950,7 +974,7 @@ function openChannelBroadcast(chat) {
                 type="button"
                 class="rounded-lg border border-slate-700/70 bg-zinc-900/75 px-2 py-1 text-[11px] font-semibold leading-tight text-slate-100 hover:bg-zinc-800/80"
                 @click="goToReports(chat.id)"
-              >{{ chat.log_chat_id ? 'Отчёты ✓' : 'Отчёты' }}</button>
+              >{{ chat.log_chat_id ? t('chats.actions.reports_done') : t('chats.actions.reports') }}</button>
             </div>
           </div>
         </div>
@@ -965,29 +989,29 @@ function openChannelBroadcast(chat) {
             />
             <span
               class="block pl-2 text-[11px] font-extrabold uppercase leading-tight tracking-[0.16em] text-lime-50 drop-shadow-[0_0_14px_rgba(163,255,0,0.4)]"
-            >Мои каналы</span>
+            >{{ t('chats.sections.channels_mine') }}</span>
           </div>
           <div v-for="chat in frameOwnChannels" :key="'oc-' + chat.id" :data-chat-id="chat.id" :class="chatCardClass(chat)">
             <div class="flex items-start gap-2">
               <div class="min-w-0 flex-1">
                 <p class="truncate text-sm font-bold leading-tight text-white">{{ chat.title }}</p>
                 <div class="mt-0.5 flex flex-wrap items-center gap-1">
-                  <p class="text-[10px] text-slate-300">Мой кабинет</p>
-                  <span class="rounded-full border border-emerald-400/40 bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-emerald-100">Канал</span>
+                  <p class="text-[10px] text-slate-300">{{ t('chats.labels.my_cabinet') }}</p>
+                  <span class="rounded-full border border-emerald-400/40 bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-emerald-100">{{ t('chats.labels.channel') }}</span>
                 </div>
                 <p v-if="chat.linked_discussion_title || chat.linked_discussion_chat_id" class="mt-0.5 text-[10px] text-slate-400">
-                  Обсуждение:
+                  {{ t('chats.labels.discussion') }}
                   <span class="font-medium text-slate-200">{{ chat.linked_discussion_title || ('#' + chat.linked_discussion_chat_id) }}</span>
                 </p>
-                <p v-if="chat.locked_by_limit" class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">Лимит Free: нужен Premium</p>
-                <p v-else-if="protectionActive(chat)" class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-lime-300">Подключён</p>
-                <p v-else class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-400">Не активен</p>
+                <p v-if="chat.locked_by_limit" class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">{{ t('chats.labels.free_limit') }}</p>
+                <p v-else-if="protectionActive(chat)" class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-lime-300">{{ t('chats.labels.connected') }}</p>
+                <p v-else class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-400">{{ t('chats.labels.inactive') }}</p>
               </div>
               <button
                 v-if="!chat.locked_by_limit"
                 type="button"
                 class="shrink-0 rounded-lg border border-red-500/35 bg-red-950/25 px-2 py-1 text-xs text-red-200"
-                aria-label="Удалить канал"
+                :aria-label="t('chats.labels.remove_channel')"
                 @click="removeChat(chat)"
               >✕</button>
             </div>
@@ -997,13 +1021,13 @@ function openChannelBroadcast(chat) {
                 type="button"
                 class="guard-green-soft rounded-lg px-2 py-1 text-[11px] font-semibold leading-tight"
                 @click="openChannelBroadcast(chat)"
-              >Рассылка</button>
+              >{{ t('chats.actions.broadcast') }}</button>
               <button
                 v-if="!chat.locked_by_limit"
                 type="button"
                 class="rounded-lg border border-slate-700/70 bg-zinc-900/75 px-2 py-1 text-[11px] font-semibold leading-tight text-slate-100 hover:bg-zinc-800/80"
                 @click="openChannelPostRules(chat)"
-              >Настройки</button>
+              >{{ t('chats.actions.settings') }}</button>
               <button
                 v-else
                 type="button"
@@ -1016,15 +1040,15 @@ function openChannelBroadcast(chat) {
                 class="inline-flex min-w-0 max-w-full items-center justify-center gap-1 rounded-lg border border-slate-700/70 bg-zinc-900/75 px-2.5 py-1 text-[11px] font-semibold leading-tight text-slate-100"
                 @click="openManagers(chat)"
               >
-                <span>Админы</span>
+                <span>{{ t('chats.actions.managers') }}</span>
                 <span v-if="(Number(chat.managers_count) || 0) > 0" class="min-w-[1.1rem] shrink-0 tabular-nums text-cyan-200/95">{{ Number(chat.managers_count) || 0 }}</span>
               </button>
               <button
                 v-else
                 type="button"
                 class="rounded-lg border border-amber-400/35 bg-amber-900/25 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-200"
-                @click="router.push('/')"
-              >Админы 🔒 Premium</button>
+                @click="router.push({ path: '/', query: { ...route.query, section: 'account' } })"
+              >{{ t('chats.actions.managers_premium') }}</button>
             </div>
           </div>
         </div>
@@ -1039,28 +1063,28 @@ function openChannelBroadcast(chat) {
             />
             <span
               class="block pl-2 text-[11px] font-extrabold uppercase leading-tight tracking-[0.16em] text-cyan-50 drop-shadow-[0_0_14px_rgba(34,211,238,0.45)]"
-            >Мои чаты</span>
+            >{{ t('chats.sections.groups_mine') }}</span>
           </div>
           <div v-for="chat in frameOwnGroups" :key="'og-' + chat.id" :data-chat-id="chat.id" :class="chatCardClass(chat)">
             <div class="flex items-start gap-2">
               <div class="min-w-0 flex-1">
                 <p class="truncate text-sm font-bold leading-tight text-white">{{ chat.title }}</p>
                 <div class="mt-0.5 flex flex-wrap items-center gap-1">
-                  <p class="text-[10px] text-slate-300">Мой кабинет</p>
+                  <p class="text-[10px] text-slate-300">{{ t('chats.labels.my_cabinet') }}</p>
                   <span
                     v-if="chatSpikeAlert(chat)"
                     class="rounded-full border border-yellow-400/45 bg-yellow-500/20 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-yellow-100"
-                  >⚠ под угрозой</span>
+                  >{{ t('chats.labels.threat') }}</span>
                 </div>
-                <p v-if="chat.locked_by_limit" class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">Лимит Free: нужен Premium</p>
-                <p v-else-if="protectionActive(chat)" class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-lime-300">Активен</p>
-                <p v-else class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-400">Не активен</p>
+                <p v-if="chat.locked_by_limit" class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">{{ t('chats.labels.free_limit') }}</p>
+                <p v-else-if="protectionActive(chat)" class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-lime-300">{{ t('chats.labels.active') }}</p>
+                <p v-else class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-400">{{ t('chats.labels.inactive') }}</p>
               </div>
               <button
                 v-if="!chat.locked_by_limit"
                 type="button"
                 class="shrink-0 rounded-lg border border-red-500/35 bg-red-950/25 px-2 py-1 text-xs text-red-200"
-                aria-label="Удалить группу"
+                :aria-label="t('chats.labels.remove_group')"
                 @click="removeChat(chat)"
               >✕</button>
             </div>
@@ -1070,39 +1094,40 @@ function openChannelBroadcast(chat) {
                 type="button"
                 class="guard-green-soft rounded-lg px-2 py-1 text-[11px] font-semibold leading-tight"
                 @click="goToProtection(chat.id)"
-              >Защита <span v-if="chatSpikeAlert(chat)">⚠</span></button>
+              >{{ t('chats.actions.protection') }} <span v-if="chatSpikeAlert(chat)">⚠</span></button>
               <button
                 v-else
                 type="button"
                 class="rounded-lg border border-amber-400/40 bg-amber-900/30 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-100"
                 @click="goToPremiumBilling"
-              >💳 Premium: открыть и защитить</button>
+              >{{ t('chats.actions.protection_premium') }}</button>
               <button
                 v-if="canOpenManagers(chat)"
                 type="button"
                 class="inline-flex min-w-0 max-w-full items-center justify-center gap-1 rounded-lg border border-slate-700/70 bg-zinc-900/75 px-2.5 py-1 text-[11px] font-semibold leading-tight text-slate-100"
                 @click="openManagers(chat)"
               >
-                <span>Админы</span>
+                <span>{{ t('chats.actions.managers') }}</span>
                 <span v-if="(Number(chat.managers_count) || 0) > 0" class="min-w-[1.1rem] shrink-0 tabular-nums text-cyan-200/95">{{ Number(chat.managers_count) || 0 }}</span>
               </button>
               <button
                 v-else
                 type="button"
                 class="rounded-lg border border-amber-400/35 bg-amber-900/25 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-200"
-                @click="router.push('/')"
-              >Админы 🔒 Premium</button>
+                @click="router.push({ path: '/', query: { ...route.query, section: 'account' } })"
+              >{{ t('chats.actions.managers_premium') }}</button>
               <button
                 v-if="!chat.locked_by_limit"
                 type="button"
                 class="rounded-lg border border-slate-700/70 bg-zinc-900/75 px-2 py-1 text-[11px] font-semibold leading-tight text-slate-100"
                 @click="goToReports(chat.id)"
-              >{{ chat.log_chat_id ? 'Отчёты ✓' : 'Отчёты' }}</button>
+              >{{ chat.log_chat_id ? t('chats.actions.reports_done') : t('chats.actions.reports') }}</button>
             </div>
           </div>
         </div>
     </div>
 
+    <Teleport to="body">
     <div
       v-if="managersModalChat"
       class="fixed inset-0 z-[300] flex items-end justify-center bg-black/70 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
@@ -1110,12 +1135,12 @@ function openChannelBroadcast(chat) {
     >
       <div class="w-full max-w-4xl rounded-3xl bg-gradient-to-b from-[#0c1523]/96 via-[#0a111d]/97 to-[#070d17]/99 p-4 text-slate-100 shadow-[0_32px_90px_-30px_rgba(0,0,0,0.95)] backdrop-blur-2xl ring-1 ring-sky-500/15">
         <div class="mb-3 flex items-center justify-between gap-2 pb-2">
-          <h3 class="text-sm font-semibold text-white">Админы чата: {{ managersModalChat.title }}</h3>
+          <h3 class="text-sm font-semibold text-white">{{ t('chats.managers.heading', { title: managersModalChat.title }) }}</h3>
           <div class="flex items-center gap-1">
             <button
               type="button"
               class="inline-flex h-6 min-w-[1.5rem] items-center justify-center rounded-full bg-cyan-500/12 px-1 text-[10px] font-bold text-cyan-200/95 shadow-[0_0_18px_-10px_rgba(34,211,238,0.75)] ring-1 ring-cyan-400/28"
-              title="Справка"
+              :title="isEn ? 'Help' : 'Справка'"
               @click="showManagersInfoModal = true"
             >
               i
@@ -1123,14 +1148,18 @@ function openChannelBroadcast(chat) {
             <button type="button" class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-slate-800/80 hover:text-white" @click="closeManagers">✕</button>
           </div>
         </div>
-        <div v-if="managersLoading" class="text-xs text-slate-400">Загрузка…</div>
+        <div v-if="managersLoading" class="text-xs text-slate-400">{{ t('chats.managers.loading') }}</div>
         <div v-else class="space-y-2">
-          <div class="text-[11px] text-slate-300">Админов: {{ managersData.managers?.length || 0 }} · лимит: без ограничений</div>
+          <div class="text-[11px] text-slate-300">{{ t('chats.managers.count', { count: managersData.managers?.length || 0 }) }}</div>
           <div v-if="managersStats" class="rounded-xl bg-slate-900/55 p-2.5 text-[11px] text-slate-200 ring-1 ring-slate-700/45">
             <p>
-              Удалено за 7 дней: <b>{{ Number(managersStats?.total_deleted || 0) }}</b>
-              · Подключилось: <b>{{ Number(managersStats?.total_joined || 0) }}</b>
-              · Сообщений: <b>{{ Number(managersStats?.total_messages || 0) }}</b>
+              {{
+                t('chats.managers.stats', {
+                  deleted: Number(managersStats?.total_deleted || 0),
+                  joined: Number(managersStats?.total_joined || 0),
+                  messages: Number(managersStats?.total_messages || 0),
+                })
+              }}
             </p>
           </div>
           <div class="space-y-1.5">
@@ -1145,7 +1174,7 @@ function openChannelBroadcast(chat) {
                     class="inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
                     :class="m.is_online ? 'bg-emerald-500/20 text-emerald-200 ring-1 ring-emerald-400/30' : 'bg-slate-500/20 text-slate-300 ring-1 ring-slate-400/25'"
                   >
-                    {{ m.is_online ? 'Онлайн' : 'Оффлайн' }}
+                    {{ m.is_online ? t('chats.managers.online') : t('chats.managers.offline') }}
                   </span>
                   <span
                     v-for="perm in managerPermEntries(m.permissions)"
@@ -1171,14 +1200,14 @@ function openChannelBroadcast(chat) {
                   class="rounded-lg bg-red-950/35 px-1.5 py-0.5 text-[11px] text-red-200 ring-1 ring-red-400/35"
                   @click="removeManager(m.user_id)"
                 >
-                  Удалить админа
+                  {{ t('chats.managers.remove') }}
                 </button>
               </div>
             </div>
-            <p v-if="!(managersData.managers || []).length" class="text-xs text-slate-400">Пока никого не добавили.</p>
+            <p v-if="!(managersData.managers || []).length" class="text-xs text-slate-400">{{ t('chats.managers.empty') }}</p>
           </div>
           <div v-if="managersData.can_manage_access" class="space-y-1">
-            <p class="text-[11px] text-slate-300">Статусы приглашений</p>
+            <p class="text-[11px] text-slate-300">{{ t('chats.managers.invites_label') }}</p>
             <div v-for="inv in (managersData.invites || [])" :key="`inv-${inv.id}`" class="flex items-center justify-between rounded-lg bg-slate-900/55 px-2 py-1.5 text-[11px] ring-1 ring-slate-700/40">
               <span class="truncate text-slate-200">
                 {{ inv.target_username ? '@' + inv.target_username : (inv.target_telegram_id || '—') }}
@@ -1191,35 +1220,37 @@ function openChannelBroadcast(chat) {
                   class="rounded-lg bg-amber-950/35 px-1.5 py-0.5 text-[10px] text-amber-200 ring-1 ring-amber-400/35"
                   @click="cancelInvite(inv.id)"
                 >
-                  Отменить
+                  {{ t('chats.managers.cancel_invite') }}
                 </button>
               </div>
             </div>
-            <p v-if="!(managersData.invites || []).length" class="text-[11px] text-slate-500">Инвайтов пока нет.</p>
+            <p v-if="!(managersData.invites || []).length" class="text-[11px] text-slate-500">{{ t('chats.managers.no_invites') }}</p>
           </div>
           <div v-if="managersData.can_manage_access" class="mt-2 space-y-2 rounded-2xl bg-gradient-to-b from-slate-900/70 to-slate-950/65 p-3 backdrop-blur-xl ring-1 ring-slate-700/45">
             <input v-model="addManagerValue" type="text" class="w-full rounded-xl bg-slate-950/80 px-3 py-2 text-xs text-white outline-none ring-1 ring-slate-700/45 transition focus:ring-cyan-400/40"
               @keydown.enter.prevent="onAddManagerInputEnter"
-              placeholder="Telegram ID или @username" />
+              :placeholder="t('chats.managers.invite_placeholder')" />
             <button
               type="button"
               class="guard-green-soft rounded-xl px-4 py-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50"
               :disabled="managersLoading || !String(addManagerValue || '').trim()"
               @click="onAddManagerPrimaryClick"
             >
-              {{ addManagerPermsOpen ? 'Подтвердить права' : 'Выбрать права и добавить' }}
+              {{ addManagerPermsOpen ? t('chats.managers.confirm_perms') : t('chats.managers.pick_perms') }}
             </button>
           </div>
           <p v-if="managersData.premium_enabled === false" class="text-xs text-amber-300">
-            Доступы админов чата доступны только на Premium у владельца кабинета.
+            {{ t('chats.managers.access_premium_only') }}
           </p>
           <p v-if="!managersData.can_manage_access && managersData.premium_enabled !== false" class="text-xs text-slate-400">
-            Только владелец чата может добавлять/удалять админов.
+            {{ t('chats.managers.owner_only') }}
           </p>
         </div>
       </div>
     </div>
+    </Teleport>
 
+    <Teleport to="body">
     <div
       v-if="managersModalChat && addManagerPermsOpen"
       class="fixed inset-0 z-[315] flex items-center justify-center bg-black/75 px-4"
@@ -1235,40 +1266,42 @@ function openChannelBroadcast(chat) {
         <div v-if="!isManagersChannel" class="flex flex-wrap gap-1.5">
           <label class="inline-flex items-center gap-1.5 rounded-xl bg-slate-900/65 px-2.5 py-1.5 text-[11px] text-slate-100 ring-1 ring-slate-700/45">
             <input v-model="addManagerPerms.protection" type="checkbox" class="h-3.5 w-3.5 accent-emerald-400" />
-            <span>Защита</span>
+            <span>{{ t('chats.perm_help.protection') }}</span>
           </label>
           <label class="inline-flex items-center gap-1.5 rounded-xl bg-slate-900/65 px-2.5 py-1.5 text-[11px] text-slate-100 ring-1 ring-slate-700/45">
             <input v-model="addManagerPerms.broadcast" type="checkbox" class="h-3.5 w-3.5 accent-violet-400" />
-            <span>Рассылка</span>
+            <span>{{ t('chats.perm_help.broadcast') }}</span>
           </label>
           <label class="inline-flex items-center gap-1.5 rounded-xl bg-slate-900/65 px-2.5 py-1.5 text-[11px] text-slate-100 ring-1 ring-slate-700/45">
             <input v-model="addManagerPerms.stats" type="checkbox" class="h-3.5 w-3.5 accent-sky-400" />
-            <span>Статистика</span>
+            <span>{{ t('chats.perm_help.stats') }}</span>
           </label>
           <label class="inline-flex items-center gap-1.5 rounded-xl bg-slate-900/65 px-2.5 py-1.5 text-[11px] text-slate-100 ring-1 ring-slate-700/45">
             <input v-model="addManagerPerms.reports" type="checkbox" class="h-3.5 w-3.5 accent-cyan-400" />
-            <span>Отчёты</span>
+            <span>{{ t('chats.perm_help.reports') }}</span>
           </label>
         </div>
         <div v-else class="flex flex-wrap gap-1.5">
           <label class="inline-flex items-center gap-1.5 rounded-xl bg-slate-900/65 px-2.5 py-1.5 text-[11px] text-slate-100 ring-1 ring-slate-700/45">
             <input v-model="addManagerPerms.broadcast" type="checkbox" class="h-3.5 w-3.5 accent-violet-400" />
-            <span>Рассылка</span>
+            <span>{{ t('chats.perm_help.broadcast_label') }}</span>
           </label>
           <label class="inline-flex items-center gap-1.5 rounded-xl bg-slate-900/65 px-2.5 py-1.5 text-[11px] text-slate-100 ring-1 ring-slate-700/45">
             <input v-model="addManagerPerms.first_post_settings" type="checkbox" class="h-3.5 w-3.5 accent-amber-400" />
-            <span>Настройки первого сообщения в коммах</span>
+            <span>{{ t('chats.perm_help.first_post') }}</span>
           </label>
         </div>
         <div class="mt-4 flex gap-2">
-          <button type="button" class="flex-1 rounded-xl bg-slate-800/85 px-3 py-2 text-xs font-semibold text-slate-200 ring-1 ring-slate-700/45" @click="addManagerPermsOpen = false">Отмена</button>
+          <button type="button" class="flex-1 rounded-xl bg-slate-800/85 px-3 py-2 text-xs font-semibold text-slate-200 ring-1 ring-slate-700/45" @click="addManagerPermsOpen = false">{{ t('chats.managers.cancel') }}</button>
           <button type="submit" class="guard-green-soft flex-1 rounded-xl px-3 py-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50" :disabled="managersLoading || !canSubmitNewManager">
-            Добавить админа
+            {{ t('chats.managers.add') }}
           </button>
         </div>
       </form>
     </div>
+    </Teleport>
 
+    <Teleport to="body">
     <div
       v-if="showCabinetInfoModal"
       class="fixed inset-0 z-[320] flex items-end justify-center overscroll-none bg-black/70 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
@@ -1278,63 +1311,60 @@ function openChannelBroadcast(chat) {
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-500/40 bg-slate-950 p-4 text-slate-100 shadow-2xl">
         <div class="mb-2 flex items-center justify-between border-b border-white/10 pb-2">
-          <h3 class="text-sm font-semibold">🛡️ Подключённые чаты и каналы</h3>
+          <h3 class="text-sm font-semibold">{{ t('chats.help_connected.title') }}</h3>
           <button class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-white/10" @click="showCabinetInfoModal = false">✕</button>
         </div>
         <div class="max-h-[min(70vh,28rem)] space-y-3 overflow-y-auto overscroll-y-contain pr-1 text-xs leading-relaxed text-slate-300">
           <p class="text-[11px] text-slate-400">
-            Один экран — все сущности, куда добавлен Guard. Ниже — зачем вкладки, пресеты и кнопки, чтобы админу и делегату не гадать.
+            {{ t('chats.help_connected.intro') }}
           </p>
           <div class="rounded-lg border border-white/10 bg-white/[0.04] p-2.5">
-            <p class="text-[11px] font-semibold text-teal-200">Вкладки кабинета</p>
+            <p class="text-[11px] font-semibold text-teal-200">{{ t('chats.help_connected.tabs_title') }}</p>
             <ul class="mt-1 list-inside list-disc space-y-1 text-[11px] text-slate-300">
-              <li><span class="font-medium text-slate-200">Все кабинеты</span> — свои и делегированные вместе: сверху чужие (фиолетовый ADM), затем твои каналы, затем твои группы.</li>
-              <li><span class="font-medium text-slate-200">Мой кабинет</span> — только то, что ты владелец: сначала каналы, потом группы.</li>
-              <li><span class="font-medium text-slate-200">Доступы</span> — только чужие кабинеты, куда тебя пустили; здесь же блок «Админы и доступы» и счётчик выданных доступов.</li>
+              <li><span class="font-medium text-slate-200">{{ t('chats.tabs.all') }}</span> — {{ t('chats.help_connected.tabs_all') }}</li>
+              <li><span class="font-medium text-slate-200">{{ t('chats.tabs.mine') }}</span> — {{ t('chats.help_connected.tabs_mine') }}</li>
+              <li><span class="font-medium text-slate-200">{{ t('chats.tabs.shared') }}</span> — {{ t('chats.help_connected.tabs_shared') }}</li>
             </ul>
           </div>
           <div class="rounded-lg border border-white/10 bg-white/[0.04] p-2.5">
-            <p class="text-[11px] font-semibold text-teal-200">Пресеты «Все / Группы / Каналы»</p>
+            <p class="text-[11px] font-semibold text-teal-200">{{ t('chats.help_connected.presets_title') }}</p>
             <p class="mt-1 text-[11px] text-slate-300">
-              Фильтр внутри выбранной вкладки: по умолчанию <span class="text-slate-200">Все</span>. «Группы» и «Каналы» оставляют только нужный тип — удобно, когда список длинный.
+              {{ t('chats.help_connected.presets_body') }}
             </p>
           </div>
           <div class="rounded-lg border border-white/10 bg-white/[0.04] p-2.5">
-            <p class="text-[11px] font-semibold text-teal-200">Группы</p>
+            <p class="text-[11px] font-semibold text-teal-200">{{ t('chats.help_connected.groups_title') }}</p>
             <p class="mt-1 text-[11px] text-slate-300">
-              <span class="font-medium text-slate-200">Защита</span> — настройки антиспама и модерации в Mini App.
-              <span class="font-medium text-slate-200">Отчёты</span> — сводка по чату (лог-чат и метрики); для каналов кнопку убрали: отчёты там пока не те, отдельный сценарий добавим позже.
+              {{ t('chats.help_connected.groups_body') }}
             </p>
             <p class="mt-1.5 text-[11px] text-slate-400">
-              У делегата по группе ещё есть <span class="text-slate-200">Рассылка в группы</span> (ADM) — если владелец выдал право на рассылку по этому чату.
+              {{ t('chats.help_connected.groups_delegate') }}
             </p>
           </div>
           <div class="rounded-lg border border-emerald-500/25 bg-emerald-950/15 p-2.5">
-            <p class="text-[11px] font-semibold text-emerald-200">Каналы</p>
+            <p class="text-[11px] font-semibold text-emerald-200">{{ t('chats.help_connected.channels_title') }}</p>
             <p class="mt-1 text-[11px] text-slate-300">
-              Канал не «группа под защитой»: <span class="font-medium text-slate-200">Рассылка</span> в ADM (в ленту канала) и
-              <span class="font-medium text-slate-200">Настройки</span> — правила в комментариях (нужна привязанная группа обсуждения).
-              Строка «Обсуждение» подсказывает этот чат.
+              {{ t('chats.help_connected.channels_body') }}
             </p>
             <p class="mt-1.5 text-[11px] text-slate-400">
-              Делегату для «Настройки» достаточно роли <span class="text-slate-200">админа чата на канале</span> в этом списке; отдельное приглашение в группу обсуждения не требуется.
-              В Telegram у бота должны быть права админа и в канале (рассылка), и в группе обсуждения (отправка правил в треды).
+              {{ t('chats.help_connected.channels_delegate') }}
             </p>
           </div>
           <div class="rounded-lg border border-violet-500/25 bg-violet-950/20 p-2.5">
-            <p class="text-[11px] font-semibold text-violet-200">Делегатам</p>
+            <p class="text-[11px] font-semibold text-violet-200">{{ t('chats.help_connected.delegates_title') }}</p>
             <p class="mt-1 text-[11px] text-slate-300">
-              Фиолетовые карточки — чужой кабинет: видишь только то, куда тебя пустили. Действия ограничены правами владельца; лишнего в кошелёк или чужие настройки не зайдёшь.
+              {{ t('chats.help_connected.delegates_body') }}
             </p>
             <p class="mt-1.5 text-[11px] text-slate-400">
-              По каналам: если владелец добавил тебя админом в «Админы чата» на <span class="text-slate-200">канале</span>, ты можешь открыть «Настройки» правил комментариев без отдельного приглашения в группу обсуждения.
-              Чтобы бот слал правила в треды, владелец должен выдать боту админку в группе обсуждения (это уже в Telegram).
+              {{ t('chats.help_connected.delegates_channels') }}
             </p>
           </div>
         </div>
       </div>
     </div>
+    </Teleport>
 
+    <Teleport to="body">
     <div
       v-if="showDelegatedInfoModal"
       class="fixed inset-0 z-[320] flex items-end justify-center overscroll-none bg-black/70 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
@@ -1344,13 +1374,15 @@ function openChannelBroadcast(chat) {
     >
       <div class="w-full max-w-xl rounded-2xl border border-violet-500/40 bg-slate-950 p-4 text-slate-100 shadow-2xl">
         <div class="mb-2 flex items-center justify-between border-b border-white/10 pb-2">
-          <h3 class="text-sm font-semibold">😈 Фиолетовый ADM</h3>
+          <h3 class="text-sm font-semibold">{{ t('chats.help_violet_adm.title') }}</h3>
           <button class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-white/10" @click="showDelegatedInfoModal = false">✕</button>
         </div>
-        <p class="text-xs text-slate-300">Здесь только то, куда тебя пустили чужим доступом. «Защита» и «Рассылка» работают ровно в рамках выданных прав — без лазейки в чужой кошелёк.</p>
+        <p class="text-xs text-slate-300">{{ t('chats.help_violet_adm.body') }}</p>
       </div>
     </div>
+    </Teleport>
 
+    <Teleport to="body">
     <div
       v-if="showManagersInfoModal"
       class="fixed inset-0 z-[330] flex items-end justify-center overscroll-none bg-black/70 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
@@ -1360,25 +1392,24 @@ function openChannelBroadcast(chat) {
     >
       <div class="w-full max-w-xl rounded-2xl border border-sky-500/40 bg-slate-950 p-4 text-slate-100 shadow-2xl">
         <div class="mb-2 flex items-center justify-between border-b border-white/10 pb-2">
-          <h3 class="text-sm font-semibold">😈 Админы чата</h3>
+          <h3 class="text-sm font-semibold">{{ t('chats.help_managers.title') }}</h3>
           <button class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-white/10" @click="showManagersInfoModal = false">✕</button>
         </div>
         <p class="text-[13px] leading-relaxed text-slate-200/95">
-          <span class="font-semibold text-white">Приглашения.</span>
-          Статусы цепочки «отправлено → принял → подключился» показывают, на каком шаге человек.
-          Метка «онлайн» — когда Telegram передаёт активность.
+          <span class="font-semibold text-white">{{ t('chats.help_managers.p1_title') }}</span>
+          {{ t('chats.help_managers.p1_body') }}
         </p>
         <p class="mt-3 text-[12px] leading-relaxed text-slate-400">
-          <span class="font-semibold text-slate-300">Кто может менять список.</span>
-          Добавлять и убирать админов может только владелец чата с Premium — так мы ограничиваем выдачу прав модерации.
+          <span class="font-semibold text-slate-300">{{ t('chats.help_managers.p2_title') }}</span>
+          {{ t('chats.help_managers.p2_body') }}
         </p>
         <p class="mt-3 text-[12px] leading-relaxed text-slate-400">
-          <span class="font-semibold text-slate-300">Канал и обсуждение.</span>
-          Если вы выдали админку здесь на канале, человек в приложении открывает рассылку в канал и настройки правил в комментариях.
-          В самом Telegram у бота должны быть права администратора и в канале, и в группе обсуждения — иначе посты и правила в треды не дойдут.
+          <span class="font-semibold text-slate-300">{{ t('chats.help_managers.p3_title') }}</span>
+          {{ t('chats.help_managers.p3_body') }}
         </p>
       </div>
     </div>
+    </Teleport>
 
     <ChannelPostRulesModal
       v-model="channelPostRulesOpen"

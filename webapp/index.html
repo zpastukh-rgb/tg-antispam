@@ -7,18 +7,50 @@
     <meta name="theme-color" content="#8fd41a" media="(prefers-color-scheme: light)" />
     <!-- Опционально: полный https:// URL API, если нельзя задать VITE_API_BASE_URL при сборке (редко). -->
     <meta name="guard-api-base" content="" />
-    <link rel="icon" type="image/png" href="./logo.png" />
+    <link rel="icon" type="image/png" href="/logo.png" />
     <title>AntiSpam Guard — Панель</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <style>
+      /* До Vue/Tailwind: иначе при 404 на бандле — белый экран без текста */
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+        min-height: 100dvh;
+        background: #0b0b10;
+        color: #e4e4e7;
+        font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+      }
+      #guard-boot-placeholder {
+        padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+          max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+        font-size: 14px;
+        line-height: 1.45;
+        max-width: 22rem;
+      }
+      #guard-boot-placeholder.guard-boot--err {
+        color: #fca5a5;
+        max-width: none;
+      }
+    </style>
   </head>
   <body>
-    <div id="app"></div>
-    <!-- Раньше основного бандла: в Docker задаётся из VITE_API_BASE_URL рантайма (serve-static.mjs). -->
+    <noscript>
+      <div
+        style="padding:16px;background:#0b0b10;color:#fecaca;font-family:system-ui,sans-serif;min-height:100vh"
+      >
+        Включите JavaScript — панель не работает без него.
+      </div>
+    </noscript>
+    <div id="app">
+      <div id="guard-boot-placeholder" role="status">Загрузка панели…</div>
+    </div>
     <script src="/guard-api-config.js"></script>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="/guard-boot.js"></script>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

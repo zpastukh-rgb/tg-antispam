@@ -1,8 +1,11 @@
 <script setup>
 import { useRoute, useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import { navItems } from '../config/nav.js'
 import NavIcon from './NavIcon.vue'
 import { useDashboardSection } from '../composables/useDashboardSection'
+
+const { t } = useI18n()
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -33,9 +36,12 @@ const isActive = (item) => {
 function onNavClick(item) {
   if (item.section) {
     setDashboardSection(item.section)
-    router.push('/')
+    router.push({ path: '/', query: { ...route.query, section: item.section } })
+  } else if (item.path === '/') {
+    setDashboardSection('account')
+    router.push({ path: '/', query: { ...route.query, section: 'account' } })
   } else {
-    router.push(item.path)
+    router.push({ path: item.path, query: { ...route.query } })
   }
   emit('close')
 }
@@ -71,13 +77,13 @@ function onNavClick(item) {
             @dragstart.prevent
           />
           <div class="min-w-0 border-t border-white/15 pt-3 text-center leading-tight">
-            <p class="text-[11px] font-semibold uppercase tracking-[0.14em] text-lime-400/95">Панель</p>
+            <p class="text-[11px] font-semibold uppercase tracking-[0.14em] text-lime-400/95">{{ t('nav.panel') }}</p>
             <p class="mt-0.5 text-sm font-bold text-white">AntiSpam Guard</p>
           </div>
         </div>
         <button
           v-for="item in navItems"
-          :key="item.path + (item.section || '') + item.label"
+          :key="item.path + (item.section || '') + (item.labelKey || item.label || '')"
           type="button"
           class="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200"
           :class="
@@ -88,7 +94,7 @@ function onNavClick(item) {
           @click="onNavClick(item)"
         >
           <NavIcon :name="item.icon" class="h-5 w-5 shrink-0 opacity-95" />
-          <span class="min-w-0 truncate">{{ item.label }}</span>
+          <span class="min-w-0 truncate">{{ item.labelKey ? t(item.labelKey) : item.label }}</span>
         </button>
       </nav>
     </aside>
