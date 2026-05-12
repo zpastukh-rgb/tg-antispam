@@ -10,6 +10,12 @@
     /* Меньше сдвига fixed-таббара при появлении скролла (десктоп / веб) */
     scrollbar-gutter: stable;
   }
+  /* WKWebView / Telegram: уменьшаем конфликт жеста скролла и синтетического click */
+  button,
+  [type='button'],
+  [type='submit'] {
+    touch-action: manipulation;
+  }
   body {
     /* Подложка до mount Vue; основной фон — в App.vue (глобальное изображение) */
     @apply min-h-screen bg-zinc-950 text-gray-100;

@@ -1,14 +1,11 @@
 <script setup>
 /**
- * Модалки в #guard-modal-root (см. index.html): узел-сосед #app без fixed/inset — иначе WKWebView «ест» тапы.
- * Контейнер pointer-events-none; здесь pointer-events-auto только для содержимого слота.
+ * В Telegram Mini App (WKWebView) Vue Teleport на внешний #guard-modal-root давал ситуацию,
+ * когда визуально всё есть, но тапы не доходят до кнопок. Рендерим слот на месте —
+ * у модалок уже стоят fixed + z-index, поверх контента они поднимаются и без телепорта.
  */
 </script>
 
 <template>
-  <Teleport to="#guard-modal-root">
-    <div class="pointer-events-auto">
-      <slot />
-    </div>
-  </Teleport>
+  <slot />
 </template>
