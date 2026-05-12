@@ -150,8 +150,8 @@ function onSubscriptionBackFromHeader() {
       </main>
 
       <AppBottomNav />
-      <!-- Цель Teleport: в Telegram WebView узлы на document.body часто оказываются под слоями WebView / без контента -->
-      <div id="guard-modal-root"></div>
+      <!-- Единая точка монтирования модалок (GuardTeleport). Высокий z-index — над таббаром/шапкой, без body. -->
+      <div id="guard-modal-root" class="relative z-[850]"></div>
     </div>
     <!-- Вне z-10 колонки: иначе в Telegram WebView оверлей может оказаться под контентом -->
     <LegalConsentGate />

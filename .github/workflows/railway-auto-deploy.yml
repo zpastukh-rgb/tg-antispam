@@ -93,3 +93,35 @@ jobs:
           RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
           RAILWAY_ENVIRONMENT: ${{ secrets.RAILWAY_ENVIRONMENT }}
         run: railway up -s accomplished-cat -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -d
+
+  # Ручной запуск в GitHub → Actions → Railway Auto Deploy → Run workflow: деплой всех трёх сервисов (бот + API + фронт).
+  deploy-all-manual:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm i -g @railway/cli
+
+      - name: Deploy bot (tg-antispam)
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+          RAILWAY_ENVIRONMENT: ${{ secrets.RAILWAY_ENVIRONMENT }}
+        run: railway up -s tg-antispam -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -d
+
+      - name: Deploy API (zealous-bravery)
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+          RAILWAY_ENVIRONMENT: ${{ secrets.RAILWAY_ENVIRONMENT }}
+        run: railway up -s zealous-bravery -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -d
+
+      - name: Deploy WebApp (accomplished-cat)
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+          RAILWAY_ENVIRONMENT: ${{ secrets.RAILWAY_ENVIRONMENT }}
+        run: railway up -s accomplished-cat -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -d

@@ -1,24 +1,13 @@
 <script setup>
-import { computed } from 'vue'
-
 /**
- * В Telegram Mini App WebView телепорт за пределы дерева страницы часто даёт «пустой» оверлей или модалку без содержимого.
- * В TMA рендерим слот на месте (без Teleport). В браузере — в #guard-modal-root.
- * Не используем Teleport :disabled — в WKWebView это может «съедать» клики по основному контенту.
+ * Всегда монтируем модалки в #guard-modal-root (внутри #app, над основным контентом).
+ * Teleport на document.body в Telegram WebView давал пустые слои; режим «слот на месте»
+ * для TMA давал конфликты стекинга/кликов. Единый таргет — предсказуемый z-order.
  */
-const disableTeleport = computed(() => {
-  if (typeof window === 'undefined') return false
-  try {
-    return !!window.Telegram?.WebApp
-  } catch {
-    return false
-  }
-})
 </script>
 
 <template>
-  <Teleport v-if="!disableTeleport" to="#guard-modal-root">
+  <Teleport to="#guard-modal-root">
     <slot />
   </Teleport>
-  <slot v-else />
 </template>
