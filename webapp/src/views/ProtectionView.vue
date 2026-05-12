@@ -3485,6 +3485,7 @@ const protCardIndigo =
           <p class="text-[11px] leading-relaxed text-slate-500">
             {{ tt('protection.ui.filters_intro') }}
           </p>
+          <button type="button" class="mb-2 w-full rounded-lg bg-red-600 px-3 py-2 text-sm font-bold text-white" @click="$event.target.textContent = 'CLICK OK ' + Date.now()">TAP TEST — нажми сюда</button>
           <div class="grid grid-cols-2 gap-2">
             <button
               type="button"
