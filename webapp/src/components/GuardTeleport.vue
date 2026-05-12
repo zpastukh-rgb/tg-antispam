@@ -1,8 +1,7 @@
 <script setup>
 /**
- * Всегда монтируем модалки в #guard-modal-root (внутри #app, над основным контентом).
- * Контейнер #guard-modal-root — pointer-events-none (см. App.vue), иначе пустой слой с высоким
- * z-index в Telegram WKWebView перехватывает тапы по странице. Здесь включаем события только для слота.
+ * Модалки в #guard-modal-root (см. index.html): узел-сосед #app без fixed/inset — иначе WKWebView «ест» тапы.
+ * Контейнер pointer-events-none; здесь pointer-events-auto только для содержимого слота.
  */
 </script>
 

@@ -48,6 +48,8 @@
     <div id="app">
       <div id="guard-boot-placeholder" role="status">Загрузка панели…</div>
     </div>
+    <!-- Таргет Vue Teleport для модалок: без fixed/inset — иначе в Telegram WKWebView полноэкранный слой часто «ест» тапы даже при pointer-events:none. -->
+    <div id="guard-modal-root" class="pointer-events-none"></div>
     <script src="/guard-api-config.js"></script>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script src="/guard-boot.js"></script>

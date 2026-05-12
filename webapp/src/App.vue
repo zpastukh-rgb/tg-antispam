@@ -46,7 +46,10 @@ async function syncLocaleFromProfile() {
     const me = await api.me()
     if (me?.language) {
       const norm = normalizeLocale(me.language)
-      if (getLocale() !== norm) setLocale(norm)
+      if (getLocale() !== norm) {
+        // После добавления EN: смена локали в том же тике, что и первый layout Teleport, иногда даёт артефакты в WKWebView
+        requestAnimationFrame(() => setLocale(norm))
+      }
     }
   } catch {
     //
@@ -119,8 +122,6 @@ function onSubscriptionBackFromHeader() {
       class="pointer-events-none fixed inset-0 z-[1] bg-gradient-to-b from-black/30 via-black/18 to-black/42"
     />
     <div class="relative z-10 flex min-h-[100dvh] min-h-screen flex-col bg-transparent">
-      <!-- Весь экран: только таргет для Teleport; pointer-events-none — тапы доходят до main/таббара; модалки внутри GuardTeleport с pointer-events-auto -->
-      <div id="guard-modal-root" class="pointer-events-none fixed inset-0 z-[2000]"></div>
       <div
         v-if="showApiConfigWarning"
         class="border-b border-rose-500/40 bg-rose-950/90 px-3 py-2 text-center text-[11px] font-semibold leading-snug text-rose-100"
