@@ -8,7 +8,6 @@ import { useCabinetMode } from '../composables/useCabinetMode'
 import { useToast } from '../composables/useToast'
 import ChannelPostRulesModal from '../components/ChannelPostRulesModal.vue'
 import SecurityPinGateModal from '../components/SecurityPinGateModal.vue'
-import GuardTeleport from '../components/GuardTeleport.vue'
 import { useSecurityPinGate } from '../composables/useSecurityPinGate'
 import { shouldAskPinForAction } from '../utils/settingsSecurity'
 
@@ -1128,7 +1127,7 @@ function openChannelBroadcast(chat) {
         </div>
     </div>
 
-    <GuardTeleport>
+    <Teleport to="body">
     <div
       v-if="managersModalChat"
       class="fixed inset-0 z-[300] flex items-end justify-center bg-black/70 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
@@ -1249,9 +1248,9 @@ function openChannelBroadcast(chat) {
         </div>
       </div>
     </div>
-    </GuardTeleport>
+    </Teleport>
 
-    <GuardTeleport>
+    <Teleport to="body">
     <div
       v-if="managersModalChat && addManagerPermsOpen"
       class="fixed inset-0 z-[315] flex items-center justify-center bg-black/75 px-4"
@@ -1300,9 +1299,9 @@ function openChannelBroadcast(chat) {
         </div>
       </form>
     </div>
-    </GuardTeleport>
+    </Teleport>
 
-    <GuardTeleport>
+    <Teleport to="body">
     <div
       v-if="showCabinetInfoModal"
       class="fixed inset-0 z-[320] flex items-end justify-center overscroll-none bg-black/70 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
@@ -1363,9 +1362,9 @@ function openChannelBroadcast(chat) {
         </div>
       </div>
     </div>
-    </GuardTeleport>
+    </Teleport>
 
-    <GuardTeleport>
+    <Teleport to="body">
     <div
       v-if="showDelegatedInfoModal"
       class="fixed inset-0 z-[320] flex items-end justify-center overscroll-none bg-black/70 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
@@ -1381,9 +1380,9 @@ function openChannelBroadcast(chat) {
         <p class="text-xs text-slate-300">{{ t('chats.help_violet_adm.body') }}</p>
       </div>
     </div>
-    </GuardTeleport>
+    </Teleport>
 
-    <GuardTeleport>
+    <Teleport to="body">
     <div
       v-if="showManagersInfoModal"
       class="fixed inset-0 z-[330] flex items-end justify-center overscroll-none bg-black/70 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
@@ -1410,7 +1409,7 @@ function openChannelBroadcast(chat) {
         </p>
       </div>
     </div>
-    </GuardTeleport>
+    </Teleport>
 
     <ChannelPostRulesModal
       v-model="channelPostRulesOpen"

@@ -29,7 +29,6 @@ import {
   loadPinHash,
 } from '../utils/settingsSecurity'
 import GuardBlueLoadingState from '../components/GuardBlueLoadingState.vue'
-import GuardTeleport from '../components/GuardTeleport.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -4480,7 +4479,7 @@ const protCardIndigo =
       </div>
     </div>
 
-    <GuardTeleport>
+    <Teleport to="body">
     <div
       v-if="showSpamSpikeInfoModal"
       class="fixed inset-0 z-[530] flex items-end justify-center bg-black/60 p-3 md:items-center"
@@ -5031,8 +5030,8 @@ const protCardIndigo =
         </div>
       </div>
     </div>
-    </GuardTeleport>
-    <GuardTeleport>
+    </Teleport>
+    <Teleport to="body">
       <div
         v-if="showStopwordsModal"
         class="fixed inset-0 z-[400] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -5081,9 +5080,9 @@ const protCardIndigo =
           </div>
         </div>
       </div>
-    </GuardTeleport>
+    </Teleport>
 
-    <GuardTeleport>
+    <Teleport to="body">
       <div
         v-if="showProtectionPinModal"
         class="fixed inset-0 z-[480] flex items-end justify-center bg-black/75 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] backdrop-blur-md md:items-center md:pb-6"
@@ -5119,9 +5118,9 @@ const protCardIndigo =
           </div>
         </div>
       </div>
-    </GuardTeleport>
+    </Teleport>
 
-    <GuardTeleport>
+    <Teleport to="body">
       <div
         v-if="postRulesImagePreviewUrl"
         class="fixed inset-0 z-[270] flex items-center justify-center bg-black/75 p-4 backdrop-blur-[2px]"
@@ -5136,9 +5135,9 @@ const protCardIndigo =
           <img :src="postRulesImagePreviewUrl" alt="preview" class="max-h-[75vh] w-full rounded-lg object-contain" />
         </div>
       </div>
-    </GuardTeleport>
+    </Teleport>
 
-    <GuardTeleport>
+    <Teleport to="body">
       <div
         v-if="welcomeImagePreviewUrl && showWelcomeSettingsModal"
         class="fixed inset-0 z-[270] flex items-center justify-center bg-black/75 p-4 backdrop-blur-[2px]"
@@ -5153,9 +5152,9 @@ const protCardIndigo =
           <img :src="welcomeImagePreviewUrl" :alt="tt('protection.ui.welcome_photo_preview_alt')" class="max-h-[78vh] w-full rounded-lg object-contain" />
         </div>
       </div>
-    </GuardTeleport>
+    </Teleport>
 
-    <GuardTeleport>
+    <Teleport to="body">
       <div
         v-if="showWelcomeSettingsModal && chat?.rule"
         class="fixed inset-0 z-[258] flex items-center justify-center bg-black/55 p-3 sm:p-4 backdrop-blur-[2px]"
@@ -5389,9 +5388,9 @@ const protCardIndigo =
           </div>
         </div>
       </div>
-    </GuardTeleport>
+    </Teleport>
 
-    <GuardTeleport>
+    <Teleport to="body">
       <div
         v-if="showPostRulesSettingsModal && chat?.rule"
         class="fixed inset-0 z-[259] flex items-center justify-center bg-black/55 p-3 sm:p-4 backdrop-blur-[2px]"
@@ -5621,9 +5620,9 @@ const protCardIndigo =
           </div>
         </div>
       </div>
-    </GuardTeleport>
+    </Teleport>
 
-    <GuardTeleport>
+    <Teleport to="body">
       <div
         v-if="showPostRulesGroupSendModal && showPostRulesSettingsModal"
         class="fixed inset-0 z-[263] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -5674,9 +5673,9 @@ const protCardIndigo =
           </div>
         </div>
       </div>
-    </GuardTeleport>
+    </Teleport>
 
-    <GuardTeleport>
+    <Teleport to="body">
       <div
         v-if="showPostRulesGroupFullPreview && showPostRulesSettingsModal && postRulesGroupFullPreviewRow"
         class="fixed inset-0 z-[265] flex items-center justify-center bg-black/65 p-4 backdrop-blur-[2px]"
@@ -5724,9 +5723,9 @@ const protCardIndigo =
           </div>
         </div>
       </div>
-    </GuardTeleport>
+    </Teleport>
 
-    <GuardTeleport>
+    <Teleport to="body">
       <div
         v-if="showPostRulesButtonsModal && showPostRulesSettingsModal"
         class="fixed inset-0 z-[262] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -5764,9 +5763,9 @@ const protCardIndigo =
           </div>
         </div>
       </div>
-    </GuardTeleport>
+    </Teleport>
 
-    <GuardTeleport>
+    <Teleport to="body">
       <div
         v-if="postRulesLinkModalOpen && showPostRulesSettingsModal"
         class="fixed inset-0 z-[262] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -5788,9 +5787,9 @@ const protCardIndigo =
           </div>
         </div>
       </div>
-    </GuardTeleport>
+    </Teleport>
 
-    <GuardTeleport>
+    <Teleport to="body">
       <div
         v-if="welcomeInfoModal && showWelcomeSettingsModal"
         class="fixed inset-0 z-[261] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -5835,9 +5834,9 @@ const protCardIndigo =
           </div>
         </div>
       </div>
-    </GuardTeleport>
+    </Teleport>
 
-    <GuardTeleport>
+    <Teleport to="body">
       <div
         v-if="showWelcomeButtonsModal && showWelcomeSettingsModal"
         class="fixed inset-0 z-[262] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -5878,9 +5877,9 @@ const protCardIndigo =
           </div>
         </div>
       </div>
-    </GuardTeleport>
+    </Teleport>
 
-    <GuardTeleport>
+    <Teleport to="body">
       <div
         v-if="welcomeLinkModalOpen"
         class="fixed inset-0 z-[263] flex items-start justify-center bg-black/60 p-4 md:items-center"
@@ -5905,9 +5904,9 @@ const protCardIndigo =
           </div>
         </div>
       </div>
-    </GuardTeleport>
+    </Teleport>
 
-    <GuardTeleport>
+    <Teleport to="body">
       <div
         v-if="showLinksFilterModal && chat?.rule"
         class="fixed inset-0 z-[400] flex items-center justify-center bg-black/45 p-4 backdrop-blur-md"
@@ -6255,9 +6254,9 @@ const protCardIndigo =
           </div>
         </div>
       </div>
-    </GuardTeleport>
+    </Teleport>
 
-    <GuardTeleport>
+    <Teleport to="body">
       <div
         v-if="showChannelPostsFilterModal && chat?.rule"
         class="fixed inset-0 z-[400] flex items-center justify-center bg-black/45 p-4 backdrop-blur-md"
@@ -6362,9 +6361,9 @@ const protCardIndigo =
           </div>
         </div>
       </div>
-    </GuardTeleport>
+    </Teleport>
 
-    <GuardTeleport>
+    <Teleport to="body">
       <div
         v-if="showMentionsFilterModal && chat?.rule"
         class="fixed inset-0 z-[400] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -6395,9 +6394,9 @@ const protCardIndigo =
           </div>
         </div>
       </div>
-    </GuardTeleport>
+    </Teleport>
 
-    <GuardTeleport>
+    <Teleport to="body">
       <div
         v-if="showMediaFilterModal && chat?.rule"
         class="fixed inset-0 z-[400] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -6425,9 +6424,9 @@ const protCardIndigo =
           </div>
         </div>
       </div>
-    </GuardTeleport>
+    </Teleport>
 
-    <GuardTeleport>
+    <Teleport to="body">
       <div
         v-if="showButtonsFilterModal && chat?.rule"
         class="fixed inset-0 z-[400] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -6458,7 +6457,7 @@ const protCardIndigo =
           </div>
         </div>
       </div>
-    </GuardTeleport>
+    </Teleport>
 
     <div
       v-if="showAntinakrutkaSettingsModal && chat?.rule"
@@ -6568,7 +6567,7 @@ const protCardIndigo =
         </div>
       </div>
     </div>
-    <GuardTeleport>
+    <Teleport to="body">
     <div
       v-if="showAntinakrutkaInfoModal"
       class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
@@ -6607,8 +6606,8 @@ const protCardIndigo =
         </div>
       </div>
     </div>
-    </GuardTeleport>
-    <GuardTeleport>
+    </Teleport>
+    <Teleport to="body">
     <div
       v-if="showJoinCaptchaSettingsModal && chat?.rule"
       class="fixed inset-0 z-[400] flex items-end justify-center bg-black/65 p-3 md:items-center"
@@ -6673,8 +6672,8 @@ const protCardIndigo =
         </div>
       </div>
     </div>
-    </GuardTeleport>
-    <GuardTeleport>
+    </Teleport>
+    <Teleport to="body">
     <div
       v-if="showJoinCaptchaInfoModal"
       class="fixed inset-0 z-[530] flex items-center justify-center bg-black/65 p-3"
@@ -6755,7 +6754,7 @@ const protCardIndigo =
         </div>
       </div>
     </div>
-    </GuardTeleport>
+    </Teleport>
     <div
       v-if="showAntispamListModal"
       class="fixed inset-0 z-[400] flex items-center justify-center bg-black/65 p-3"
@@ -6815,7 +6814,7 @@ const protCardIndigo =
       </div>
     </div>
 
-    <GuardTeleport>
+    <Teleport to="body">
       <div
         v-if="showFreeLimitsPremiumModal"
         class="fixed inset-0 z-[268] flex items-center justify-center bg-black/70 p-4 backdrop-blur-[2px]"
@@ -6888,7 +6887,7 @@ const protCardIndigo =
           </div>
         </div>
       </div>
-    </GuardTeleport>
+    </Teleport>
   </div>
 </template>
 

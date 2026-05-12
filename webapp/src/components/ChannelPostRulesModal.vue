@@ -10,7 +10,6 @@ import {
 } from '../api/client'
 import { normalizeHtmlForTelegram } from '../utils/telegramHtmlForTg'
 import { useI18n } from 'vue-i18n'
-import GuardTeleport from './GuardTeleport.vue'
 
 const { t: tt, locale: i18nLocale } = useI18n()
 
@@ -960,7 +959,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <GuardTeleport>
+  <Teleport to="body">
     <div
       v-if="modelValue"
       class="fixed inset-0 z-[340] flex items-center justify-center bg-black/55 p-3 sm:p-4 backdrop-blur-[2px]"
@@ -1188,9 +1187,9 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
-  </GuardTeleport>
+  </Teleport>
 
-  <GuardTeleport>
+  <Teleport to="body">
     <div
       v-if="showButtonsModal && modelValue && rulesChat"
       class="fixed inset-0 z-[345] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -1235,9 +1234,9 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
-  </GuardTeleport>
+  </Teleport>
 
-  <GuardTeleport>
+  <Teleport to="body">
     <div
       v-if="linkModalOpen && modelValue"
       class="fixed inset-0 z-[345] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -1259,9 +1258,9 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
-  </GuardTeleport>
+  </Teleport>
 
-  <GuardTeleport>
+  <Teleport to="body">
     <div
       v-if="imagePreviewUrl"
       class="fixed inset-0 z-[348] flex items-center justify-center bg-black/75 p-4"
@@ -1274,7 +1273,7 @@ onBeforeUnmount(() => {
         <img :src="imagePreviewUrl" alt="preview" class="max-h-[75vh] w-full rounded-lg object-contain" />
       </div>
     </div>
-  </GuardTeleport>
+  </Teleport>
 </template>
 
 <style scoped>
