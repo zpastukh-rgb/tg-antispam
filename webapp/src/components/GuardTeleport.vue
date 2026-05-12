@@ -1,5 +1,3 @@
 <template>
-  <Teleport to="body">
-    <slot />
-  </Teleport>
+  <slot />
 </template>

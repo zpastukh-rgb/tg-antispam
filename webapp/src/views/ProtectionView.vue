@@ -50,6 +50,7 @@ const showMentionsFilterModal = ref(false)
 const showMediaFilterModal = ref(false)
 const showButtonsFilterModal = ref(false)
 const showChannelPostsFilterModal = ref(false)
+const _dbgClicks = ref(0)
 
 const newWhitelistDomain = ref('')
 const newWhitelistUserId = ref('')
@@ -3175,6 +3176,10 @@ const protCardIndigo =
       class="relative -mx-4 min-h-0 px-4 pb-8 font-display md:-mx-6 md:px-6 md:pb-10"
     >
       <div class="relative z-[2] space-y-4 pt-1 text-[13px] leading-snug md:pt-2">
+    <!-- DEBUG: диагностика кликов -->
+    <div v-if="_dbgClicks >= 0" style="position:relative;z-index:99999;background:#1e1e2e;border:2px solid #f00;border-radius:8px;padding:6px 10px;margin-bottom:8px;font-size:11px;color:#fff;font-family:monospace">
+      DBG: clicks={{ _dbgClicks }} | MEN={{ showMentionsFilterModal }} | LNK={{ showLinksFilterModal }} | BTN={{ showButtonsFilterModal }} | rule={{ !!chat?.rule }} | id={{ chat?.id }}
+    </div>
     <div class="flex items-center justify-between gap-2">
       <h1 class="text-lg font-semibold text-white drop-shadow-sm md:text-xl">{{ tt('protection.title') }}</h1>
       <span
@@ -3498,7 +3503,7 @@ const protCardIndigo =
             <button
               type="button"
               class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-violet-500/15 to-fuchsia-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-violet-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="showMentionsFilterModal = true"
+              @click="_dbgClicks++; showMentionsFilterModal = true"
             >
               <span class="text-lg leading-none">@</span>
               <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_mentions') }}</span>
