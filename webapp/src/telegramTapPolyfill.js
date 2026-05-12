@@ -31,13 +31,17 @@ export function installTelegramTapPolyfill() {
         if (Date.now() - st > 900) return
         if (Math.abs(t.clientX - sx) > 18 || Math.abs(t.clientY - sy) > 18) return
 
-        const raw = ev.target
-        if (!(raw instanceof Element)) return
-        if (raw.closest('[data-guard-no-tap-polyfill]')) return
-        if (raw.closest('[contenteditable="true"], .welcome-rich-editor, .post-rules-rich-editor')) return
-        if (raw.matches?.('input, textarea, select')) return
+        let el = ev.target
+        // Тап по тексту внутри кнопки даёт Text node — без этого полифилл молчит и @click не приходит.
+        if (el && typeof el.nodeType === 'number' && el.nodeType === Node.TEXT_NODE) {
+          el = el.parentElement
+        }
+        if (!(el instanceof Element)) return
+        if (el.closest('[data-guard-no-tap-polyfill]')) return
+        if (el.closest('[contenteditable="true"], .welcome-rich-editor, .post-rules-rich-editor')) return
+        if (el.matches?.('input, textarea, select')) return
 
-        const hit = raw.closest(
+        const hit = el.closest(
           'button:not([disabled]):not([aria-disabled="true"]), a[href], [role="button"]:not([aria-disabled="true"])',
         )
         if (!hit) return
