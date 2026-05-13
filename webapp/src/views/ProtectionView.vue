@@ -1025,7 +1025,7 @@ function policyButtonClass(currentMode, optValue) {
 function linkScopeButtonClass(currentScope, optValue) {
   const cur = String(currentScope || 'all').toLowerCase()
   const selected = cur === optValue
-  const base = 'rounded-2xl border px-2.5 py-2.5 text-xs font-medium leading-snug backdrop-blur-md transition-colors'
+  const base = 'rounded-2xl border px-2.5 py-2.5 text-xs font-medium leading-snug transition-colors'
   if (!selected) {
     return `${base} border-white/12 bg-white/[0.05] text-zinc-300 hover:border-white/18 hover:bg-white/[0.08]`
   }
@@ -1279,7 +1279,7 @@ const linkModalWhitelistUsersHtml = computed(() => tt('protection.links_modal.tr
 function linkModeButtonClass(currentMode, optValue) {
   const selected = String(currentMode || '').toLowerCase() === String(optValue || '').toLowerCase()
   const base =
-    'rounded-2xl border px-2.5 py-2.5 text-left text-xs font-medium leading-snug backdrop-blur-md transition-[border-color,background-color,box-shadow] duration-200'
+    'rounded-2xl border px-2.5 py-2.5 text-left text-xs font-medium leading-snug transition-[border-color,background-color,box-shadow] duration-200'
   if (!selected) {
     return `${base} border-white/12 bg-white/[0.05] text-zinc-300 hover:border-white/20 hover:bg-white/[0.09]`
   }
@@ -5923,13 +5923,14 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="showLinksFilterModal && chat?.rule"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/45 p-4 backdrop-blur-md"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px"
+        class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         role="dialog"
         aria-modal="true"
         @click.self="showLinksFilterModal = false"
       >
         <div
-          class="links-glass-panel flex max-h-[min(88vh,44rem)] w-full max-w-xl flex-col overflow-hidden rounded-[1.35rem] border border-white/18 bg-zinc-950/75 text-zinc-100 shadow-[0_32px_96px_-24px_rgba(0,0,0,0.78),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-2xl backdrop-saturate-150 ring-1 ring-white/10"
+          class="flex max-h-[min(88vh,44rem)] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-white/15 bg-gradient-to-b from-slate-900 to-slate-950 p-0 text-slate-100 shadow-2xl ring-1 ring-sky-500/20"
           @click.stop
         >
           <div
@@ -6273,13 +6274,14 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="showChannelPostsFilterModal && chat?.rule"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/45 p-4 backdrop-blur-md"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px"
+        class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         role="dialog"
         aria-modal="true"
         @click.self="showChannelPostsFilterModal = false"
       >
         <div
-          class="links-glass-panel flex max-h-[min(86vh,42rem)] w-full max-w-xl flex-col overflow-hidden rounded-[1.35rem] border border-white/18 bg-zinc-950/75 text-zinc-100 shadow-[0_32px_96px_-24px_rgba(0,0,0,0.78),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-2xl backdrop-saturate-150 ring-1 ring-white/10"
+          class="flex max-h-[min(86vh,42rem)] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-white/15 bg-gradient-to-b from-slate-900 to-slate-950 p-0 text-slate-100 shadow-2xl ring-1 ring-fuchsia-500/25"
           @click.stop
         >
           <div class="flex shrink-0 items-center justify-between gap-2 border-b border-white/10 bg-gradient-to-r from-white/[0.06] to-transparent px-4 py-3.5">
@@ -6970,12 +6972,6 @@ const protCardIndigo =
   height: 1.65rem;
   min-width: 1.65rem;
   padding: 0 0.3rem;
-}
-
-/* Модалка «Ссылки»: стекло + читаемые подсказки с v-html */
-.links-glass-panel {
-  -webkit-backdrop-filter: blur(24px);
-  backdrop-filter: blur(24px);
 }
 
 .link-glass-info-btn {
