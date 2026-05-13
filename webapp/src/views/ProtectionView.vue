@@ -3243,14 +3243,14 @@ const protCardIndigo =
 
     <div v-else-if="chat?.rule" class="space-y-3.5">
       <!-- Только полоса чата липнет под шапкой App (h-14). Плашка «под угрозой» ниже — обычный скролл. -->
-      <!-- pointer-events-none + auto только на чипе/кнопках: иначе при скролле полноширинная «стеклянная» карта (z-28) перехватывает тапы над блоком «Фильтры» (z-10). -->
+      <!-- pointer-events-none на обёртке/карте/чипе: при скролле полоса (z-28) висит над «Фильтрами» (z-10). Иначе тапы ловит стекло или широкий чип (flex-1). Ловим только «Выбрать чат» и «i». -->
       <div
         class="pointer-events-none sticky top-14 z-[28] -mx-4 px-4 py-2 md:-mx-6 md:px-6"
       >
         <div :class="[protCardChatBar, 'pointer-events-none']">
           <div class="flex items-center gap-1.5">
             <div
-              class="pointer-events-auto guard-green-chip min-w-0 flex-1 rounded-xl border border-emerald-300/40 px-2.5 py-2 text-xs font-semibold shadow-[0_0_28px_-10px_rgba(163,230,53,0.45)] ring-1 ring-lime-200/25"
+              class="pointer-events-none guard-green-chip min-w-0 flex-1 rounded-xl border border-emerald-300/40 px-2.5 py-2 text-xs font-semibold shadow-[0_0_28px_-10px_rgba(163,230,53,0.45)] ring-1 ring-lime-200/25"
             >
               <span class="block truncate">{{ selectedChatTitle }}</span>
             </div>
@@ -3503,7 +3503,8 @@ const protCardIndigo =
       </section>
 
       <!-- Фильтры -->
-      <section :class="[protCard, 'relative z-[10]']">
+      <!-- Фильтры: z выше липкой полосы чата (z-28), иначе при скролле плитки оказываются под ней по stacking (родитель z-[2]). -->
+      <section :class="[protCard, 'relative z-[30]']">
         <div class="mb-3 flex items-center justify-between gap-2">
           <h2 class="text-xs font-medium text-slate-200">{{ tt('protection.ui.filters_section') }}</h2>
           <button
@@ -3522,7 +3523,7 @@ const protCardIndigo =
           <div class="relative z-20 grid grid-cols-2 gap-2">
             <button
               type="button"
-              class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-sky-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-sky-400/40 hover:shadow-md active:scale-[0.99]"
+              class="touch-manipulation group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-sky-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-sky-400/40 hover:shadow-md active:scale-[0.99]"
               @click="onProtectionFilterTileClick('links')"
               @touchend.prevent.stop="onProtectionFilterTileTouchend('links')"
             >
@@ -3532,7 +3533,7 @@ const protCardIndigo =
             </button>
             <button
               type="button"
-              class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-violet-500/15 to-fuchsia-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-violet-400/40 hover:shadow-md active:scale-[0.99]"
+              class="touch-manipulation group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-violet-500/15 to-fuchsia-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-violet-400/40 hover:shadow-md active:scale-[0.99]"
               @click="onProtectionFilterTileClick('mentions')"
               @touchend.prevent.stop="onProtectionFilterTileTouchend('mentions')"
             >
@@ -3542,7 +3543,7 @@ const protCardIndigo =
             </button>
             <button
               type="button"
-              class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-amber-500/15 to-orange-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-amber-400/40 hover:shadow-md active:scale-[0.99]"
+              class="touch-manipulation group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-amber-500/15 to-orange-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-amber-400/40 hover:shadow-md active:scale-[0.99]"
               @click="onProtectionFilterTileClick('media')"
               @touchend.prevent.stop="onProtectionFilterTileTouchend('media')"
             >
@@ -3552,7 +3553,7 @@ const protCardIndigo =
             </button>
             <button
               type="button"
-              class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-emerald-500/15 to-teal-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-emerald-400/40 hover:shadow-md active:scale-[0.99]"
+              class="touch-manipulation group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-emerald-500/15 to-teal-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-emerald-400/40 hover:shadow-md active:scale-[0.99]"
               @click="onProtectionFilterTileClick('buttons')"
               @touchend.prevent.stop="onProtectionFilterTileTouchend('buttons')"
             >
@@ -3562,7 +3563,7 @@ const protCardIndigo =
             </button>
             <button
               type="button"
-              class="group col-span-2 flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-fuchsia-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-fuchsia-400/40 hover:shadow-md active:scale-[0.99]"
+              class="touch-manipulation group col-span-2 flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-fuchsia-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-fuchsia-400/40 hover:shadow-md active:scale-[0.99]"
               @click="onProtectionFilterTileClick('channelPosts')"
               @touchend.prevent.stop="onProtectionFilterTileTouchend('channelPosts')"
             >
