@@ -55,6 +55,45 @@ function guardApiConfigPlugin() {
   }
 }
 
+/** В `npm run dev` / `vite preview`: дублировать guardLog/guardWarn в терминал (POST с клиента). */
+function guardDevTerminalLogPlugin() {
+  const attach = (server) => {
+    server.middlewares.use((req, res, next) => {
+      const pathOnly = String(req.url || '').split('?')[0]
+      if (req.method !== 'POST' || pathOnly !== '/__guard_debug_log') {
+        next()
+        return
+      }
+      const chunks = []
+      req.on('data', (c) => chunks.push(c))
+      req.on('end', () => {
+        try {
+          const raw = Buffer.concat(chunks).toString('utf8')
+          const j = JSON.parse(raw || '{}')
+          if (j.kind === 'warn') {
+            console.warn(`[Guard:${j.scope}]`, j.msg, j.detail !== undefined ? j.detail : '')
+          } else {
+            console.log(`[Guard:${j.scope}]`, j.msg, j.extra !== undefined ? j.extra : '')
+          }
+        } catch (e) {
+          console.warn('[Guard:terminal]', 'bad __guard_debug_log body', e)
+        }
+        res.statusCode = 204
+        res.end()
+      })
+      req.on('error', () => {
+        res.statusCode = 500
+        res.end()
+      })
+    })
+  }
+  return {
+    name: 'guard-dev-terminal-log',
+    configureServer: attach,
+    configurePreviewServer: attach,
+  }
+}
+
 /** Комментарий в dist/index.html — по View Source видно, что выкатили новый билд. */
 function guardBuildStampPlugin() {
   const stamp = new Date().toISOString()
@@ -74,6 +113,7 @@ export default defineConfig({
   },
   plugins: [
     guardApiConfigPlugin(),
+    guardDevTerminalLogPlugin(),
     guardBuildStampPlugin(),
     vue({
       template: {

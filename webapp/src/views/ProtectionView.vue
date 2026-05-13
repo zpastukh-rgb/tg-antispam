@@ -52,12 +52,34 @@ const showButtonsFilterModal = ref(false)
 const showChannelPostsFilterModal = ref(false)
 
 /** Одна модалка фильтра за раз + телепорт в body (TMA / stacking context). */
-function openProtectionFilterModal(which) {
+function openProtectionFilterModal(which, source) {
   showLinksFilterModal.value = which === 'links'
   showMentionsFilterModal.value = which === 'mentions'
   showMediaFilterModal.value = which === 'media'
   showButtonsFilterModal.value = which === 'buttons'
   showChannelPostsFilterModal.value = which === 'channelPosts'
+  guardLog('Protection', 'openProtectionFilterModal', {
+    which,
+    source: source || 'direct',
+    open: {
+      links: showLinksFilterModal.value,
+      mentions: showMentionsFilterModal.value,
+      media: showMediaFilterModal.value,
+      buttons: showButtonsFilterModal.value,
+      channelPosts: showChannelPostsFilterModal.value,
+    },
+  })
+}
+
+/** TMA/WKWebView: часть плиток не даёт стабильный click — дублируем открытие на touchend. */
+let protectionFilterTileTouchAt = 0
+function onProtectionFilterTileTouchend(which) {
+  protectionFilterTileTouchAt = Date.now()
+  openProtectionFilterModal(which, 'touchend')
+}
+function onProtectionFilterTileClick(which) {
+  if (Date.now() - protectionFilterTileTouchAt < 450) return
+  openProtectionFilterModal(which, 'click')
 }
 
 const newWhitelistDomain = ref('')
@@ -3221,26 +3243,27 @@ const protCardIndigo =
 
     <div v-else-if="chat?.rule" class="space-y-3.5">
       <!-- Только полоса чата липнет под шапкой App (h-14). Плашка «под угрозой» ниже — обычный скролл. -->
+      <!-- pointer-events-none + auto только на чипе/кнопках: иначе при скролле полноширинная «стеклянная» карта (z-28) перехватывает тапы над блоком «Фильтры» (z-10). -->
       <div
-        class="sticky top-14 z-[28] -mx-4 px-4 py-2 md:-mx-6 md:px-6"
+        class="pointer-events-none sticky top-14 z-[28] -mx-4 px-4 py-2 md:-mx-6 md:px-6"
       >
-        <div :class="protCardChatBar">
+        <div :class="[protCardChatBar, 'pointer-events-none']">
           <div class="flex items-center gap-1.5">
             <div
-              class="guard-green-chip min-w-0 flex-1 rounded-xl border border-emerald-300/40 px-2.5 py-2 text-xs font-semibold shadow-[0_0_28px_-10px_rgba(163,230,53,0.45)] ring-1 ring-lime-200/25"
+              class="pointer-events-auto guard-green-chip min-w-0 flex-1 rounded-xl border border-emerald-300/40 px-2.5 py-2 text-xs font-semibold shadow-[0_0_28px_-10px_rgba(163,230,53,0.45)] ring-1 ring-lime-200/25"
             >
               <span class="block truncate">{{ selectedChatTitle }}</span>
             </div>
             <button
               type="button"
-              class="shrink-0 rounded-xl border border-white/[0.14] bg-white/[0.07] px-2.5 py-2 text-xs font-semibold text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.1)] backdrop-blur-md transition hover:border-white/22 hover:bg-white/[0.12]"
+              class="pointer-events-auto shrink-0 rounded-xl border border-white/[0.14] bg-white/[0.07] px-2.5 py-2 text-xs font-semibold text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.1)] backdrop-blur-md transition hover:border-white/22 hover:bg-white/[0.12]"
               @click="openChatPicker"
             >
               {{ tt('protection.ui.pick_chat') }}
             </button>
             <button
               type="button"
-              class="prot-info-btn chatbar-info-btn shrink-0"
+              class="pointer-events-auto prot-info-btn chatbar-info-btn shrink-0"
               :aria-label="tt('protection.ui.chat_picker_aria')"
               @click="showChatSwitchInfoModal = true"
             >
@@ -3496,51 +3519,56 @@ const protCardIndigo =
           <p class="text-[11px] leading-relaxed text-slate-500">
             {{ tt('protection.ui.filters_intro') }}
           </p>
-          <div class="grid grid-cols-2 gap-2">
+          <div class="relative z-20 grid grid-cols-2 gap-2">
             <button
               type="button"
               class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-sky-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-sky-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="openProtectionFilterModal('links')"
+              @click="onProtectionFilterTileClick('links')"
+              @touchend.prevent.stop="onProtectionFilterTileTouchend('links')"
             >
-              <span class="text-lg leading-none">🔗</span>
-              <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_links') }}</span>
-              <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ linkModeSummary }}</span>
+              <span class="pointer-events-none text-lg leading-none">🔗</span>
+              <span class="pointer-events-none mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_links') }}</span>
+              <span class="pointer-events-none mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ linkModeSummary }}</span>
             </button>
             <button
               type="button"
               class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-violet-500/15 to-fuchsia-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-violet-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="openProtectionFilterModal('mentions')"
+              @click="onProtectionFilterTileClick('mentions')"
+              @touchend.prevent.stop="onProtectionFilterTileTouchend('mentions')"
             >
-              <span class="text-lg leading-none">@</span>
-              <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_mentions') }}</span>
-              <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ mentionsSummary }}</span>
+              <span class="pointer-events-none text-lg leading-none">@</span>
+              <span class="pointer-events-none mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_mentions') }}</span>
+              <span class="pointer-events-none mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ mentionsSummary }}</span>
             </button>
             <button
               type="button"
               class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-amber-500/15 to-orange-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-amber-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="openProtectionFilterModal('media')"
+              @click="onProtectionFilterTileClick('media')"
+              @touchend.prevent.stop="onProtectionFilterTileTouchend('media')"
             >
-              <span class="text-lg leading-none">🖼</span>
-              <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_media') }}</span>
-              <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ mediaSummary }}</span>
+              <span class="pointer-events-none text-lg leading-none">🖼</span>
+              <span class="pointer-events-none mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_media') }}</span>
+              <span class="pointer-events-none mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ mediaSummary }}</span>
             </button>
             <button
               type="button"
               class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-emerald-500/15 to-teal-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-emerald-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="openProtectionFilterModal('buttons')"
+              @click="onProtectionFilterTileClick('buttons')"
+              @touchend.prevent.stop="onProtectionFilterTileTouchend('buttons')"
             >
-              <span class="text-lg leading-none">🔘</span>
-              <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_buttons') }}</span>
-              <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ buttonsSummary }}</span>
+              <span class="pointer-events-none text-lg leading-none">🔘</span>
+              <span class="pointer-events-none mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_buttons') }}</span>
+              <span class="pointer-events-none mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ buttonsSummary }}</span>
             </button>
             <button
               type="button"
               class="group col-span-2 flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-fuchsia-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-fuchsia-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="openProtectionFilterModal('channelPosts')"
+              @click="onProtectionFilterTileClick('channelPosts')"
+              @touchend.prevent.stop="onProtectionFilterTileTouchend('channelPosts')"
             >
-              <span class="text-lg leading-none">📣</span>
-              <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_channel_posts') }}</span>
-              <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ channelPostsSummary }}</span>
+              <span class="pointer-events-none text-lg leading-none">📣</span>
+              <span class="pointer-events-none mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_channel_posts') }}</span>
+              <span class="pointer-events-none mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ channelPostsSummary }}</span>
             </button>
           </div>
           <div class="flex items-center justify-between gap-2 pt-1">

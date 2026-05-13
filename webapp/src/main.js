@@ -1,5 +1,7 @@
 import './bootstrapLocation.js'
 import './themeBootstrap.js'
+/** TMA WKWebView: touch по тексту внутри <button> часто не даёт @click — полифилл синтезирует click(). */
+import './telegramTapPolyfill.js'
 import { createApp } from 'vue'
 import App from './App.vue'
 import router from './router'
