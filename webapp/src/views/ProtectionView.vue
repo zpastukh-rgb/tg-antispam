@@ -3537,7 +3537,8 @@ const protCardIndigo =
               @click="onProtectionFilterTileClick('mentions')"
               @touchend.prevent.stop="onProtectionFilterTileTouchend('mentions')"
             >
-              <span class="pointer-events-none text-lg leading-none">@</span>
+              <!-- U+FF20: не ASCII @ — в TMA/WKWebView сырой @ иногда перехватывается как «упоминание», ломая tap → click -->
+              <span class="pointer-events-none text-lg leading-none" aria-hidden="true">{{ '\uFF20' }}</span>
               <span class="pointer-events-none mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_mentions') }}</span>
               <span class="pointer-events-none mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ mentionsSummary }}</span>
             </button>
