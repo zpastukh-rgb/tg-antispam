@@ -71,23 +71,6 @@ function openProtectionFilterModal(which, source) {
   })
 }
 
-/** TMA/WKWebView: часть плиток не даёт стабильный click — дублируем открытие на touchend. */
-let protectionFilterTileTouchAt = 0
-function onProtectionFilterTileTouchend(which) {
-  protectionFilterTileTouchAt = Date.now()
-  openProtectionFilterModal(which, 'touchend')
-}
-/** TMA: иногда доходит pointerup, но не click/touchend — дублируем открытие. */
-function onProtectionFilterTilePointerup(which, ev) {
-  if (ev && typeof ev.button === 'number' && ev.button !== 0) return
-  protectionFilterTileTouchAt = Date.now()
-  openProtectionFilterModal(which, 'pointerup')
-}
-function onProtectionFilterTileClick(which) {
-  if (Date.now() - protectionFilterTileTouchAt < 450) return
-  openProtectionFilterModal(which, 'click')
-}
-
 const newWhitelistDomain = ref('')
 const newWhitelistUserId = ref('')
 const newWhitelistSenderChat = ref('')
@@ -3529,59 +3512,48 @@ const protCardIndigo =
           <div class="relative z-20 grid grid-cols-2 gap-2">
             <button
               type="button"
-              class="touch-manipulation group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-sky-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-sky-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="onProtectionFilterTileClick('links')"
-              @pointerup="onProtectionFilterTilePointerup('links', $event)"
-              @touchend.prevent.stop="onProtectionFilterTileTouchend('links')"
+              class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-sky-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-sky-400/40 hover:shadow-md active:scale-[0.99]"
+              @click="openProtectionFilterModal('links')"
             >
-              <span class="pointer-events-none text-lg leading-none">🔗</span>
-              <span class="pointer-events-none mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_links') }}</span>
-              <span class="pointer-events-none mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ linkModeSummary }}</span>
+              <span class="text-lg leading-none">🔗</span>
+              <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_links') }}</span>
+              <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ linkModeSummary }}</span>
             </button>
             <button
               type="button"
-              class="touch-manipulation group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-violet-500/15 to-fuchsia-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-violet-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="onProtectionFilterTileClick('mentions')"
-              @pointerup="onProtectionFilterTilePointerup('mentions', $event)"
-              @touchend.prevent.stop="onProtectionFilterTileTouchend('mentions')"
+              class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-violet-500/15 to-fuchsia-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-violet-400/40 hover:shadow-md active:scale-[0.99]"
+              @click="openProtectionFilterModal('mentions')"
             >
-              <!-- U+FF20: не ASCII @ — в TMA/WKWebView сырой @ иногда перехватывается как «упоминание», ломая tap → click -->
-              <span class="pointer-events-none text-lg leading-none" aria-hidden="true">{{ '\uFF20' }}</span>
-              <span class="pointer-events-none mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_mentions') }}</span>
-              <span class="pointer-events-none mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ mentionsSummary }}</span>
+              <span class="text-lg leading-none" aria-hidden="true">@</span>
+              <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_mentions') }}</span>
+              <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ mentionsSummary }}</span>
             </button>
             <button
               type="button"
-              class="touch-manipulation group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-amber-500/15 to-orange-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-amber-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="onProtectionFilterTileClick('media')"
-              @pointerup="onProtectionFilterTilePointerup('media', $event)"
-              @touchend.prevent.stop="onProtectionFilterTileTouchend('media')"
+              class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-amber-500/15 to-orange-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-amber-400/40 hover:shadow-md active:scale-[0.99]"
+              @click="openProtectionFilterModal('media')"
             >
-              <span class="pointer-events-none text-lg leading-none">🖼</span>
-              <span class="pointer-events-none mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_media') }}</span>
-              <span class="pointer-events-none mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ mediaSummary }}</span>
+              <span class="text-lg leading-none">🖼</span>
+              <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_media') }}</span>
+              <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ mediaSummary }}</span>
             </button>
             <button
               type="button"
-              class="touch-manipulation group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-emerald-500/15 to-teal-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-emerald-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="onProtectionFilterTileClick('buttons')"
-              @pointerup="onProtectionFilterTilePointerup('buttons', $event)"
-              @touchend.prevent.stop="onProtectionFilterTileTouchend('buttons')"
+              class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-emerald-500/15 to-teal-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-emerald-400/40 hover:shadow-md active:scale-[0.99]"
+              @click="openProtectionFilterModal('buttons')"
             >
-              <span class="pointer-events-none text-lg leading-none">🔘</span>
-              <span class="pointer-events-none mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_buttons') }}</span>
-              <span class="pointer-events-none mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ buttonsSummary }}</span>
+              <span class="text-lg leading-none">🔘</span>
+              <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_buttons') }}</span>
+              <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ buttonsSummary }}</span>
             </button>
             <button
               type="button"
-              class="touch-manipulation group col-span-2 flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-fuchsia-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-fuchsia-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="onProtectionFilterTileClick('channelPosts')"
-              @pointerup="onProtectionFilterTilePointerup('channelPosts', $event)"
-              @touchend.prevent.stop="onProtectionFilterTileTouchend('channelPosts')"
+              class="group col-span-2 flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-fuchsia-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-fuchsia-400/40 hover:shadow-md active:scale-[0.99]"
+              @click="openProtectionFilterModal('channelPosts')"
             >
-              <span class="pointer-events-none text-lg leading-none">📣</span>
-              <span class="pointer-events-none mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_channel_posts') }}</span>
-              <span class="pointer-events-none mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ channelPostsSummary }}</span>
+              <span class="text-lg leading-none">📣</span>
+              <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_channel_posts') }}</span>
+              <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ channelPostsSummary }}</span>
             </button>
           </div>
           <div class="flex items-center justify-between gap-2 pt-1">

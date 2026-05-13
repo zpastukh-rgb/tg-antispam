@@ -1246,9 +1246,13 @@ async def _run_guard_25_days_story(bot, session: AsyncSession, now: datetime) ->
                 hours_saved=hours_saved,
             )
             await bot.send_message(uid, msg, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
-            await _mark_dispatch_bucket(session, uid, bucket)
         except Exception as e:
             logger.warning("guard_25_days notify user=%s: %s", getattr(u, "telegram_id", None), e)
+            continue
+        try:
+            await _mark_dispatch_bucket(session, uid, bucket)
+        except Exception as e:
+            logger.warning("guard_25_days mark user=%s: %s", getattr(u, "telegram_id", None), e)
             await session.rollback()
 
 
