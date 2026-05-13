@@ -6157,7 +6157,7 @@ watch(
     </div>
     <div
       v-if="showFullAdminShell && tab === 'overview' && showUserInfoModal && selectedAdminUser"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/70 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/70 p-3"
       @click.self="showUserInfoModal = false"
     >
       <div class="w-full max-w-2xl rounded-2xl border border-cyan-400/22 bg-gradient-to-b from-slate-900/95 via-slate-950/95 to-black/95 p-4 text-slate-100 shadow-[0_28px_96px_-30px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,255,255,0.1)] ring-1 ring-cyan-300/20 backdrop-blur-2xl">
@@ -6737,7 +6737,7 @@ watch(
       <GuardTeleport>
         <div
           v-if="guardPulseInfoOpen"
-          style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/50 p-3 sm:items-center"
+          style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/50 p-3 sm:items-center"
           @click.self="guardPulseInfoOpen = false"
         >
           <div
@@ -7254,7 +7254,7 @@ watch(
       <GuardTeleport>
         <div
           v-if="bcQuickDraftModalOpen"
-          style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex min-h-[100dvh] min-w-0 flex-col bg-[#09090b] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
+          style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex min-h-[100dvh] min-w-0 flex-col bg-[#09090b] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
           @click.self="closeQuickBroadcastDraft"
         >
           <div class="flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-2">
@@ -7392,7 +7392,7 @@ watch(
       <GuardTeleport>
         <div
           v-if="bcSendTargetModalOpen"
-          style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex min-h-[100dvh] min-w-0 flex-col bg-[#09090b] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
+          style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex min-h-[100dvh] min-w-0 flex-col bg-[#09090b] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
           @click.self="bcSendTargetModalOpen = false"
         >
           <div class="flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-2">
@@ -7488,7 +7488,7 @@ watch(
       <GuardTeleport>
       <div
         v-if="bcConfirmModalOpen"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex flex-col overflow-y-auto bg-[#070b12] px-1.5 pb-[max(5.75rem,calc(5.25rem+env(safe-area-inset-bottom,0px)))] pt-[max(0.25rem,calc(env(safe-area-inset-top,0px)+46px))]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex flex-col overflow-y-auto bg-[#070b12] px-1.5 pb-[max(5.75rem,calc(5.25rem+env(safe-area-inset-bottom,0px)))] pt-[max(0.25rem,calc(env(safe-area-inset-top,0px)+46px))]"
         @click.self="bcConfirmModalOpen = false"
       >
         <div
@@ -7547,7 +7547,7 @@ watch(
 
       <div
         v-if="bcShowAllRecentModal"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/75 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/75 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
         @click.self="bcShowAllRecentModal = false"
       >
         <div class="w-full max-w-lg rounded-2xl border border-white/12 bg-[#0b111b]/96 p-3 text-zinc-100 shadow-[0_24px_64px_-24px_rgba(0,0,0,0.92)]">
@@ -8070,7 +8070,7 @@ watch(
     <GuardTeleport>
       <div
         v-if="bcCampaignUxOpen"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex h-[100dvh] min-w-0 flex-col overflow-hidden bg-[#05070B] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] text-white"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex h-[100dvh] min-w-0 flex-col overflow-hidden bg-[#05070B] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] text-white"
       >
         <div class="flex items-center justify-between border-b border-white/10 bg-black/20 px-4 py-3 backdrop-blur-sm">
           <button type="button" class="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/[0.03] text-white/90 transition hover:bg-white/[0.08] active:scale-[0.98]" @click="bcCampaignUxBack">←</button>
@@ -8364,7 +8364,7 @@ watch(
     <GuardTeleport>
       <div
         v-if="bcCampaignUxRecipientPickerOpen"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex h-[100dvh] min-w-0 flex-col overflow-hidden bg-[#05070B] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] text-white"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex h-[100dvh] min-w-0 flex-col overflow-hidden bg-[#05070B] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] text-white"
       >
         <div class="flex items-center justify-between border-b border-white/10 bg-black/20 px-4 py-3 backdrop-blur-sm">
           <p class="text-[16px] font-bold">{{ bcCampaignUxRecipientPickerKind === 'channels' ? tt('admin.bc_campaign.picker_channels') : tt('admin.bc_campaign.picker_groups') }}</p>
@@ -9025,7 +9025,7 @@ watch(
     <GuardTeleport>
     <div
       v-if="bcAuxModal === 'keyboard'"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
       @click.self="bcAuxModal = ''"
     >
       <div
@@ -9089,7 +9089,7 @@ watch(
     <GuardTeleport>
     <div
       v-if="bcAuxModal === 'media'"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
       @click.self="bcAuxModal = ''"
     >
       <div
@@ -9306,7 +9306,7 @@ watch(
 
     <div
       v-if="showPartnerGroupsModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/70 p-3 md:items-center"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/70 p-3 md:items-center"
       @click.self="showPartnerGroupsModal = false"
     >
       <div
@@ -9386,7 +9386,7 @@ watch(
 
     <div
       v-if="showPartnerJoinsModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/70 p-3 md:items-center"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/70 p-3 md:items-center"
       @click.self="showPartnerJoinsModal = false"
     >
       <div
@@ -9474,7 +9474,7 @@ watch(
 
     <div
       v-if="showPartnerSegmentModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/70 p-3 md:items-center"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/70 p-3 md:items-center"
       @click.self="showPartnerSegmentModal = false"
     >
       <div class="w-full max-w-sm rounded-2xl border border-violet-400/50 bg-slate-950 p-4 shadow-2xl">
@@ -9497,7 +9497,7 @@ watch(
 
     <div
       v-if="showPartnerSlotDetailModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/70 p-3 md:items-center"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/70 p-3 md:items-center"
       @click.self="showPartnerSlotDetailModal = false"
     >
       <div
@@ -9540,7 +9540,7 @@ watch(
 
     <div
       v-if="showPartnerHourlyModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center overflow-y-auto overscroll-contain bg-black/70 p-3 pt-[max(1rem,calc(env(safe-area-inset-top,0px)+88px))] pb-[max(1rem,calc(5.5rem+env(safe-area-inset-bottom,0px)))] md:items-center"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center overflow-y-auto overscroll-contain bg-black/70 p-3 pt-[max(1rem,calc(env(safe-area-inset-top,0px)+88px))] pb-[max(1rem,calc(5.5rem+env(safe-area-inset-bottom,0px)))] md:items-center"
       @click.self="showPartnerHourlyModal = false"
     >
       <div
@@ -9837,7 +9837,7 @@ watch(
 
     <div
       v-if="showPartnerHourlyChatPicker"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center overflow-y-auto overscroll-contain bg-black/75 p-3 pt-[max(1rem,calc(env(safe-area-inset-top,0px)+88px))] pb-[max(1rem,calc(5.5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center overflow-y-auto overscroll-contain bg-black/75 p-3 pt-[max(1rem,calc(env(safe-area-inset-top,0px)+88px))] pb-[max(1rem,calc(5.5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
       @click.self="showPartnerHourlyChatPicker = false"
     >
       <div
@@ -9902,7 +9902,7 @@ watch(
     <GuardTeleport>
       <div
         v-if="bcSendModalOpen"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex min-h-[100dvh] min-w-0 flex-col bg-[#09090b] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex min-h-[100dvh] min-w-0 flex-col bg-[#09090b] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
         @click.self="bcSendModalState === 'sending' ? null : closeBcSendModal()"
       >
         <div
@@ -10066,7 +10066,7 @@ watch(
 
     <div
       v-if="bcMediaViewerOpen && bcMediaViewerItem"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/88 p-3 pt-[max(0.5rem,calc(env(safe-area-inset-top,0px)+48px))] pb-[max(0.75rem,calc(4.5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-md"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/88 p-3 pt-[max(0.5rem,calc(env(safe-area-inset-top,0px)+48px))] pb-[max(0.75rem,calc(4.5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-md"
       @click.self="closeBcMediaViewer"
     >
       <div
@@ -10102,7 +10102,7 @@ watch(
     <GuardTeleport>
     <div
       v-if="bcShowGroupsPicker"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
       @click.self="bcShowGroupsPicker = false"
     >
       <div
@@ -10154,7 +10154,7 @@ watch(
     <GuardTeleport>
     <div
       v-if="bcShowChannelsPicker"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
       @click.self="bcShowChannelsPicker = false"
     >
       <div
@@ -10206,7 +10206,7 @@ watch(
     <GuardTeleport>
     <div
       v-if="bcShowBotsPicker"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
       @click.self="bcShowBotsPicker = false"
     >
       <div
