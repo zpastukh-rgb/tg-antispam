@@ -71,6 +71,42 @@ function openProtectionFilterModal(which, source) {
   })
 }
 
+/** Плитки фильтров в TMA: только @click часто молчит; отдельный touch-путь + исключение из глобального polyfill (двойной click). */
+const PROTECTION_FILTER_TOUCH = new WeakMap()
+let protectionFilterOpenedByTouchAt = 0
+
+function onProtectionFilterTouchStart(ev) {
+  const el = ev.currentTarget
+  if (!(el instanceof HTMLElement)) return
+  const t = ev.targetTouches?.[0] ?? ev.changedTouches?.[0]
+  if (!t) return
+  PROTECTION_FILTER_TOUCH.set(el, { x: t.clientX, y: t.clientY, t: Date.now() })
+}
+
+function onProtectionFilterTouchEnd(which, ev) {
+  const el = ev.currentTarget
+  if (!(el instanceof HTMLElement)) return
+  const t = ev.changedTouches?.[0]
+  const st = PROTECTION_FILTER_TOUCH.get(el)
+  PROTECTION_FILTER_TOUCH.delete(el)
+  if (!t || !st) return
+  if (Date.now() - st.t > 900) return
+  if (Math.abs(t.clientX - st.x) > 22 || Math.abs(t.clientY - st.y) > 22) return
+  try {
+    if (ev.cancelable) ev.preventDefault()
+    ev.stopPropagation()
+  } catch {
+    //
+  }
+  protectionFilterOpenedByTouchAt = Date.now()
+  openProtectionFilterModal(which, 'filter-tile-touch')
+}
+
+function onProtectionFilterTileClick(which) {
+  if (Date.now() - protectionFilterOpenedByTouchAt < 650) return
+  openProtectionFilterModal(which, 'filter-tile-click')
+}
+
 const newWhitelistDomain = ref('')
 const newWhitelistUserId = ref('')
 const newWhitelistSenderChat = ref('')
@@ -3509,11 +3545,17 @@ const protCardIndigo =
           <p class="text-[11px] leading-relaxed text-slate-500">
             {{ tt('protection.ui.filters_intro') }}
           </p>
-          <div class="relative z-20 grid grid-cols-2 gap-2">
+          <div
+            id="protection-filter-grid"
+            class="relative z-[50] isolate grid grid-cols-2 gap-2"
+          >
             <button
               type="button"
-              class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-sky-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-sky-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="openProtectionFilterModal('links')"
+              data-guard-no-tap-polyfill
+              class="group relative flex cursor-pointer flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-sky-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-sky-400/40 hover:shadow-md active:scale-[0.99]"
+              @touchstart.passive="onProtectionFilterTouchStart"
+              @touchend.prevent.stop="onProtectionFilterTouchEnd('links', $event)"
+              @click="onProtectionFilterTileClick('links')"
             >
               <span class="text-lg leading-none">🔗</span>
               <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_links') }}</span>
@@ -3521,17 +3563,23 @@ const protCardIndigo =
             </button>
             <button
               type="button"
-              class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-violet-500/15 to-fuchsia-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-violet-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="openProtectionFilterModal('mentions')"
+              data-guard-no-tap-polyfill
+              class="group relative flex cursor-pointer flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-violet-500/15 to-fuchsia-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-violet-400/40 hover:shadow-md active:scale-[0.99]"
+              @touchstart.passive="onProtectionFilterTouchStart"
+              @touchend.prevent.stop="onProtectionFilterTouchEnd('mentions', $event)"
+              @click="onProtectionFilterTileClick('mentions')"
             >
-              <span class="text-lg leading-none" aria-hidden="true">@</span>
+              <span class="text-lg leading-none" aria-hidden="true">{{ '\uFF20' }}</span>
               <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_mentions') }}</span>
               <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ mentionsSummary }}</span>
             </button>
             <button
               type="button"
-              class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-amber-500/15 to-orange-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-amber-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="openProtectionFilterModal('media')"
+              data-guard-no-tap-polyfill
+              class="group relative flex cursor-pointer flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-amber-500/15 to-orange-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-amber-400/40 hover:shadow-md active:scale-[0.99]"
+              @touchstart.passive="onProtectionFilterTouchStart"
+              @touchend.prevent.stop="onProtectionFilterTouchEnd('media', $event)"
+              @click="onProtectionFilterTileClick('media')"
             >
               <span class="text-lg leading-none">🖼</span>
               <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_media') }}</span>
@@ -3539,8 +3587,11 @@ const protCardIndigo =
             </button>
             <button
               type="button"
-              class="group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-emerald-500/15 to-teal-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-emerald-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="openProtectionFilterModal('buttons')"
+              data-guard-no-tap-polyfill
+              class="group relative flex cursor-pointer flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-emerald-500/15 to-teal-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-emerald-400/40 hover:shadow-md active:scale-[0.99]"
+              @touchstart.passive="onProtectionFilterTouchStart"
+              @touchend.prevent.stop="onProtectionFilterTouchEnd('buttons', $event)"
+              @click="onProtectionFilterTileClick('buttons')"
             >
               <span class="text-lg leading-none">🔘</span>
               <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_buttons') }}</span>
@@ -3548,8 +3599,11 @@ const protCardIndigo =
             </button>
             <button
               type="button"
-              class="group col-span-2 flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-fuchsia-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-fuchsia-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="openProtectionFilterModal('channelPosts')"
+              data-guard-no-tap-polyfill
+              class="group relative col-span-2 flex cursor-pointer flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-fuchsia-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-fuchsia-400/40 hover:shadow-md active:scale-[0.99]"
+              @touchstart.passive="onProtectionFilterTouchStart"
+              @touchend.prevent.stop="onProtectionFilterTouchEnd('channelPosts', $event)"
+              @click="onProtectionFilterTileClick('channelPosts')"
             >
               <span class="text-lg leading-none">📣</span>
               <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_channel_posts') }}</span>
