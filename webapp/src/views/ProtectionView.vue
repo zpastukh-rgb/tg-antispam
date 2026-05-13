@@ -77,6 +77,12 @@ function onProtectionFilterTileTouchend(which) {
   protectionFilterTileTouchAt = Date.now()
   openProtectionFilterModal(which, 'touchend')
 }
+/** TMA: иногда доходит pointerup, но не click/touchend — дублируем открытие. */
+function onProtectionFilterTilePointerup(which, ev) {
+  if (ev && typeof ev.button === 'number' && ev.button !== 0) return
+  protectionFilterTileTouchAt = Date.now()
+  openProtectionFilterModal(which, 'pointerup')
+}
 function onProtectionFilterTileClick(which) {
   if (Date.now() - protectionFilterTileTouchAt < 450) return
   openProtectionFilterModal(which, 'click')
@@ -3525,6 +3531,7 @@ const protCardIndigo =
               type="button"
               class="touch-manipulation group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-sky-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-sky-400/40 hover:shadow-md active:scale-[0.99]"
               @click="onProtectionFilterTileClick('links')"
+              @pointerup="onProtectionFilterTilePointerup('links', $event)"
               @touchend.prevent.stop="onProtectionFilterTileTouchend('links')"
             >
               <span class="pointer-events-none text-lg leading-none">🔗</span>
@@ -3535,6 +3542,7 @@ const protCardIndigo =
               type="button"
               class="touch-manipulation group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-violet-500/15 to-fuchsia-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-violet-400/40 hover:shadow-md active:scale-[0.99]"
               @click="onProtectionFilterTileClick('mentions')"
+              @pointerup="onProtectionFilterTilePointerup('mentions', $event)"
               @touchend.prevent.stop="onProtectionFilterTileTouchend('mentions')"
             >
               <!-- U+FF20: не ASCII @ — в TMA/WKWebView сырой @ иногда перехватывается как «упоминание», ломая tap → click -->
@@ -3546,6 +3554,7 @@ const protCardIndigo =
               type="button"
               class="touch-manipulation group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-amber-500/15 to-orange-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-amber-400/40 hover:shadow-md active:scale-[0.99]"
               @click="onProtectionFilterTileClick('media')"
+              @pointerup="onProtectionFilterTilePointerup('media', $event)"
               @touchend.prevent.stop="onProtectionFilterTileTouchend('media')"
             >
               <span class="pointer-events-none text-lg leading-none">🖼</span>
@@ -3556,6 +3565,7 @@ const protCardIndigo =
               type="button"
               class="touch-manipulation group flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-emerald-500/15 to-teal-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-emerald-400/40 hover:shadow-md active:scale-[0.99]"
               @click="onProtectionFilterTileClick('buttons')"
+              @pointerup="onProtectionFilterTilePointerup('buttons', $event)"
               @touchend.prevent.stop="onProtectionFilterTileTouchend('buttons')"
             >
               <span class="pointer-events-none text-lg leading-none">🔘</span>
@@ -3566,6 +3576,7 @@ const protCardIndigo =
               type="button"
               class="touch-manipulation group col-span-2 flex flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-fuchsia-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] transition hover:border-fuchsia-400/40 hover:shadow-md active:scale-[0.99]"
               @click="onProtectionFilterTileClick('channelPosts')"
+              @pointerup="onProtectionFilterTilePointerup('channelPosts', $event)"
               @touchend.prevent.stop="onProtectionFilterTileTouchend('channelPosts')"
             >
               <span class="pointer-events-none text-lg leading-none">📣</span>
@@ -6417,14 +6428,14 @@ const protCardIndigo =
         @click.self="showMentionsFilterModal = false"
       >
         <div
-          class="w-full max-w-md rounded-2xl border border-white/15 bg-gradient-to-b from-slate-900 to-slate-950 p-4 text-slate-100 shadow-2xl ring-1 ring-violet-500/20"
+          class="w-full max-w-md rounded-2xl border border-white/15 bg-gradient-to-b from-slate-900 to-slate-950 p-4 text-slate-100 shadow-2xl ring-1 ring-emerald-500/20"
           @click.stop
         >
           <div class="mb-3 flex items-center justify-between">
             <h3 class="text-sm font-semibold text-white">{{ tt('protection.ui.mentions_modal_title') }}</h3>
             <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-white/10" @click="showMentionsFilterModal = false">✕</button>
           </div>
-          <p class="mb-3 text-[11px] leading-relaxed text-slate-400">
+          <p class="mb-3 text-[11px] text-slate-400">
             {{ tt('protection.ui.mentions_modal_body') }}
           </p>
           <div class="grid grid-cols-2 gap-2">
@@ -6433,7 +6444,7 @@ const protCardIndigo =
               :key="`men-${opt.value}`"
               type="button"
               :class="policyButtonClass(chat.rule.filter_mentions ? 'forbid' : 'allow', opt.value)"
-              class="rounded-xl px-2.5 py-2.5 text-xs font-medium"
+              class="touch-manipulation rounded-xl px-2.5 py-2.5 text-xs font-medium"
               @click="updateRule({ filter_mentions: opt.value === 'forbid' })"
             >
               {{ opt.label }}
@@ -6496,7 +6507,7 @@ const protCardIndigo =
               :key="`btn-${opt.value}`"
               type="button"
               :class="policyButtonClass(chat.rule.filter_buttons_mode, opt.value)"
-              class="rounded-xl px-2.5 py-2.5 text-xs font-medium"
+              class="touch-manipulation rounded-xl px-2.5 py-2.5 text-xs font-medium"
               @click="updateRule({ filter_buttons_mode: opt.value })"
             >
               {{ opt.label }}

@@ -1141,9 +1141,9 @@ export default {
       stopwords_modal_hint: 'Прокрутка внутри списка · закрыть — вне окна или ✕',
       stopwords_empty_modal: 'Список пуст',
       stopwords_row_remove: 'Удалить',
-      mentions_modal_title: '@ Упоминания',
+      mentions_modal_title: '💬 Упоминания',
       mentions_modal_body:
-        '@username и текстовые упоминания. «Запрещено» — удаляются по общему действию (удалить / мут / бан).',
+        'Юзернеймы (@username) и текстовые упоминания. «Запрещено» — удаляются по общему действию (удалить / мут / бан).',
       media_modal_title: '🖼 Медиа и стикеры',
       buttons_modal_title: '🔘 Сообщения с кнопками',
       buttons_modal_body: 'Inline-кнопки вроде «перейти», «бонус», «вступить».',

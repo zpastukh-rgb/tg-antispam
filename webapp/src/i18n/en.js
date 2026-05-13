@@ -1134,9 +1134,9 @@ export default {
       stopwords_modal_hint: 'Scroll inside the list · close by tapping outside or ✕',
       stopwords_empty_modal: 'The list is empty',
       stopwords_row_remove: 'Remove',
-      mentions_modal_title: '@ Mentions',
+      mentions_modal_title: '💬 Mentions',
       mentions_modal_body:
-        '@username and text mentions. “Forbidden” messages are handled with the shared action (delete / mute / ban).',
+        'Usernames (@username) and text mentions. “Forbidden” messages are handled with the shared action (delete / mute / ban).',
       media_modal_title: '🖼 Media & stickers',
       buttons_modal_title: '🔘 Messages with buttons',
       buttons_modal_body: 'Inline buttons such as “open”, “bonus”, or “join”.',
