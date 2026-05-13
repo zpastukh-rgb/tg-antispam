@@ -29,7 +29,7 @@ export function installTelegramTapPolyfill() {
         const t = ev.changedTouches?.[0]
         if (!t) return
         if (Date.now() - st > 900) return
-        if (Math.abs(t.clientX - sx) > 18 || Math.abs(t.clientY - sy) > 18) return
+        if (Math.abs(t.clientX - sx) > 26 || Math.abs(t.clientY - sy) > 26) return
 
         let el = ev.target
         // Тап по тексту внутри кнопки даёт Text node — без этого полифилл молчит и @click не приходит.
