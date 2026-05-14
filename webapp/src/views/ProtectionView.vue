@@ -57,7 +57,7 @@ const showChannelPostsFilterModal = ref(false)
 /**
  * TMA / WKWebView: `telegramTapPolyfill` делает `hit.click()` из `touchend` — если модалка монтируется синхронно,
  * «хвост» того же события может попасть в `@click.self` подложки → мгновенное закрытие (визуально «не открылось»).
- * Открытие флагов — в `requestAnimationFrame` после очистки; подложка глушится ~550 ms. Модалки фильтров — `Teleport to="body"` поверх shell z-10.
+ * Открытие флагов — после очистки `nextTick(applyFlags)` (после стека событий); подложка глушится ~650 ms. Модалки фильтров — `GuardTeleport` → `#guard-teleport-root` (в TMA `Teleport to="body"` иногда не вставляет узлы в DOM).
  */
 const allowFilterModalBackdropClose = ref(true)
 let filterBackdropArmTimer = null
@@ -68,7 +68,7 @@ function armFilterModalBackdropClose() {
     filterBackdropArmTimer = setTimeout(() => {
       allowFilterModalBackdropClose.value = true
       filterBackdropArmTimer = null
-    }, 550)
+    }, 650)
   })
 }
 function closeFilterModalBackdrop(which) {
@@ -78,6 +78,14 @@ function closeFilterModalBackdrop(which) {
   else if (which === 'media') showMediaFilterModal.value = false
   else if (which === 'buttons') showButtonsFilterModal.value = false
   else if (which === 'channelPosts') showChannelPostsFilterModal.value = false
+}
+
+/** Пока закрытие подложки заблокировано — гасим ранний touch/mousedown (ghost после synthetic click в WebView). */
+function swallowFilterBackdropGhostIfLocked(e) {
+  if (!allowFilterModalBackdropClose.value) {
+    e.preventDefault()
+    e.stopPropagation()
+  }
 }
 
 function snapshotFilterModalRefs() {
@@ -117,7 +125,7 @@ function scheduleProtectionFilterModalDomProbe(whichOpened) {
   })
 }
 
-/** Одна модалка фильтра за раз. Пять модалок фильтров — `Teleport to="body"` + rAF-открытие (см. комментарий у armFilter). */
+/** Одна модалка фильтра за раз. Пять модалок фильтров — `GuardTeleport` + отложенное открытие (см. комментарий у armFilter). */
 function openProtectionFilterModal(which, source) {
   const src = source || 'direct'
   const plan = protectionFilterModalOpenPlanSteps(which)
@@ -178,8 +186,8 @@ function openProtectionFilterModal(which, source) {
   showButtonsFilterModal.value = false
   showChannelPostsFilterModal.value = false
 
-  // После synthetic click() из touchend: монтировать подложку только на следующем кадре, иначе click «протекает» в @click.self.
-  requestAnimationFrame(() => {
+  // После synthetic click(): применить флаги на следующем тике Vue — иначе click может попасть в @click.self новой подложки; цель Teleport — #guard-teleport-root (см. комментарий у armFilter).
+  nextTick(() => {
     applyFlags()
   })
 }
@@ -6099,7 +6107,7 @@ const protCardIndigo =
       </div>
     </GuardTeleport>
 
-    <Teleport to="body">
+    <GuardTeleport>
       <div
         v-if="showLinksFilterModal"
         data-guard-protection-filter-modal="links"
@@ -6108,6 +6116,8 @@ const protCardIndigo =
         role="dialog"
         aria-modal="true"
         @click.self="closeFilterModalBackdrop('links')"
+        @mousedown.self="swallowFilterBackdropGhostIfLocked"
+        @touchstart.self="swallowFilterBackdropGhostIfLocked"
       >
         <div
           v-if="chat?.rule"
@@ -6458,9 +6468,9 @@ const protCardIndigo =
           {{ tt('common.loading') }}
         </div>
       </div>
-    </Teleport>
+    </GuardTeleport>
 
-    <Teleport to="body">
+    <GuardTeleport>
       <div
         v-if="showChannelPostsFilterModal"
         data-guard-protection-filter-modal="channelPosts"
@@ -6469,6 +6479,8 @@ const protCardIndigo =
         role="dialog"
         aria-modal="true"
         @click.self="closeFilterModalBackdrop('channelPosts')"
+        @mousedown.self="swallowFilterBackdropGhostIfLocked"
+        @touchstart.self="swallowFilterBackdropGhostIfLocked"
       >
         <div
           v-if="chat?.rule"
@@ -6576,15 +6588,17 @@ const protCardIndigo =
           {{ tt('common.loading') }}
         </div>
       </div>
-    </Teleport>
+    </GuardTeleport>
 
-    <Teleport to="body">
+    <GuardTeleport>
       <div
         v-if="showMentionsFilterModal"
         data-guard-protection-filter-modal="mentions"
         style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px"
         class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         @click.self="closeFilterModalBackdrop('mentions')"
+        @mousedown.self="swallowFilterBackdropGhostIfLocked"
+        @touchstart.self="swallowFilterBackdropGhostIfLocked"
       >
         <div
           v-if="chat?.rule"
@@ -6620,14 +6634,16 @@ const protCardIndigo =
           {{ tt('common.loading') }}
         </div>
       </div>
-    </Teleport>
+    </GuardTeleport>
 
-    <Teleport to="body">
+    <GuardTeleport>
       <div
         v-if="showMediaFilterModal"
         data-guard-protection-filter-modal="media"
         style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         @click.self="closeFilterModalBackdrop('media')"
+        @mousedown.self="swallowFilterBackdropGhostIfLocked"
+        @touchstart.self="swallowFilterBackdropGhostIfLocked"
       >
         <div
           v-if="chat?.rule"
@@ -6660,14 +6676,16 @@ const protCardIndigo =
           {{ tt('common.loading') }}
         </div>
       </div>
-    </Teleport>
+    </GuardTeleport>
 
-    <Teleport to="body">
+    <GuardTeleport>
       <div
         v-if="showButtonsFilterModal"
         data-guard-protection-filter-modal="buttons"
         style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         @click.self="closeFilterModalBackdrop('buttons')"
+        @mousedown.self="swallowFilterBackdropGhostIfLocked"
+        @touchstart.self="swallowFilterBackdropGhostIfLocked"
       >
         <div
           v-if="chat?.rule"
@@ -6703,7 +6721,7 @@ const protCardIndigo =
           {{ tt('common.loading') }}
         </div>
       </div>
-    </Teleport>
+    </GuardTeleport>
 
     <GuardTeleport>
     <div
