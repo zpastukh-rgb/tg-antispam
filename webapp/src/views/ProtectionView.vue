@@ -55,9 +55,9 @@ const showButtonsFilterModal = ref(false)
 const showChannelPostsFilterModal = ref(false)
 
 /**
- * TMA / WKWebView: `telegramTapPolyfill` делает `hit.click()` из `touchend` — «хвост» может попасть в `@click.self` подложки.
- * Подложка глушится ~650 ms + `swallowFilterBackdropGhostIfLocked`. Флаги открытия — сразу `applyFlags()` после сброса.
- * Модалки фильтров — **без Teleport** (fixed + z-index): в TMA узлы из `Teleport` не попадали в `document` при `refs=true`.
+ * TMA / WKWebView: `telegramTapPolyfill` делает `hit.click()` из `touchend` — «хвост» может закрыть подложку (`@click.self`) → пустой экран.
+ * Сразу гасим `allowFilterModalBackdropClose`, открытие флагов — `setTimeout(0)` после сброса; `@click.capture` на подложке, пока закрытие заблокировано.
+ * Модалки фильтров — in-place `fixed` + z-index (без Teleport).
  */
 const allowFilterModalBackdropClose = ref(true)
 let filterBackdropArmTimer = null
@@ -86,6 +86,14 @@ function swallowFilterBackdropGhostIfLocked(e) {
     e.preventDefault()
     e.stopPropagation()
   }
+}
+
+/** Клик по самой подложке (не по панели) в фазе capture — иначе `@click.self` иногда срабатывает до arm в том же такте. */
+function swallowFilterBackdropGhostClickCapture(e) {
+  if (allowFilterModalBackdropClose.value) return
+  if (e.target !== e.currentTarget) return
+  e.preventDefault()
+  e.stopPropagation()
 }
 
 function snapshotFilterModalRefs() {
@@ -179,6 +187,13 @@ function openProtectionFilterModal(which, source) {
     scheduleProtectionFilterModalDomProbe(which)
   }
 
+  // Сразу блокируем закрытие по подложке (до монтирования слоя), сбрасываем таймер с прошлого открытия.
+  allowFilterModalBackdropClose.value = false
+  if (filterBackdropArmTimer) {
+    clearTimeout(filterBackdropArmTimer)
+    filterBackdropArmTimer = null
+  }
+
   // Сначала гасим все — иначе быстрый переключатель между фильтрами оставляет старый слой.
   showLinksFilterModal.value = false
   showMentionsFilterModal.value = false
@@ -186,7 +201,10 @@ function openProtectionFilterModal(which, source) {
   showButtonsFilterModal.value = false
   showChannelPostsFilterModal.value = false
 
-  applyFlags()
+  // После synthetic click(): macrotask — иначе тот же клик закрывает только что смонтированную подложку.
+  setTimeout(() => {
+    applyFlags()
+  }, 0)
 }
 
 function normalizeProtectionRoutePf(pfRaw) {
@@ -6111,6 +6129,7 @@ const protCardIndigo =
         class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         role="dialog"
         aria-modal="true"
+        @click.capture="swallowFilterBackdropGhostClickCapture"
         @click.self="closeFilterModalBackdrop('links')"
         @mousedown.self="swallowFilterBackdropGhostIfLocked"
         @touchstart.self="swallowFilterBackdropGhostIfLocked"
@@ -6471,6 +6490,7 @@ const protCardIndigo =
         class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         role="dialog"
         aria-modal="true"
+        @click.capture="swallowFilterBackdropGhostClickCapture"
         @click.self="closeFilterModalBackdrop('channelPosts')"
         @mousedown.self="swallowFilterBackdropGhostIfLocked"
         @touchstart.self="swallowFilterBackdropGhostIfLocked"
@@ -6586,6 +6606,7 @@ const protCardIndigo =
         data-guard-protection-filter-modal="mentions"
         style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px"
         class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+        @click.capture="swallowFilterBackdropGhostClickCapture"
         @click.self="closeFilterModalBackdrop('mentions')"
         @mousedown.self="swallowFilterBackdropGhostIfLocked"
         @touchstart.self="swallowFilterBackdropGhostIfLocked"
@@ -6628,6 +6649,7 @@ const protCardIndigo =
         v-if="showMediaFilterModal"
         data-guard-protection-filter-modal="media"
         style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+        @click.capture="swallowFilterBackdropGhostClickCapture"
         @click.self="closeFilterModalBackdrop('media')"
         @mousedown.self="swallowFilterBackdropGhostIfLocked"
         @touchstart.self="swallowFilterBackdropGhostIfLocked"
@@ -6667,6 +6689,7 @@ const protCardIndigo =
         v-if="showButtonsFilterModal"
         data-guard-protection-filter-modal="buttons"
         style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+        @click.capture="swallowFilterBackdropGhostClickCapture"
         @click.self="closeFilterModalBackdrop('buttons')"
         @mousedown.self="swallowFilterBackdropGhostIfLocked"
         @touchstart.self="swallowFilterBackdropGhostIfLocked"
