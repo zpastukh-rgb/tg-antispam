@@ -201,10 +201,10 @@ function openProtectionFilterModal(which, source) {
   showButtonsFilterModal.value = false
   showChannelPostsFilterModal.value = false
 
-  // После synthetic click(): macrotask — иначе тот же клик закрывает только что смонтированную подложку.
+  // После synthetic click(): отложить на следующий macrotask (50 ms в TMA надёжнее, чем 0).
   setTimeout(() => {
     applyFlags()
-  }, 0)
+  }, 50)
 }
 
 function normalizeProtectionRoutePf(pfRaw) {
@@ -3368,7 +3368,7 @@ const protCardIndigo =
     <div
       class="relative -mx-4 min-h-0 px-4 pb-8 font-display md:-mx-6 md:px-6 md:pb-10"
     >
-      <div class="relative z-[2] space-y-4 pt-1 text-[13px] leading-snug md:pt-2">
+      <div class="relative z-[2] min-h-[45dvh] space-y-4 pt-1 text-[13px] leading-snug md:pt-2">
     <div class="flex items-center justify-between gap-2">
       <h1 class="text-lg font-semibold text-white drop-shadow-sm md:text-xl">{{ tt('protection.title') }}</h1>
       <span
@@ -6602,7 +6602,7 @@ const protCardIndigo =
         </div>
       </div>
       <div
-        v-show="showMentionsFilterModal"
+        v-if="showMentionsFilterModal"
         data-guard-protection-filter-modal="mentions"
         style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px"
         class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -6646,7 +6646,7 @@ const protCardIndigo =
         </div>
       </div>
       <div
-        v-show="showMediaFilterModal"
+        v-if="showMediaFilterModal"
         data-guard-protection-filter-modal="media"
         style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         @click.capture="swallowFilterBackdropGhostClickCapture"
@@ -6686,7 +6686,7 @@ const protCardIndigo =
         </div>
       </div>
       <div
-        v-show="showButtonsFilterModal"
+        v-if="showButtonsFilterModal"
         data-guard-protection-filter-modal="buttons"
         style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         @click.capture="swallowFilterBackdropGhostClickCapture"
