@@ -1,5 +1,49 @@
+function queryModalBackdropEl(sel) {
+  try {
+    const fromDoc = document.querySelector(sel)
+    if (fromDoc) return fromDoc
+    const app = document.getElementById('app')
+    if (app) {
+      const inApp = app.querySelector(sel)
+      if (inApp) return inApp
+      const sr = app.shadowRoot
+      if (sr) {
+        const inShadow = sr.querySelector(sel)
+        if (inShadow) return inShadow
+      }
+    }
+  } catch {
+    //
+  }
+  return null
+}
+
+function collectModalBackdropKeys() {
+  const keys = []
+  const pushFromRoot = (root) => {
+    if (!root?.querySelectorAll) return
+    try {
+      root.querySelectorAll('[data-guard-protection-filter-modal]').forEach((node) => {
+        const attr = node.getAttribute('data-guard-protection-filter-modal')
+        if (attr) keys.push(attr)
+      })
+    } catch {
+      //
+    }
+  }
+  pushFromRoot(document)
+  const app = document.getElementById('app')
+  pushFromRoot(app)
+  try {
+    if (app?.shadowRoot) pushFromRoot(app.shadowRoot)
+  } catch {
+    //
+  }
+  return [...new Set(keys)]
+}
+
 /**
- * Снимок DOM для модалки фильтра (корень = подложка fixed в Teleport).
+ * Снимок DOM для модалки фильтра (корень = подложка fixed; in-place или Teleport).
  * Селектор: [data-guard-protection-filter-modal="<key>"]
  * @param {'links'|'mentions'|'media'|'buttons'|'channelPosts'} key
  */
@@ -9,14 +53,11 @@ export function probeProtectionFilterModalDom(key) {
   }
   const k = String(key || '')
   const sel = `[data-guard-protection-filter-modal="${k}"]`
-  const el = document.querySelector(sel)
+  const el = queryModalBackdropEl(sel)
   if (!el) {
     let foundKeys = []
     try {
-      document.querySelectorAll('[data-guard-protection-filter-modal]').forEach((node) => {
-        const attr = node.getAttribute('data-guard-protection-filter-modal')
-        if (attr) foundKeys.push(attr)
-      })
+      foundKeys = collectModalBackdropKeys()
     } catch {
       foundKeys = []
     }

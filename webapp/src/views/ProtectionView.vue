@@ -6602,7 +6602,7 @@ const protCardIndigo =
         </div>
       </div>
       <div
-        v-if="showMentionsFilterModal"
+        v-show="showMentionsFilterModal"
         data-guard-protection-filter-modal="mentions"
         style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px"
         class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -6646,7 +6646,7 @@ const protCardIndigo =
         </div>
       </div>
       <div
-        v-if="showMediaFilterModal"
+        v-show="showMediaFilterModal"
         data-guard-protection-filter-modal="media"
         style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         @click.capture="swallowFilterBackdropGhostClickCapture"
@@ -6686,7 +6686,7 @@ const protCardIndigo =
         </div>
       </div>
       <div
-        v-if="showButtonsFilterModal"
+        v-show="showButtonsFilterModal"
         data-guard-protection-filter-modal="buttons"
         style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         @click.capture="swallowFilterBackdropGhostClickCapture"
