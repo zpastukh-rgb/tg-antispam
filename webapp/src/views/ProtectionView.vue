@@ -55,9 +55,9 @@ const showButtonsFilterModal = ref(false)
 const showChannelPostsFilterModal = ref(false)
 
 /**
- * TMA / WKWebView: `telegramTapPolyfill` делает `hit.click()` из `touchend` — если модалка монтируется синхронно,
- * «хвост» того же события может попасть в `@click.self` подложки → мгновенное закрытие (визуально «не открылось»).
- * Открытие флагов — после очистки `nextTick(applyFlags)` (после стека событий); подложка глушится ~650 ms. Модалки фильтров — `GuardTeleport` → `#guard-teleport-root` (в TMA `Teleport to="body"` иногда не вставляет узлы в DOM).
+ * TMA / WKWebView: `telegramTapPolyfill` делает `hit.click()` из `touchend` — «хвост» может попасть в `@click.self` подложки.
+ * Подложка глушится ~650 ms + `swallowFilterBackdropGhostIfLocked`. Флаги открытия — сразу `applyFlags()` после сброса.
+ * Модалки фильтров — **без Teleport** (fixed + z-index): в TMA узлы из `Teleport` не попадали в `document` при `refs=true`.
  */
 const allowFilterModalBackdropClose = ref(true)
 let filterBackdropArmTimer = null
@@ -125,7 +125,7 @@ function scheduleProtectionFilterModalDomProbe(whichOpened) {
   })
 }
 
-/** Одна модалка фильтра за раз. Пять модалок фильтров — `GuardTeleport` + отложенное открытие (см. комментарий у armFilter). */
+/** Одна модалка фильтра за раз. Пять модалок — in-place fixed (без Teleport), см. комментарий у armFilter. */
 function openProtectionFilterModal(which, source) {
   const src = source || 'direct'
   const plan = protectionFilterModalOpenPlanSteps(which)
@@ -186,10 +186,7 @@ function openProtectionFilterModal(which, source) {
   showButtonsFilterModal.value = false
   showChannelPostsFilterModal.value = false
 
-  // После synthetic click(): применить флаги на следующем тике Vue — иначе click может попасть в @click.self новой подложки; цель Teleport — #guard-teleport-root (см. комментарий у armFilter).
-  nextTick(() => {
-    applyFlags()
-  })
+  applyFlags()
 }
 
 function normalizeProtectionRoutePf(pfRaw) {
@@ -6107,7 +6104,6 @@ const protCardIndigo =
       </div>
     </GuardTeleport>
 
-    <GuardTeleport>
       <div
         v-if="showLinksFilterModal"
         data-guard-protection-filter-modal="links"
@@ -6468,9 +6464,6 @@ const protCardIndigo =
           {{ tt('common.loading') }}
         </div>
       </div>
-    </GuardTeleport>
-
-    <GuardTeleport>
       <div
         v-if="showChannelPostsFilterModal"
         data-guard-protection-filter-modal="channelPosts"
@@ -6588,9 +6581,6 @@ const protCardIndigo =
           {{ tt('common.loading') }}
         </div>
       </div>
-    </GuardTeleport>
-
-    <GuardTeleport>
       <div
         v-if="showMentionsFilterModal"
         data-guard-protection-filter-modal="mentions"
@@ -6634,9 +6624,6 @@ const protCardIndigo =
           {{ tt('common.loading') }}
         </div>
       </div>
-    </GuardTeleport>
-
-    <GuardTeleport>
       <div
         v-if="showMediaFilterModal"
         data-guard-protection-filter-modal="media"
@@ -6676,9 +6663,6 @@ const protCardIndigo =
           {{ tt('common.loading') }}
         </div>
       </div>
-    </GuardTeleport>
-
-    <GuardTeleport>
       <div
         v-if="showButtonsFilterModal"
         data-guard-protection-filter-modal="buttons"
@@ -6721,7 +6705,6 @@ const protCardIndigo =
           {{ tt('common.loading') }}
         </div>
       </div>
-    </GuardTeleport>
 
     <GuardTeleport>
     <div
