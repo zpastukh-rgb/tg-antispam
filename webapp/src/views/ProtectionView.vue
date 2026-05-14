@@ -33,7 +33,6 @@ import {
 } from '../utils/settingsSecurity'
 import GuardBlueLoadingState from '../components/GuardBlueLoadingState.vue'
 import GuardTeleport from '../components/GuardTeleport.vue'
-import GuardTeleportInPlace from '../components/GuardTeleportInPlace.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -56,10 +55,9 @@ const showButtonsFilterModal = ref(false)
 const showChannelPostsFilterModal = ref(false)
 
 /**
- * TMA / WKWebView: после `touchend` + programmatic `click()` по плитке «хвост» hit-test
- * иногда попадает в `@click.self` на подложке и закрывает модалку в том же кадре — визуально «ничего не открылось».
- * Плюс для плиток первого ряда («Ссылки», «Упоминания») раньше откладывали монтирование модалки на следующий macrotask —
- * это ломало Teleport в TMA; открытие теперь синхронное, подложка по-прежнему не закрывается от «хвоста» click ~450 ms.
+ * TMA / WKWebView: `telegramTapPolyfill` делает `hit.click()` из `touchend` — если модалка монтируется синхронно,
+ * «хвост» того же события может попасть в `@click.self` подложки → мгновенное закрытие (визуально «не открылось»).
+ * Открытие флагов — в `requestAnimationFrame` после очистки; подложка глушится ~550 ms. Модалки фильтров — `Teleport to="body"` поверх shell z-10.
  */
 const allowFilterModalBackdropClose = ref(true)
 let filterBackdropArmTimer = null
@@ -70,7 +68,7 @@ function armFilterModalBackdropClose() {
     filterBackdropArmTimer = setTimeout(() => {
       allowFilterModalBackdropClose.value = true
       filterBackdropArmTimer = null
-    }, 450)
+    }, 550)
   })
 }
 function closeFilterModalBackdrop(which) {
@@ -119,7 +117,7 @@ function scheduleProtectionFilterModalDomProbe(whichOpened) {
   })
 }
 
-/** Одна модалка фильтра за раз. Модалки рендерятся через GuardTeleportInPlace (без Teleport) — см. комментарий у флагов. */
+/** Одна модалка фильтра за раз. Пять модалок фильтров — `Teleport to="body"` + rAF-открытие (см. комментарий у armFilter). */
 function openProtectionFilterModal(which, source) {
   const src = source || 'direct'
   const plan = protectionFilterModalOpenPlanSteps(which)
@@ -180,7 +178,10 @@ function openProtectionFilterModal(which, source) {
   showButtonsFilterModal.value = false
   showChannelPostsFilterModal.value = false
 
-  applyFlags()
+  // После synthetic click() из touchend: монтировать подложку только на следующем кадре, иначе click «протекает» в @click.self.
+  requestAnimationFrame(() => {
+    applyFlags()
+  })
 }
 
 function normalizeProtectionRoutePf(pfRaw) {
@@ -6098,7 +6099,7 @@ const protCardIndigo =
       </div>
     </GuardTeleport>
 
-    <GuardTeleportInPlace>
+    <Teleport to="body">
       <div
         v-if="showLinksFilterModal"
         data-guard-protection-filter-modal="links"
@@ -6457,9 +6458,9 @@ const protCardIndigo =
           {{ tt('common.loading') }}
         </div>
       </div>
-    </GuardTeleportInPlace>
+    </Teleport>
 
-    <GuardTeleportInPlace>
+    <Teleport to="body">
       <div
         v-if="showChannelPostsFilterModal"
         data-guard-protection-filter-modal="channelPosts"
@@ -6575,9 +6576,9 @@ const protCardIndigo =
           {{ tt('common.loading') }}
         </div>
       </div>
-    </GuardTeleportInPlace>
+    </Teleport>
 
-    <GuardTeleportInPlace>
+    <Teleport to="body">
       <div
         v-if="showMentionsFilterModal"
         data-guard-protection-filter-modal="mentions"
@@ -6619,9 +6620,9 @@ const protCardIndigo =
           {{ tt('common.loading') }}
         </div>
       </div>
-    </GuardTeleportInPlace>
+    </Teleport>
 
-    <GuardTeleportInPlace>
+    <Teleport to="body">
       <div
         v-if="showMediaFilterModal"
         data-guard-protection-filter-modal="media"
@@ -6659,9 +6660,9 @@ const protCardIndigo =
           {{ tt('common.loading') }}
         </div>
       </div>
-    </GuardTeleportInPlace>
+    </Teleport>
 
-    <GuardTeleportInPlace>
+    <Teleport to="body">
       <div
         v-if="showButtonsFilterModal"
         data-guard-protection-filter-modal="buttons"
@@ -6702,7 +6703,7 @@ const protCardIndigo =
           {{ tt('common.loading') }}
         </div>
       </div>
-    </GuardTeleportInPlace>
+    </Teleport>
 
     <GuardTeleport>
     <div
