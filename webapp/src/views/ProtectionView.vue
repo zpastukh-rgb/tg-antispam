@@ -3543,6 +3543,12 @@ const protCardIndigo =
           <p class="text-[11px] leading-relaxed text-slate-500">
             {{ tt('protection.ui.filters_intro') }}
           </p>
+          <p
+            v-if="premiumFeatureLocked"
+            class="text-[10px] leading-snug text-amber-100/85"
+          >
+            {{ tt('protection.ui.filters_premium_note_free') }}
+          </p>
           <div
             id="protection-filter-grid"
             class="relative z-[50] isolate grid grid-cols-2 gap-2"

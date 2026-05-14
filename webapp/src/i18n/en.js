@@ -1114,6 +1114,8 @@ export default {
       filters_info_aria: 'About filters',
       filters_intro:
         'Settings open in separate sheets — easier to tune modes and whitelists without a wall of buttons.',
+      filters_premium_note_free:
+        'Filter tiles (Links, Mentions, etc.) open without Premium — your tariff does not block them. 🔒 Premium only marks specific sections further down or inside some sheets.',
       filter_links: 'Links',
       filter_mentions: 'Mentions',
       filter_media: 'Media',
