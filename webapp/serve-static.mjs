@@ -15,6 +15,7 @@ const apiBase = String(
 )
   .trim()
   .replace(/\/$/, '')
+const webappDebugTok = String(process.env.GUARD_WEBAPP_DEBUG_LOG_TOKEN || '').trim()
 
 const logHttp = String(process.env.GUARD_LOG_HTTP || '').trim() === '1'
 
@@ -56,7 +57,12 @@ http
       pathLog = u.pathname
       const pathLast = u.pathname.split('/').filter(Boolean).pop() || ''
       if (pathLast === 'guard-api-config.js') {
-        send(res, 200, { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-store' }, `window.__GUARD_API_BASE__=${JSON.stringify(apiBase)};`)
+        send(
+          res,
+          200,
+          { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-store' },
+          `window.__GUARD_API_BASE__=${JSON.stringify(apiBase)};window.__GUARD_WEBAPP_DEBUG_LOG_TOKEN__=${JSON.stringify(webappDebugTok)};`,
+        )
         return
       }
 

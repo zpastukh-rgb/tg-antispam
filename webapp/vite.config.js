@@ -12,7 +12,8 @@ function trimApiBaseForDev(raw) {
 function guardApiConfigPlugin() {
   const body = () => {
     const b = trimApiBaseForDev(process.env.VITE_API_BASE_URL || process.env.GUARD_API_BASE_URL)
-    return `window.__GUARD_API_BASE__=${JSON.stringify(b)};`
+    const tok = String(process.env.GUARD_WEBAPP_DEBUG_LOG_TOKEN || '').trim()
+    return `window.__GUARD_API_BASE__=${JSON.stringify(b)};window.__GUARD_WEBAPP_DEBUG_LOG_TOKEN__=${JSON.stringify(tok)};`
   }
   const send = (res) => {
     res.statusCode = 200

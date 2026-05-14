@@ -9,6 +9,15 @@ import i18n from './i18n'
 import { installRouteTransitionLoader } from './composables/useRouteTransitionLoader.js'
 import './styles.css'
 
+/** Если в отданном index.html нет узла — Vue Teleport молча не монтирует слот → пустой DOM и пустой foundKeys в зонде. */
+function ensureGuardTeleportRoot() {
+  if (typeof document === 'undefined') return
+  if (document.getElementById('guard-teleport-root')) return
+  const el = document.createElement('div')
+  el.id = 'guard-teleport-root'
+  document.body.appendChild(el)
+}
+ensureGuardTeleportRoot()
 installRouteTransitionLoader(router)
 
 console.info('[Guard] panel build', typeof __GUARD_BUILD_STAMP__ !== 'undefined' ? __GUARD_BUILD_STAMP__ : 'dev')

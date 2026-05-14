@@ -45,6 +45,11 @@ export function hasConfiguredApiBase() {
   return !!getBaseUrl()
 }
 
+/** База API для вспомогательных fetch (например guardDebugLog → Railway stdout). */
+export function getApiBaseUrl() {
+  return getBaseUrl()
+}
+
 if (typeof window !== 'undefined' && import.meta.env.PROD) {
   window.__GUARD_API_BASE_BUILT__ = trimApiBase(import.meta.env.VITE_API_BASE_URL) || ''
 }
@@ -145,6 +150,17 @@ function isSessionTerminatedResponse(status, detail) {
   return d.includes('session terminated')
 }
 
+export function getMiniAppAuthHeaders() {
+  const initData = getInitData()
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(initData ? { 'X-Telegram-Init-Data': initData } : {}),
+    ...(getGuardSessionId() ? { 'X-Guard-Session-Id': getGuardSessionId() } : {}),
+    ...(getGuardSessionLabel() ? { 'X-Guard-Session-Label': getGuardSessionLabel() } : {}),
+  }
+  return headers
+}
+
 async function request(method, path, body = null) {
   const base = getBaseUrl()
   /**
@@ -160,14 +176,8 @@ async function request(method, path, body = null) {
     throw err
   }
   const url = path.startsWith('http') ? path : `${base}${path}`
-  const initData = getInitData()
 
-  const headers = {
-    'Content-Type': 'application/json',
-    ...(initData ? { 'X-Telegram-Init-Data': initData } : {}),
-    ...(getGuardSessionId() ? { 'X-Guard-Session-Id': getGuardSessionId() } : {}),
-    ...(getGuardSessionLabel() ? { 'X-Guard-Session-Label': getGuardSessionLabel() } : {}),
-  }
+  const headers = getMiniAppAuthHeaders()
 
   const options = { method, headers }
   if (body != null && method !== 'GET') {

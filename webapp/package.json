@@ -8,7 +8,9 @@
     "build": "vite build",
     "preview": "vite preview",
     "start": "serve -s dist",
-    "check:locale-mix": "node scripts/check_locale_mix.mjs src"
+    "check:locale-mix": "node scripts/check_locale_mix.mjs src",
+    "test:protection-filter": "node scripts/test_protection_filter_modal_state.mjs",
+    "test:unit": "vitest run"
   },
   "dependencies": {
     "emoji-picker-element": "^1.22.4",
@@ -23,6 +25,8 @@
     "autoprefixer": "^10.4.16",
     "postcss": "^8.4.32",
     "tailwindcss": "^3.4.0",
-    "vite": "^5.4.0"
+    "vite": "^5.4.0",
+    "vitest": "^3.1.4",
+    "happy-dom": "^17.4.4"
   }
 }

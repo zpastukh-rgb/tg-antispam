@@ -18,6 +18,7 @@ from starlette.responses import JSONResponse
 
 from app.api.api_locale import current_api_locale, reset_request_api_locale, set_request_api_locale
 from app.api.auth import get_telegram_user_id
+from app.api.debug_webapp_client_log import router as debug_webapp_client_log_router
 from app.api.routes import router
 from app.i18n import t as i18n_t
 from app.db.ensure_defaults import (
@@ -349,4 +350,5 @@ async def health():
     return {"status": "ok"}
 
 
+app.include_router(debug_webapp_client_log_router)
 app.include_router(router)

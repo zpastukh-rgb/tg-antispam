@@ -48,6 +48,8 @@
     <div id="app">
       <div id="guard-boot-placeholder" role="status">Загрузка панели…</div>
     </div>
+    <!-- Цель Vue Teleport для модалок: внутри shell рядом с #app (TMA / порядок отрисовки). -->
+    <div id="guard-teleport-root"></div>
     <script src="/guard-api-config.js"></script>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script src="/guard-boot.js"></script>
