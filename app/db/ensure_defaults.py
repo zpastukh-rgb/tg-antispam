@@ -725,6 +725,37 @@ async def ensure_chat_manager_invites_schema(engine: AsyncEngine) -> None:
         log.warning("ensure_chat_manager_invites_schema skipped: %s", e)
 
 
+async def ensure_chat_manager_actions_schema(engine: AsyncEngine) -> None:
+    """Фаза 3 «Админы чата»: журнал действий делегатов/владельца. См. ChatManagerAction."""
+    sql_blocks = (
+        """
+        CREATE TABLE IF NOT EXISTS chat_manager_actions (
+            id BIGSERIAL PRIMARY KEY,
+            chat_id BIGINT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+            user_id BIGINT NOT NULL,
+            action_kind VARCHAR(64) NOT NULL,
+            action_target VARCHAR(128) NULL,
+            action_meta TEXT NULL,
+            success BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_chat_manager_actions_chat_id ON chat_manager_actions (chat_id)",
+        "CREATE INDEX IF NOT EXISTS ix_chat_manager_actions_user_id ON chat_manager_actions (user_id)",
+        "CREATE INDEX IF NOT EXISTS ix_chat_manager_actions_action_kind ON chat_manager_actions (action_kind)",
+        "CREATE INDEX IF NOT EXISTS ix_chat_manager_actions_created_at ON chat_manager_actions (created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_chat_manager_actions_chat_created ON chat_manager_actions (chat_id, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS ix_chat_manager_actions_chat_user_created ON chat_manager_actions (chat_id, user_id, created_at DESC)",
+    )
+    try:
+        async with engine.begin() as conn:
+            for sql in sql_blocks:
+                await conn.execute(text(sql))
+        log.info("ensure_chat_manager_actions_schema: ok")
+    except Exception as e:
+        log.warning("ensure_chat_manager_actions_schema skipped: %s", e)
+
+
 async def ensure_chat_manager_permissions_columns(engine: AsyncEngine) -> None:
     """
     Делегированные права в ChatManager / ChatManagerInvite.
@@ -740,6 +771,12 @@ async def ensure_chat_manager_permissions_columns(engine: AsyncEngine) -> None:
         "ALTER TABLE chat_manager_invites ADD COLUMN IF NOT EXISTS can_broadcast BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE chat_manager_invites ADD COLUMN IF NOT EXISTS can_reports BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE chat_manager_invites ADD COLUMN IF NOT EXISTS can_first_post_settings BOOLEAN NOT NULL DEFAULT FALSE",
+        # Фаза 2 «Админы чата»: TTL прав/приглашений + токен ссылки-приглашения.
+        # См. ChatManager.expires_at, ChatManagerInvite.expires_at/token.
+        "ALTER TABLE chat_managers ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ NULL",
+        "ALTER TABLE chat_manager_invites ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ NULL",
+        "ALTER TABLE chat_manager_invites ADD COLUMN IF NOT EXISTS token VARCHAR(64) NULL",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_chat_manager_invites_token ON chat_manager_invites (token) WHERE token IS NOT NULL",
         # Legacy backfill: всем уже добавленным менеджерам выставляем актуальный набор прав.
         """
         UPDATE chat_managers cm
@@ -1375,6 +1412,46 @@ async def ensure_rules_channel_posts_filter_columns(engine: AsyncEngine) -> None
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_religion_promo_only BOOLEAN DEFAULT FALSE",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_esoteric_enabled BOOLEAN DEFAULT FALSE",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_esoteric_promo_only BOOLEAN DEFAULT FALSE",
+        # Гранулярные тогглы по типу медиа (см. models.ChatRule.filter_media_*).
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_media_photos BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_media_videos BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_media_stickers BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_media_animations BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_media_voice BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_media_video_notes BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_media_audio BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_media_custom_emoji BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_media_plain_emoji BOOLEAN DEFAULT FALSE",
+        # Гранулярные тогглы по типу упоминаний (см. models.ChatRule.filter_mention_*).
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_mention_users BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_mention_bots BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_mention_channels BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_mention_text_mention BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_mention_hashtags BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_mention_bot_commands BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_mention_cashtags BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_mention_emails BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_mention_mass_enabled BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_mention_mass_threshold INTEGER DEFAULT 5",
+        # Гранулярные тогглы по типу кнопок (см. models.ChatRule.filter_button_*).
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_button_url BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_button_callback BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_button_web_app BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_button_switch_inline BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_button_login BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_button_pay BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_button_copy_text BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_button_reply BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_button_mass_enabled BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_button_mass_threshold INTEGER DEFAULT 5",
+        # Гранулярные тогглы для «Сообщения от каналов» (см. models.ChatRule.filter_channel_post_*).
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_channel_post_channels BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_channel_post_groups BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_channel_post_anon_admin BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_channel_post_fwd_channel BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_channel_post_fwd_group BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_channel_post_no_username BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_channel_post_hidden_fwd BOOLEAN DEFAULT FALSE",
     )
     try:
         async with engine.begin() as conn:
@@ -1592,6 +1669,36 @@ async def ensure_users_yookassa_autorenew_columns(engine: AsyncEngine) -> None:
         log.info("ensure_users_yookassa_autorenew_columns: ok")
     except Exception as e:
         log.warning("ensure_users_yookassa_autorenew_columns skipped: %s", e)
+
+
+async def ensure_users_trial_schema(engine: AsyncEngine) -> None:
+    """Поля 10-дневного триала Premium: trial_used / trial_activated_at /
+    trial_reminder_last_day_sent (+ бэкфилл «уже трогавших» автотриал)."""
+    stmts = (
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_used BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_activated_at TIMESTAMPTZ",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_reminder_last_day_sent INTEGER NOT NULL DEFAULT 0",
+        # Бэкфилл: те, у кого был автотриал из start.py (subscription_source='trial')
+        # или сейчас активный trial-Premium без явного source — считаются использовавшими триал.
+        """
+        UPDATE users
+        SET    trial_used = TRUE,
+               trial_activated_at = COALESCE(trial_activated_at, first_start_at)
+        WHERE  trial_used = FALSE
+          AND  (subscription_source = 'trial'
+                OR (subscription_until IS NOT NULL
+                    AND subscription_until > NOW()
+                    AND lower(coalesce(tariff, 'free')) IN ('premium','pro','business')
+                    AND subscription_source IS NULL))
+        """,
+    )
+    try:
+        async with engine.begin() as conn:
+            for sql in stmts:
+                await conn.execute(text(sql))
+        log.info("ensure_users_trial_schema: ok")
+    except Exception as e:
+        log.warning("ensure_users_trial_schema skipped: %s", e)
 
 
 async def ensure_users_group_channel_limits_schema(engine: AsyncEngine) -> None:

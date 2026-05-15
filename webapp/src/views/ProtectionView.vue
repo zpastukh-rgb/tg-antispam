@@ -9,7 +9,13 @@ const { t: tt, tm } = useI18n()
 import { guardLog, guardWarn, guardFilterChain } from '../utils/guardDebugLog'
 import { protectionFilterModalFlags } from '../utils/protectionFilterModalState'
 import { protectionFilterModalOpenPlanSteps } from '../utils/protectionFilterModalOpenPlan'
-import { probeProtectionFilterModalDom } from '../utils/protectionModalDomProbe'
+import { probeProtectionFilterModalDom, queryGuardDomSelector } from '../utils/protectionModalDomProbe'
+import { closeMentionsVanillaModal } from '../utils/mentionsVanillaModal'
+import { runMentionsChain, MENTION_FILTER_KINDS } from '../utils/mentionsChain'
+import {
+  openWelcomeFallbackModal,
+  closeWelcomeFallbackModal,
+} from '../utils/welcomeFallbackModal'
 import { useCabinetMode } from '../composables/useCabinetMode'
 import {
   uploadChatWelcomePhoto,
@@ -33,6 +39,8 @@ import {
 } from '../utils/settingsSecurity'
 import GuardBlueLoadingState from '../components/GuardBlueLoadingState.vue'
 import GuardTeleport from '../components/GuardTeleport.vue'
+import PremiumLockBadge from '../components/PremiumLockBadge.vue'
+import { usePremiumLock } from '../composables/usePremiumLock'
 
 const router = useRouter()
 const route = useRoute()
@@ -41,6 +49,8 @@ const { cabinetMode, setCabinetMode } = useCabinetMode()
 /** Смена чата без глобального loading (иначе весь экран «мигает») */
 const switchChatBusy = ref(false)
 const { showToast } = useToast()
+const { openLock } = usePremiumLock()
+const lastMeSnapshot = ref(null)
 const chat = ref(null)
 const selectedChatId = ref(null)
 const showChatPicker = ref(false)
@@ -53,11 +63,21 @@ const showMentionsFilterModal = ref(false)
 const showMediaFilterModal = ref(false)
 const showButtonsFilterModal = ref(false)
 const showChannelPostsFilterModal = ref(false)
+onMounted(() => {
+  nextTick(() => {
+    const mark = queryGuardDomSelector('[data-guard-protection-tma-teleport-mark]')
+    guardFilterChain('Protection', 'tmaTeleportMark:afterMountTick', {
+      inDom: !!mark.el,
+      where: mark.where,
+      hasInitData: !!hasInitData.value,
+    })
+  })
+})
 
 /**
  * TMA / WKWebView: `telegramTapPolyfill` делает `hit.click()` из `touchend` — «хвост» может закрыть подложку (`@click.self`) → пустой экран.
  * Сразу гасим `allowFilterModalBackdropClose`, открытие флагов — `setTimeout(0)` после сброса; `@click.capture` на подложке, пока закрытие заблокировано.
- * Модалки фильтров — in-place `fixed` + z-index (без Teleport).
+ * Модалки фильтров + тест «упоминания»: GuardTeleport (как остальные модалки) + маркер в целевом узле.
  */
 const allowFilterModalBackdropClose = ref(true)
 let filterBackdropArmTimer = null
@@ -133,7 +153,141 @@ function scheduleProtectionFilterModalDomProbe(whichOpened) {
   })
 }
 
-/** Одна модалка фильтра за раз. Пять модалок — in-place fixed (без Teleport), см. комментарий у armFilter. */
+/** Лог-хендлер для тапа по плитке/кнопке. Отдаёт `detail` в filter-chain и зовёт колбэк. */
+function tileClickLog(name, ev, after) {
+  let detail = { ts: Date.now() }
+  try {
+    detail = {
+      ts: Date.now(),
+      type: ev?.type ?? null,
+      isTrusted: !!ev?.isTrusted,
+      hasChat: !!chat.value,
+      hasRule: !!chat.value?.rule,
+      tileTarget: ev?.target?.tagName ?? null,
+    }
+  } catch {
+    //
+  }
+  guardFilterChain('Protection', `${name}:click`, detail)
+  try {
+    after?.()
+  } catch (err) {
+    guardFilterChain('Protection', `${name}:afterError`, {
+      name: err?.name ?? null,
+      message: err?.message ?? null,
+    })
+  }
+}
+
+/** Прямой хендлер тапа по плитке «Упоминания» — логируется до любого ветвления. */
+function onMentionsTileClick(ev) {
+  tileClickLog('mentionsTile', ev, () => openMentionsModalChain('tile_click_native'))
+}
+
+/** Хендлер плитки «Ссылки». */
+function onLinksTileClick(ev) {
+  tileClickLog('linksTile', ev, () => openProtectionFilterModal('links'))
+}
+
+/** Хендлер плитки «Сообщения от каналов». */
+function onChannelPostsTileClick(ev) {
+  tileClickLog('channelPostsTile', ev, () => openProtectionFilterModal('channelPosts'))
+}
+
+/** Хендлер кнопки «Настроить» в карточке «Приветствие новичков». */
+function onWelcomeConfigureClick(ev) {
+  tileClickLog('welcomeConfigure', ev, () => openWelcomeSettings())
+}
+
+/**
+ * Открыть vanilla-fallback «Приветствие новичков». Используется, когда Vue v-if
+ * не смонтировал большую welcome-модалку (см. welcomeSettings:fallback_trigger).
+ */
+function openWelcomeFallbackModalChain() {
+  const rule = chat.value?.rule
+  if (!rule) {
+    guardFilterChain('Protection', 'welcomeFallback:abort_no_rule', {})
+    return
+  }
+  guardFilterChain('Protection', 'welcomeFallback:enter', {
+    ts: Date.now(),
+    currentEnabled: !!rule.welcome_enabled,
+  })
+  function safeT(key, fallback) {
+    try {
+      const v = tt(key)
+      const s = String(v || '')
+      return s.length > 0 ? s : fallback
+    } catch (err) {
+      guardFilterChain('Protection', 'welcomeFallback:i18nError', {
+        key,
+        name: err?.name ?? null,
+        message: err?.message ?? null,
+      })
+      return fallback
+    }
+  }
+  openWelcomeFallbackModal({
+    titleText: safeT('protection.ui.welcome_newcomers_title', 'Приветствие новичков'),
+    bodyText: safeT(
+      'protection.ui.welcome_newcomers_body',
+      'Отдельный текст для новых участников этого чата. Полная настройка — в веб-кабинете.',
+    ),
+    enableText: safeT('protection.ui.enabled_short', 'Включено'),
+    disableText: safeT('protection.ui.disabled_short', 'Выключено'),
+    cancelText: safeT('common.cancel', 'Отмена'),
+    currentEnabled: !!rule.welcome_enabled,
+    onToggle: (enabled) => {
+      guardFilterChain('Protection', 'welcomeFallback:choose', { enabled })
+      try {
+        const p = updateRule({ welcome_enabled: !!enabled })
+        if (p && typeof p.then === 'function') {
+          p.catch((err) =>
+            guardFilterChain('Protection', 'welcomeFallback:updateError', {
+              name: err?.name ?? null,
+              message: err?.message ?? null,
+            }),
+          )
+        }
+      } catch (err) {
+        guardFilterChain('Protection', 'welcomeFallback:updateThrow', {
+          name: err?.name ?? null,
+          message: err?.message ?? null,
+        })
+      }
+    },
+    onClose: () => guardFilterChain('Protection', 'welcomeFallback:close', {}),
+  })
+}
+
+/**
+ * Открыть «Упоминания» через vanilla-JS DOM, минуя Vue.
+ * @param {string} source — откуда зашли: `tile_click_native` | `openProtectionFilterModal` | `route-pf-query` | ручной вызов.
+ */
+function openMentionsModalChain(source) {
+  const rule = chat.value?.rule
+  guardFilterChain('Protection', 'mentionsChain:enter', {
+    ts: Date.now(),
+    source,
+    hasChat: !!chat.value,
+    hasRule: !!rule,
+    chatId: chat.value?.id ?? null,
+    currentForbid: !!rule?.filter_mentions,
+  })
+  const node = runMentionsChain({
+    rule,
+    t: (key) => tt(key),
+    onUpdateRule: (patch) => updateRule(patch),
+    source,
+  })
+  guardFilterChain('Protection', 'mentionsChain:result', {
+    ts: Date.now(),
+    nodeAppended: !!node,
+    domHasNode: !!document.querySelector('[data-guard-protection-filter-modal="mentions"]'),
+  })
+}
+
+/** Одна модалка фильтра за раз. Пять модалок — in-place в корне view (без Teleport), см. шаблон. */
 function openProtectionFilterModal(which, source) {
   const src = source || 'direct'
   const plan = protectionFilterModalOpenPlanSteps(which)
@@ -143,6 +297,26 @@ function openProtectionFilterModal(which, source) {
     plan,
     refs_before: snapshotFilterModalRefs(),
   })
+
+  // Mentions: Vue v-if в TMA WKWebView не добавлял узел в DOM. Полностью обходим Vue — vanilla-JS модалка в body.
+  if (which === 'mentions') {
+    openMentionsModalChain('openProtectionFilterModal')
+    return
+  }
+
+  // Media: при первом открытии модалки тихо сбрасываем legacy filter_media_mode в 'allow'
+  // (если был 'forbid'/'captcha') — гранулярные тогглы стартуют с ВЫКЛ, как и должно быть в UI.
+  if (which === 'media') {
+    try { resetLegacyMediaModeIfNeeded() } catch {}
+  }
+  // Buttons: то же самое для filter_buttons_mode — переход на гранулярную модель.
+  if (which === 'buttons') {
+    try { resetLegacyButtonsModeIfNeeded() } catch {}
+  }
+  // Channel posts: то же самое для filter_channel_posts_enabled — переход на гранулярную модель.
+  if (which === 'channelPosts') {
+    try { resetLegacyChannelPostsIfNeeded() } catch {}
+  }
 
   const flags = protectionFilterModalFlags(which)
 
@@ -201,8 +375,17 @@ function openProtectionFilterModal(which, source) {
   showButtonsFilterModal.value = false
   showChannelPostsFilterModal.value = false
 
+  guardFilterChain('Protection', 'openProtectionFilterModal:timer_scheduled', {
+    which,
+    delayMs: 50,
+    ts: Date.now(),
+  })
   // После synthetic click(): отложить на следующий macrotask (50 ms в TMA надёжнее, чем 0).
   setTimeout(() => {
+    guardFilterChain('Protection', 'openProtectionFilterModal:timer_fired', {
+      which,
+      ts: Date.now(),
+    })
     applyFlags()
   }, 50)
 }
@@ -247,6 +430,13 @@ const newWhitelistSenderChat = ref('')
 const whitelistLoading = ref(false)
 const newLinkBlacklistPattern = ref('')
 const linkBlacklistLoading = ref(false)
+// Глобальная база URL Guard — личный список владельца, применяется во всех его чатах.
+// Раньше CRUD жил в кабинете «АнтиURL»; теперь редактируется прямо в модалке «Ссылки».
+const USER_GLOBAL_BAD_URL_MAX = 50
+const globalBadUrlItems = ref([])
+const globalBadUrlLoading = ref(false)
+const globalBadUrlLoadedFor = ref(null)
+const newGlobalBadUrlPattern = ref('')
 const openLinkModeHint = ref(null)
 const showMainInfoModal = ref(false)
 const showChatSwitchInfoModal = ref(false)
@@ -597,6 +787,7 @@ onMounted(async () => {
       premium: !!meData?.is_premium,
     })
     isPremium.value = !!meData?.is_premium
+    lastMeSnapshot.value = meData || null
     viewerTelegramId.value = Number(meData?.telegram_id || 0)
     writePremiumCache(isPremium.value)
     chatsList.value = chats || []
@@ -658,6 +849,16 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  try {
+    closeMentionsVanillaModal()
+  } catch {
+    //
+  }
+  try {
+    closeWelcomeFallbackModal()
+  } catch {
+    //
+  }
   if (postRulesDraftsRemoteSyncTimer) {
     clearTimeout(postRulesDraftsRemoteSyncTimer)
     postRulesDraftsRemoteSyncTimer = null
@@ -735,6 +936,8 @@ const canUsePremiumForCurrentChat = computed(
 )
 /** Free / без подписки владельца: показываем «Premium» и прокладку, без реальной смены правил */
 const premiumFeatureLocked = computed(() => !canUsePremiumForCurrentChat.value)
+/** Активная подписка владельца чата (маски rule/DM спайка на бэке). */
+const chatOwnerHasPremium = computed(() => !!chat.value?.chat_owner_is_premium)
 const premiumSectionFrameClass = computed(() =>
   premiumFeatureLocked.value
     ? 'ring-1 ring-amber-400/35 ring-inset shadow-[0_0_24px_-10px_rgba(251,191,36,0.12)]'
@@ -931,6 +1134,7 @@ async function openChatPicker() {
       fetchSilent(() => api.me()).catch(() => ({ is_premium: false })),
     ])
     isPremium.value = !!meData?.is_premium
+    lastMeSnapshot.value = meData || null
     viewerTelegramId.value = Number(meData?.telegram_id || 0)
     writePremiumCache(isPremium.value)
     const rows = chatsRes?.chats || []
@@ -958,6 +1162,19 @@ function openFreeLimitsPremiumModal() {
 
 function closeFreeLimitsPremiumModal() {
   showFreeLimitsPremiumModal.value = false
+}
+
+function openPremiumLock(feature, opts = {}) {
+  openLock({ feature, me: lastMeSnapshot.value, ...opts })
+}
+
+function onSpamSpikeNotifyManagersToggle() {
+  if (!chat.value?.rule) return
+  if (!chatOwnerHasPremium.value) {
+    openPremiumLock('spam_spike_managers')
+    return
+  }
+  updateRule({ spam_spike_notify_managers: !chat.value.rule.spam_spike_notify_managers })
 }
 
 /** Переход на лендинг тарифа, блок «Premium» */
@@ -1030,7 +1247,11 @@ function onSilencePresetPick(value) {
 }
 
 function onGuardianIntervalPick(h) {
-  withPremiumForCurrentChatOrModal(() => updateRule({ guardian_periodic_interval_hours: h }))
+  if (!canUsePremiumForCurrentChat.value) {
+    openPremiumLock('guardian_interval')
+    return
+  }
+  updateRule({ guardian_periodic_interval_hours: h })
 }
 
 function onAntispamListButtonClick() {
@@ -1205,6 +1426,201 @@ function policyButtonClass(currentMode, optValue) {
     return 'bg-gradient-to-r from-rose-500 to-red-600 text-white shadow-[0_8px_20px_-10px_rgba(239,68,68,0.75)]'
   }
   return 'guard-green-soft'
+}
+
+// Гранулярные тогглы по типам медиа: каждый — отдельное boolean-поле в rule.
+// Порядок здесь — порядок в UI (модалка «Медиа»).
+const MEDIA_FILTER_KINDS = Object.freeze([
+  { key: 'photos', field: 'filter_media_photos', icon: '📷' },
+  { key: 'videos', field: 'filter_media_videos', icon: '🎬' },
+  { key: 'stickers', field: 'filter_media_stickers', icon: '🎟️' },
+  { key: 'animations', field: 'filter_media_animations', icon: '🎞️' },
+  { key: 'voice', field: 'filter_media_voice', icon: '🎙️' },
+  { key: 'video_notes', field: 'filter_media_video_notes', icon: '⭕' },
+  { key: 'audio', field: 'filter_media_audio', icon: '🎵' },
+  { key: 'plain_emoji', field: 'filter_media_plain_emoji', icon: '🙂' },
+  { key: 'custom_emoji', field: 'filter_media_custom_emoji', icon: '😀' },
+])
+
+function iosSwitchClass(on) {
+  return on
+    ? 'border-emerald-400/40 bg-emerald-500/[0.32] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12)]'
+    : 'border-white/[0.14] bg-white/[0.09]'
+}
+
+async function toggleMediaKind(field) {
+  if (!chat.value?.rule || !field) return
+  const next = !chat.value.rule[field]
+  // Оптимистичное обновление: переключатель должен мгновенно реагировать.
+  chat.value.rule[field] = next
+  // Любой тап по гранулярному тогглу = переходим на новую модель.
+  // Сбрасываем legacy filter_media_mode в 'allow', чтобы старый блок «всё медиа запрещено»
+  // больше не срабатывал и итоговое состояние решалось только этими 8 тогглами.
+  const patch = { [field]: next }
+  const curMode = String(chat.value.rule.filter_media_mode || 'allow').toLowerCase()
+  if (curMode !== 'allow') {
+    patch.filter_media_mode = 'allow'
+    chat.value.rule.filter_media_mode = 'allow'
+  }
+  try {
+    await updateRule(patch)
+  } catch (e) {
+    chat.value.rule[field] = !next
+    if (curMode !== 'allow') {
+      chat.value.rule.filter_media_mode = curMode
+    }
+    try {
+      guardFilterChain('Protection', 'toggleMediaKind:error', { field, name: e?.name, message: e?.message })
+    } catch {}
+  }
+}
+
+// Тихо сбрасывает legacy filter_media_mode → 'allow' при первом открытии модалки.
+// Гранулярные тогглы стартуют как они есть в БД (по умолчанию все false → ничего не запрещено).
+// Идемпотентно: если режим уже 'allow', ничего не делает.
+function resetLegacyMediaModeIfNeeded() {
+  const rule = chat.value?.rule
+  if (!rule) return
+  const mode = String(rule.filter_media_mode || 'allow').toLowerCase()
+  if (mode === 'allow') return
+  rule.filter_media_mode = 'allow'
+  try { guardFilterChain('Protection', 'mediaMode:legacy_reset', { from: mode }) } catch {}
+  updateRule({ filter_media_mode: 'allow' }).catch((e) => {
+    try { guardFilterChain('Protection', 'mediaMode:legacy_reset_error', { name: e?.name, message: e?.message }) } catch {}
+  })
+}
+
+// Гранулярные тогглы по типу кнопок — порядок в массиве = порядок в UI.
+// «Массовые» (mass) рендерятся отдельной карточкой с тогглом + слайдером порога.
+const BUTTON_FILTER_KINDS = Object.freeze([
+  { key: 'url', field: 'filter_button_url', icon: '🔗' },
+  { key: 'callback', field: 'filter_button_callback', icon: '⚙️' },
+  { key: 'web_app', field: 'filter_button_web_app', icon: '🧩' },
+  { key: 'switch_inline', field: 'filter_button_switch_inline', icon: '🔄' },
+  { key: 'login', field: 'filter_button_login', icon: '🔐' },
+  { key: 'pay', field: 'filter_button_pay', icon: '💳' },
+  { key: 'copy_text', field: 'filter_button_copy_text', icon: '📋' },
+  { key: 'reply', field: 'filter_button_reply', icon: '⌨️' },
+])
+
+async function toggleButtonKind(field) {
+  if (!chat.value?.rule || !field) return
+  const next = !chat.value.rule[field]
+  chat.value.rule[field] = next
+  // Любой тап по гранулярному тогглу = переходим на новую модель.
+  // Сбрасываем legacy filter_buttons_mode в 'allow', чтобы старая логика
+  // «все кнопки запрещены» не пересекалась с гранулами.
+  const patch = { [field]: next }
+  const curMode = String(chat.value.rule.filter_buttons_mode || 'allow').toLowerCase()
+  if (curMode !== 'allow') {
+    patch.filter_buttons_mode = 'allow'
+    chat.value.rule.filter_buttons_mode = 'allow'
+  }
+  try {
+    await updateRule(patch)
+  } catch (e) {
+    chat.value.rule[field] = !next
+    if (curMode !== 'allow') {
+      chat.value.rule.filter_buttons_mode = curMode
+    }
+    try {
+      guardFilterChain('Protection', 'toggleButtonKind:error', { field, name: e?.name, message: e?.message })
+    } catch {}
+  }
+}
+
+async function toggleButtonMassEnabled() {
+  if (!chat.value?.rule) return
+  const next = !chat.value.rule.filter_button_mass_enabled
+  chat.value.rule.filter_button_mass_enabled = next
+  const patch = { filter_button_mass_enabled: next }
+  const curMode = String(chat.value.rule.filter_buttons_mode || 'allow').toLowerCase()
+  if (curMode !== 'allow') {
+    patch.filter_buttons_mode = 'allow'
+    chat.value.rule.filter_buttons_mode = 'allow'
+  }
+  try {
+    await updateRule(patch)
+  } catch (e) {
+    chat.value.rule.filter_button_mass_enabled = !next
+    if (curMode !== 'allow') chat.value.rule.filter_buttons_mode = curMode
+    try { guardFilterChain('Protection', 'toggleButtonMass:error', { name: e?.name, message: e?.message }) } catch {}
+  }
+}
+
+let _buttonMassThresholdTimer = null
+function setButtonMassThreshold(value) {
+  if (!chat.value?.rule) return
+  const v = Math.max(3, Math.min(20, Number(value) || 5))
+  chat.value.rule.filter_button_mass_threshold = v
+  // Дебаунс PATCH, чтобы драг по слайдеру не слал десятки запросов.
+  if (_buttonMassThresholdTimer) clearTimeout(_buttonMassThresholdTimer)
+  _buttonMassThresholdTimer = setTimeout(() => {
+    updateRule({ filter_button_mass_threshold: v }).catch((e) => {
+      try { guardFilterChain('Protection', 'setButtonMassThreshold:error', { v, name: e?.name, message: e?.message }) } catch {}
+    })
+  }, 300)
+}
+
+// Тихо сбрасывает legacy filter_buttons_mode → 'allow' при первом открытии модалки.
+function resetLegacyButtonsModeIfNeeded() {
+  const rule = chat.value?.rule
+  if (!rule) return
+  const mode = String(rule.filter_buttons_mode || 'allow').toLowerCase()
+  if (mode === 'allow') return
+  rule.filter_buttons_mode = 'allow'
+  try { guardFilterChain('Protection', 'buttonsMode:legacy_reset', { from: mode }) } catch {}
+  updateRule({ filter_buttons_mode: 'allow' }).catch((e) => {
+    try { guardFilterChain('Protection', 'buttonsMode:legacy_reset_error', { name: e?.name, message: e?.message }) } catch {}
+  })
+}
+
+// Гранулярные тогглы по типу sender_chat / forward (модалка «Сообщения от каналов»).
+const CHANNEL_POST_FILTER_KINDS = Object.freeze([
+  { key: 'channels', field: 'filter_channel_post_channels', icon: '🔊' },
+  { key: 'groups', field: 'filter_channel_post_groups', icon: '👥' },
+  { key: 'anon_admin', field: 'filter_channel_post_anon_admin', icon: '🥷' },
+  { key: 'fwd_channel', field: 'filter_channel_post_fwd_channel', icon: '📨' },
+  { key: 'fwd_group', field: 'filter_channel_post_fwd_group', icon: '📤' },
+  { key: 'no_username', field: 'filter_channel_post_no_username', icon: '🚫' },
+  { key: 'hidden_fwd', field: 'filter_channel_post_hidden_fwd', icon: '👻' },
+])
+
+async function toggleChannelPostKind(field) {
+  if (!chat.value?.rule || !field) return
+  const next = !chat.value.rule[field]
+  chat.value.rule[field] = next
+  // Любой тап по гранулярному тогглу = переходим на новую модель.
+  // Сбрасываем legacy filter_channel_posts_enabled=false, иначе оба правила
+  // (всё/granular) будут пересекаться.
+  const patch = { [field]: next }
+  const wasLegacyOn = !!chat.value.rule.filter_channel_posts_enabled
+  if (wasLegacyOn) {
+    patch.filter_channel_posts_enabled = false
+    chat.value.rule.filter_channel_posts_enabled = false
+  }
+  try {
+    await updateRule(patch)
+  } catch (e) {
+    chat.value.rule[field] = !next
+    if (wasLegacyOn) chat.value.rule.filter_channel_posts_enabled = true
+    try {
+      guardFilterChain('Protection', 'toggleChannelPostKind:error', { field, name: e?.name, message: e?.message })
+    } catch {}
+  }
+}
+
+// Тихо сбрасывает legacy filter_channel_posts_enabled=false при первом открытии модалки.
+// Гранулярные тогглы стартуют как они есть в БД (по умолчанию все false → ничего не запрещено).
+function resetLegacyChannelPostsIfNeeded() {
+  const rule = chat.value?.rule
+  if (!rule) return
+  if (!rule.filter_channel_posts_enabled) return
+  rule.filter_channel_posts_enabled = false
+  try { guardFilterChain('Protection', 'channelPosts:legacy_reset', {}) } catch {}
+  updateRule({ filter_channel_posts_enabled: false }).catch((e) => {
+    try { guardFilterChain('Protection', 'channelPosts:legacy_reset_error', { name: e?.name, message: e?.message }) } catch {}
+  })
 }
 
 function linkScopeButtonClass(currentScope, optValue) {
@@ -1485,29 +1901,93 @@ const linkModeSummary = computed(() => {
   return tt('protection.summaries.link_mode.fallback')
 })
 
-const mentionsSummary = computed(() =>
-  chat.value?.rule?.filter_mentions
-    ? tt('protection.summaries.mentions_forbidden')
-    : tt('protection.summaries.mentions_allowed'),
-)
+const mentionsSummary = computed(() => {
+  const rule = chat.value?.rule
+  if (!rule) return tt('protection.summaries.mentions_allowed')
+  const forbiddenKeys = MENTION_FILTER_KINDS
+    .filter((k) => !!rule[k.field])
+    .map((k) => k.key)
+  if (rule.filter_mention_mass_enabled) forbiddenKeys.push('mass')
+  if (forbiddenKeys.length === 0) {
+    // Legacy fallback: пользователь ещё не открывал новую модалку.
+    return rule.filter_mentions
+      ? tt('protection.summaries.mentions_forbidden')
+      : tt('protection.summaries.mentions_allowed')
+  }
+  if (forbiddenKeys.length <= 3) {
+    const names = forbiddenKeys
+      .map((k) => {
+        try { return tt(`protection.ui.mention_kinds_short.${k}`) }
+        catch { return k }
+      })
+      .filter(Boolean)
+      .join(', ')
+    return tt('protection.ui.mention_summary_forbidden_one', { types: names })
+  }
+  return tt('protection.ui.mention_summary_forbidden_count', { count: forbiddenKeys.length })
+})
 const mediaSummary = computed(() => {
-  const m = String(chat.value?.rule?.filter_media_mode || 'allow').toLowerCase()
-  return m === 'forbid'
-    ? tt('protection.summaries.media_forbidden')
-    : tt('protection.summaries.media_allowed')
+  const rule = chat.value?.rule
+  if (!rule) return tt('protection.ui.media_summary_allowed')
+  const forbiddenKeys = MEDIA_FILTER_KINDS
+    .filter((k) => !!rule[k.field])
+    .map((k) => k.key)
+  if (forbiddenKeys.length === 0) {
+    // Учитываем legacy «всё запрещено» (старое поле filter_media_mode), на случай если новые тогглы ещё не выставлены.
+    const m = String(rule.filter_media_mode || 'allow').toLowerCase()
+    return m === 'forbid'
+      ? tt('protection.summaries.media_forbidden')
+      : tt('protection.ui.media_summary_allowed')
+  }
+  if (forbiddenKeys.length <= 3) {
+    const names = forbiddenKeys
+      .map((k) => {
+        try {
+          return tt(`protection.ui.media_kinds_short.${k}`)
+        } catch {
+          return k
+        }
+      })
+      .filter(Boolean)
+      .join(', ')
+    return tt('protection.ui.media_summary_forbidden_one', { types: names })
+  }
+  return tt('protection.ui.media_summary_forbidden_count', { count: forbiddenKeys.length })
 })
 const buttonsSummary = computed(() => {
-  const m = String(chat.value?.rule?.filter_buttons_mode || 'allow').toLowerCase()
-  return m === 'forbid'
-    ? tt('protection.summaries.buttons_forbidden')
-    : tt('protection.summaries.buttons_allowed')
+  const rule = chat.value?.rule
+  if (!rule) return tt('protection.summaries.buttons_allowed')
+  // Считаем, сколько гранулярных тогглов включено.
+  const enabledShort = BUTTON_FILTER_KINDS
+    .filter((k) => !!rule[k.field])
+    .map((k) => tt(`protection.ui.button_kinds_short.${k.key}`))
+  const massOn = !!rule.filter_button_mass_enabled
+  // Если ни одна грануляция не включена → fallback на legacy buttons_mode.
+  if (enabledShort.length === 0 && !massOn) {
+    const m = String(rule.filter_buttons_mode || 'allow').toLowerCase()
+    return m === 'forbid'
+      ? tt('protection.summaries.buttons_forbidden')
+      : tt('protection.summaries.buttons_allowed')
+  }
+  const parts = [...enabledShort]
+  if (massOn) {
+    parts.push(tt('protection.ui.button_kinds_short.mass'))
+  }
+  return tt('protection.summaries.buttons_granular', { list: parts.join(', ') })
 })
 const channelPostsSummary = computed(() => {
-  const enabled = !!chat.value?.rule?.filter_channel_posts_enabled
-  if (!enabled) return tt('protection.summaries.channel_posts_allowed')
-  return String(chat.value?.rule?.filter_channel_posts_action || 'delete') === 'ban'
-    ? tt('protection.summaries.channel_posts_ban')
-    : tt('protection.summaries.channel_posts_delete')
+  const rule = chat.value?.rule
+  if (!rule) return tt('protection.summaries.channel_posts_allowed')
+  const enabledShort = CHANNEL_POST_FILTER_KINDS
+    .filter((k) => !!rule[k.field])
+    .map((k) => tt(`protection.ui.channel_post_kinds_short.${k.key}`))
+  if (enabledShort.length === 0) {
+    if (!rule.filter_channel_posts_enabled) return tt('protection.summaries.channel_posts_allowed')
+    return String(rule.filter_channel_posts_action || 'delete') === 'ban'
+      ? tt('protection.summaries.channel_posts_ban')
+      : tt('protection.summaries.channel_posts_delete')
+  }
+  return tt('protection.summaries.channel_posts_granular', { list: enabledShort.join(', ') })
 })
 const postRulesDraftsForChat = computed(() =>
   (postRulesDrafts.value || []).filter(
@@ -2669,7 +3149,16 @@ function openWelcomeImagePreview() {
 }
 
 function openWelcomeSettings() {
-  if (!chat.value?.rule) return
+  guardFilterChain('Protection', 'welcomeSettings:enter', {
+    ts: Date.now(),
+    hasChat: !!chat.value,
+    hasRule: !!chat.value?.rule,
+    chatId: chat.value?.id ?? null,
+  })
+  if (!chat.value?.rule) {
+    guardFilterChain('Protection', 'welcomeSettings:abort_no_rule', {})
+    return
+  }
   welcomeForm.value = {
     enabled: !!chat.value.rule.welcome_enabled,
     text: String(chat.value.rule.welcome_text || ''),
@@ -2682,6 +3171,66 @@ function openWelcomeSettings() {
   welcomeButtonRows.value = welcomeKeyboardRowsFromRule(chat.value.rule.welcome_buttons || [])
   welcomeInfoModal.value = ''
   showWelcomeSettingsModal.value = true
+  // Vue v-if в TMA WKWebView иногда не патчит большие модалки (см. welcomeSettings:rAF domHasNode:false).
+  // Поэтому ждём nextTick + rAF, и если узел так и не появился — снимаем Vue-флаг и открываем vanilla-fallback.
+  nextTick(() => {
+    const node = document.querySelector('[data-guard-protection-welcome-modal]')
+    guardFilterChain('Protection', 'welcomeSettings:afterNextTick', {
+      flagValue: !!showWelcomeSettingsModal.value,
+      domHasNode: !!node,
+      bodyHasOverflowHidden: typeof document !== 'undefined' && document.body?.style?.overflow === 'hidden',
+    })
+    requestAnimationFrame(() => {
+      const node2 = document.querySelector('[data-guard-protection-welcome-modal]')
+      let rect = null
+      let computed = null
+      let topAtCenter = null
+      if (node2) {
+        try {
+          const r = node2.getBoundingClientRect()
+          rect = { x: r.x, y: r.y, w: r.width, h: r.height }
+          const cs = window.getComputedStyle(node2)
+          computed = {
+            display: cs.display,
+            visibility: cs.visibility,
+            opacity: cs.opacity,
+            zIndex: cs.zIndex,
+            position: cs.position,
+          }
+          const cx = Math.floor((r.left + r.right) / 2)
+          const cy = Math.floor((r.top + r.bottom) / 2)
+          const topEl = document.elementFromPoint(cx, cy)
+          topAtCenter = {
+            tag: topEl?.tagName ?? null,
+            id: topEl?.id ?? null,
+            isOurModal: !!topEl && (topEl === node2 || node2.contains(topEl)),
+          }
+        } catch {
+          //
+        }
+      }
+      guardFilterChain('Protection', 'welcomeSettings:rAF', {
+        domHasNode: !!node2,
+        rect,
+        computed,
+        topAtCenter,
+      })
+      requestAnimationFrame(() => {
+        const node3 = document.querySelector('[data-guard-protection-welcome-modal]')
+        if (!node3) {
+          // Vue не смонтировал даже после двух rAF — обычно это означает,
+          // что внутри modal subtree был throw (см. VueError / app.errorHandler).
+          // Откатываем флаг (иначе экран Защиты остаётся «пустым») и открываем
+          // vanilla-fallback как страховку, чтобы пользователь хоть toggle мог сделать.
+          showWelcomeSettingsModal.value = false
+          guardFilterChain('Protection', 'welcomeSettings:fallback_trigger', {
+            reason: 'vue_did_not_mount_after_2x_rAF',
+          })
+          openWelcomeFallbackModalChain()
+        }
+      })
+    })
+  })
   welcomeImagePreviewUrl.value = ''
   if (welcomePreviewUrl.value) {
     revokeBroadcastMediaPreviewUrl(welcomePreviewUrl.value)
@@ -3008,6 +3557,31 @@ async function closePostRulesSettingsModal() {
   showPostRulesSettingsModal.value = false
 }
 
+// Любая открытая модалка фильтра защиты должна блокировать прокрутку фона:
+// иначе пользователь скроллит «Защиту» под полупрозрачной подложкой и мажет UX.
+// Один общий watcher на все filter-модалки (links/media/buttons/channelPosts).
+// Mentions/welcome обрабатываются их vanilla-модалками отдельно.
+watch(
+  [
+    showLinksFilterModal,
+    showMediaFilterModal,
+    showButtonsFilterModal,
+    showChannelPostsFilterModal,
+  ],
+  (vals) => {
+    if (!document?.body?.style) return
+    const anyOpen = vals.some(Boolean)
+    document.body.style.overflow = anyOpen ? 'hidden' : ''
+  },
+)
+
+// При открытии модалки «Ссылки» подгружаем глобальную базу URL текущего владельца.
+// Кеш по chat.id внутри loadGlobalBadUrls — повторно не дёргаем.
+watch(showLinksFilterModal, (open) => {
+  if (!open) return
+  loadGlobalBadUrls(false)
+})
+
 watch(showPostRulesSettingsModal, (open) => {
   if (!document?.body?.style) return
   document.body.style.overflow = open ? 'hidden' : ''
@@ -3088,7 +3662,7 @@ async function addLinkBlacklistPattern() {
   const p = (newLinkBlacklistPattern.value || '').trim()
   if (!p || !chat.value?.id || chat.value.noSelection) return
   if (!canUsePremiumForCurrentChat.value) {
-    openFreeLimitsPremiumModal()
+    openPremiumLock('link_blacklist')
     return
   }
   linkBlacklistLoading.value = true
@@ -3115,6 +3689,71 @@ async function removeLinkBlacklistPattern(pat) {
     showToast(error.value || tt('protection.toasts.link_blacklist_remove_fail'))
   } finally {
     linkBlacklistLoading.value = false
+  }
+}
+
+// --- Глобальная база URL (CRUD прямо в модалке «Ссылки») ---
+// Хранится не на чате, а на владельце (UserGlobalBadUrlPattern). Все чаты, где
+// у пользователя включён filter_links + use_global_bad_urls, ловят эти шаблоны.
+async function loadGlobalBadUrls(force = false) {
+  const ownerKey = String(chat.value?.id || 'me')
+  if (!force && globalBadUrlLoadedFor.value === ownerKey) return
+  globalBadUrlLoading.value = true
+  try {
+    const res = await fetchSilent(() => api.meGlobalBadUrlsList())
+    globalBadUrlItems.value = Array.isArray(res?.items) ? res.items : []
+    globalBadUrlLoadedFor.value = ownerKey
+  } catch {
+    globalBadUrlItems.value = []
+  } finally {
+    globalBadUrlLoading.value = false
+  }
+}
+
+async function addGlobalBadUrlPattern() {
+  const p = (newGlobalBadUrlPattern.value || '').trim()
+  if (!p) return
+  if (!canUsePremiumForCurrentChat.value) {
+    openPremiumLock('global_bad_urls')
+    return
+  }
+  if ((globalBadUrlItems.value || []).length >= USER_GLOBAL_BAD_URL_MAX) {
+    showToast(tt('protection.toasts.global_bad_url_limit', { max: USER_GLOBAL_BAD_URL_MAX }))
+    return
+  }
+  globalBadUrlLoading.value = true
+  try {
+    const res = await fetchSilent(() => api.meGlobalBadUrlsAdd({ pattern: p }))
+    globalBadUrlItems.value = Array.isArray(res?.items) ? res.items : globalBadUrlItems.value
+    newGlobalBadUrlPattern.value = ''
+    // При первом добавлении автоматически включаем использование базы для текущего
+    // чата — иначе пользователь добавит шаблон и не поймёт, почему не работает.
+    if (chat.value?.rule && !chat.value.rule.use_global_bad_urls) {
+      try {
+        await updateRule({ use_global_bad_urls: true })
+      } catch {
+        // молча: основная операция уже выполнена
+      }
+    }
+    showToast(tt('protection.toasts.global_bad_url_added'))
+  } catch {
+    showToast(error.value || tt('protection.toasts.global_bad_url_add_fail'))
+  } finally {
+    globalBadUrlLoading.value = false
+  }
+}
+
+async function removeGlobalBadUrlPattern(pat) {
+  if (!pat) return
+  globalBadUrlLoading.value = true
+  try {
+    await fetchSilent(() => api.meGlobalBadUrlsDelete(pat))
+    globalBadUrlItems.value = (globalBadUrlItems.value || []).filter((x) => x?.pattern !== pat)
+    showToast(tt('protection.toasts.global_bad_url_removed'))
+  } catch {
+    showToast(error.value || tt('protection.toasts.global_bad_url_remove_fail'))
+  } finally {
+    globalBadUrlLoading.value = false
   }
 }
 
@@ -3323,7 +3962,7 @@ async function togglePublicAlerts(on) {
 async function toggleGuardianPeriodic(on) {
   if (!chat.value?.rule) return
   if (!canUsePremiumForCurrentChat.value) {
-    openFreeLimitsPremiumModal()
+    openPremiumLock('guardian_interval')
     return
   }
   await updateRule({ guardian_periodic_enabled: !!on })
@@ -3365,6 +4004,7 @@ const protCardIndigo =
 
 <template>
   <div>
+    <span data-guard-protection-tma-teleport-mark style="display: none" aria-hidden="true"></span>
     <div
       class="relative -mx-4 min-h-0 px-4 pb-8 font-display md:-mx-6 md:px-6 md:pb-10"
     >
@@ -3406,9 +4046,12 @@ const protCardIndigo =
 
     <div v-else-if="chat?.rule" class="space-y-3.5">
       <!-- Только полоса чата липнет под шапкой App (h-14). Плашка «под угрозой» ниже — обычный скролл. -->
-      <!-- pointer-events-none на обёртке/карте/чипе: при скролле полоса (z-28) висит над «Фильтрами» (z-10). Иначе тапы ловит стекло или широкий чип (flex-1). Ловим только «Выбрать чат» и «i». -->
+      <!-- pointer-events-none на обёртке/карте/чипе: при скролле полоса висит над фильтрами и модалками
+           (z=2147483100 — выше Vue-модалок z=200000 и vanilla-модалок mentionsVanillaModal z=2147483000),
+           иначе тапы ловит стекло или широкий чип (flex-1). Ловим только «Выбрать чат» и «i». -->
       <div
-        class="pointer-events-none sticky top-14 z-[28] -mx-4 px-4 py-2 md:-mx-6 md:px-6"
+        class="pointer-events-none sticky top-14 -mx-4 px-4 py-2 md:-mx-6 md:px-6"
+        style="z-index:2147483100"
       >
         <div :class="[protCardChatBar, 'pointer-events-none']">
           <div class="flex items-center gap-1.5">
@@ -3462,11 +4105,11 @@ const protCardIndigo =
         </button>
       </div>
 
-      <!-- Модалка выбора чата снизу -->
+      <!-- Модалка выбора чата снизу. z=2147483200 — выше sticky chat-bar (2147483100) и любых других модалок. -->
       <GuardTeleport>
       <div
         v-if="showChatPicker"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/70 p-0 pb-[calc(5rem+env(safe-area-inset-bottom,0px))] md:items-end md:pb-6"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483200;display:flex;align-items:flex-end;justify-content:center;background:rgba(0,0,0,0.7);padding:0 0 calc(5rem + env(safe-area-inset-bottom,0px)) 0"
         @click="showChatPicker = false"
       >
         <div
@@ -3698,7 +4341,7 @@ const protCardIndigo =
               type="button"
               data-guard-filter-tile="links"
               class="group relative flex min-h-[4.75rem] touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-sky-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-sky-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="openProtectionFilterModal('links')"
+              @click="onLinksTileClick"
             >
               <span class="text-lg leading-none">🔗</span>
               <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_links') }}</span>
@@ -3708,7 +4351,7 @@ const protCardIndigo =
               type="button"
               data-guard-filter-tile="mentions"
               class="group relative flex min-h-[4.75rem] touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-violet-500/15 to-fuchsia-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-violet-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="openProtectionFilterModal('mentions')"
+              @click="onMentionsTileClick"
             >
               <span class="text-lg leading-none" aria-hidden="true">{{ '\uFF20' }}</span>
               <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_mentions') }}</span>
@@ -3738,7 +4381,7 @@ const protCardIndigo =
               type="button"
               data-guard-filter-tile="channelPosts"
               class="group relative col-span-2 flex min-h-[4.75rem] touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-fuchsia-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-fuchsia-400/40 hover:shadow-md active:scale-[0.99]"
-              @click="openProtectionFilterModal('channelPosts')"
+              @click="onChannelPostsTileClick"
             >
               <span class="text-lg leading-none">📣</span>
               <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_channel_posts') }}</span>
@@ -4070,50 +4713,6 @@ const protCardIndigo =
         </div>
       </section>
 
-      <section :class="protCard">
-        <div class="mb-3 flex items-center justify-between gap-2">
-          <h2 class="text-xs font-medium text-slate-200">{{ tt('protection.ui.welcome_newcomers_title') }}</h2>
-          <button
-            type="button"
-            class="rounded-lg border border-white/15 bg-white/10 px-2.5 py-1 text-xs font-semibold text-slate-100 hover:bg-white/15"
-            @click="openWelcomeSettings()"
-          >
-            {{ tt('protection.ui.configure') }}
-          </button>
-        </div>
-        <p class="text-[11px] text-slate-300/90">
-          {{ tt('protection.ui.welcome_newcomers_body') }}
-        </p>
-        <p class="mt-1 text-[11px] text-slate-500">
-          {{ tt('protection.ui.status_label') }}
-          <span :class="chat.rule.welcome_enabled ? 'text-emerald-300' : 'text-slate-400'">
-            {{ chat.rule.welcome_enabled ? tt('protection.ui.enabled_short') : tt('protection.ui.disabled_short') }}
-          </span>
-          <span v-if="chat.rule.welcome_has_photo" class="text-sky-300">{{ tt('protection.ui.photo_added') }}</span>
-          <span class="text-zinc-500">{{ tt('protection.ui.every_nth', { n: Number(chat.rule.welcome_every_n_joins || 1) }) }}</span>
-        </p>
-      </section>
-
-      <section :class="protCard">
-        <div class="mb-3 flex items-center justify-between gap-2">
-          <h2 class="text-xs font-medium text-slate-200">{{ tt('protection.ui.group_rules_title') }}</h2>
-          <button
-            type="button"
-            class="rounded-lg border border-white/15 bg-white/10 px-2.5 py-1 text-xs font-semibold text-slate-100 hover:bg-white/15"
-            @click="openPostRulesSettings()"
-          >
-            {{ tt('protection.ui.configure') }}
-          </button>
-        </div>
-        <p class="text-[11px] text-slate-300/90">
-          {{ tt('protection.ui.status_label') }}
-          <span :class="chat.rule.rules_group_enabled ? 'text-emerald-300' : 'text-slate-400'">{{ chat.rule.rules_group_enabled ? tt('protection.ui.group_rules_status_on') : tt('protection.ui.group_rules_status_off') }}</span>
-        </p>
-        <p class="mt-1 text-[11px] text-slate-500">
-          {{ tt('protection.ui.group_rules_hint') }}
-        </p>
-      </section>
-
       <!-- Наказания -->
       <section :class="protCard">
         <h2 class="mb-3 text-xs font-medium text-slate-200">{{ tt('protection.ui.punishments_title') }}</h2>
@@ -4160,10 +4759,63 @@ const protCardIndigo =
 
       <div class="h-2" aria-hidden="true" />
 
+      <section :class="protCard">
+        <div class="mb-3 flex items-center justify-between gap-2">
+          <h2 class="text-xs font-medium text-slate-200">{{ tt('protection.ui.welcome_newcomers_title') }}</h2>
+          <button
+            type="button"
+            class="rounded-lg border border-white/15 bg-white/10 px-2.5 py-1 text-xs font-semibold text-slate-100 hover:bg-white/15"
+            @click="onWelcomeConfigureClick"
+          >
+            {{ tt('protection.ui.configure') }}
+          </button>
+        </div>
+        <p class="text-[11px] text-slate-300/90">
+          {{ tt('protection.ui.welcome_newcomers_body') }}
+        </p>
+        <p class="mt-1 text-[11px] text-slate-500">
+          {{ tt('protection.ui.status_label') }}
+          <span :class="chat.rule.welcome_enabled ? 'text-emerald-300' : 'text-slate-400'">
+            {{ chat.rule.welcome_enabled ? tt('protection.ui.enabled_short') : tt('protection.ui.disabled_short') }}
+          </span>
+          <span v-if="chat.rule.welcome_has_photo" class="text-sky-300">{{ tt('protection.ui.photo_added') }}</span>
+          <span class="text-zinc-500">{{ tt('protection.ui.every_nth', { n: Number(chat.rule.welcome_every_n_joins || 1) }) }}</span>
+        </p>
+      </section>
+
+      <section :class="protCard">
+        <div class="mb-3 flex items-center justify-between gap-2">
+          <h2 class="text-xs font-medium text-slate-200">{{ tt('protection.ui.group_rules_title') }}</h2>
+          <button
+            type="button"
+            class="rounded-lg border border-white/15 bg-white/10 px-2.5 py-1 text-xs font-semibold text-slate-100 hover:bg-white/15"
+            @click="openPostRulesSettings()"
+          >
+            {{ tt('protection.ui.configure') }}
+          </button>
+        </div>
+        <p class="text-[11px] text-slate-300/90">
+          {{ tt('protection.ui.status_label') }}
+          <span :class="chat.rule.rules_group_enabled ? 'text-emerald-300' : 'text-slate-400'">{{ chat.rule.rules_group_enabled ? tt('protection.ui.group_rules_status_on') : tt('protection.ui.group_rules_status_off') }}</span>
+        </p>
+        <p class="mt-1 text-[11px] text-slate-500">
+          {{ tt('protection.ui.group_rules_hint') }}
+        </p>
+      </section>
+
       <!-- Публичные сообщения от Guard -->
       <section :class="protCard">
-        <div class="mb-2 flex items-center justify-between gap-2">
-          <h2 class="text-sm font-semibold tracking-wide text-slate-50">{{ tt('protection.ui.public_messages_title') }}</h2>
+        <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div class="flex min-w-0 flex-wrap items-center gap-2">
+            <h2 class="text-sm font-semibold tracking-wide text-slate-50">{{ tt('protection.ui.public_messages_title') }}</h2>
+            <PremiumLockBadge
+              v-if="premiumFeatureLocked"
+              variant="pill"
+              size="xs"
+              interactive
+              @click="openPremiumLock('guardian_interval')"
+            />
+          </div>
           <button
             type="button"
             class="prot-info-btn prot-info-btn--frost"
@@ -4233,8 +4885,17 @@ const protCardIndigo =
 
       <div :class="protCardSub">
         <div class="flex items-start justify-between gap-2">
-          <div>
-            <p class="text-xs font-semibold uppercase tracking-wide text-slate-200">{{ tt('protection.ui.spam_spike_title') }}</p>
+          <div class="min-w-0 flex-1">
+            <div class="flex flex-wrap items-center gap-2">
+              <p class="text-xs font-semibold uppercase tracking-wide text-slate-200">{{ tt('protection.ui.spam_spike_title') }}</p>
+              <PremiumLockBadge
+                v-if="!chatOwnerHasPremium"
+                variant="pill"
+                size="xs"
+                interactive
+                @click="openPremiumLock('spam_spike_managers')"
+              />
+            </div>
             <p class="mt-1 text-[11px] text-slate-300/90">
               {{ tt('protection.ui.spam_spike_body', {
                 count: Number(chat.rule.spam_spike_min_deletes || spamSpikeDefaultDeleteCount),
@@ -4597,7 +5258,16 @@ const protCardIndigo =
                 {{ chat.rule.guardian_periodic_enabled ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}
               </button>
             </div>
-            <p class="mb-1 text-[11px] text-slate-400">{{ tt('protection.public_alerts_settings_modal.duty_frequency') }}</p>
+            <div class="mb-1 flex flex-wrap items-center gap-2">
+              <p class="text-[11px] text-slate-400">{{ tt('protection.public_alerts_settings_modal.duty_frequency') }}</p>
+              <PremiumLockBadge
+                v-if="premiumFeatureLocked"
+                variant="pill"
+                size="xs"
+                interactive
+                @click="openPremiumLock('guardian_interval')"
+              />
+            </div>
             <div class="flex flex-wrap gap-1.5">
               <button
                 v-for="opt in guardianPeriodicIntervalPresets"
@@ -4792,14 +5462,23 @@ const protCardIndigo =
               <p class="text-xs font-semibold text-slate-100">{{ tt('protection.spam_spike_settings_modal.notify_title') }}</p>
               <p class="text-[11px] text-slate-400">{{ tt('protection.spam_spike_settings_modal.notify_hint') }}</p>
             </div>
-            <button
-              type="button"
-              :class="boolToggleClass(!!chat.rule.spam_spike_notify_managers)"
-              class="rounded-xl px-3 py-1.5 text-xs font-semibold"
-              @click="updateRule({ spam_spike_notify_managers: !chat.rule.spam_spike_notify_managers })"
-            >
-              {{ chat.rule.spam_spike_notify_managers ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}
-            </button>
+            <div class="flex shrink-0 items-center gap-2">
+              <PremiumLockBadge
+                v-if="!chatOwnerHasPremium"
+                variant="crown"
+                size="sm"
+                interactive
+                @click="openPremiumLock('spam_spike_managers')"
+              />
+              <button
+                type="button"
+                :class="boolToggleClass(!!chat.rule.spam_spike_notify_managers)"
+                class="rounded-xl px-3 py-1.5 text-xs font-semibold"
+                @click="onSpamSpikeNotifyManagersToggle"
+              >
+                {{ chat.rule.spam_spike_notify_managers ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}
+              </button>
+            </div>
           </div>
 
           <div class="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-white/[0.04] p-2.5 backdrop-blur-md">
@@ -5370,14 +6049,16 @@ const protCardIndigo =
       </div>
     </GuardTeleport>
 
-    <GuardTeleport>
-      <div
-        v-if="showWelcomeSettingsModal && chat?.rule"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/55 p-3 sm:p-4 backdrop-blur-[2px]"
-        role="dialog"
-        aria-modal="true"
-        @click.self="closeWelcomeSettingsModal()"
-      >
+    <!-- Welcome-модалка: рендерим in-place (без GuardTeleport), т.к. Teleport в TMA WKWebView ломал mentions. -->
+    <div
+      v-if="showWelcomeSettingsModal && chat?.rule"
+      data-guard-protection-welcome-modal
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px"
+      class="flex items-center justify-center bg-black/55 p-3 sm:p-4 backdrop-blur-[2px]"
+      role="dialog"
+      aria-modal="true"
+      @click.self="closeWelcomeSettingsModal()"
+    >
         <div
           class="flex max-h-[min(90vh,48rem)] w-full max-w-2xl flex-col overflow-hidden rounded-[1.35rem] border border-white/12 bg-zinc-950/76 p-0 text-zinc-100 shadow-[0_34px_90px_-28px_rgba(0,0,0,0.78),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-2xl backdrop-saturate-150"
           @click.stop
@@ -5604,7 +6285,6 @@ const protCardIndigo =
           </div>
         </div>
       </div>
-    </GuardTeleport>
 
     <GuardTeleport>
       <div
@@ -6122,11 +6802,13 @@ const protCardIndigo =
       </div>
     </GuardTeleport>
 
+    <!-- Фильтры: in-place (без Teleport) — см. комментарий у тест-модалки выше. -->
       <div
         v-if="showLinksFilterModal"
+        data-guard-protection-filter-modals-anchor
         data-guard-protection-filter-modal="links"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px"
-        class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.78);padding:16px"
+        class="pointer-events-auto flex items-center justify-center p-4"
         role="dialog"
         aria-modal="true"
         @click.capture="swallowFilterBackdropGhostClickCapture"
@@ -6136,23 +6818,20 @@ const protCardIndigo =
       >
         <div
           v-if="chat?.rule"
-          class="flex min-h-0 max-h-[min(88vh,44rem)] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-white/15 bg-gradient-to-b from-slate-900 to-slate-950 p-0 text-slate-100 shadow-2xl ring-1 ring-sky-500/20"
+          class="flex min-h-0 max-h-[min(88vh,44rem)] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#101013] p-0 text-zinc-100 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.9)]"
           data-guard-protection-filter-modal-panel
           @click.stop
         >
           <div
-            class="flex shrink-0 items-center justify-between gap-2 border-b border-white/10 bg-gradient-to-r from-white/[0.06] to-transparent px-4 py-3.5"
+            class="flex shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] px-4 py-3"
           >
             <div class="flex min-w-0 items-center gap-2">
-              <span
-                class="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-400/25 to-teal-500/15 text-lg ring-1 ring-emerald-400/20"
-                aria-hidden="true"
-              >🔗</span>
+              <span class="text-lg leading-none" aria-hidden="true">🔗</span>
               <h3 class="truncate text-sm font-semibold tracking-tight text-white">{{ tt('protection.links_modal.title') }}</h3>
             </div>
             <button
               type="button"
-              class="rounded-xl border border-white/10 bg-white/[0.06] px-2.5 py-1.5 text-xs text-zinc-400 backdrop-blur-sm hover:border-white/20 hover:bg-white/10 hover:text-white"
+              class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/10"
               @click="showLinksFilterModal = false"
             >
               ✕
@@ -6176,7 +6855,7 @@ const protCardIndigo =
               </div>
               <div
                 v-show="openLinkModeHint === '_legend'"
-                class="link-modal-hint link-liquid-hint mb-2 rounded-2xl border border-white/12 bg-white/[0.06] p-3 text-[11px] leading-relaxed text-zinc-300 backdrop-blur-md"
+                class="link-modal-hint mb-2 rounded-xl bg-white/[0.03] p-3 text-[11px] leading-relaxed text-zinc-300"
                 v-html="linkModalLegendHtml"
               />
               <div class="space-y-2.5">
@@ -6192,7 +6871,7 @@ const protCardIndigo =
                     </button>
                     <button
                       type="button"
-                      class="link-glass-info-btn shrink-0 !h-9 !min-w-9 !rounded-2xl !px-2.5 !text-xs"
+                      class="link-glass-info-btn shrink-0"
                       :class="openLinkModeHint === opt.value ? 'link-glass-info-btn--active' : ''"
                       :aria-expanded="openLinkModeHint === opt.value"
                       :aria-label="tt('protection.ui.link_hint_for_mode_aria', { label: opt.label })"
@@ -6203,49 +6882,84 @@ const protCardIndigo =
                   </div>
                   <div
                     v-show="openLinkModeHint === opt.value"
-                    class="link-modal-hint link-liquid-hint rounded-2xl border border-white/10 bg-white/[0.05] p-3 text-[11px] leading-relaxed text-zinc-300 backdrop-blur-md"
+                    class="link-modal-hint rounded-xl bg-white/[0.03] p-3 text-[11px] leading-relaxed text-zinc-300"
                     v-html="opt.guardHtml"
                   />
                 </template>
               </div>
             </div>
-            <div
-              class="rounded-2xl border border-teal-400/22 bg-gradient-to-br from-teal-500/[0.1] via-teal-950/20 to-emerald-950/25 p-3.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.07)] backdrop-blur-md ring-1 ring-inset ring-teal-300/10"
-            >
-              <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <div class="min-w-0 flex-1">
-                  <div class="mb-1.5 flex items-center justify-between gap-2">
-                    <p class="text-xs font-semibold text-teal-100">{{ tt('protection.links_modal.global_title') }}</p>
-                    <button
-                      type="button"
-                      class="link-glass-info-btn"
-                      :class="openLinkModeHint === '_global' ? 'link-glass-info-btn--active' : ''"
-                      :aria-label="tt('protection.ui.link_hint_global_url_base_aria')"
-                      @click="openLinkModeHint = openLinkModeHint === '_global' ? null : '_global'"
-                    >
-                      ⓘ
-                    </button>
-                  </div>
-                  <p class="text-[11px] leading-relaxed text-zinc-400" v-html="tt('protection.links_modal.global_teaser_html')" />
-                  <div
-                    v-show="openLinkModeHint === '_global'"
-                    class="link-modal-hint link-liquid-hint mt-2 rounded-xl border border-teal-400/15 bg-black/30 p-3 text-[11px] leading-relaxed text-zinc-300 backdrop-blur-md"
-                    v-html="linkModalGlobalBadUrlsHtml"
+            <div class="rounded-2xl bg-white/[0.025] p-3.5">
+              <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
+                  {{ tt('protection.links_modal.global_title') }}
+                  <span class="font-normal normal-case text-zinc-500">
+                    ({{ globalBadUrlItems.length }}/{{ USER_GLOBAL_BAD_URL_MAX }})
+                  </span>
+                  <PremiumLockBadge
+                    v-if="premiumFeatureLocked"
+                    variant="pill"
+                    size="xs"
+                    interactive
+                    @click="openPremiumLock('global_bad_urls')"
                   />
-                </div>
+                </p>
                 <button
                   type="button"
-                  class="shrink-0 self-start rounded-xl border px-3 py-2 text-[11px] font-semibold backdrop-blur-sm transition-colors sm:py-1.5"
-                  :class="
-                    chat.rule.use_global_bad_urls
-                      ? 'border-teal-400/40 bg-teal-500/90 text-white shadow-[0_0_20px_-6px_rgba(45,212,191,0.5)]'
-                      : 'border-white/15 bg-white/[0.06] text-zinc-400 hover:border-white/25 hover:text-zinc-200'
-                  "
-                  @click="updateRule({ use_global_bad_urls: !chat.rule.use_global_bad_urls })"
+                  class="link-glass-info-btn"
+                  :class="openLinkModeHint === '_global' ? 'link-glass-info-btn--active' : ''"
+                  :aria-label="tt('protection.ui.link_hint_global_url_base_aria')"
+                  @click="openLinkModeHint = openLinkModeHint === '_global' ? null : '_global'"
                 >
-                  {{ chat.rule.use_global_bad_urls ? tt('protection.links_modal.toggle_on') : tt('protection.links_modal.toggle_off') }}
+                  ⓘ
                 </button>
               </div>
+              <p class="mb-2 text-[11px] leading-relaxed text-zinc-400" v-html="tt('protection.links_modal.global_teaser_html')" />
+              <div
+                v-show="openLinkModeHint === '_global'"
+                class="link-modal-hint mb-2 rounded-xl bg-white/[0.03] p-3 text-[11px] leading-relaxed text-zinc-300"
+                v-html="linkModalGlobalBadUrlsHtml"
+              />
+              <div class="mb-2 flex gap-2">
+                <input
+                  v-model="newGlobalBadUrlPattern"
+                  type="text"
+                  :placeholder="tt('protection.links_modal.global_placeholder')"
+                  class="min-w-0 flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-2.5 py-2 text-xs text-white placeholder:text-zinc-500 focus:border-teal-400/40 focus:outline-none"
+                  :disabled="globalBadUrlLoading"
+                  @keydown.enter.prevent="addGlobalBadUrlPattern()"
+                />
+                <button
+                  type="button"
+                  class="link-glass-add-btn shrink-0"
+                  :disabled="globalBadUrlLoading || !(newGlobalBadUrlPattern || '').trim()"
+                  @click="addGlobalBadUrlPattern()"
+                >
+                  +
+                </button>
+              </div>
+              <ul class="max-h-32 space-y-1 overflow-y-auto pr-1">
+                <li
+                  v-for="b in globalBadUrlItems"
+                  :key="`gbu-${b.pattern}`"
+                  class="flex items-center justify-between rounded-xl bg-white/[0.03] px-2 py-1.5 font-mono text-[11px]"
+                >
+                  <span>{{ b.pattern }}</span>
+                  <button
+                    type="button"
+                    class="text-rose-300 hover:text-rose-200"
+                    :disabled="globalBadUrlLoading"
+                    @click="removeGlobalBadUrlPattern(b.pattern)"
+                  >
+                    {{ tt('protection.links_modal.list_remove') }}
+                  </button>
+                </li>
+                <li
+                  v-if="!globalBadUrlLoading && globalBadUrlItems.length === 0"
+                  class="text-[11px] text-zinc-500"
+                >
+                  {{ tt('protection.links_modal.global_empty') }}
+                </li>
+              </ul>
             </div>
             <div>
               <div class="mb-2 flex items-center justify-between gap-2">
@@ -6262,7 +6976,7 @@ const protCardIndigo =
               </div>
               <div
                 v-show="openLinkModeHint === '_scope'"
-                class="link-modal-hint link-liquid-hint mb-2 rounded-2xl border border-violet-400/20 bg-violet-500/[0.09] p-3 text-[11px] leading-relaxed text-zinc-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-md"
+                class="link-modal-hint mb-2 rounded-xl bg-white/[0.03] p-3 text-[11px] leading-relaxed text-zinc-300"
                 v-html="linkModalScopeHtml"
               />
               <div class="grid grid-cols-2 gap-2">
@@ -6284,13 +6998,17 @@ const protCardIndigo =
                 </button>
               </div>
             </div>
-            <div
-              class="rounded-2xl border border-rose-400/22 bg-gradient-to-br from-rose-600/[0.1] via-rose-950/25 to-red-950/35 p-3.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-md ring-1 ring-inset ring-rose-300/10"
-            >
+            <div class="rounded-2xl bg-white/[0.025] p-3.5">
               <div class="mb-2 flex items-center justify-between gap-2">
-                <p class="text-[11px] font-semibold uppercase tracking-wide text-rose-100/95">
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
                   {{ tt('protection.links_modal.blacklist_title') }}
-                  <span v-if="premiumFeatureLocked" class="font-normal text-amber-300">{{ tt('protection.links_modal.premium_suffix') }}</span>
+                  <PremiumLockBadge
+                    v-if="premiumFeatureLocked"
+                    variant="pill"
+                    size="xs"
+                    interactive
+                    @click="openPremiumLock('link_blacklist')"
+                  />
                 </p>
                 <button
                   type="button"
@@ -6304,7 +7022,7 @@ const protCardIndigo =
               </div>
               <div
                 v-show="openLinkModeHint === '_bl'"
-                class="link-modal-hint link-liquid-hint mb-2 rounded-xl border border-rose-400/18 bg-rose-950/30 p-3 text-[11px] leading-relaxed text-zinc-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] backdrop-blur-md"
+                class="link-modal-hint mb-2 rounded-xl bg-white/[0.03] p-3 text-[11px] leading-relaxed text-zinc-300"
                 v-html="linkModalBlacklistHtml"
               />
               <div class="mb-2 flex gap-2">
@@ -6312,13 +7030,13 @@ const protCardIndigo =
                   v-model="newLinkBlacklistPattern"
                   type="text"
                   :placeholder="tt('protection.links_modal.blacklist_placeholder')"
-                  class="min-w-0 flex-1 rounded-xl border border-white/14 bg-white/[0.06] px-2.5 py-2 text-xs text-white placeholder:text-zinc-500 backdrop-blur-sm focus:border-rose-400/40 focus:outline-none"
+                  class="min-w-0 flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-2.5 py-2 text-xs text-white placeholder:text-zinc-500 focus:border-rose-400/40 focus:outline-none"
                   :disabled="linkBlacklistLoading"
                   @keydown.enter.prevent="addLinkBlacklistPattern()"
                 />
                 <button
                   type="button"
-                  class="shrink-0 rounded-xl bg-gradient-to-br from-rose-500 to-red-600 px-3 py-2 text-xs font-semibold text-white shadow-[0_8px_24px_-10px_rgba(244,63,94,0.55)] hover:from-rose-400 hover:to-red-500 disabled:opacity-50"
+                  class="link-glass-add-btn shrink-0"
                   :disabled="linkBlacklistLoading || !(newLinkBlacklistPattern || '').trim()"
                   @click="addLinkBlacklistPattern()"
                 >
@@ -6329,7 +7047,7 @@ const protCardIndigo =
                 <li
                   v-for="b in chat.link_blacklist || []"
                   :key="`bl-${b}`"
-                  class="flex items-center justify-between rounded-xl border border-white/10 bg-white/[0.04] px-2 py-1.5 font-mono text-[11px] backdrop-blur-sm"
+                  class="flex items-center justify-between rounded-xl bg-white/[0.03] px-2 py-1.5 font-mono text-[11px]"
                 >
                   <span>{{ b }}</span>
                   <button
@@ -6347,7 +7065,7 @@ const protCardIndigo =
               </p>
             </div>
             <div
-              class="rounded-2xl border border-white/12 bg-gradient-to-br from-white/[0.07] to-black/20 p-3 text-[11px] leading-relaxed text-zinc-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-md ring-1 ring-inset ring-white/[0.04]"
+              class="rounded-2xl bg-white/[0.025] p-3 text-[11px] leading-relaxed text-zinc-400"
               v-html="tt('protection.links_modal.delegation_note_html')"
             ></div>
             <div>
@@ -6357,6 +7075,13 @@ const protCardIndigo =
                   <span class="font-normal normal-case text-zinc-500">
                     ({{ (chat.whitelist_domains || []).length }}/{{ chat.whitelist_max_domains ?? 5 }})
                   </span>
+                  <PremiumLockBadge
+                    v-if="premiumFeatureLocked"
+                    variant="pill"
+                    size="xs"
+                    interactive
+                    @click="openPremiumLock('whitelist_caps')"
+                  />
                 </p>
                 <button
                   type="button"
@@ -6370,7 +7095,7 @@ const protCardIndigo =
               </div>
               <div
                 v-show="openLinkModeHint === '_wl'"
-                class="link-modal-hint link-liquid-hint mb-2 rounded-2xl border border-sky-400/22 bg-sky-500/[0.1] p-3 text-[11px] leading-relaxed text-zinc-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.07)] backdrop-blur-md"
+                class="link-modal-hint mb-2 rounded-xl bg-white/[0.03] p-3 text-[11px] leading-relaxed text-zinc-300"
                 v-html="linkModalWhitelistHtml"
               />
               <div class="mb-2 flex gap-2">
@@ -6378,13 +7103,13 @@ const protCardIndigo =
                   v-model="newWhitelistDomain"
                   type="text"
                   :placeholder="tt('protection.links_modal.trusted_placeholder')"
-                  class="min-w-0 flex-1 rounded-xl border border-white/14 bg-white/[0.06] px-2.5 py-2 text-xs text-white placeholder:text-zinc-500 backdrop-blur-sm focus:border-sky-400/40 focus:outline-none"
+                  class="min-w-0 flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-2.5 py-2 text-xs text-white placeholder:text-zinc-500 focus:border-sky-400/40 focus:outline-none"
                   :disabled="whitelistLoading"
                   @keydown.enter.prevent="addWhitelistDomain()"
                 />
                 <button
                   type="button"
-                  class="shrink-0 rounded-xl bg-gradient-to-br from-sky-500 to-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-[0_8px_24px_-10px_rgba(56,189,248,0.45)] hover:from-sky-400 hover:to-indigo-500 disabled:opacity-50"
+                  class="link-glass-add-btn shrink-0"
                   :disabled="whitelistLoading || !(newWhitelistDomain || '').trim()"
                   @click="addWhitelistDomain()"
                 >
@@ -6395,7 +7120,7 @@ const protCardIndigo =
                 <li
                   v-for="d in (chat.whitelist_domains || [])"
                   :key="`wl-d-${d}`"
-                  class="flex items-center justify-between rounded-xl border border-white/10 bg-white/[0.04] px-2 py-1.5 font-mono text-[11px] backdrop-blur-sm"
+                  class="flex items-center justify-between rounded-xl bg-white/[0.03] px-2 py-1.5 font-mono text-[11px]"
                 >
                   <span>{{ d }}</span>
                   <button
@@ -6416,6 +7141,13 @@ const protCardIndigo =
                   <span class="font-normal normal-case text-zinc-500">
                     ({{ (chat.whitelist_users || []).length }}/{{ chat.whitelist_max_users ?? 50 }})
                   </span>
+                  <PremiumLockBadge
+                    v-if="premiumFeatureLocked"
+                    variant="pill"
+                    size="xs"
+                    interactive
+                    @click="openPremiumLock('whitelist_caps')"
+                  />
                 </p>
                 <button
                   type="button"
@@ -6429,7 +7161,7 @@ const protCardIndigo =
               </div>
               <div
                 v-show="openLinkModeHint === '_wl_users'"
-                class="link-modal-hint link-liquid-hint mb-2 rounded-2xl border border-violet-400/20 bg-violet-500/[0.08] p-3 text-[11px] leading-relaxed text-zinc-300 backdrop-blur-md"
+                class="link-modal-hint mb-2 rounded-xl bg-white/[0.03] p-3 text-[11px] leading-relaxed text-zinc-300"
                 v-html="linkModalWhitelistUsersHtml"
               />
               <div class="mb-2 flex gap-2">
@@ -6437,13 +7169,13 @@ const protCardIndigo =
                   v-model="newWhitelistUserId"
                   type="text"
                   :placeholder="tt('protection.links_modal.trusted_users_placeholder')"
-                  class="min-w-0 flex-1 rounded-xl border border-white/14 bg-white/[0.06] px-2.5 py-2 text-xs text-white placeholder:text-zinc-500 backdrop-blur-sm focus:border-violet-400/40 focus:outline-none"
+                  class="min-w-0 flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-2.5 py-2 text-xs text-white placeholder:text-zinc-500 focus:border-violet-400/40 focus:outline-none"
                   :disabled="whitelistLoading"
                   @keydown.enter.prevent="addWhitelistUser()"
                 />
                 <button
                   type="button"
-                  class="shrink-0 rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-600 px-3 py-2 text-xs font-semibold text-white shadow-[0_8px_24px_-10px_rgba(167,139,250,0.45)] hover:from-violet-400 hover:to-fuchsia-500 disabled:opacity-50"
+                  class="link-glass-add-btn shrink-0"
                   :disabled="whitelistLoading || !(newWhitelistUserId || '').trim()"
                   @click="addWhitelistUser()"
                 >
@@ -6454,7 +7186,7 @@ const protCardIndigo =
                 <li
                   v-for="u in (chat.whitelist_users || [])"
                   :key="`wl-u-${u.user_id}`"
-                  class="flex items-center justify-between rounded-xl border border-white/10 bg-white/[0.04] px-2 py-1.5 text-[11px] backdrop-blur-sm"
+                  class="flex items-center justify-between rounded-xl bg-white/[0.03] px-2 py-1.5 text-[11px]"
                 >
                   <span>
                     <span class="font-mono text-zinc-200">{{ u.user_id }}</span>
@@ -6485,9 +7217,10 @@ const protCardIndigo =
       </div>
       <div
         v-if="showChannelPostsFilterModal"
+        data-guard-protection-filter-modals-anchor
         data-guard-protection-filter-modal="channelPosts"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px"
-        class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.78);padding:16px"
+        class="pointer-events-auto flex items-center justify-center p-4"
         role="dialog"
         aria-modal="true"
         @click.capture="swallowFilterBackdropGhostClickCapture"
@@ -6497,158 +7230,124 @@ const protCardIndigo =
       >
         <div
           v-if="chat?.rule"
-          class="flex max-h-[min(86vh,42rem)] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-white/15 bg-gradient-to-b from-slate-900 to-slate-950 p-0 text-slate-100 shadow-2xl ring-1 ring-fuchsia-500/25"
-          data-guard-protection-filter-modal-panel
-          @click.stop
-        >
-          <div class="flex shrink-0 items-center justify-between gap-2 border-b border-white/10 bg-gradient-to-r from-white/[0.06] to-transparent px-4 py-3.5">
-            <div class="flex min-w-0 items-center gap-2">
-              <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-fuchsia-400/25 to-indigo-500/15 text-lg ring-1 ring-fuchsia-400/20">📣</span>
-              <h3 class="truncate text-sm font-semibold tracking-tight text-white">{{ tt('protection.channel_posts_modal.title') }}</h3>
-            </div>
-            <button
-              type="button"
-              class="rounded-xl border border-white/10 bg-white/[0.06] px-2.5 py-1.5 text-xs text-zinc-400 backdrop-blur-sm hover:border-white/20 hover:bg-white/10 hover:text-white"
-              @click="showChannelPostsFilterModal = false"
-            >
-              ✕
-            </button>
-          </div>
-          <div class="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-4 py-4 [-webkit-overflow-scrolling:touch]">
-            <p class="text-[11px] leading-relaxed text-zinc-300" v-html="tt('protection.channel_posts_modal.intro_html')"></p>
-            <div class="flex items-center justify-between gap-2 rounded-xl border border-white/12 bg-white/[0.05] px-3 py-2">
-              <span class="text-xs text-slate-200">{{ tt('protection.channel_posts_modal.filter_toggle_label') }}</span>
-              <button
-                type="button"
-                :class="boolToggleClass(!!chat.rule.filter_channel_posts_enabled)"
-                class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium"
-                @click="updateRule({ filter_channel_posts_enabled: !chat.rule.filter_channel_posts_enabled })"
-              >
-                {{ chat.rule.filter_channel_posts_enabled ? tt('protection.links_modal.toggle_on') : tt('protection.links_modal.toggle_off') }}
-              </button>
-            </div>
-            <div v-if="chat.rule.filter_channel_posts_enabled" class="rounded-xl border border-white/12 bg-white/[0.05] p-3">
-              <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ tt('protection.channel_posts_modal.reaction_label') }}</p>
-              <div class="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  class="rounded-lg px-2.5 py-2 text-xs font-semibold"
-                  :class="String(chat.rule.filter_channel_posts_action || 'delete') === 'delete' ? 'guard-green-soft text-slate-900' : protToggleOff"
-                  @click="updateRule({ filter_channel_posts_action: 'delete' })"
-                >
-                  {{ tt('protection.channel_posts_modal.action_delete') }}
-                </button>
-                <button
-                  type="button"
-                  class="rounded-lg px-2.5 py-2 text-xs font-semibold"
-                  :class="String(chat.rule.filter_channel_posts_action || 'delete') === 'ban' ? 'bg-gradient-to-r from-rose-500 to-red-600 text-white shadow-[0_8px_20px_-10px_rgba(239,68,68,0.75)]' : protToggleOff"
-                  @click="updateRule({ filter_channel_posts_action: 'ban' })"
-                >
-                  {{ tt('protection.channel_posts_modal.action_delete_ban') }}
-                </button>
-              </div>
-            </div>
-            <div class="rounded-xl border border-white/12 bg-white/[0.05] p-3">
-              <p class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
-                {{ tt('protection.channel_posts_modal.trusted_senders_title') }}
-                <span class="font-normal normal-case text-zinc-500">
-                  ({{ (chat.whitelist_sender_chats || []).length }})
-                </span>
-              </p>
-              <div class="mb-2 flex gap-2">
-                <input
-                  v-model="newWhitelistSenderChat"
-                  type="text"
-                  :placeholder="tt('protection.channel_posts_modal.trusted_placeholder')"
-                  class="min-w-0 flex-1 rounded-xl border border-white/14 bg-white/[0.06] px-2.5 py-2 text-xs text-white placeholder:text-zinc-500 backdrop-blur-sm focus:border-fuchsia-400/40 focus:outline-none"
-                  :disabled="whitelistLoading"
-                  @keydown.enter.prevent="addWhitelistSenderChat()"
-                />
-                <button
-                  type="button"
-                  class="shrink-0 rounded-xl bg-gradient-to-br from-fuchsia-500 to-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-[0_8px_24px_-10px_rgba(217,70,239,0.45)] hover:from-fuchsia-400 hover:to-indigo-500 disabled:opacity-50"
-                  :disabled="whitelistLoading || !(newWhitelistSenderChat || '').trim()"
-                  @click="addWhitelistSenderChat()"
-                >
-                  +
-                </button>
-              </div>
-              <ul class="max-h-36 space-y-1 overflow-y-auto pr-1">
-                <li
-                  v-for="u in (chat.whitelist_sender_chats || [])"
-                  :key="`wl-sc-${u}`"
-                  class="flex items-center justify-between rounded-xl border border-white/10 bg-white/[0.04] px-2 py-1.5 text-[11px] backdrop-blur-sm"
-                >
-                  <span class="font-mono text-zinc-200">@{{ String(u || '').replace(/^@+/, '') }}</span>
-                  <button
-                    type="button"
-                    class="text-rose-300 hover:text-rose-200"
-                    :disabled="whitelistLoading"
-                    @click="removeWhitelistSenderChat(u)"
-                  >
-                    {{ tt('protection.links_modal.list_remove') }}
-                  </button>
-                </li>
-              </ul>
-            </div>
-          </div>
-        </div>
-        <div
-          v-else
-          class="mx-auto w-full max-w-sm rounded-2xl border border-white/15 bg-slate-900/95 p-8 text-center text-sm text-zinc-400 shadow-2xl"
-          role="status"
-        >
-          {{ tt('common.loading') }}
-        </div>
-      </div>
-      <div
-        v-if="showMentionsFilterModal"
-        data-guard-protection-filter-modal="mentions"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px"
-        class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
-        @click.capture="swallowFilterBackdropGhostClickCapture"
-        @click.self="closeFilterModalBackdrop('mentions')"
-        @mousedown.self="swallowFilterBackdropGhostIfLocked"
-        @touchstart.self="swallowFilterBackdropGhostIfLocked"
-      >
-        <div
-          v-if="chat?.rule"
-          class="w-full max-w-md rounded-2xl border border-white/15 bg-gradient-to-b from-slate-900 to-slate-950 p-4 text-slate-100 shadow-2xl ring-1 ring-emerald-500/20"
+          class="w-full max-w-md max-h-[90vh] overflow-y-auto rounded-2xl border border-white/10 bg-[#101013] p-4 text-zinc-100 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.9)]"
           data-guard-protection-filter-modal-panel
           @click.stop
         >
           <div class="mb-3 flex items-center justify-between">
-            <h3 class="text-sm font-semibold text-white">{{ tt('protection.ui.mentions_modal_title') }}</h3>
-            <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-white/10" @click="showMentionsFilterModal = false">✕</button>
+            <h3 class="text-sm font-semibold text-white">{{ tt('protection.channel_posts_modal.title') }}</h3>
+            <button type="button" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/10" @click="showChannelPostsFilterModal = false">✕</button>
           </div>
-          <p class="mb-3 text-[11px] text-slate-400">
-            {{ tt('protection.ui.mentions_modal_body') }}
-          </p>
-          <div class="grid grid-cols-2 gap-2">
-            <button
-              v-for="opt in policyOptions"
-              :key="`men-${opt.value}`"
-              type="button"
-              :class="policyButtonClass(chat.rule.filter_mentions ? 'forbid' : 'allow', opt.value)"
-              class="touch-manipulation rounded-xl px-2.5 py-2.5 text-xs font-medium"
-              @click="updateRule({ filter_mentions: opt.value === 'forbid' })"
+          <p class="mb-3 text-[12px] leading-snug text-zinc-400">{{ tt('protection.ui.channel_posts_modal_hint') }}</p>
+          <ul class="space-y-2">
+            <li
+              v-for="kind in CHANNEL_POST_FILTER_KINDS"
+              :key="kind.field"
+              class="flex items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-2.5"
             >
-              {{ opt.label }}
-            </button>
+              <div class="flex min-w-0 flex-1 items-center gap-2.5">
+                <span class="text-lg leading-none">{{ kind.icon }}</span>
+                <div class="flex min-w-0 flex-col">
+                  <span class="truncate text-[13px] font-medium text-white">{{ tt(`protection.ui.channel_post_kinds.${kind.key}`) }}</span>
+                  <span class="truncate text-[11px] text-zinc-500">{{ tt(`protection.ui.channel_post_kinds_hint.${kind.key}`) }}</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                :aria-checked="!!chat.rule[kind.field]"
+                class="relative h-[31px] w-[51px] shrink-0 rounded-full border transition duration-200"
+                :class="iosSwitchClass(!!chat.rule[kind.field])"
+                @click="toggleChannelPostKind(kind.field)"
+              >
+                <span
+                  class="absolute left-[3px] top-1/2 h-[25px] w-[25px] rounded-full bg-white shadow-md transition duration-200"
+                  :style="{ transform: chat.rule[kind.field] ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }"
+                />
+              </button>
+            </li>
+          </ul>
+          <div class="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-2.5">
+            <p class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ tt('protection.channel_posts_modal.reaction_label') }}</p>
+            <div class="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                class="rounded-lg px-2.5 py-2 text-xs font-semibold"
+                :class="String(chat.rule.filter_channel_posts_action || 'delete') === 'delete' ? 'guard-green-soft text-slate-900' : protToggleOff"
+                @click="updateRule({ filter_channel_posts_action: 'delete' })"
+              >
+                {{ tt('protection.channel_posts_modal.action_delete') }}
+              </button>
+              <button
+                type="button"
+                class="rounded-lg px-2.5 py-2 text-xs font-semibold"
+                :class="String(chat.rule.filter_channel_posts_action || 'delete') === 'ban' ? 'bg-gradient-to-r from-rose-500 to-red-600 text-white shadow-[0_8px_20px_-10px_rgba(239,68,68,0.75)]' : protToggleOff"
+                @click="updateRule({ filter_channel_posts_action: 'ban' })"
+              >
+                {{ tt('protection.channel_posts_modal.action_delete_ban') }}
+              </button>
+            </div>
+          </div>
+          <div class="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-2.5">
+            <p class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
+              {{ tt('protection.channel_posts_modal.trusted_senders_title') }}
+              <span class="font-normal normal-case text-zinc-500">
+                ({{ (chat.whitelist_sender_chats || []).length }})
+              </span>
+            </p>
+            <div class="mb-2 flex gap-2">
+              <input
+                v-model="newWhitelistSenderChat"
+                type="text"
+                :placeholder="tt('protection.channel_posts_modal.trusted_placeholder')"
+                class="min-w-0 flex-1 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-2 text-xs text-white placeholder:text-zinc-500 focus:border-white/20 focus:outline-none"
+                :disabled="whitelistLoading"
+                @keydown.enter.prevent="addWhitelistSenderChat()"
+              />
+              <button
+                type="button"
+                class="link-glass-add-btn shrink-0"
+                :disabled="whitelistLoading || !(newWhitelistSenderChat || '').trim()"
+                @click="addWhitelistSenderChat()"
+              >
+                +
+              </button>
+            </div>
+            <ul class="max-h-36 space-y-1 overflow-y-auto pr-1">
+              <li
+                v-for="u in (chat.whitelist_sender_chats || [])"
+                :key="`wl-sc-${u}`"
+                class="flex items-center justify-between rounded-lg bg-white/[0.03] px-2 py-1.5 text-[11px]"
+              >
+                <span class="font-mono text-zinc-200">@{{ String(u || '').replace(/^@+/, '') }}</span>
+                <button
+                  type="button"
+                  class="text-rose-300 hover:text-rose-200"
+                  :disabled="whitelistLoading"
+                  @click="removeWhitelistSenderChat(u)"
+                >
+                  {{ tt('protection.links_modal.list_remove') }}
+                </button>
+              </li>
+            </ul>
           </div>
         </div>
         <div
           v-else
-          class="mx-auto w-full max-w-sm rounded-2xl border border-white/15 bg-slate-900/95 p-8 text-center text-sm text-zinc-400 shadow-2xl"
+          class="mx-auto w-full max-w-md rounded-2xl border border-white/10 bg-[#101013] p-8 text-center text-sm text-zinc-400 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.9)]"
           role="status"
         >
           {{ tt('common.loading') }}
         </div>
       </div>
+      <!-- Mentions: Vue-модалка отключена. Активная модалка строится из mentionsVanillaModal.js (см. openProtectionFilterModal). -->
+      <div v-if="false" data-guard-protection-filter-modal="mentions" style="display:none" />
       <div
         v-if="showMediaFilterModal"
+        data-guard-protection-filter-modals-anchor
         data-guard-protection-filter-modal="media"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.78);padding:16px"
+        class="pointer-events-auto flex items-center justify-center p-4"
         @click.capture="swallowFilterBackdropGhostClickCapture"
         @click.self="closeFilterModalBackdrop('media')"
         @mousedown.self="swallowFilterBackdropGhostIfLocked"
@@ -6656,30 +7355,44 @@ const protCardIndigo =
       >
         <div
           v-if="chat?.rule"
-          class="w-full max-w-md rounded-2xl border border-white/15 bg-gradient-to-b from-slate-900 to-slate-950 p-4 text-slate-100 shadow-2xl ring-1 ring-amber-500/20"
+          class="w-full max-w-md max-h-[90vh] overflow-y-auto rounded-2xl border border-white/10 bg-[#101013] p-4 text-zinc-100 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.9)]"
           data-guard-protection-filter-modal-panel
           @click.stop
         >
           <div class="mb-3 flex items-center justify-between">
             <h3 class="text-sm font-semibold text-white">{{ tt('protection.ui.media_modal_title') }}</h3>
-            <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-white/10" @click="showMediaFilterModal = false">✕</button>
+            <button type="button" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/10" @click="showMediaFilterModal = false">✕</button>
           </div>
-          <div class="grid grid-cols-2 gap-2">
-            <button
-              v-for="opt in policyOptions"
-              :key="`med-${opt.value}`"
-              type="button"
-              :class="policyButtonClass(chat.rule.filter_media_mode, opt.value)"
-              class="rounded-xl px-2.5 py-2.5 text-xs font-medium"
-              @click="updateRule({ filter_media_mode: opt.value })"
+          <p class="mb-3 text-[12px] leading-snug text-zinc-400">{{ tt('protection.ui.media_modal_hint') }}</p>
+          <ul class="space-y-2">
+            <li
+              v-for="kind in MEDIA_FILTER_KINDS"
+              :key="kind.field"
+              class="flex items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-2.5"
             >
-              {{ opt.label }}
-            </button>
-          </div>
+              <div class="flex min-w-0 flex-1 items-center gap-2.5">
+                <span class="text-lg leading-none">{{ kind.icon }}</span>
+                <span class="truncate text-[13px] font-medium text-white">{{ tt(`protection.ui.media_kinds.${kind.key}`) }}</span>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                :aria-checked="!!chat.rule[kind.field]"
+                class="relative h-[31px] w-[51px] shrink-0 rounded-full border transition duration-200"
+                :class="iosSwitchClass(!!chat.rule[kind.field])"
+                @click="toggleMediaKind(kind.field)"
+              >
+                <span
+                  class="absolute left-[3px] top-1/2 h-[25px] w-[25px] rounded-full bg-white shadow-md transition duration-200"
+                  :style="{ transform: chat.rule[kind.field] ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }"
+                />
+              </button>
+            </li>
+          </ul>
         </div>
         <div
           v-else
-          class="mx-auto w-full max-w-sm rounded-2xl border border-white/15 bg-slate-900/95 p-8 text-center text-sm text-zinc-400 shadow-2xl"
+          class="mx-auto w-full max-w-md rounded-2xl border border-white/10 bg-[#101013] p-8 text-center text-sm text-zinc-400 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.9)]"
           role="status"
         >
           {{ tt('common.loading') }}
@@ -6687,8 +7400,10 @@ const protCardIndigo =
       </div>
       <div
         v-if="showButtonsFilterModal"
+        data-guard-protection-filter-modals-anchor
         data-guard-protection-filter-modal="buttons"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.78);padding:16px"
+        class="pointer-events-auto flex items-center justify-center p-4"
         @click.capture="swallowFilterBackdropGhostClickCapture"
         @click.self="closeFilterModalBackdrop('buttons')"
         @mousedown.self="swallowFilterBackdropGhostIfLocked"
@@ -6696,33 +7411,90 @@ const protCardIndigo =
       >
         <div
           v-if="chat?.rule"
-          class="w-full max-w-md rounded-2xl border border-white/15 bg-gradient-to-b from-slate-900 to-slate-950 p-4 text-slate-100 shadow-2xl ring-1 ring-emerald-500/20"
+          class="w-full max-w-md max-h-[90vh] overflow-y-auto rounded-2xl border border-white/10 bg-[#101013] p-4 text-zinc-100 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.9)]"
           data-guard-protection-filter-modal-panel
           @click.stop
         >
           <div class="mb-3 flex items-center justify-between">
             <h3 class="text-sm font-semibold text-white">{{ tt('protection.ui.buttons_modal_title') }}</h3>
-            <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-white/10" @click="showButtonsFilterModal = false">✕</button>
+            <button type="button" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/10" @click="showButtonsFilterModal = false">✕</button>
           </div>
-          <p class="mb-3 text-[11px] text-slate-400">
-            {{ tt('protection.ui.buttons_modal_body') }}
-          </p>
-          <div class="grid grid-cols-2 gap-2">
-            <button
-              v-for="opt in policyOptions"
-              :key="`btn-${opt.value}`"
-              type="button"
-              :class="policyButtonClass(chat.rule.filter_buttons_mode, opt.value)"
-              class="touch-manipulation rounded-xl px-2.5 py-2.5 text-xs font-medium"
-              @click="updateRule({ filter_buttons_mode: opt.value })"
+          <p class="mb-3 text-[12px] leading-snug text-zinc-400">{{ tt('protection.ui.buttons_modal_hint') }}</p>
+          <ul class="space-y-2">
+            <li
+              v-for="kind in BUTTON_FILTER_KINDS"
+              :key="kind.field"
+              class="flex items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-2.5"
             >
-              {{ opt.label }}
-            </button>
-          </div>
+              <div class="flex min-w-0 flex-1 items-center gap-2.5">
+                <span class="text-lg leading-none">{{ kind.icon }}</span>
+                <div class="flex min-w-0 flex-col">
+                  <span class="truncate text-[13px] font-medium text-white">{{ tt(`protection.ui.button_kinds.${kind.key}`) }}</span>
+                  <span class="truncate text-[11px] text-zinc-500">{{ tt(`protection.ui.button_kinds_hint.${kind.key}`) }}</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                :aria-checked="!!chat.rule[kind.field]"
+                class="relative h-[31px] w-[51px] shrink-0 rounded-full border transition duration-200"
+                :class="iosSwitchClass(!!chat.rule[kind.field])"
+                @click="toggleButtonKind(kind.field)"
+              >
+                <span
+                  class="absolute left-[3px] top-1/2 h-[25px] w-[25px] rounded-full bg-white shadow-md transition duration-200"
+                  :style="{ transform: chat.rule[kind.field] ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }"
+                />
+              </button>
+            </li>
+            <li class="rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-2.5">
+              <div class="flex items-center justify-between gap-3">
+                <div class="flex min-w-0 flex-1 items-center gap-2.5">
+                  <span class="text-lg leading-none">📊</span>
+                  <div class="flex min-w-0 flex-col">
+                    <span class="truncate text-[13px] font-medium text-white">{{ tt('protection.ui.button_kinds.mass') }}</span>
+                    <span class="truncate text-[11px] text-zinc-500">{{ tt('protection.ui.button_kinds_hint.mass') }}</span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  :aria-checked="!!chat.rule.filter_button_mass_enabled"
+                  class="relative h-[31px] w-[51px] shrink-0 rounded-full border transition duration-200"
+                  :class="iosSwitchClass(!!chat.rule.filter_button_mass_enabled)"
+                  @click="toggleButtonMassEnabled()"
+                >
+                  <span
+                    class="absolute left-[3px] top-1/2 h-[25px] w-[25px] rounded-full bg-white shadow-md transition duration-200"
+                    :style="{ transform: chat.rule.filter_button_mass_enabled ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }"
+                  />
+                </button>
+              </div>
+              <div v-if="chat.rule.filter_button_mass_enabled" class="mt-3">
+                <div class="mb-1 flex items-center justify-between">
+                  <span class="text-[11px] text-zinc-400">{{ tt('protection.ui.button_mass_threshold_label') }}</span>
+                  <span class="text-[12px] font-semibold text-white">{{ chat.rule.filter_button_mass_threshold || 5 }}</span>
+                </div>
+                <input
+                  type="range"
+                  min="3"
+                  max="20"
+                  step="1"
+                  :value="chat.rule.filter_button_mass_threshold || 5"
+                  class="w-full accent-emerald-400"
+                  @input="setButtonMassThreshold($event.target.value)"
+                />
+                <div class="mt-1 flex justify-between text-[10px] text-zinc-500">
+                  <span>3</span>
+                  <span>20</span>
+                </div>
+              </div>
+            </li>
+          </ul>
         </div>
         <div
           v-else
-          class="mx-auto w-full max-w-sm rounded-2xl border border-white/15 bg-slate-900/95 p-8 text-center text-sm text-zinc-400 shadow-2xl"
+          class="mx-auto w-full max-w-md rounded-2xl border border-white/10 bg-[#101013] p-8 text-center text-sm text-zinc-400 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.9)]"
           role="status"
         >
           {{ tt('common.loading') }}
@@ -7231,37 +8003,55 @@ const protCardIndigo =
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  height: 1.5rem;
-  min-width: 1.5rem;
-  padding: 0 0.4rem;
+  height: 1.25rem;
+  min-width: 1.25rem;
+  padding: 0 0.3rem;
   border-radius: 9999px;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 700;
   line-height: 1;
-  color: #e2e8f0;
-  border: 1px solid rgba(71, 85, 105, 0.55);
-  background: linear-gradient(160deg, rgba(30, 41, 59, 0.95) 0%, rgba(15, 23, 42, 0.98) 100%);
-  box-shadow:
-    0 3px 12px -4px rgba(0, 0, 0, 0.5),
-    inset 0 1px 0 rgba(255, 255, 255, 0.1);
-  -webkit-backdrop-filter: blur(8px);
-  backdrop-filter: blur(8px);
+  color: #cbd5e1;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
   transition:
     border-color 0.15s ease,
-    box-shadow 0.15s ease,
-    transform 0.12s ease;
+    background 0.15s ease;
 }
 .link-glass-info-btn:hover {
-  border-color: rgba(148, 163, 184, 0.45);
-  transform: scale(1.03);
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.08);
 }
 .link-glass-info-btn--active {
-  border-color: rgba(52, 211, 153, 0.45);
+  border-color: rgba(52, 211, 153, 0.5);
   color: #ecfdf5;
-  background: linear-gradient(160deg, rgba(5, 150, 105, 0.45) 0%, rgba(15, 23, 42, 0.95) 100%);
-  box-shadow:
-    0 0 16px -5px rgba(52, 211, 153, 0.35),
-    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  background: rgba(16, 185, 129, 0.18);
+}
+
+.link-glass-add-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 2rem;
+  min-width: 2rem;
+  padding: 0 0.55rem;
+  border-radius: 0.5rem;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+.link-glass-add-btn:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.1);
+}
+.link-glass-add-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .link-liquid-hint {

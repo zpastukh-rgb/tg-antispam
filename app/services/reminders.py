@@ -33,6 +33,12 @@ from app.services.user_service import (
     TARIFF_CHAT_LIMITS,
     TARIFF_GROUP_LIMITS,
     TARIFF_CHANNEL_LIMITS,
+    TRIAL_DAYS,
+    TRIAL_WINDOW_DAYS,
+    TRIAL_SUBSCRIPTION_SOURCE,
+    is_trial_active,
+    trial_active_remaining_days,
+    trial_window_remaining_days,
 )
 from app.services.chat_limit_enforcer import enforce_owner_active_chat_limit
 from app.db.models import Tariff
@@ -43,6 +49,7 @@ from app.texts.guardian_billing import PREMIUM_PLANS
 from app.texts.guard_group_messages import guardian_periodic_texts
 from app.i18n import DEFAULT_LOCALE, normalize_locale, t
 from app.services.chat_owner_locale import owner_locale_for_chat, user_locale
+from app.services.chat_owner_premium import chat_owner_has_miniapp_premium
 from app.services.payments_yookassa import (
     autorenew_window_hours,
     run_yookassa_autorenew_batch,
@@ -520,13 +527,27 @@ async def send_trial_warning_preview_guard(
         await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
 
 
-async def _run_reminders_no_group(bot, session: AsyncSession, now: datetime, tpl: dict[str, AdminMessageTemplate]) -> None:
-    """Напоминания: пользователь сделал /start, но не подключил ни одной группы."""
+async def _run_reminders_no_group(
+    bot,
+    session: AsyncSession,
+    now: datetime,
+    tpl: dict[str, AdminMessageTemplate],
+    *,
+    skip_user_ids: set[int] | None = None,
+) -> None:
+    """Напоминания: пользователь сделал /start, но не подключил ни одной группы.
+
+    `skip_user_ids` — кому уже отправили trial-DM в этой итерации: их пропускаем,
+    чтобы не слать два письма в одни сутки.
+    """
+    skip_user_ids = skip_user_ids or set()
     res = await session.execute(
         select(User).where(User.first_start_at.isnot(None)).where(User.reminder_stage < 4)
     )
     users = list(res.scalars().all())
     for user in users:
+        if int(getattr(user, "telegram_id", 0) or 0) in skip_user_ids:
+            continue
         try:
             loc = normalize_locale(getattr(user, "language", None))
             started_at = user.first_start_at
@@ -588,14 +609,27 @@ async def _run_reminders_no_group(bot, session: AsyncSession, now: datetime, tpl
             await session.rollback()
 
 
-async def _run_reminders_reports_chat(bot, session: AsyncSession, now: datetime, tpl: dict[str, AdminMessageTemplate]) -> None:
-    """Напоминание: группа подключена, но чат отчётов не выбран (log_chat_id = null)."""
-    # Пользователи, у которых есть хотя бы один защищаемый чат без log_chat_id
+async def _run_reminders_reports_chat(
+    bot,
+    session: AsyncSession,
+    now: datetime,
+    tpl: dict[str, AdminMessageTemplate],
+    *,
+    skip_user_ids: set[int] | None = None,
+) -> None:
+    """Напоминание: группа подключена, но чат отчётов не выбран (log_chat_id = null).
+
+    `skip_user_ids` — кому в этой итерации уже отправили trial-DM или no-group-DM:
+    пропускаем, чтобы не плодить два письма в одни сутки.
+    """
+    skip_user_ids = skip_user_ids or set()
     res = await session.execute(
         select(User).where(User.reports_reminder_sent_at.is_(None)).where(User.first_start_at.isnot(None))
     )
     users = list(res.scalars().all())
     for user in users:
+        if int(getattr(user, "telegram_id", 0) or 0) in skip_user_ids:
+            continue
         try:
             loc = normalize_locale(getattr(user, "language", None))
             count = await count_protected_chats(session, user.telegram_id)
@@ -635,6 +669,147 @@ async def _run_reminders_reports_chat(bot, session: AsyncSession, now: datetime,
         except Exception as e:
             logger.warning("reminder reports user=%s: %s", getattr(user, "telegram_id"), e)
             await session.rollback()
+
+
+# === Premium-триал DM-серии ====================================================
+
+def _select_pre_trial_targets(users, now: datetime):
+    """Pure: какие юзеры (и какой "оставшийся день N") должны получить pre-trial DM.
+
+    Pre-trial — юзер ещё не активировал триал, но окно ещё открыто.
+    Шлём не каждый день после /start, а только при N=1..9 (день N=10 = день первого
+    /start — пропускаем, чтобы не заваливать сразу). Дедуп через
+    `user.trial_reminder_last_day_sent`: положительное значение хранит последний
+    отправленный pre-trial-день.
+    """
+    for u in users:
+        if bool(getattr(u, "trial_used", False)):
+            continue
+        if getattr(u, "first_start_at", None) is None:
+            continue
+        src = (getattr(u, "subscription_source", None) or "").strip().lower()
+        if src in ("payment", "promo"):
+            continue
+        n = trial_window_remaining_days(u, now)
+        if n <= 0 or n >= TRIAL_WINDOW_DAYS:
+            continue
+        if int(getattr(u, "trial_reminder_last_day_sent", 0) or 0) == n:
+            continue
+        yield u, n
+
+
+def _select_in_trial_targets(users, now: datetime):
+    """Pure: какие юзеры (и сколько дней N) должны получить in-trial DM.
+
+    In-trial — триал активирован и сейчас идёт. Шлём при N=1..9; день активации
+    (N=TRIAL_DAYS) пропускаем — юзер только что активировал, не заваливаем.
+    Дедуп через `user.trial_reminder_last_day_sent` отрицательным значением
+    (-N), чтобы не пересекаться с pre-trial-нумерацией.
+    """
+    for u in users:
+        if not is_trial_active(u, now):
+            continue
+        n = trial_active_remaining_days(u, now)
+        if n <= 0 or n >= TRIAL_DAYS:
+            continue
+        if int(getattr(u, "trial_reminder_last_day_sent", 0) or 0) == -n:
+            continue
+        yield u, n
+
+
+async def _run_reminders_pre_trial(bot, session: AsyncSession, now: datetime) -> set[int]:
+    """Pre-trial DM: «осталось N дней попробовать Premium бесплатно».
+
+    Возвращает множество telegram_id, которым уже отправили в этой итерации —
+    используется для гармонизации с серией «нет группы» / «нет чата отчётов»
+    (чтобы не плодить два письма в одни сутки).
+    """
+    sent: set[int] = set()
+    res = await session.execute(
+        select(User)
+        .where(User.first_start_at.isnot(None))
+        .where(User.trial_used.is_(False))
+    )
+    users = list(res.scalars().all())
+    for user, n in _select_pre_trial_targets(users, now):
+        try:
+            loc = normalize_locale(getattr(user, "language", None))
+            text_body = _trial_window_text(loc, n)
+            from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+            trial_link = await _startapp_link_for_bot(bot, "trial")
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text=t(loc, "reminders.btn_trial_activate"), url=trial_link),
+            ]])
+            await bot.send_message(
+                user.telegram_id,
+                text_body,
+                parse_mode=None,
+                reply_markup=kb,
+                disable_web_page_preview=True,
+            )
+            user.trial_reminder_last_day_sent = int(n)
+            await session.commit()
+            sent.add(int(user.telegram_id))
+        except Exception as e:
+            _log_expected_telegram_user_block(logger, "reminder pre_trial", getattr(user, "telegram_id"), e)
+            await session.rollback()
+    return sent
+
+
+async def _run_reminders_in_trial(bot, session: AsyncSession, now: datetime) -> set[int]:
+    """In-trial DM: «осталось N дней Premium-триала — закрепи защиту»."""
+    sent: set[int] = set()
+    res = await session.execute(
+        select(User)
+        .where(User.trial_used.is_(True))
+        .where(User.subscription_source == TRIAL_SUBSCRIPTION_SOURCE)
+        .where(User.subscription_until.isnot(None))
+        .where(User.subscription_until > now)
+    )
+    users = list(res.scalars().all())
+    for user, n in _select_in_trial_targets(users, now):
+        try:
+            loc = normalize_locale(getattr(user, "language", None))
+            text_body = _trial_active_text(loc, n)
+            from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+            billing_link = await _startapp_link_for_bot(bot, "billing")
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text=t(loc, "reminders.btn_trial_billing"), url=billing_link),
+            ]])
+            await bot.send_message(
+                user.telegram_id,
+                text_body,
+                parse_mode=None,
+                reply_markup=kb,
+                disable_web_page_preview=True,
+            )
+            user.trial_reminder_last_day_sent = -int(n)
+            await session.commit()
+            sent.add(int(user.telegram_id))
+        except Exception as e:
+            _log_expected_telegram_user_block(logger, "reminder in_trial", getattr(user, "telegram_id"), e)
+            await session.rollback()
+    return sent
+
+
+def _trial_window_text(loc: str, n: int) -> str:
+    """Текст pre-trial DM для дня N (1..9). Fallback на generic, если в i18n нет."""
+    key = f"reminders.trial_window_left.{n}"
+    specific = t(loc, key)
+    if specific and specific != key:
+        return specific
+    return t(loc, "reminders.trial_window_left.generic", n=n)
+
+
+def _trial_active_text(loc: str, n: int) -> str:
+    """Текст in-trial DM для дня N (1..9). Fallback на generic, если в i18n нет."""
+    key = f"reminders.trial_active_left.{n}"
+    specific = t(loc, key)
+    if specific and specific != key:
+        return specific
+    return t(loc, "reminders.trial_active_left.generic", n=n)
 
 
 async def _run_guardian_periodic_messages(bot, session: AsyncSession, now: datetime) -> None:
@@ -738,6 +913,8 @@ async def _run_auto_reports(bot, session: AsyncSession, now: datetime) -> None:
     )
     for row in res.all():
         chat_row, rule = row[0], row[1]
+        if not await chat_owner_has_miniapp_premium(session, int(chat_row.id)):
+            continue
         log_chat_id = chat_row.log_chat_id
         if not log_chat_id:
             continue
@@ -1417,12 +1594,28 @@ async def _run_autorenew_retries(bot, session: AsyncSession, now: datetime) -> N
 async def run_reminders_and_guardian(bot) -> None:
     """Запуск всех проверок: напоминания, Guard раз в 3 дня, автоотчёты раз в сутки."""
     now = datetime.now(timezone.utc)
+    # Premium-триал DM-серии идут ПЕРВЫМИ (приоритет in-trial > pre-trial), затем
+    # передаём множество получателей в no_group/reports, чтобы юзер не получил
+    # два письма в одни сутки.
+    trial_recipients: set[int] = set()
+    try:
+        async with await get_session() as session:
+            in_trial_sent = await _run_reminders_in_trial(bot, session, now)
+            trial_recipients |= in_trial_sent
+    except Exception as e:
+        logger.warning("reminders in_trial skipped: %s", e)
+    try:
+        async with await get_session() as session:
+            pre_trial_sent = await _run_reminders_pre_trial(bot, session, now)
+            trial_recipients |= pre_trial_sent
+    except Exception as e:
+        logger.warning("reminders pre_trial skipped: %s", e)
     async with await get_session() as session:
         tpl = await _load_message_templates(session)
-        await _run_reminders_no_group(bot, session, now, tpl)
+        await _run_reminders_no_group(bot, session, now, tpl, skip_user_ids=trial_recipients)
     async with await get_session() as session:
         tpl = await _load_message_templates(session)
-        await _run_reminders_reports_chat(bot, session, now, tpl)
+        await _run_reminders_reports_chat(bot, session, now, tpl, skip_user_ids=trial_recipients)
     try:
         n_charged = await run_yookassa_autorenew_batch(bot=bot, limit=50)
         if n_charged:

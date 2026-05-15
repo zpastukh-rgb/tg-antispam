@@ -1,6 +1,15 @@
 """Тексты публичных сообщений Guard в группах: публичные алерты и дежурная ротация.
 
-Локаль берётся из языка владельца чата (User.language). Версии ru / en.
+ВРЕМЕННАЯ ПОЛИТИКА (см. apps/texts/guard_group_messages.py):
+    Публичные сообщения в группах сейчас отправляются ВСЕГДА на русском, независимо
+    от языка интерфейса владельца. Это сделано осознанно: выбор языка в мини-приложении
+    переключает интерфейс панели/DM, а не язык, который видят все участники чата.
+    Поэтому ниже в `public_alert_pools()` и `guardian_periodic_texts()` параметр `locale`
+    принимается ради обратной совместимости вызывающего кода, но игнорируется.
+
+    EN-пулы оставлены и НЕ удалены — мультиязычность будет включена обратно позже,
+    когда определимся как именно её предоставлять (например, отдельная настройка чата
+    «Язык публичных сообщений», а не язык владельца).
 """
 
 from __future__ import annotations
@@ -229,15 +238,12 @@ GUARDIAN_PERIODIC_TEXTS_EN: Final[list[str]] = [
 ]
 
 
-def public_alert_pools(locale: str) -> dict[str, list[str]]:
-    from app.i18n import normalize_locale
+def public_alert_pools(locale: str) -> dict[str, list[str]]:  # noqa: ARG001
+    # Публичные сообщения в группе: всегда ru (см. модульный docstring).
+    # Параметр locale игнорируется намеренно.
+    return dict(_PUBLIC_ALERT_POOLS_RU)
 
-    loc = normalize_locale(locale)
-    return dict(_PUBLIC_ALERT_POOLS_EN if loc == "en" else _PUBLIC_ALERT_POOLS_RU)
 
-
-def guardian_periodic_texts(locale: str) -> list[str]:
-    from app.i18n import normalize_locale
-
-    loc = normalize_locale(locale)
-    return list(GUARDIAN_PERIODIC_TEXTS_EN if loc == "en" else GUARDIAN_PERIODIC_TEXTS_RU)
+def guardian_periodic_texts(locale: str) -> list[str]:  # noqa: ARG001
+    # Дежурная ротация в группу: всегда ru (см. модульный docstring).
+    return list(GUARDIAN_PERIODIC_TEXTS_RU)

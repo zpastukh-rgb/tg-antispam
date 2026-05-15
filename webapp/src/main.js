@@ -7,7 +7,39 @@ import App from './App.vue'
 import router from './router'
 import i18n from './i18n'
 import { installRouteTransitionLoader } from './composables/useRouteTransitionLoader.js'
+import { guardFilterChain } from './utils/guardDebugLog.js'
 import './styles.css'
+
+function errToObj(e) {
+  if (!e) return null
+  if (typeof e !== 'object') return { value: String(e) }
+  return {
+    name: e.name ?? null,
+    message: e.message ?? null,
+    stack: typeof e.stack === 'string' ? e.stack.slice(0, 800) : null,
+  }
+}
+
+try {
+  if (typeof window !== 'undefined') {
+    window.addEventListener('error', (ev) => {
+      guardFilterChain('GlobalError', 'window.error', {
+        message: ev?.message ?? null,
+        filename: ev?.filename ?? null,
+        lineno: ev?.lineno ?? null,
+        colno: ev?.colno ?? null,
+        error: errToObj(ev?.error),
+      })
+    })
+    window.addEventListener('unhandledrejection', (ev) => {
+      guardFilterChain('GlobalError', 'unhandledRejection', {
+        reason: errToObj(ev?.reason),
+      })
+    })
+  }
+} catch {
+  //
+}
 
 /** Если в отданном index.html нет узла — Vue Teleport молча не монтирует слот → пустой DOM и пустой foundKeys в зонде. */
 function ensureGuardTeleportRoot() {
@@ -48,6 +80,26 @@ app.use(i18n)
 
 app.config.errorHandler = (err, _instance, info) => {
   console.error('[Guard Vue]', err, info)
+  try {
+    guardFilterChain('VueError', 'app.errorHandler', {
+      info: String(info ?? ''),
+      error: errToObj(err),
+    })
+  } catch {
+    //
+  }
+}
+try {
+  app.config.warnHandler = (msg, _instance, trace) => {
+    if (typeof msg === 'string' && /linked|template|render|hydrat/i.test(msg)) {
+      guardFilterChain('VueError', 'app.warnHandler', {
+        message: msg,
+        trace: typeof trace === 'string' ? trace.slice(0, 400) : null,
+      })
+    }
+  }
+} catch {
+  //
 }
 
 try {

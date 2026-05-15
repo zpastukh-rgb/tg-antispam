@@ -6,11 +6,14 @@ import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import { openTelegramDeepLink } from '../utils/openTelegramDeepLink'
 import GuardBlueLoadingState from '../components/GuardBlueLoadingState.vue'
+import PremiumLockBadge from '../components/PremiumLockBadge.vue'
 import { useCabinetMode } from '../composables/useCabinetMode'
+import { usePremiumLock } from '../composables/usePremiumLock'
 
 const router = useRouter()
 const route = useRoute()
 const { cabinetMode, setCabinetMode } = useCabinetMode()
+const { openLock } = usePremiumLock()
 const { api, error, fetchSilent, hasInitData } = useApi()
 const { showToast } = useToast()
 const { t } = useI18n()
@@ -188,8 +191,7 @@ function goToExtendedStatsReports() {
     router.push({ path: '/admin', query: { tab: 'overview', open: 'stats_reports' } }).catch(() => {})
     return
   }
-  showToast(isEn.value ? 'Extended stats require Premium Guard' : 'Расширенная статистика — с Premium Guard')
-  router.push({ path: '/admin', query: { tab: 'overview', open: 'stats_reports' } }).catch(() => {})
+  openLock({ feature: 'stats_reports_extended', me: meProfile.value })
 }
 
 function goPremiumFromReports() {
@@ -297,12 +299,13 @@ function goPremiumFromReports() {
                 {{ isEn ? 'Per-chat and channel stats + extended reports.' : 'Статистика по чатам и каналам + расширенные отчёты.' }}
               </p>
             </div>
-            <span
+            <PremiumLockBadge
               v-if="!meProfile?.is_premium"
-              class="shrink-0 rounded-full border border-amber-500/35 bg-amber-500/12 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-200"
-            >
-              Premium
-            </span>
+              variant="pill"
+              size="xs"
+              interactive
+              @click="goToExtendedStatsReports"
+            />
           </div>
           <button
             type="button"

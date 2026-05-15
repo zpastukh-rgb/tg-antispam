@@ -55,12 +55,14 @@ from app.db.ensure_defaults import (
     ensure_autopost_campaigns_schema,
     ensure_admin_insights_schema,
     ensure_chat_manager_invites_schema,
+    ensure_chat_manager_actions_schema,
     ensure_spam_spike_notify_schema,
     ensure_payments_receipt_url_schema,
     ensure_users_subscription_source_schema,
     ensure_users_subscription_activated_at_schema,
     ensure_users_payment_binding_schema,
     ensure_users_yookassa_autorenew_columns,
+    ensure_users_trial_schema,
     ensure_users_group_channel_limits_schema,
     ensure_chat_spike_alerts_schema,
     ensure_rules_spam_spike_columns,
@@ -193,12 +195,14 @@ async def _run_api_startup_ensures(app: FastAPI) -> None:
         await ensure_autopost_campaigns_schema(engine)
         await ensure_admin_insights_schema(engine)
         await ensure_chat_manager_invites_schema(engine)
+        await ensure_chat_manager_actions_schema(engine)
         await ensure_spam_spike_notify_schema(engine)
         await ensure_payments_receipt_url_schema(engine)
         await ensure_users_subscription_source_schema(engine)
         await ensure_users_subscription_activated_at_schema(engine)
         await ensure_users_payment_binding_schema(engine)
         await ensure_users_yookassa_autorenew_columns(engine)
+        await ensure_users_trial_schema(engine)
         await ensure_users_group_channel_limits_schema(engine)
         await ensure_chat_spike_alerts_schema(engine)
         await ensure_rules_spam_spike_columns(engine)

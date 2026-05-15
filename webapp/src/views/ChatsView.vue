@@ -9,7 +9,9 @@ import { useToast } from '../composables/useToast'
 import ChannelPostRulesModal from '../components/ChannelPostRulesModal.vue'
 import SecurityPinGateModal from '../components/SecurityPinGateModal.vue'
 import GuardTeleport from '../components/GuardTeleport.vue'
+import PremiumLockBadge from '../components/PremiumLockBadge.vue'
 import { useSecurityPinGate } from '../composables/useSecurityPinGate'
+import { usePremiumLock } from '../composables/usePremiumLock'
 import { shouldAskPinForAction } from '../utils/settingsSecurity'
 
 const { t } = useI18n()
@@ -20,6 +22,8 @@ const route = useRoute()
 const { api, error, fetchSilent, hasInitData } = useApi()
 const { showToast } = useToast()
 const { setCabinetMode } = useCabinetMode()
+const { openLock } = usePremiumLock()
+const lastMeForPremiumLock = ref(null)
 /** Только фиолетовый ADM: ?cabinet=delegated. Обычный список чатов не зависит от localStorage — всегда свои + делегированные. */
 const delegatedChatsOnly = computed(() => String(route.query.cabinet || '').toLowerCase() === 'delegated')
 const focusThreatOnly = computed(() => String(route.query.threat || '') === '1')
@@ -39,6 +43,21 @@ const managersStats = ref(null)
 const addManagerValue = ref('')
 const addManagerPerms = ref({ protection: false, broadcast: false, reports: false, stats: false, first_post_settings: false })
 const addManagerPermsOpen = ref(false)
+// Если выбрано — отправляем флаг as_invite_link=true. Бэк создаст pending-инвайт
+// с токеном даже если юзер ещё не общался с ботом, и вернёт invite_link.
+const addManagerAsLink = ref(false)
+
+// Журнал действий (Фаза 3). Открывается из шапки модалки админов.
+// При клике на бейдж «N за 7д» у конкретного делегата — открывается с фильтром
+// по этому user_id (см. openAuditModal(uid)).
+const auditModalOpen = ref(false)
+const auditLoading = ref(false)
+const auditFilterUserId = ref(null)  // null = весь чат, число = только этот делегат
+const _AUDIT_PAGE_SIZE = 25
+const auditItems = ref([])
+const auditTotal = ref(0)
+const auditOffset = ref(0)
+const auditUserActivity = ref(null) // { last_action_at, actions_7d, actions_30d } для single-user view
 
 const isManagersChannel = computed(
   () => String(managersData.value?.chat_kind || managersModalChat.value?.chat_kind || 'group').toLowerCase() === 'channel'
@@ -55,7 +74,33 @@ function _resetAddManagerForm() {
   addManagerValue.value = ''
   addManagerPerms.value = { protection: false, broadcast: false, reports: false, stats: false, first_post_settings: false }
   addManagerPermsOpen.value = false
+  addManagerAsLink.value = false
 }
+
+// Мета каждого права: иконка + цветовая палитра бейджа.
+// Цвет важен визуально, чтобы быстро понимать на какие зоны открыт доступ.
+const MANAGER_PERM_META = Object.freeze({
+  protection: {
+    icon: '🛡',
+    badge: 'bg-emerald-500/15 text-emerald-200',
+    removeBtn: 'bg-emerald-900/40 text-emerald-100',
+  },
+  broadcast: {
+    icon: '📢',
+    badge: 'bg-violet-500/15 text-violet-200',
+    removeBtn: 'bg-violet-900/40 text-violet-100',
+  },
+  reports: {
+    icon: '📋',
+    badge: 'bg-cyan-500/15 text-cyan-200',
+    removeBtn: 'bg-cyan-900/40 text-cyan-100',
+  },
+  first_post_settings: {
+    icon: '⭐',
+    badge: 'bg-amber-500/15 text-amber-200',
+    removeBtn: 'bg-amber-900/40 text-amber-100',
+  },
+})
 
 function managerPermEntries(perms) {
   const p = perms || {}
@@ -65,6 +110,129 @@ function managerPermEntries(perms) {
   if (p.reports || p.stats) out.push({ key: 'reports', label: t('chats.perms.reports') })
   if (p.first_post_settings) out.push({ key: 'first_post_settings', label: t('chats.perms.first_post_settings') })
   return out
+}
+
+// Какие права ещё НЕ выданы делегату. Зависит от типа чата:
+// для group релевантны protection/broadcast/reports;
+// для channel — broadcast/first_post_settings (см. API normalize в routes.py).
+function managerPermMissing(perms) {
+  const p = perms || {}
+  const isChannel = isManagersChannel.value
+  const all = isChannel
+    ? ['broadcast', 'first_post_settings']
+    : ['protection', 'broadcast', 'reports']
+  const out = []
+  for (const key of all) {
+    const has = key === 'reports' ? !!(p.reports || p.stats) : !!p[key]
+    if (!has) out.push({ key, label: t(`chats.perms.${key}`) })
+  }
+  return out
+}
+
+function managerPermMeta(key) {
+  return MANAGER_PERM_META[key] || {
+    icon: '•',
+    badge: 'bg-slate-500/15 text-slate-200',
+    removeBtn: 'bg-slate-900/40 text-slate-200',
+  }
+}
+
+// Цветной аватар-инициал. Цвет детерминирован user_id (хеш в палитру).
+const _AVATAR_PALETTE = Object.freeze([
+  'from-rose-500/45 to-pink-600/45',
+  'from-orange-500/45 to-amber-600/45',
+  'from-yellow-500/45 to-lime-600/45',
+  'from-emerald-500/45 to-teal-600/45',
+  'from-cyan-500/45 to-sky-600/45',
+  'from-blue-500/45 to-indigo-600/45',
+  'from-violet-500/45 to-purple-600/45',
+  'from-fuchsia-500/45 to-pink-500/45',
+])
+
+function managerAvatarMeta(m) {
+  if (!m) return { initials: '?', gradient: _AVATAR_PALETTE[0] }
+  const name = String(m.first_name || m.username || '').trim()
+  let initials = ''
+  if (name) {
+    const parts = name.split(/\s+/).filter(Boolean)
+    initials = parts.slice(0, 2).map((p) => p[0]?.toUpperCase() || '').join('')
+  }
+  if (!initials) {
+    const u = String(m.username || '').replace(/^@+/, '')
+    initials = u ? u[0].toUpperCase() : '#'
+  }
+  const idx = Math.abs(Number(m.user_id || 0)) % _AVATAR_PALETTE.length
+  return { initials: initials.slice(0, 2), gradient: _AVATAR_PALETTE[idx] }
+}
+
+// Пресеты прав — один клик, и все галки расставлены.
+// Не показываются для канальной модалки (там всего 2 права).
+const MANAGER_PERM_PRESETS = Object.freeze([
+  {
+    key: 'moderator',
+    icon: '🛡',
+    perms: { protection: true, broadcast: false, reports: false, stats: false },
+  },
+  {
+    key: 'marketer',
+    icon: '📢',
+    perms: { protection: false, broadcast: true, reports: true, stats: true },
+  },
+  {
+    key: 'auditor',
+    icon: '👁',
+    perms: { protection: false, broadcast: false, reports: true, stats: true },
+  },
+  {
+    key: 'co_owner',
+    icon: '👑',
+    perms: { protection: true, broadcast: true, reports: true, stats: true },
+  },
+])
+
+function applyManagerPreset(preset) {
+  if (!preset) return
+  // Сохраняем first_post_settings без изменений (это канальное право, не входит в группы).
+  const cur = addManagerPerms.value || {}
+  addManagerPerms.value = {
+    protection: !!preset.perms.protection,
+    broadcast: !!preset.perms.broadcast,
+    reports: !!preset.perms.reports,
+    stats: !!preset.perms.stats,
+    first_post_settings: !!cur.first_post_settings,
+  }
+}
+
+function isPermPresetActive(preset) {
+  const p = addManagerPerms.value || {}
+  return (
+    !!p.protection === !!preset.perms.protection
+    && !!p.broadcast === !!preset.perms.broadcast
+    && !!p.reports === !!preset.perms.reports
+    && !!p.stats === !!preset.perms.stats
+  )
+}
+
+// Двухэтапное удаление: храним ID кандидата + список его прав.
+const removeManagerConfirm = ref(null) // { user_id, name, perms: ['protection', ...] } | null
+function askRemoveManager(manager) {
+  if (!manager) return
+  const lostPerms = managerPermEntries(manager.permissions || {}).map((p) => p.label)
+  removeManagerConfirm.value = {
+    user_id: manager.user_id,
+    name: manager.first_name || (manager.username ? '@' + manager.username : String(manager.user_id || '—')),
+    perms: lostPerms,
+  }
+}
+function cancelRemoveManager() {
+  removeManagerConfirm.value = null
+}
+async function confirmRemoveManager() {
+  const target = removeManagerConfirm.value
+  removeManagerConfirm.value = null
+  if (target?.user_id) {
+    await removeManager(target.user_id)
+  }
 }
 
 function extractTelegramIdFromInitUnsafe() {
@@ -162,11 +330,18 @@ async function openChannelPostRules(chat) {
   channelPostRulesOpen.value = true
 }
 
+// Любая модалка «Чаты» (info-окна + «Админы чата» с её под-модалками) — должна
+// блокировать прокрутку фоновой страницы, иначе пользователь промахивается мимо
+// модалки и листает список чатов. См. также onUnmounted-сброс html/body.style.
 const chatsInfoModalOpen = computed(
   () =>
     showCabinetInfoModal.value ||
     showDelegatedInfoModal.value ||
-    showManagersInfoModal.value,
+    showManagersInfoModal.value ||
+    !!managersModalChat.value ||
+    auditModalOpen.value ||
+    addManagerPermsOpen.value ||
+    !!removeManagerConfirm.value,
 )
 
 watch(
@@ -217,6 +392,7 @@ async function loadChats() {
     ])
     const rows = data.chats || []
     isPremium.value = !!me?.is_premium
+    lastMeForPremiumLock.value = me || null
     const fromMe = Number(me?.telegram_id || 0)
     viewerTelegramId.value = fromMe > 0 ? fromMe : extractTelegramIdFromInitUnsafe()
     chats.value = delegatedChatsOnly.value
@@ -351,10 +527,12 @@ function goToReports(chatId) {
   router.push({ path: '/admin', query: { tab: 'overview', open: 'stats_reports' } })
 }
 
-function goToPremiumBilling() {
-  const q = { ...route.query, section: 'billing' }
-  delete q.scroll
-  void router.push({ path: '/', query: q })
+function onChatActivationPremiumClick() {
+  openLock({ feature: 'chat_activation_limit', me: lastMeForPremiumLock.value })
+}
+
+function onManagersPremiumClick() {
+  openLock({ feature: 'chat_managers', me: lastMeForPremiumLock.value })
 }
 
 async function activatePendingFromEmpty() {
@@ -544,6 +722,184 @@ function closeManagers() {
   _resetAddManagerForm()
 }
 
+async function _tryWriteClipboard(text) {
+  if (!text) return false
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch {
+    // продолжаем к fallback
+  }
+  try {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(ta)
+    return ok
+  } catch {
+    return false
+  }
+}
+
+async function copyInviteLink(inv) {
+  const link = inv?.invite_link || ''
+  if (!link) return
+  const ok = await _tryWriteClipboard(link)
+  showToast(ok ? t('chats.managers.invite_link_copied') : t('chats.managers.invite_link_copy_failed'))
+}
+
+function managerActivityBadgeClass(m) {
+  // Тонировка бейджа по «свежести» активности:
+  // - emerald  — делал что-то за 7 дней;
+  // - zinc     — ничего не делал за 7 дней, но запись существует;
+  // - rose     — добавлен >7 дней назад и ноль действий за 30 дней (потенциальный «мертвый» делегат).
+  const n7 = Number(m?.actions_7d || 0)
+  const n30 = Number(m?.actions_30d || 0)
+  if (n7 > 0) return 'bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25'
+  if (n30 === 0) {
+    const created = m?.created_at ? Date.parse(m.created_at) : NaN
+    if (!Number.isNaN(created) && Date.now() - created > 7 * 24 * 60 * 60 * 1000) {
+      return 'bg-rose-500/15 text-rose-200 hover:bg-rose-500/25'
+    }
+  }
+  return 'bg-white/[0.04] text-zinc-300 hover:bg-white/[0.08]'
+}
+
+function managerActivityTitle(m) {
+  const last = m?.last_action_at
+  const n30 = Number(m?.actions_30d || 0)
+  const parts = []
+  parts.push(t('chats.managers.actions_30d', { n: n30 }))
+  if (last) parts.push(t('chats.managers.last_action_at', { ts: formatLocalDate(last) }))
+  else parts.push(t('chats.managers.never_acted'))
+  return parts.join(' · ')
+}
+
+function formatLocalDate(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  try {
+    return d.toLocaleString(isEn?.value ? 'en-GB' : 'ru-RU', {
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit',
+    })
+  } catch {
+    return iso
+  }
+}
+
+function auditActionLabel(kind) {
+  // Ключи должны совпадать с _MANAGER_ACTION_KINDS в routes.py.
+  const map = {
+    manager_added: t('chats.managers.audit_kinds.manager_added'),
+    manager_removed: t('chats.managers.audit_kinds.manager_removed'),
+    manager_perms_updated: t('chats.managers.audit_kinds.manager_perms_updated'),
+    manager_invite_created: t('chats.managers.audit_kinds.manager_invite_created'),
+    manager_invite_cancelled: t('chats.managers.audit_kinds.manager_invite_cancelled'),
+    manager_invite_accepted: t('chats.managers.audit_kinds.manager_invite_accepted'),
+    rule_patched: t('chats.managers.audit_kinds.rule_patched'),
+  }
+  return map[kind] || kind
+}
+
+function auditActionIcon(kind) {
+  const map = {
+    manager_added: '➕',
+    manager_removed: '🚫',
+    manager_perms_updated: '🔧',
+    manager_invite_created: '🔗',
+    manager_invite_cancelled: '❌',
+    manager_invite_accepted: '✅',
+    rule_patched: '🛡',
+  }
+  return map[kind] || '·'
+}
+
+async function openAuditModal(filterUserId = null) {
+  auditFilterUserId.value = filterUserId ? Number(filterUserId) : null
+  auditItems.value = []
+  auditTotal.value = 0
+  auditOffset.value = 0
+  auditUserActivity.value = null
+  auditModalOpen.value = true
+  await loadAudit({ reset: true })
+}
+
+function closeAuditModal() {
+  auditModalOpen.value = false
+  auditFilterUserId.value = null
+  auditItems.value = []
+  auditUserActivity.value = null
+}
+
+async function loadAudit({ reset = false } = {}) {
+  if (!managersModalChat.value?.id) return
+  const chatId = managersModalChat.value.id
+  auditLoading.value = true
+  try {
+    if (auditFilterUserId.value) {
+      // По одному делегату: отдельный эндпоинт со статистикой за 7д/30д + recent[10].
+      const res = await fetchSilent(() => api.chatManagerActivity(chatId, auditFilterUserId.value))
+      auditUserActivity.value = {
+        last_action_at: res?.last_action_at || null,
+        actions_7d: Number(res?.actions_7d || 0),
+        actions_30d: Number(res?.actions_30d || 0),
+      }
+      auditItems.value = Array.isArray(res?.recent) ? res.recent : []
+      auditTotal.value = auditItems.value.length
+      auditOffset.value = auditItems.value.length
+    } else {
+      const offset = reset ? 0 : auditOffset.value
+      const res = await fetchSilent(() => api.chatAudit(chatId, { limit: _AUDIT_PAGE_SIZE, offset }))
+      const items = Array.isArray(res?.items) ? res.items : []
+      auditItems.value = reset ? items : [...auditItems.value, ...items]
+      auditTotal.value = Number(res?.total || auditItems.value.length)
+      auditOffset.value = auditItems.value.length
+    }
+  } catch (e) {
+    if (!reset) {
+      // Тихо игнорируем при подгрузке — пользователь увидит «больше нет данных».
+    } else {
+      showToast(messageFromApiError(e))
+    }
+  } finally {
+    auditLoading.value = false
+  }
+}
+
+function auditCanLoadMore() {
+  if (auditFilterUserId.value) return false
+  return auditItems.value.length < auditTotal.value
+}
+
+function managerExpiresMeta(iso) {
+  if (!iso) return null
+  const ts = Date.parse(iso)
+  if (Number.isNaN(ts)) return null
+  const diffMs = ts - Date.now()
+  if (diffMs <= 0) {
+    return { label: t('chats.managers.expires_passed'), tone: 'rose' }
+  }
+  const minutes = Math.round(diffMs / 60000)
+  const hours = Math.round(minutes / 60)
+  const days = Math.round(hours / 24)
+  let label
+  if (minutes < 60) label = t('chats.managers.expires_minutes', { n: minutes })
+  else if (hours < 24) label = t('chats.managers.expires_hours', { n: hours })
+  else label = t('chats.managers.expires_days', { n: days })
+  let tone = 'zinc'
+  if (diffMs < 24 * 60 * 60 * 1000) tone = 'amber'
+  if (diffMs < 2 * 60 * 60 * 1000) tone = 'rose'
+  return { label, tone }
+}
+
 async function addManager() {
   if (!managersModalChat.value?.id) return
   const raw = String(addManagerValue.value || '').trim()
@@ -560,10 +916,15 @@ async function addManager() {
     ? { broadcast: !!p.broadcast, first_post_settings: !!p.first_post_settings }
     : { protection: !!p.protection, broadcast: !!p.broadcast, reports: !!(p.reports || p.stats) }
   const payload = { ...base, permissions }
+  if (addManagerAsLink.value) payload.as_invite_link = true
   managersLoading.value = true
   try {
     const res = await fetchSilent(() => api.chatManagerAdd(managersModalChat.value.id, payload))
     managersData.value = { ...managersData.value, ...res }
+    if (res?.created_status === 'pending_link' && res?.new_invite_link) {
+      const ok = await _tryWriteClipboard(res.new_invite_link)
+      showToast(ok ? t('chats.managers.invite_link_copied') : t('chats.managers.invite_link_created'))
+    }
     _resetAddManagerForm()
     await loadChats()
   } catch (e) {
@@ -598,7 +959,7 @@ async function removeManager(uid) {
   }
 }
 
-async function removeManagerPermission(manager, key) {
+async function _patchManagerPerm(manager, key, value) {
   if (!managersModalChat.value?.id || !manager?.user_id || !key) return
   const base = manager?.permissions || {}
   const nextPerms = {
@@ -607,7 +968,7 @@ async function removeManagerPermission(manager, key) {
     reports: !!base.reports,
     first_post_settings: !!base.first_post_settings,
   }
-  nextPerms[key] = false
+  nextPerms[key] = !!value
   managersLoading.value = true
   try {
     const res = await fetchSilent(() => api.chatManagerUpdate(managersModalChat.value.id, manager.user_id, { permissions: nextPerms }))
@@ -616,6 +977,14 @@ async function removeManagerPermission(manager, key) {
   } finally {
     managersLoading.value = false
   }
+}
+
+async function removeManagerPermission(manager, key) {
+  await _patchManagerPerm(manager, key, false)
+}
+
+async function addManagerPermission(manager, key) {
+  await _patchManagerPerm(manager, key, true)
 }
 
 async function cancelInvite(inviteId) {
@@ -937,9 +1306,12 @@ function openChannelBroadcast(chat) {
                 <button
                   v-if="chat.locked_by_limit"
                   type="button"
-                  class="rounded-lg border border-amber-400/40 bg-amber-900/30 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-100"
-                  @click="goToPremiumBilling"
-                >💳 Premium</button>
+                  class="inline-flex items-center gap-1 rounded-lg border border-amber-400/40 bg-amber-900/30 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-100"
+                  @click="onChatActivationPremiumClick"
+                >
+                  <PremiumLockBadge variant="crown" size="xs" />
+                  <span>💳 Premium</span>
+                </button>
               </template>
               <template v-else>
                 <button
@@ -951,9 +1323,12 @@ function openChannelBroadcast(chat) {
                 <button
                   v-else-if="chat.locked_by_limit"
                   type="button"
-                  class="rounded-lg border border-amber-400/40 bg-amber-900/30 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-100"
-                  @click="goToPremiumBilling"
-                >{{ t('chats.actions.protection_premium') }}</button>
+                  class="inline-flex items-center gap-1 rounded-lg border border-amber-400/40 bg-amber-900/30 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-100"
+                  @click="onChatActivationPremiumClick"
+                >
+                  <PremiumLockBadge variant="crown" size="xs" />
+                  <span>{{ t('chats.actions.protection_premium') }}</span>
+                </button>
                 <button
                   v-if="delegatedCan(chat, 'broadcast')"
                   type="button"
@@ -1032,9 +1407,12 @@ function openChannelBroadcast(chat) {
               <button
                 v-else
                 type="button"
-                class="rounded-lg border border-amber-400/40 bg-amber-900/30 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-100"
-                @click="goToPremiumBilling"
-              >💳 Premium</button>
+                class="inline-flex items-center gap-1 rounded-lg border border-amber-400/40 bg-amber-900/30 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-100"
+                @click="onChatActivationPremiumClick"
+              >
+                <PremiumLockBadge variant="crown" size="xs" />
+                <span>💳 Premium</span>
+              </button>
               <button
                 v-if="canOpenManagers(chat)"
                 type="button"
@@ -1047,9 +1425,12 @@ function openChannelBroadcast(chat) {
               <button
                 v-else
                 type="button"
-                class="rounded-lg border border-amber-400/35 bg-amber-900/25 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-200"
-                @click="router.push({ path: '/', query: { ...route.query, section: 'account' } })"
-              >{{ t('chats.actions.managers_premium') }}</button>
+                class="inline-flex items-center gap-1 rounded-lg border border-amber-400/35 bg-amber-900/25 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-200"
+                @click="onManagersPremiumClick"
+              >
+                <PremiumLockBadge variant="crown" size="xs" />
+                <span>{{ t('chats.actions.managers_premium') }}</span>
+              </button>
             </div>
           </div>
         </div>
@@ -1099,9 +1480,12 @@ function openChannelBroadcast(chat) {
               <button
                 v-else
                 type="button"
-                class="rounded-lg border border-amber-400/40 bg-amber-900/30 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-100"
-                @click="goToPremiumBilling"
-              >{{ t('chats.actions.protection_premium') }}</button>
+                class="inline-flex items-center gap-1 rounded-lg border border-amber-400/40 bg-amber-900/30 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-100"
+                @click="onChatActivationPremiumClick"
+              >
+                <PremiumLockBadge variant="crown" size="xs" />
+                <span>{{ t('chats.actions.protection_premium') }}</span>
+              </button>
               <button
                 v-if="canOpenManagers(chat)"
                 type="button"
@@ -1114,9 +1498,12 @@ function openChannelBroadcast(chat) {
               <button
                 v-else
                 type="button"
-                class="rounded-lg border border-amber-400/35 bg-amber-900/25 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-200"
-                @click="router.push({ path: '/', query: { ...route.query, section: 'account' } })"
-              >{{ t('chats.actions.managers_premium') }}</button>
+                class="inline-flex items-center gap-1 rounded-lg border border-amber-400/35 bg-amber-900/25 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-200"
+                @click="onManagersPremiumClick"
+              >
+                <PremiumLockBadge variant="crown" size="xs" />
+                <span>{{ t('chats.actions.managers_premium') }}</span>
+              </button>
               <button
                 v-if="!chat.locked_by_limit"
                 type="button"
@@ -1131,28 +1518,48 @@ function openChannelBroadcast(chat) {
     <GuardTeleport>
     <div
       v-if="managersModalChat"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/70 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.78);padding:16px"
+      class="flex items-end justify-center px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
       @click.self="closeManagers"
     >
-      <div class="w-full max-w-4xl rounded-3xl bg-gradient-to-b from-[#0c1523]/96 via-[#0a111d]/97 to-[#070d17]/99 p-4 text-slate-100 shadow-[0_32px_90px_-30px_rgba(0,0,0,0.95)] backdrop-blur-2xl ring-1 ring-sky-500/15">
-        <div class="mb-3 flex items-center justify-between gap-2 pb-2">
-          <h3 class="text-sm font-semibold text-white">{{ t('chats.managers.heading', { title: managersModalChat.title }) }}</h3>
+      <div class="w-full max-w-md max-h-[90vh] overflow-y-auto rounded-2xl border border-white/10 bg-[#101013] p-4 text-zinc-100 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.9)]">
+        <div class="mb-3 flex items-center justify-between gap-2">
+          <h3 class="truncate text-sm font-semibold text-white">{{ t('chats.managers.heading', { title: managersModalChat.title }) }}</h3>
           <div class="flex items-center gap-1">
             <button
               type="button"
-              class="inline-flex h-6 min-w-[1.5rem] items-center justify-center rounded-full bg-cyan-500/12 px-1 text-[10px] font-bold text-cyan-200/95 shadow-[0_0_18px_-10px_rgba(34,211,238,0.75)] ring-1 ring-cyan-400/28"
+              class="inline-flex h-6 min-w-[1.5rem] items-center justify-center rounded-full bg-white/[0.04] px-1 text-[10px] font-bold text-zinc-300 hover:bg-white/[0.08]"
               :title="isEn ? 'Help' : 'Справка'"
               @click="showManagersInfoModal = true"
             >
               i
             </button>
-            <button type="button" class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-slate-800/80 hover:text-white" @click="closeManagers">✕</button>
+            <button type="button" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/10" @click="closeManagers">✕</button>
           </div>
         </div>
-        <div v-if="managersLoading" class="text-xs text-slate-400">{{ t('chats.managers.loading') }}</div>
-        <div v-else class="space-y-2">
-          <div class="text-[11px] text-slate-300">{{ t('chats.managers.count', { count: managersData.managers?.length || 0 }) }}</div>
-          <div v-if="managersStats" class="rounded-xl bg-slate-900/55 p-2.5 text-[11px] text-slate-200 ring-1 ring-slate-700/45">
+        <div v-if="managersLoading" class="text-xs text-zinc-400">{{ t('chats.managers.loading') }}</div>
+        <div v-else class="space-y-3">
+          <!-- Прогресс лимита делегатов + кнопка журнала действий -->
+          <div class="flex items-center justify-between gap-2 text-[11px]">
+            <span class="text-zinc-400">{{ t('chats.managers.count', { count: managersData.managers?.length || 0 }) }}</span>
+            <div class="flex items-center gap-1.5">
+              <button
+                type="button"
+                class="inline-flex items-center gap-1 rounded-full bg-white/[0.04] px-2 py-0.5 text-[10px] font-medium text-zinc-300 hover:bg-white/[0.08]"
+                @click="openAuditModal()"
+              >
+                📋 {{ t('chats.managers.audit_button') }}
+              </button>
+              <span v-if="Number(managersData.limit) > 0" class="rounded-full bg-white/[0.04] px-2 py-0.5 font-medium text-zinc-300">
+                {{ t('chats.managers.limit_progress', { used: managersData.managers?.length || 0, total: managersData.limit }) }}
+              </span>
+              <span v-else class="rounded-full bg-emerald-500/15 px-2 py-0.5 font-medium text-emerald-200">
+                {{ t('chats.managers.limit_unlimited') }}
+              </span>
+            </div>
+          </div>
+          <!-- Сводка статистики чата (deleted/joined/messages) — без белой обводки -->
+          <div v-if="managersStats" class="rounded-xl bg-white/[0.025] px-3 py-2 text-[11px] text-zinc-300">
             <p>
               {{
                 t('chats.managers.stats', {
@@ -1163,87 +1570,202 @@ function openChannelBroadcast(chat) {
               }}
             </p>
           </div>
-          <div class="space-y-1.5">
-            <div v-for="m in (managersData.managers || [])" :key="`m-${m.user_id}`" class="flex items-center justify-between gap-2 rounded-xl bg-slate-900/60 px-2.5 py-2.5 text-xs shadow-[0_12px_30px_-22px_rgba(0,0,0,0.95)] ring-1 ring-slate-700/40 backdrop-blur-xl">
+          <!-- Список делегатов -->
+          <div class="space-y-2">
+            <div
+              v-for="m in (managersData.managers || [])"
+              :key="`m-${m.user_id}`"
+              class="flex items-start gap-2.5 rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-2.5 text-xs"
+            >
+              <!-- Аватар-инициал -->
+              <span
+                class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-br text-[12px] font-bold text-white shadow-inner"
+                :class="managerAvatarMeta(m).gradient"
+              >
+                {{ managerAvatarMeta(m).initials }}
+              </span>
+              <!-- Имя + бейджи -->
               <div class="min-w-0 flex-1">
-                <span class="truncate">
-                  {{ m.first_name || (m.username ? '@'+m.username : m.user_id) }}
-                  <span class="text-slate-400">({{ m.user_id }})</span>
-                </span>
-                <div class="mt-0.5 flex flex-wrap items-center gap-1">
-                  <span
-                    class="inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
-                    :class="m.is_online ? 'bg-emerald-500/20 text-emerald-200 ring-1 ring-emerald-400/30' : 'bg-slate-500/20 text-slate-300 ring-1 ring-slate-400/25'"
-                  >
-                    {{ m.is_online ? t('chats.managers.online') : t('chats.managers.offline') }}
+                <div class="flex items-center gap-2">
+                  <span class="truncate text-[13px] font-medium text-white">
+                    {{ m.first_name || (m.username ? '@'+m.username : m.user_id) }}
                   </span>
+                  <span
+                    class="inline-flex h-1.5 w-1.5 shrink-0 rounded-full"
+                    :class="m.is_online ? 'bg-emerald-400' : 'bg-zinc-500'"
+                    :title="m.is_online ? t('chats.managers.online') : t('chats.managers.offline')"
+                  />
+                </div>
+                <div class="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-zinc-500">
+                  <span>ID {{ m.user_id }}</span>
+                  <span
+                    v-if="managerExpiresMeta(m.expires_at)"
+                    class="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium"
+                    :class="{
+                      'bg-zinc-500/15 text-zinc-300': managerExpiresMeta(m.expires_at).tone === 'zinc',
+                      'bg-amber-500/15 text-amber-200': managerExpiresMeta(m.expires_at).tone === 'amber',
+                      'bg-rose-500/20 text-rose-200': managerExpiresMeta(m.expires_at).tone === 'rose',
+                    }"
+                    :title="t('chats.managers.expires_title')"
+                  >
+                    ⏳ {{ managerExpiresMeta(m.expires_at).label }}
+                  </span>
+                  <button
+                    type="button"
+                    class="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium"
+                    :class="managerActivityBadgeClass(m)"
+                    :title="managerActivityTitle(m)"
+                    @click.stop="openAuditModal(m.user_id)"
+                  >
+                    📊 {{ t('chats.managers.actions_7d', { n: Number(m.actions_7d || 0) }) }}
+                  </button>
+                </div>
+                <div class="mt-1.5 flex flex-wrap items-center gap-1">
+                  <!-- Активные права. Кнопка ✕ снимает только одно конкретное право. -->
                   <span
                     v-for="perm in managerPermEntries(m.permissions)"
                     :key="`mp-${m.user_id}-${perm.key}`"
-                    class="inline-flex items-center gap-1 rounded-full bg-violet-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-violet-100 ring-1 ring-violet-400/30"
+                    class="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium"
+                    :class="managerPermMeta(perm.key).badge"
                   >
+                    <span aria-hidden="true">{{ managerPermMeta(perm.key).icon }}</span>
                     {{ perm.label }}
                     <button
                       v-if="managersData.can_manage_access"
                       type="button"
-                      class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full bg-violet-900/35 text-[10px] leading-none text-white ring-1 ring-violet-300/35"
+                      class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full text-[10px] leading-none text-white"
+                      :class="managerPermMeta(perm.key).removeBtn"
+                      :title="t('chats.managers.remove_perm_title')"
                       @click.stop="removeManagerPermission(m, perm.key)"
                     >
                       ✕
                     </button>
                   </span>
+                  <!--
+                    Бейджи недостающих прав. Полупрозрачные, с «+».
+                    Клик добавляет это право без открытия модалки пресетов.
+                    Видны только владельцу с can_manage_access.
+                  -->
+                  <button
+                    v-for="perm in (managersData.can_manage_access ? managerPermMissing(m.permissions) : [])"
+                    :key="`mpa-${m.user_id}-${perm.key}`"
+                    type="button"
+                    class="inline-flex items-center gap-1 rounded-full border border-dashed border-white/15 bg-white/[0.025] px-1.5 py-0.5 text-[10px] font-medium text-zinc-400 hover:border-white/30 hover:bg-white/[0.05] hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
+                    :disabled="managersLoading"
+                    :title="t('chats.managers.add_perm_title', { label: perm.label })"
+                    @click.stop="addManagerPermission(m, perm.key)"
+                  >
+                    <span aria-hidden="true" class="opacity-60">{{ managerPermMeta(perm.key).icon }}</span>
+                    {{ perm.label }}
+                    <span class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full bg-white/[0.08] text-[10px] leading-none">＋</span>
+                  </button>
+                  <span
+                    v-if="!managerPermEntries(m.permissions).length && !managersData.can_manage_access"
+                    class="rounded-full bg-white/[0.04] px-1.5 py-0.5 text-[10px] text-zinc-500"
+                  >
+                    {{ t('chats.managers.no_perms') }}
+                  </span>
                 </div>
               </div>
-              <div class="flex items-center gap-1">
+              <!-- Удалить админа -->
+              <button
+                v-if="managersData.can_manage_access"
+                type="button"
+                class="shrink-0 rounded-lg bg-rose-500/15 px-2 py-1 text-[11px] font-medium text-rose-200 hover:bg-rose-500/25"
+                @click="askRemoveManager(m)"
+              >
+                {{ t('chats.managers.remove') }}
+              </button>
+            </div>
+            <p v-if="!(managersData.managers || []).length" class="rounded-xl bg-white/[0.025] px-3 py-3 text-center text-xs text-zinc-500">{{ t('chats.managers.empty') }}</p>
+          </div>
+          <!-- Приглашения -->
+          <div v-if="managersData.can_manage_access" class="space-y-1.5">
+            <p class="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ t('chats.managers.invites_label') }}</p>
+            <div
+              v-for="inv in (managersData.invites || [])"
+              :key="`inv-${inv.id}`"
+              class="flex flex-col gap-2 rounded-lg bg-white/[0.025] px-2.5 py-2 text-[11px]"
+            >
+              <div class="flex items-center justify-between gap-2">
+                <span class="truncate text-zinc-200">
+                  {{ inv.target_username ? '@' + inv.target_username : (inv.target_telegram_id || t('chats.managers.invite_anonymous')) }}
+                </span>
+                <div class="flex shrink-0 items-center gap-2">
+                  <span
+                    class="rounded-full px-1.5 py-0.5 text-[10px] font-medium"
+                    :class="inv.status === 'connected' ? 'bg-emerald-500/15 text-emerald-200' : 'bg-amber-500/15 text-amber-200'"
+                  >
+                    {{ inviteStatusLabel(inv.status) }}
+                  </span>
+                  <span
+                    v-if="inv.status !== 'connected' && managerExpiresMeta(inv.expires_at)"
+                    class="rounded-full px-1.5 py-0.5 text-[10px] font-medium"
+                    :class="{
+                      'bg-zinc-500/15 text-zinc-300': managerExpiresMeta(inv.expires_at).tone === 'zinc',
+                      'bg-amber-500/15 text-amber-200': managerExpiresMeta(inv.expires_at).tone === 'amber',
+                      'bg-rose-500/20 text-rose-200': managerExpiresMeta(inv.expires_at).tone === 'rose',
+                    }"
+                    :title="t('chats.managers.expires_title')"
+                  >
+                    ⏳ {{ managerExpiresMeta(inv.expires_at).label }}
+                  </span>
+                </div>
+              </div>
+              <div v-if="inv.status !== 'connected'" class="flex flex-wrap items-center gap-1.5">
+                <button
+                  v-if="inv.invite_link"
+                  type="button"
+                  class="inline-flex items-center gap-1 rounded-lg bg-emerald-500/15 px-2 py-1 text-[10px] font-medium text-emerald-200 hover:bg-emerald-500/25"
+                  @click="copyInviteLink(inv)"
+                >
+                  🔗 {{ t('chats.managers.copy_invite_link') }}
+                </button>
                 <button
                   v-if="managersData.can_manage_access"
                   type="button"
-                  class="rounded-lg bg-red-950/35 px-1.5 py-0.5 text-[11px] text-red-200 ring-1 ring-red-400/35"
-                  @click="removeManager(m.user_id)"
-                >
-                  {{ t('chats.managers.remove') }}
-                </button>
-              </div>
-            </div>
-            <p v-if="!(managersData.managers || []).length" class="text-xs text-slate-400">{{ t('chats.managers.empty') }}</p>
-          </div>
-          <div v-if="managersData.can_manage_access" class="space-y-1">
-            <p class="text-[11px] text-slate-300">{{ t('chats.managers.invites_label') }}</p>
-            <div v-for="inv in (managersData.invites || [])" :key="`inv-${inv.id}`" class="flex items-center justify-between rounded-lg bg-slate-900/55 px-2 py-1.5 text-[11px] ring-1 ring-slate-700/40">
-              <span class="truncate text-slate-200">
-                {{ inv.target_username ? '@' + inv.target_username : (inv.target_telegram_id || '—') }}
-              </span>
-              <div class="flex items-center gap-1.5">
-                <span class="text-slate-300">{{ inviteStatusLabel(inv.status) }}</span>
-                <button
-                  v-if="managersData.can_manage_access && inv.status !== 'connected'"
-                  type="button"
-                  class="rounded-lg bg-amber-950/35 px-1.5 py-0.5 text-[10px] text-amber-200 ring-1 ring-amber-400/35"
+                  class="rounded-lg bg-white/[0.04] px-2 py-1 text-[10px] text-zinc-300 hover:bg-white/[0.08]"
                   @click="cancelInvite(inv.id)"
                 >
                   {{ t('chats.managers.cancel_invite') }}
                 </button>
               </div>
             </div>
-            <p v-if="!(managersData.invites || []).length" class="text-[11px] text-slate-500">{{ t('chats.managers.no_invites') }}</p>
+            <p v-if="!(managersData.invites || []).length" class="text-[11px] text-zinc-500">{{ t('chats.managers.no_invites') }}</p>
           </div>
-          <div v-if="managersData.can_manage_access" class="mt-2 space-y-2 rounded-2xl bg-gradient-to-b from-slate-900/70 to-slate-950/65 p-3 backdrop-blur-xl ring-1 ring-slate-700/45">
-            <input v-model="addManagerValue" type="text" class="w-full rounded-xl bg-slate-950/80 px-3 py-2 text-xs text-white outline-none ring-1 ring-slate-700/45 transition focus:ring-cyan-400/40"
+          <!-- Добавить нового админа -->
+          <div v-if="managersData.can_manage_access" class="rounded-xl border border-white/[0.06] bg-white/[0.025] p-3">
+            <input
+              v-model="addManagerValue"
+              type="text"
+              class="mb-2 w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-xs text-white placeholder:text-zinc-500 focus:border-white/20 focus:outline-none"
               @keydown.enter.prevent="onAddManagerInputEnter"
-              :placeholder="t('chats.managers.invite_placeholder')" />
+              :placeholder="t('chats.managers.invite_placeholder')"
+            />
+            <label class="mb-2 flex cursor-pointer items-start gap-2 rounded-lg bg-white/[0.03] px-2.5 py-2 text-[11px] text-zinc-300 hover:bg-white/[0.05]">
+              <input
+                v-model="addManagerAsLink"
+                type="checkbox"
+                class="mt-0.5 h-3.5 w-3.5 shrink-0 cursor-pointer accent-emerald-400"
+              />
+              <span class="flex-1">
+                <span class="block font-medium text-white">{{ t('chats.managers.as_link_title') }}</span>
+                <span class="block text-[10px] leading-snug text-zinc-500">{{ t('chats.managers.as_link_hint') }}</span>
+              </span>
+            </label>
             <button
               type="button"
-              class="guard-green-soft rounded-xl px-4 py-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50"
+              class="guard-green-soft w-full rounded-lg px-4 py-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50"
               :disabled="managersLoading || !String(addManagerValue || '').trim()"
               @click="onAddManagerPrimaryClick"
             >
               {{ addManagerPermsOpen ? t('chats.managers.confirm_perms') : t('chats.managers.pick_perms') }}
             </button>
           </div>
-          <p v-if="managersData.premium_enabled === false" class="text-xs text-amber-300">
+          <p v-if="managersData.premium_enabled === false" class="text-xs text-amber-300/90">
             {{ t('chats.managers.access_premium_only') }}
           </p>
-          <p v-if="!managersData.can_manage_access && managersData.premium_enabled !== false" class="text-xs text-slate-400">
+          <p v-if="!managersData.can_manage_access && managersData.premium_enabled !== false" class="text-xs text-zinc-400">
             {{ t('chats.managers.owner_only') }}
           </p>
         </div>
@@ -1251,50 +1773,294 @@ function openChannelBroadcast(chat) {
     </div>
     </GuardTeleport>
 
+    <!-- Подтверждение удаления админа -->
+    <GuardTeleport>
+    <div
+      v-if="removeManagerConfirm"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95500;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.78);padding:16px"
+      class="flex items-center justify-center p-4"
+      @click.self="cancelRemoveManager"
+    >
+      <div class="w-full max-w-sm rounded-2xl border border-white/10 bg-[#101013] p-4 text-zinc-100 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.9)]">
+        <h3 class="mb-2 text-sm font-semibold text-white">{{ t('chats.managers.confirm_remove_title', { name: removeManagerConfirm.name }) }}</h3>
+        <p class="text-[12px] leading-snug text-zinc-400">{{ t('chats.managers.confirm_remove_hint') }}</p>
+        <div v-if="removeManagerConfirm.perms.length" class="mt-2 flex flex-wrap gap-1">
+          <span
+            v-for="(lbl, i) in removeManagerConfirm.perms"
+            :key="`crp-${i}`"
+            class="rounded-full bg-white/[0.04] px-2 py-0.5 text-[10px] text-zinc-300"
+          >
+            {{ lbl }}
+          </span>
+        </div>
+        <div class="mt-4 flex gap-2">
+          <button
+            type="button"
+            class="flex-1 rounded-lg bg-white/[0.04] px-3 py-2 text-xs font-medium text-zinc-200 hover:bg-white/[0.08]"
+            @click="cancelRemoveManager"
+          >
+            {{ t('chats.managers.confirm_remove_cancel') }}
+          </button>
+          <button
+            type="button"
+            class="flex-1 rounded-lg bg-rose-500/85 px-3 py-2 text-xs font-semibold text-white hover:bg-rose-500"
+            @click="confirmRemoveManager"
+          >
+            {{ t('chats.managers.confirm_remove_ok') }}
+          </button>
+        </div>
+      </div>
+    </div>
+    </GuardTeleport>
+
+    <!-- Audit log: журнал действий делегатов/владельца в чате (Фаза 3) -->
+    <GuardTeleport>
+    <div
+      v-if="managersModalChat && auditModalOpen"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.78);padding:16px"
+      class="flex items-center justify-center px-4"
+      @click.self="closeAuditModal"
+    >
+      <div
+        class="relative max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border border-white/10 bg-[#101013] p-4 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.9)]"
+        @click.stop
+      >
+        <div class="mb-3 flex items-start justify-between gap-3">
+          <div class="min-w-0">
+            <h3 class="text-sm font-semibold text-white">
+              {{ auditFilterUserId
+                ? t('chats.managers.audit_modal_title_user')
+                : t('chats.managers.audit_modal_title') }}
+            </h3>
+            <p class="mt-0.5 text-[11px] text-zinc-500">
+              {{ auditFilterUserId
+                ? t('chats.managers.audit_modal_hint_user')
+                : t('chats.managers.audit_modal_hint') }}
+            </p>
+          </div>
+          <button type="button" class="shrink-0 rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/10" @click="closeAuditModal">✕</button>
+        </div>
+
+        <!-- Сводка для single-user режима -->
+        <div
+          v-if="auditFilterUserId && auditUserActivity"
+          class="mb-3 grid grid-cols-3 gap-1.5 rounded-xl bg-white/[0.025] p-2 text-[10px]"
+        >
+          <div class="text-center">
+            <p class="text-zinc-500">{{ t('chats.managers.actions_label_7d') }}</p>
+            <p class="text-base font-bold text-emerald-200">{{ auditUserActivity.actions_7d }}</p>
+          </div>
+          <div class="text-center">
+            <p class="text-zinc-500">{{ t('chats.managers.actions_label_30d') }}</p>
+            <p class="text-base font-bold text-zinc-200">{{ auditUserActivity.actions_30d }}</p>
+          </div>
+          <div class="text-center">
+            <p class="text-zinc-500">{{ t('chats.managers.last_action_label') }}</p>
+            <p class="text-[11px] font-medium leading-tight text-zinc-300">
+              {{ auditUserActivity.last_action_at ? formatLocalDate(auditUserActivity.last_action_at) : t('chats.managers.never_acted') }}
+            </p>
+          </div>
+        </div>
+
+        <div v-if="auditLoading && !auditItems.length" class="py-6 text-center text-xs text-zinc-400">
+          {{ t('chats.managers.loading') }}
+        </div>
+        <p v-else-if="!auditItems.length" class="py-6 text-center text-xs text-zinc-500">
+          {{ t('chats.managers.audit_empty') }}
+        </p>
+        <ul v-else class="space-y-1.5">
+          <li
+            v-for="row in auditItems"
+            :key="`audit-${row.id}`"
+            class="flex items-start gap-2 rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-2 text-[11px]"
+          >
+            <span aria-hidden="true" class="mt-0.5 text-[14px] leading-none">{{ auditActionIcon(row.action_kind) }}</span>
+            <div class="min-w-0 flex-1">
+              <p class="truncate text-[12px] font-medium text-white">{{ auditActionLabel(row.action_kind) }}</p>
+              <p class="mt-0.5 truncate text-[10px] text-zinc-500">
+                <span v-if="row.user_first_name || row.user_username">
+                  {{ row.user_first_name || ('@' + row.user_username) }}
+                </span>
+                <span v-else>ID {{ row.user_id }}</span>
+                <span class="mx-1 text-zinc-700">·</span>
+                <span>{{ formatLocalDate(row.created_at) }}</span>
+              </p>
+              <p v-if="row.action_target" class="mt-0.5 truncate text-[10px] text-zinc-500">
+                <span class="text-zinc-600">→</span> {{ row.action_target }}
+              </p>
+              <details
+                v-if="row.meta && typeof row.meta === 'object'"
+                class="mt-1"
+              >
+                <summary class="cursor-pointer text-[10px] text-zinc-500 hover:text-zinc-300">{{ t('chats.managers.audit_meta_toggle') }}</summary>
+                <pre class="mt-1 overflow-x-auto rounded-md bg-black/30 p-1.5 text-[10px] leading-snug text-zinc-300">{{ JSON.stringify(row.meta, null, 2) }}</pre>
+              </details>
+            </div>
+            <span
+              v-if="!row.success"
+              class="shrink-0 rounded-full bg-rose-500/15 px-1.5 py-0.5 text-[10px] text-rose-200"
+            >{{ t('chats.managers.audit_failed') }}</span>
+          </li>
+        </ul>
+        <div v-if="auditCanLoadMore()" class="mt-3 flex justify-center">
+          <button
+            type="button"
+            class="rounded-lg bg-white/[0.05] px-3 py-1.5 text-[11px] font-medium text-zinc-200 hover:bg-white/[0.08] disabled:opacity-50"
+            :disabled="auditLoading"
+            @click="loadAudit()"
+          >
+            {{ auditLoading ? t('chats.managers.loading') : t('chats.managers.audit_load_more') }}
+          </button>
+        </div>
+        <p v-if="auditTotal > 0 && !auditFilterUserId" class="mt-2 text-center text-[10px] text-zinc-600">
+          {{ t('chats.managers.audit_total', { shown: auditItems.length, total: auditTotal }) }}
+        </p>
+      </div>
+    </div>
+    </GuardTeleport>
+
     <GuardTeleport>
     <div
       v-if="managersModalChat && addManagerPermsOpen"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/75 px-4"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.78);padding:16px"
+      class="flex items-center justify-center px-4"
       @click.self="addManagerPermsOpen = false"
     >
       <form
-        class="w-full max-w-md rounded-2xl bg-gradient-to-b from-slate-900/96 to-slate-950/98 p-4 shadow-[0_28px_80px_-30px_rgba(0,0,0,0.95)] ring-1 ring-slate-700/50"
+        class="w-full max-w-md max-h-[90vh] overflow-y-auto rounded-2xl border border-white/10 bg-[#101013] p-4 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.9)] text-zinc-100"
         @submit.prevent="addManager"
       >
-        <div class="mb-3 flex items-center justify-end">
-          <button type="button" class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-slate-800/80 hover:text-white" @click="addManagerPermsOpen = false">✕</button>
+        <div class="mb-3 flex items-center justify-between">
+          <h3 class="text-sm font-semibold text-white">{{ t('chats.managers.pick_perms_title') }}</h3>
+          <button type="button" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/10" @click="addManagerPermsOpen = false">✕</button>
         </div>
-        <div v-if="!isManagersChannel" class="flex flex-wrap gap-1.5">
-          <label class="inline-flex items-center gap-1.5 rounded-xl bg-slate-900/65 px-2.5 py-1.5 text-[11px] text-slate-100 ring-1 ring-slate-700/45">
-            <input v-model="addManagerPerms.protection" type="checkbox" class="h-3.5 w-3.5 accent-emerald-400" />
-            <span>{{ t('chats.perm_help.protection') }}</span>
-          </label>
-          <label class="inline-flex items-center gap-1.5 rounded-xl bg-slate-900/65 px-2.5 py-1.5 text-[11px] text-slate-100 ring-1 ring-slate-700/45">
-            <input v-model="addManagerPerms.broadcast" type="checkbox" class="h-3.5 w-3.5 accent-violet-400" />
-            <span>{{ t('chats.perm_help.broadcast') }}</span>
-          </label>
-          <label class="inline-flex items-center gap-1.5 rounded-xl bg-slate-900/65 px-2.5 py-1.5 text-[11px] text-slate-100 ring-1 ring-slate-700/45">
-            <input v-model="addManagerPerms.stats" type="checkbox" class="h-3.5 w-3.5 accent-sky-400" />
-            <span>{{ t('chats.perm_help.stats') }}</span>
-          </label>
-          <label class="inline-flex items-center gap-1.5 rounded-xl bg-slate-900/65 px-2.5 py-1.5 text-[11px] text-slate-100 ring-1 ring-slate-700/45">
-            <input v-model="addManagerPerms.reports" type="checkbox" class="h-3.5 w-3.5 accent-cyan-400" />
-            <span>{{ t('chats.perm_help.reports') }}</span>
-          </label>
+
+        <!-- Пресеты прав: один клик расставляет все галки. Только для групп; для каналов не показываем. -->
+        <div v-if="!isManagersChannel" class="mb-3">
+          <p class="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ t('chats.managers.presets_label') }}</p>
+          <div class="grid grid-cols-2 gap-2">
+            <button
+              v-for="preset in MANAGER_PERM_PRESETS"
+              :key="`pp-${preset.key}`"
+              type="button"
+              class="flex items-center gap-2 rounded-xl border px-3 py-2 text-left text-[12px] transition"
+              :class="isPermPresetActive(preset)
+                ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-100'
+                : 'border-white/[0.06] bg-white/[0.025] text-zinc-200 hover:bg-white/[0.05]'"
+              @click="applyManagerPreset(preset)"
+            >
+              <span class="text-base leading-none">{{ preset.icon }}</span>
+              <div class="flex min-w-0 flex-col">
+                <span class="truncate text-[12px] font-semibold">{{ t(`chats.managers.preset_names.${preset.key}`) }}</span>
+                <span class="truncate text-[10px] text-zinc-500">{{ t(`chats.managers.preset_hints.${preset.key}`) }}</span>
+              </div>
+            </button>
+          </div>
         </div>
-        <div v-else class="flex flex-wrap gap-1.5">
-          <label class="inline-flex items-center gap-1.5 rounded-xl bg-slate-900/65 px-2.5 py-1.5 text-[11px] text-slate-100 ring-1 ring-slate-700/45">
-            <input v-model="addManagerPerms.broadcast" type="checkbox" class="h-3.5 w-3.5 accent-violet-400" />
-            <span>{{ t('chats.perm_help.broadcast_label') }}</span>
-          </label>
-          <label class="inline-flex items-center gap-1.5 rounded-xl bg-slate-900/65 px-2.5 py-1.5 text-[11px] text-slate-100 ring-1 ring-slate-700/45">
-            <input v-model="addManagerPerms.first_post_settings" type="checkbox" class="h-3.5 w-3.5 accent-amber-400" />
-            <span>{{ t('chats.perm_help.first_post') }}</span>
-          </label>
-        </div>
+
+        <p class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ t('chats.managers.perms_label') }}</p>
+
+        <!-- iOS-тогглы для каждого права. -->
+        <ul v-if="!isManagersChannel" class="space-y-2">
+          <li class="flex items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-2.5">
+            <div class="flex min-w-0 flex-1 items-center gap-2.5">
+              <span class="text-lg leading-none">🛡</span>
+              <span class="truncate text-[13px] font-medium text-white">{{ t('chats.perm_help.protection') }}</span>
+            </div>
+            <button
+              type="button" role="switch" :aria-checked="!!addManagerPerms.protection"
+              class="relative h-[31px] w-[51px] shrink-0 rounded-full border transition duration-200"
+              :class="addManagerPerms.protection ? 'border-emerald-400/40 bg-emerald-500/[0.32]' : 'border-white/[0.14] bg-white/[0.09]'"
+              @click="addManagerPerms.protection = !addManagerPerms.protection"
+            >
+              <span class="absolute left-[3px] top-1/2 h-[25px] w-[25px] rounded-full bg-white shadow-md transition duration-200"
+                :style="{ transform: addManagerPerms.protection ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }" />
+            </button>
+          </li>
+          <li class="flex items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-2.5">
+            <div class="flex min-w-0 flex-1 items-center gap-2.5">
+              <span class="text-lg leading-none">📢</span>
+              <span class="truncate text-[13px] font-medium text-white">{{ t('chats.perm_help.broadcast') }}</span>
+            </div>
+            <button
+              type="button" role="switch" :aria-checked="!!addManagerPerms.broadcast"
+              class="relative h-[31px] w-[51px] shrink-0 rounded-full border transition duration-200"
+              :class="addManagerPerms.broadcast ? 'border-emerald-400/40 bg-emerald-500/[0.32]' : 'border-white/[0.14] bg-white/[0.09]'"
+              @click="addManagerPerms.broadcast = !addManagerPerms.broadcast"
+            >
+              <span class="absolute left-[3px] top-1/2 h-[25px] w-[25px] rounded-full bg-white shadow-md transition duration-200"
+                :style="{ transform: addManagerPerms.broadcast ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }" />
+            </button>
+          </li>
+          <li class="flex items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-2.5">
+            <div class="flex min-w-0 flex-1 items-center gap-2.5">
+              <span class="text-lg leading-none">📊</span>
+              <span class="truncate text-[13px] font-medium text-white">{{ t('chats.perm_help.stats') }}</span>
+            </div>
+            <button
+              type="button" role="switch" :aria-checked="!!addManagerPerms.stats"
+              class="relative h-[31px] w-[51px] shrink-0 rounded-full border transition duration-200"
+              :class="addManagerPerms.stats ? 'border-emerald-400/40 bg-emerald-500/[0.32]' : 'border-white/[0.14] bg-white/[0.09]'"
+              @click="addManagerPerms.stats = !addManagerPerms.stats"
+            >
+              <span class="absolute left-[3px] top-1/2 h-[25px] w-[25px] rounded-full bg-white shadow-md transition duration-200"
+                :style="{ transform: addManagerPerms.stats ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }" />
+            </button>
+          </li>
+          <li class="flex items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-2.5">
+            <div class="flex min-w-0 flex-1 items-center gap-2.5">
+              <span class="text-lg leading-none">📋</span>
+              <span class="truncate text-[13px] font-medium text-white">{{ t('chats.perm_help.reports') }}</span>
+            </div>
+            <button
+              type="button" role="switch" :aria-checked="!!addManagerPerms.reports"
+              class="relative h-[31px] w-[51px] shrink-0 rounded-full border transition duration-200"
+              :class="addManagerPerms.reports ? 'border-emerald-400/40 bg-emerald-500/[0.32]' : 'border-white/[0.14] bg-white/[0.09]'"
+              @click="addManagerPerms.reports = !addManagerPerms.reports"
+            >
+              <span class="absolute left-[3px] top-1/2 h-[25px] w-[25px] rounded-full bg-white shadow-md transition duration-200"
+                :style="{ transform: addManagerPerms.reports ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }" />
+            </button>
+          </li>
+        </ul>
+
+        <!-- Канальная модалка прав. -->
+        <ul v-else class="space-y-2">
+          <li class="flex items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-2.5">
+            <div class="flex min-w-0 flex-1 items-center gap-2.5">
+              <span class="text-lg leading-none">📢</span>
+              <span class="truncate text-[13px] font-medium text-white">{{ t('chats.perm_help.broadcast_label') }}</span>
+            </div>
+            <button
+              type="button" role="switch" :aria-checked="!!addManagerPerms.broadcast"
+              class="relative h-[31px] w-[51px] shrink-0 rounded-full border transition duration-200"
+              :class="addManagerPerms.broadcast ? 'border-emerald-400/40 bg-emerald-500/[0.32]' : 'border-white/[0.14] bg-white/[0.09]'"
+              @click="addManagerPerms.broadcast = !addManagerPerms.broadcast"
+            >
+              <span class="absolute left-[3px] top-1/2 h-[25px] w-[25px] rounded-full bg-white shadow-md transition duration-200"
+                :style="{ transform: addManagerPerms.broadcast ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }" />
+            </button>
+          </li>
+          <li class="flex items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-2.5">
+            <div class="flex min-w-0 flex-1 items-center gap-2.5">
+              <span class="text-lg leading-none">⭐</span>
+              <span class="truncate text-[13px] font-medium text-white">{{ t('chats.perm_help.first_post') }}</span>
+            </div>
+            <button
+              type="button" role="switch" :aria-checked="!!addManagerPerms.first_post_settings"
+              class="relative h-[31px] w-[51px] shrink-0 rounded-full border transition duration-200"
+              :class="addManagerPerms.first_post_settings ? 'border-emerald-400/40 bg-emerald-500/[0.32]' : 'border-white/[0.14] bg-white/[0.09]'"
+              @click="addManagerPerms.first_post_settings = !addManagerPerms.first_post_settings"
+            >
+              <span class="absolute left-[3px] top-1/2 h-[25px] w-[25px] rounded-full bg-white shadow-md transition duration-200"
+                :style="{ transform: addManagerPerms.first_post_settings ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }" />
+            </button>
+          </li>
+        </ul>
+
         <div class="mt-4 flex gap-2">
-          <button type="button" class="flex-1 rounded-xl bg-slate-800/85 px-3 py-2 text-xs font-semibold text-slate-200 ring-1 ring-slate-700/45" @click="addManagerPermsOpen = false">{{ t('chats.managers.cancel') }}</button>
-          <button type="submit" class="guard-green-soft flex-1 rounded-xl px-3 py-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50" :disabled="managersLoading || !canSubmitNewManager">
+          <button type="button" class="flex-1 rounded-lg bg-white/[0.04] px-3 py-2 text-xs font-medium text-zinc-200 hover:bg-white/[0.08]" @click="addManagerPermsOpen = false">{{ t('chats.managers.cancel') }}</button>
+          <button type="submit" class="guard-green-soft flex-1 rounded-lg px-3 py-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50" :disabled="managersLoading || !canSubmitNewManager">
             {{ t('chats.managers.add') }}
           </button>
         </div>

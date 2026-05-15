@@ -8,6 +8,7 @@ import AppToast from './components/AppToast.vue'
 import AppBottomNav from './components/AppBottomNav.vue'
 import LegalConsentGate from './components/LegalConsentGate.vue'
 import GuardBlueLoadingState from './components/GuardBlueLoadingState.vue'
+import PremiumLockModal from './components/PremiumLockModal.vue'
 import { useDashboardSection } from './composables/useDashboardSection'
 import { routeTransitionOverlayActive } from './composables/useRouteTransitionLoader.js'
 import { useToast } from './composables/useToast'
@@ -47,8 +48,14 @@ async function syncLocaleFromProfile() {
     if (me?.language) {
       const norm = normalizeLocale(me.language)
       if (getLocale() !== norm) {
-        // После добавления EN: смена локали в том же тике, что и первый layout Teleport, иногда даёт артефакты в WKWebView
-        requestAnimationFrame(() => setLocale(norm))
+        // EN/RU после /api/me: дать Teleport/модалкам два кадра до смены локали (WKWebView + «Упоминания»).
+        void nextTick(() => {
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              setLocale(norm)
+            })
+          })
+        })
       }
     }
   } catch {
@@ -156,6 +163,7 @@ function onSubscriptionBackFromHeader() {
     </div>
     <!-- Вне z-10 колонки: иначе в Telegram WebView оверлей может оказаться под контентом -->
     <LegalConsentGate />
+    <PremiumLockModal />
 
     <Teleport to="body">
       <Transition name="guard-route-fade">

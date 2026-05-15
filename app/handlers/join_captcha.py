@@ -34,6 +34,7 @@ from app.db.models import JoinCaptchaSession
 from app.db.session import get_session
 from app.i18n import DEFAULT_LOCALE, normalize_locale, t
 from app.services.chat_owner_locale import owner_locale_for_chat, user_locale
+from app.services.chat_owner_premium import chat_owner_has_miniapp_premium
 from app.services.diagnostics_incidents import record_join_captcha_expire_delete_failed
 from app.handlers.moderation import (
     _welcome_keyboard_from_json,
@@ -415,6 +416,8 @@ async def maybe_start_join_captcha(bot, session, tg_chat: Chat, chat_row: Any, r
     ttl = max(1, min(5, int(getattr(rule, "join_captcha_ttl_minutes", 3) or 3)))
     kind = (getattr(rule, "join_captcha_kind", None) or "button").strip().lower()
     if kind not in ALL_KINDS:
+        kind = "button"
+    if not await chat_owner_has_miniapp_premium(session, int(chat_id)):
         kind = "button"
     prefer_dm = bool(getattr(rule, "join_captcha_prefer_dm", False))
 

@@ -526,6 +526,9 @@ MESSAGES: dict[str, dict] = {
                 "In the last <b>{window_min}</b> min, <b>{joins}</b> members joined (threshold {threshold})."
             ),
         },
+        "member_welcome_simple": (
+            "{name}, welcome to «{chat_title}»! Before posting, check the group description or pinned messages (if any)."
+        ),
         "log": {
             "header_observe": "👁 <b>Guard — OBSERVED</b>\n<i>(message left in chat)</i>\n",
             "header_combat": "😈 <b>Guard: Enforcement</b>\n",
@@ -806,6 +809,119 @@ MESSAGES: dict[str, dict] = {
         "btn_connect_group_shield": "🛡 Connect group",
         "btn_reports_connect": "📊 Connect reports chat",
         "btn_open_guard_premium": "🛡 Open Guard Premium",
+        "btn_trial_activate": "🚀 Try 10 days free",
+        "btn_trial_billing": "👑 Get Premium",
+        "trial_window_left": {
+            "generic": (
+                "😈 AntiSpam Guard here.\n\n"
+                "You have {n} day(s) left to try Premium protection for free. "
+                "One-click activation, no card required."
+            ),
+            "9": (
+                "😈 AntiSpam Guard here.\n\n"
+                "You have 9 days to try Premium protection for free.\n\n"
+                "What Premium gives you:\n"
+                "• up to 20 groups and channels\n"
+                "• advanced filters (media, mentions, buttons)\n"
+                "• delegates with granular permissions\n"
+                "• dedicated reports chat\n\n"
+                "One-click activation, no card required."
+            ),
+            "8": (
+                "🛡 2 days have passed — but protection is still off.\n\n"
+                "8 days left to try Premium for free. A large antispam DB and "
+                "precise filters can be enabled in one tap."
+            ),
+            "7": (
+                "📅 7 days of trial Premium left.\n\n"
+                "Every unguarded day means missed spam, DM ads to your members, "
+                "and bot raids. Activate now — it's free."
+            ),
+            "6": (
+                "⚡ 6 days — halfway through your trial window.\n\n"
+                "If you haven't tried Premium yet — now is the time. No payment, "
+                "just turn it on for 10 days and see how it works."
+            ),
+            "5": (
+                "⏳ 5 days already gone.\n\n"
+                "5 days left to try Premium for free. After that, the activation "
+                "window closes — you'll only be able to subscribe."
+            ),
+            "4": (
+                "🛎 4 days until the trial window closes.\n\n"
+                "Activate Premium now — it's free. Protection will turn on "
+                "instantly across all your chats."
+            ),
+            "3": (
+                "⚠️ 3 days of free Premium left.\n\n"
+                "After that, advanced protection is subscription-only. "
+                "Don't miss out — try it now."
+            ),
+            "2": (
+                "⏰ 2 days until the trial window closes.\n\n"
+                "If you haven't tried yet — now is the moment. After that, "
+                "Premium is paid-only."
+            ),
+            "1": (
+                "🚨 Last day to try Premium for free.\n\n"
+                "Tomorrow the window closes. Activate now — it takes 5 seconds."
+            ),
+        },
+        "trial_active_left": {
+            "generic": (
+                "👑 Premium is active.\n\n"
+                "You have {n} day(s) of free Premium left. "
+                "Subscribe in advance so you don't lose protection."
+            ),
+            "9": (
+                "👑 Premium trial activated — thank you!\n\n"
+                "You have 9 days to set up protection to the max:\n"
+                "• tune filters for your chat\n"
+                "• connect all your groups\n"
+                "• assign delegates with role-based access\n"
+                "• enable the reports chat\n\n"
+                "By the end of the trial — decide if you want to continue."
+            ),
+            "8": (
+                "🛡 8 days of Premium trial ahead.\n\n"
+                "If something is unclear — message support from the Mini App, "
+                "we'll help you tune it for your chat."
+            ),
+            "7": (
+                "📈 7 days of Premium still in your pocket.\n\n"
+                "Check the reports — see how much spam and how many violations "
+                "the protection has caught since activation."
+            ),
+            "6": (
+                "⚡ 6 days of Premium trial left.\n\n"
+                "Time to see which filters work best for your chat and "
+                "fine-tune them to your needs."
+            ),
+            "5": (
+                "⏳ Half-way mark — 5 days of Premium left.\n\n"
+                "If protection fits — subscribe in advance for a seamless transition."
+            ),
+            "4": (
+                "🛎 4 days until the Premium trial ends.\n\n"
+                "In 4 days the plan reverts to Free: limits — 3 groups / 1 channel, "
+                "advanced filters off. Subscribe to keep your settings."
+            ),
+            "3": (
+                "⚠️ 3 days until the Premium trial ends.\n\n"
+                "Don't lose protection — subscribe so your settings stay "
+                "and filters keep working."
+            ),
+            "2": (
+                "⏰ 2 days until the Premium trial ends.\n\n"
+                "To keep protection on — subscribe. All your filter and delegate "
+                "settings will be preserved."
+            ),
+            "1": (
+                "🚨 Last day of your Premium trial.\n\n"
+                "Tomorrow the plan reverts to Free and some filters turn off. "
+                "Subscribe now — your settings will be preserved."
+            ),
+        },
     },
     "captcha": {
         "title": "Confirm you are a human",

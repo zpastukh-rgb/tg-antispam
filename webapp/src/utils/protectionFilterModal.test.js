@@ -42,6 +42,19 @@ describe('probeProtectionFilterModalDom', () => {
       expect(r.foundKeys).toEqual([])
       expect(r.teleportRootPresent).toBe(false)
       expect(r.teleportRootChildren).toBe(null)
+      expect(r.filterModalsAnchorPresent).toBe(false)
+      expect(r.filterModalsAnchorChildren).toBe(null)
+    }
+  })
+
+  it('reports anchor when present but modal still missing', () => {
+    document.body.innerHTML =
+      '<div data-guard-protection-filter-modals-anchor class="x"><span></span></div>'
+    const r = probeProtectionFilterModalDom('mentions')
+    expect(r.ok).toBe(false)
+    if (!r.ok) {
+      expect(r.filterModalsAnchorPresent).toBe(true)
+      expect(r.filterModalsAnchorChildren).toBe(1)
     }
   })
 

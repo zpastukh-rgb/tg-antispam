@@ -26,6 +26,7 @@ from app.db.models import (
 )
 from app.i18n import t
 from app.services.chat_owner_locale import owner_locale_for_chat, user_locale
+from app.services.chat_owner_premium import chat_owner_has_miniapp_premium
 from app.services.telegram_notify import send_user_dm
 
 logger = logging.getLogger(__name__)
@@ -275,6 +276,11 @@ async def trigger_spam_spike_for_chat(
         owner_tid = int(owner_tid_raw)
     manager_ids = sorted({_as_tid(mid) for mid in manager_ids_raw if _as_tid(mid) > 0})
     notify_managers = bool(getattr(rule, "spam_spike_notify_managers", True))
+    owner_premium_spike = await chat_owner_has_miniapp_premium(session, cid)
+    if not owner_premium_spike:
+        notify_managers = False
+    utc_now = now.astimezone(timezone.utc)
+    dm_bucket = bucket if owner_premium_spike else f"free_daily:{utc_now.strftime('%Y%m%d')}"
 
     protection_url = await _startapp_link_for_bot(bot, "protection")
 
@@ -288,7 +294,7 @@ async def trigger_spam_spike_for_chat(
             recipients.append((mid, "manager"))
 
     for recipient_tid, role in recipients:
-        if await _already_sent_dm(session, recipient_tid, cid, bucket):
+        if await _already_sent_dm(session, recipient_tid, cid, dm_bucket):
             continue
 
         loc = await user_locale(session, recipient_tid)
@@ -324,7 +330,7 @@ async def trigger_spam_spike_for_chat(
                 SpamSpikeNotifySent(
                     recipient_telegram_id=int(recipient_tid),
                     chat_id=cid,
-                    bucket_key=bucket,
+                    bucket_key=dm_bucket,
                 )
             )
             await session.commit()
@@ -345,7 +351,7 @@ async def trigger_spam_spike_for_chat(
                         SpamSpikeNotifySent(
                             recipient_telegram_id=int(recipient_tid),
                             chat_id=cid,
-                            bucket_key=bucket,
+                            bucket_key=dm_bucket,
                         )
                     )
                     await session.commit()

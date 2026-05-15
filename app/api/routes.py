@@ -77,6 +77,7 @@ from app.db.models import (
     AdminMessageTemplate,
     ChatManager,
     ChatManagerInvite,
+    ChatManagerAction,
     UserContext,
     WebAppSession,
     PdfExport,
@@ -99,7 +100,15 @@ from app.services.user_service import (
     effective_group_limit,
     effective_channel_limit,
     TARIFF_CHAT_LIMITS,
+    TARIFF_GROUP_LIMITS,
+    TARIFF_CHANNEL_LIMITS,
+    TRIAL_DAYS as _TRIAL_DAYS,
+    TRIAL_SUBSCRIPTION_SOURCE as _TRIAL_SUBSCRIPTION_SOURCE,
     Tariff,
+    trial_window_remaining_days as _us_trial_window_remaining_days,
+    is_trial_eligible as _us_is_trial_eligible,
+    is_trial_active as _us_is_trial_active,
+    trial_active_remaining_days as _us_trial_active_remaining_days,
 )
 from app.services.pii_user_store import (
     hydrate_users_from_pii,
@@ -126,6 +135,7 @@ from app.services.chat_cleanup import clean_deleted_accounts
 from app.services.credit_policy import REFERRAL_LEVEL_RATES, PARTNER_TOKEN_RUB_RATE
 from app.services.admin_roles import is_full_admin_user as _is_full_admin_user
 from app.services.chat_limit_enforcer import enforce_owner_active_chat_limit
+from app.services.chat_owner_premium import chat_owner_has_miniapp_premium
 from app.i18n import normalize_locale, t as i18n_t
 from app.texts.guardian_billing import format_subscription_until
 
@@ -257,6 +267,224 @@ async def _touch_user_presence(session: AsyncSession, user_id: int) -> None:
     await session.commit()
 
 
+def _make_invite_token() -> str:
+    """32-символьный hex для ссылки t.me/<bot>?start=admin_invite_<token>."""
+    return secrets.token_hex(16)
+
+
+# =========================================================
+# Журнал действий делегатов/владельца (Фаза 3 «Админы чата»).
+# =========================================================
+# Ключи действий: коротко и стабильно. Если меняешь — обновляй i18n
+# (api.ui.audit_kind_*) и Front (managerActionLabel в ChatsView.vue).
+_MANAGER_ACTION_KINDS = frozenset({
+    # Делегаты
+    "manager_added",            # owner добавил делегата (target=user_id, meta=perms)
+    "manager_removed",          # owner удалил делегата (target=user_id)
+    "manager_perms_updated",    # owner изменил права (target=user_id, meta=perms)
+    "manager_invite_created",   # owner создал ссылку-приглашение (meta=username/days)
+    "manager_invite_cancelled", # owner отменил pending-инвайт (target=invite_id)
+    "manager_invite_accepted",  # юзер принял инвайт по ссылке (target=user_id, meta=via_link=true)
+    # Правила
+    "rule_patched",             # любой PATCH /chat/{id}/rule (meta=changed_fields list)
+})
+
+
+def _serialize_meta(meta: dict | None) -> str | None:
+    if not meta:
+        return None
+    try:
+        import json
+        return json.dumps(meta, ensure_ascii=False, default=str)[:8192]
+    except Exception:
+        return None
+
+
+async def record_manager_action(
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    user_id: int,
+    action_kind: str,
+    target: str | int | None = None,
+    meta: dict | None = None,
+    success: bool = True,
+) -> None:
+    """Записать строку в журнал действий. Ошибки глотаем — журнал не должен
+    ронять бизнес-операцию.
+
+    Используется и для owner-а, и для делегатов. user_id — кто совершил действие.
+    Не делает commit (вызывающий код контролирует транзакцию). Если транзакция
+    откатится — запись тоже откатится, что корректно: «провалившееся действие»
+    можно опционально записать с success=False ДО raise.
+    """
+    if int(chat_id) <= 0 or int(user_id) <= 0:
+        return
+    if action_kind not in _MANAGER_ACTION_KINDS:
+        # Не запрещаем, просто отметим в логе — чтобы не пропустить опечатку.
+        _log.warning("record_manager_action: unknown action_kind=%s", action_kind)
+    try:
+        session.add(ChatManagerAction(
+            chat_id=int(chat_id),
+            user_id=int(user_id),
+            action_kind=str(action_kind)[:64],
+            action_target=(str(target)[:128] if target is not None else None),
+            action_meta=_serialize_meta(meta),
+            success=bool(success),
+        ))
+        await session.flush()
+    except Exception as e:
+        _log.warning("record_manager_action failed (chat=%s,user=%s,kind=%s): %s",
+                     chat_id, user_id, action_kind, e)
+
+
+async def _manager_activity_stats(
+    session: AsyncSession,
+    chat_id: int,
+    user_ids: list[int],
+) -> dict[int, dict]:
+    """Возвращает {user_id: {last_action_at, actions_7d, actions_30d}}.
+
+    Один SQL-запрос на всю пачку — чтобы не делать N*3 round-trip-а
+    в _chat_managers_payload.
+    """
+    if not user_ids:
+        return {}
+    now_utc = datetime.now(timezone.utc)
+    cutoff_7 = now_utc - timedelta(days=7)
+    cutoff_30 = now_utc - timedelta(days=30)
+    # last_action_at: max(created_at) per user
+    last_rows = (
+        await session.execute(
+            select(
+                ChatManagerAction.user_id,
+                func.max(ChatManagerAction.created_at),
+            )
+            .where(
+                ChatManagerAction.chat_id == int(chat_id),
+                ChatManagerAction.user_id.in_(user_ids),
+            )
+            .group_by(ChatManagerAction.user_id)
+        )
+    ).all()
+    cnt7_rows = (
+        await session.execute(
+            select(
+                ChatManagerAction.user_id,
+                func.count(ChatManagerAction.id),
+            )
+            .where(
+                ChatManagerAction.chat_id == int(chat_id),
+                ChatManagerAction.user_id.in_(user_ids),
+                ChatManagerAction.created_at >= cutoff_7,
+                ChatManagerAction.success.is_(True),
+            )
+            .group_by(ChatManagerAction.user_id)
+        )
+    ).all()
+    cnt30_rows = (
+        await session.execute(
+            select(
+                ChatManagerAction.user_id,
+                func.count(ChatManagerAction.id),
+            )
+            .where(
+                ChatManagerAction.chat_id == int(chat_id),
+                ChatManagerAction.user_id.in_(user_ids),
+                ChatManagerAction.created_at >= cutoff_30,
+                ChatManagerAction.success.is_(True),
+            )
+            .group_by(ChatManagerAction.user_id)
+        )
+    ).all()
+    out: dict[int, dict] = {int(uid): {"last_action_at": None, "actions_7d": 0, "actions_30d": 0}
+                            for uid in user_ids}
+    for uid, last in last_rows:
+        out[int(uid)]["last_action_at"] = last
+    for uid, c in cnt7_rows:
+        out[int(uid)]["actions_7d"] = int(c or 0)
+    for uid, c in cnt30_rows:
+        out[int(uid)]["actions_30d"] = int(c or 0)
+    return out
+
+
+def _format_perms_for_dm(perms: dict | None, user: User | None) -> str:
+    """Человекочитаемый список прав для DM-уведомления (на языке получателя)."""
+    if not perms:
+        return _t_api_ui_user(user, "manager_perms_none")
+    labels: list[str] = []
+    for key in ("protection", "broadcast", "reports", "first_post_settings"):
+        if perms.get(key):
+            labels.append(_t_api_ui_user(user, f"manager_perm_label_{key}"))
+    if not labels:
+        return _t_api_ui_user(user, "manager_perms_none")
+    return ", ".join(labels)
+
+
+async def _notify_manager_change(
+    session: AsyncSession,
+    *,
+    target_user_id: int,
+    chat: "Chat",
+    kind: str,
+    perms: dict | None,
+) -> None:
+    """DM уведомление делегату о смене/отзыве прав.
+
+    `kind` — "updated" или "removed". Тихо проглатываем сетевые ошибки.
+    """
+    if int(target_user_id) <= 0:
+        return
+    tgt_u = (
+        await session.execute(select(User).where(User.telegram_id == int(target_user_id)).limit(1))
+    ).scalar_one_or_none()
+    chat_title = str(getattr(chat, "title", "") or "") or f"#{int(getattr(chat, 'id', 0) or 0)}"
+    if kind == "removed":
+        text = _t_api_ui_user(tgt_u, "manager_perms_removed_dm", chat_title=chat_title)
+    else:
+        text = _t_api_ui_user(
+            tgt_u,
+            "manager_perms_updated_dm",
+            chat_title=chat_title,
+            perms=_format_perms_for_dm(perms, tgt_u),
+        )
+    delegated_url = await _delegated_chats_webapp_url()
+    kb = None
+    if delegated_url and kind != "removed":
+        kb = {
+            "inline_keyboard": [
+                [{"text": _t_api_ui_user(tgt_u, "manager_invite_open_access"), "url": delegated_url}]
+            ]
+        }
+    try:
+        await send_user_dm(int(target_user_id), text, parse_mode="Markdown", reply_markup=kb)
+    except Exception as e:
+        _log.info("manager DM notify failed (user=%s, kind=%s): %s", target_user_id, kind, e)
+
+
+# Дефолтный TTL приглашения-ссылки (можно переопределить body.expires_in_days).
+_INVITE_DEFAULT_TTL_DAYS = 7
+# Жёсткая верхняя граница TTL — год.
+_INVITE_MAX_TTL_DAYS = 365
+
+
+def _parse_expires_in_days(value, *, default: int | None = None) -> "datetime | None":
+    """0 / None / "" → бессрочно (None). Иначе now+days. Обрезаем до года."""
+    if value is None or value == "" or value is False:
+        if default is None:
+            return None
+        days = max(1, min(int(default), _INVITE_MAX_TTL_DAYS))
+        return datetime.now(timezone.utc) + timedelta(days=days)
+    try:
+        days = int(value)
+    except (TypeError, ValueError):
+        return None
+    if days <= 0:
+        return None
+    days = min(days, _INVITE_MAX_TTL_DAYS)
+    return datetime.now(timezone.utc) + timedelta(days=days)
+
+
 async def _chat_managers_payload(session: AsyncSession, chat_id: int) -> list[dict]:
     rows = (
         await session.execute(
@@ -265,19 +493,51 @@ async def _chat_managers_payload(session: AsyncSession, chat_id: int) -> list[di
     ).scalars().all()
     if not rows:
         return []
-    tg_ids = {int(getattr(r, "user_id", 0) or 0) for r in rows if int(getattr(r, "user_id", 0) or 0) > 0}
+
+    # Lazy-revocation: если у делегата expires_at < now() — удаляем запись.
+    # Это дешевле, чем отдельный cron, и гарантирует что списки всегда актуальны.
+    now_utc = datetime.now(timezone.utc)
+    alive: list[ChatManager] = []
+    revoked_ids: list[int] = []
+    for r in rows:
+        exp = getattr(r, "expires_at", None)
+        if exp is not None and exp <= now_utc:
+            revoked_ids.append(int(getattr(r, "id", 0) or 0))
+            continue
+        alive.append(r)
+    if revoked_ids:
+        try:
+            await session.execute(
+                delete(ChatManager).where(ChatManager.id.in_(revoked_ids))
+            )
+            await session.commit()
+        except Exception as e:
+            _log.warning("lazy revoke ChatManager failed: %s", e)
+    if not alive:
+        return []
+
+    tg_ids = {int(getattr(r, "user_id", 0) or 0) for r in alive if int(getattr(r, "user_id", 0) or 0) > 0}
     users_map: dict[int, User] = {}
     if tg_ids:
         urows = (
             await session.execute(select(User).where(User.telegram_id.in_(list(tg_ids))))
         ).scalars().all()
         users_map = {int(u.telegram_id): u for u in urows}
+
+    # Activity-метрики делегата (Фаза 3): last_action_at / actions_7d / actions_30d
+    activity_map: dict[int, dict] = {}
+    try:
+        activity_map = await _manager_activity_stats(session, int(chat_id), list(tg_ids))
+    except Exception as e:
+        _log.warning("manager activity stats failed: %s", e)
+
     out: list[dict] = []
-    for r in rows:
+    for r in alive:
         uid = int(getattr(r, "user_id", 0) or 0)
         u = users_map.get(uid)
         seen = getattr(u, "last_webapp_seen_at", None) if u else None
         is_online = bool(seen and (datetime.now(timezone.utc) - seen) <= timedelta(seconds=90))
+        act = activity_map.get(uid) or {}
         out.append(
             {
                 "user_id": uid,
@@ -287,6 +547,10 @@ async def _chat_managers_payload(session: AsyncSession, chat_id: int) -> list[di
                 "last_seen_at": _format_dt(seen),
                 "added_by": int(getattr(r, "added_by", 0) or 0),
                 "created_at": _format_dt(getattr(r, "created_at", None)),
+                "expires_at": _format_dt(getattr(r, "expires_at", None)),
+                "last_action_at": _format_dt(act.get("last_action_at")),
+                "actions_7d": int(act.get("actions_7d") or 0),
+                "actions_30d": int(act.get("actions_30d") or 0),
                 "permissions": {
                     "protection": bool(getattr(r, "can_protection", False)),
                     "broadcast": bool(getattr(r, "can_broadcast", False)),
@@ -306,11 +570,39 @@ async def _chat_manager_invites_payload(session: AsyncSession, chat_id: int, own
             .order_by(ChatManagerInvite.created_at.desc())
         )
     ).scalars().all()
+    if not rows:
+        return []
+
+    now_utc = datetime.now(timezone.utc)
+
+    # Lazy-чистка протухших pending-приглашений (status != connected). Они уже не пригодятся.
+    expired_ids: list[int] = []
+    for r in rows:
+        st_raw = str(getattr(r, "status", "sent") or "sent").lower()
+        exp = getattr(r, "expires_at", None)
+        if st_raw != "connected" and exp is not None and exp <= now_utc:
+            expired_ids.append(int(getattr(r, "id", 0) or 0))
+    if expired_ids:
+        try:
+            await session.execute(
+                delete(ChatManagerInvite).where(ChatManagerInvite.id.in_(expired_ids))
+            )
+            await session.commit()
+        except Exception as e:
+            _log.warning("lazy expire ChatManagerInvite failed: %s", e)
+        rows = [r for r in rows if int(getattr(r, "id", 0) or 0) not in expired_ids]
+
+    bot_username = await _get_bot_username()
+
     out: list[dict] = []
     for r in rows:
         status = str(getattr(r, "status", "sent") or "sent").lower()
         if status == "sent" and int(getattr(r, "target_telegram_id", 0) or 0) > 0:
             status = "connecting"
+        token = str(getattr(r, "token", "") or "")
+        invite_link: str | None = None
+        if token and bot_username:
+            invite_link = f"https://t.me/{bot_username}?start=admin_invite_{token}"
         out.append(
             {
                 "id": int(getattr(r, "id", 0) or 0),
@@ -318,6 +610,9 @@ async def _chat_manager_invites_payload(session: AsyncSession, chat_id: int, own
                 "target_username": str(getattr(r, "target_username", "") or ""),
                 "connected_user_id": int(getattr(r, "connected_user_id", 0) or 0) or None,
                 "status": status,
+                "token": token or None,
+                "invite_link": invite_link,
+                "expires_at": _format_dt(getattr(r, "expires_at", None)),
                 "created_at": _format_dt(getattr(r, "created_at", None)),
                 "updated_at": _format_dt(getattr(r, "updated_at", None)),
                 "permissions": {
@@ -802,7 +1097,7 @@ def _next_monday_text(now: datetime | None = None) -> str:
     return d.strftime("%d.%m.%Y")
 
 
-def _rule_to_dict(rule: Rule, stopwords_count: int = 0) -> dict:
+def _rule_to_dict(rule: Rule, stopwords_count: int = 0, *, chat_owner_premium: bool = True) -> dict:
     welcome_buttons: list = []
     rules_channel_buttons: list = []
     rules_group_buttons: list = []
@@ -848,13 +1143,42 @@ def _rule_to_dict(rule: Rule, stopwords_count: int = 0) -> dict:
                 rules_group_autopost_times = [str(x) for x in parsed if str(x or "").strip()]
     except Exception:
         rules_group_autopost_times = []
-    return {
+    out = {
         "chat_id": rule.chat_id,
         "filter_links": getattr(rule, "filter_links", True),
         "filter_links_mode": getattr(rule, "filter_links_mode", "forbid"),
         "filter_links_scope": str(getattr(rule, "filter_links_scope", "all") or "all"),
         "filter_media_mode": getattr(rule, "filter_media_mode", "allow"),
+        "filter_media_photos": bool(getattr(rule, "filter_media_photos", False)),
+        "filter_media_videos": bool(getattr(rule, "filter_media_videos", False)),
+        "filter_media_stickers": bool(getattr(rule, "filter_media_stickers", False)),
+        "filter_media_animations": bool(getattr(rule, "filter_media_animations", False)),
+        "filter_media_voice": bool(getattr(rule, "filter_media_voice", False)),
+        "filter_media_video_notes": bool(getattr(rule, "filter_media_video_notes", False)),
+        "filter_media_audio": bool(getattr(rule, "filter_media_audio", False)),
+        "filter_media_custom_emoji": bool(getattr(rule, "filter_media_custom_emoji", False)),
+        "filter_media_plain_emoji": bool(getattr(rule, "filter_media_plain_emoji", False)),
+        "filter_mention_users": bool(getattr(rule, "filter_mention_users", False)),
+        "filter_mention_bots": bool(getattr(rule, "filter_mention_bots", False)),
+        "filter_mention_channels": bool(getattr(rule, "filter_mention_channels", False)),
+        "filter_mention_text_mention": bool(getattr(rule, "filter_mention_text_mention", False)),
+        "filter_mention_hashtags": bool(getattr(rule, "filter_mention_hashtags", False)),
+        "filter_mention_bot_commands": bool(getattr(rule, "filter_mention_bot_commands", False)),
+        "filter_mention_cashtags": bool(getattr(rule, "filter_mention_cashtags", False)),
+        "filter_mention_emails": bool(getattr(rule, "filter_mention_emails", False)),
+        "filter_mention_mass_enabled": bool(getattr(rule, "filter_mention_mass_enabled", False)),
+        "filter_mention_mass_threshold": int(getattr(rule, "filter_mention_mass_threshold", 5) or 5),
         "filter_buttons_mode": getattr(rule, "filter_buttons_mode", "allow"),
+        "filter_button_url": bool(getattr(rule, "filter_button_url", False)),
+        "filter_button_callback": bool(getattr(rule, "filter_button_callback", False)),
+        "filter_button_web_app": bool(getattr(rule, "filter_button_web_app", False)),
+        "filter_button_switch_inline": bool(getattr(rule, "filter_button_switch_inline", False)),
+        "filter_button_login": bool(getattr(rule, "filter_button_login", False)),
+        "filter_button_pay": bool(getattr(rule, "filter_button_pay", False)),
+        "filter_button_copy_text": bool(getattr(rule, "filter_button_copy_text", False)),
+        "filter_button_reply": bool(getattr(rule, "filter_button_reply", False)),
+        "filter_button_mass_enabled": bool(getattr(rule, "filter_button_mass_enabled", False)),
+        "filter_button_mass_threshold": int(getattr(rule, "filter_button_mass_threshold", 5) or 5),
         "filter_mentions": getattr(rule, "filter_mentions", False),
         "action_mode": getattr(rule, "action_mode", "delete"),
         "mute_minutes": int(rule.mute_minutes or 30),
@@ -912,6 +1236,13 @@ def _rule_to_dict(rule: Rule, stopwords_count: int = 0) -> dict:
         "use_global_bad_urls": bool(getattr(rule, "use_global_bad_urls", False)),
         "filter_channel_posts_enabled": bool(getattr(rule, "filter_channel_posts_enabled", False)),
         "filter_channel_posts_action": str(getattr(rule, "filter_channel_posts_action", "delete") or "delete"),
+        "filter_channel_post_channels": bool(getattr(rule, "filter_channel_post_channels", False)),
+        "filter_channel_post_groups": bool(getattr(rule, "filter_channel_post_groups", False)),
+        "filter_channel_post_anon_admin": bool(getattr(rule, "filter_channel_post_anon_admin", False)),
+        "filter_channel_post_fwd_channel": bool(getattr(rule, "filter_channel_post_fwd_channel", False)),
+        "filter_channel_post_fwd_group": bool(getattr(rule, "filter_channel_post_fwd_group", False)),
+        "filter_channel_post_no_username": bool(getattr(rule, "filter_channel_post_no_username", False)),
+        "filter_channel_post_hidden_fwd": bool(getattr(rule, "filter_channel_post_hidden_fwd", False)),
         "filter_profanity_enabled": bool(getattr(rule, "filter_profanity_enabled", True)),
         "filter_jobs_enabled": bool(getattr(rule, "filter_jobs_enabled", True)),
         "filter_casino_enabled": bool(getattr(rule, "filter_casino_enabled", True)),
@@ -937,6 +1268,9 @@ def _rule_to_dict(rule: Rule, stopwords_count: int = 0) -> dict:
         "auto_reports_enabled": bool(getattr(rule, "auto_reports_enabled", True)),
         "stopwords_count": stopwords_count,
     }
+    if not chat_owner_premium:
+        _mask_rule_public_dict_non_premium(out)
+    return out
 
 
 # ---------- GET /api/bot-info ----------
@@ -1079,6 +1413,21 @@ async def api_me(
             getattr(user, "delegate_broadcast_payer", None) or "delegate_first"
         ).strip().lower(),
         "language": _normalize_user_language(getattr(user, "language", None)),
+        # 10-дневный Premium-триал: окно активации, флаги, остаток.
+        "trial_used": bool(getattr(user, "trial_used", False)),
+        "trial_activated_at": (
+            getattr(user, "trial_activated_at").isoformat()
+            if getattr(user, "trial_activated_at", None) else None
+        ),
+        "first_start_at": (
+            getattr(user, "first_start_at").isoformat()
+            if getattr(user, "first_start_at", None) else None
+        ),
+        "trial_window_remaining_days": _us_trial_window_remaining_days(user),
+        "trial_eligible": _us_is_trial_eligible(user),
+        "trial_active": _us_is_trial_active(user),
+        "trial_remaining_days": _us_trial_active_remaining_days(user),
+        "trial_days_total": _TRIAL_DAYS,
     }
 
 
@@ -1124,6 +1473,83 @@ async def api_me_set_language(
     except Exception:
         pass
     return {"ok": True, "language": candidate}
+
+
+@router.post("/me/trial/activate")
+async def api_me_trial_activate(
+    init_profile: tuple[int, str | None, str | None] = Depends(require_init_data_with_profile),
+    session: AsyncSession = Depends(get_db),
+):
+    """Активация 10-дневного Premium-триала.
+
+    Условия (см. `is_trial_eligible`):
+      - триал ещё ни разу не активировался у этого юзера (`trial_used == False`);
+      - юзер уже нажимал /start (`first_start_at != None`);
+      - окно активации ещё открыто (10 дней с `first_start_at`);
+      - сейчас нет активной платной/промо-подписки.
+
+    Идемпотентно для уже-активного триала: возвращает текущее состояние без ошибки.
+    """
+    user_id, init_username, init_first_name = init_profile
+    user = await get_or_create_user(
+        session, user_id, username=init_username, first_name=init_first_name
+    )
+    now = datetime.now(timezone.utc)
+
+    if _us_is_trial_active(user, now):
+        return {
+            "ok": True,
+            "already_active": True,
+            "trial_active": True,
+            "trial_remaining_days": _us_trial_active_remaining_days(user, now),
+            "subscription_until": (
+                user.subscription_until.isoformat() if user.subscription_until else None
+            ),
+        }
+
+    if not _us_is_trial_eligible(user, now):
+        reason = "ineligible"
+        if bool(getattr(user, "trial_used", False)):
+            reason = "trial_already_used"
+        elif getattr(user, "first_start_at", None) is None:
+            reason = "no_first_start"
+        elif _us_trial_window_remaining_days(user, now) <= 0:
+            reason = "window_closed"
+        else:
+            src = (getattr(user, "subscription_source", None) or "").strip().lower()
+            if src in ("payment", "promo"):
+                reason = "active_subscription"
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=err_detail(f"trial_{reason}"),
+        )
+
+    until = now + timedelta(days=_TRIAL_DAYS)
+    user.tariff = Tariff.PREMIUM.value
+    user.chat_limit = int(TARIFF_CHAT_LIMITS[Tariff.PREMIUM.value])
+    user.group_limit = int(TARIFF_GROUP_LIMITS[Tariff.PREMIUM.value])
+    user.channel_limit = int(TARIFF_CHANNEL_LIMITS[Tariff.PREMIUM.value])
+    user.subscription_until = until
+    user.subscription_source = _TRIAL_SUBSCRIPTION_SOURCE
+    user.trial_used = True
+    user.trial_activated_at = now
+    # Сброс дедупа DM-серии, чтобы in-trial напоминания начали считаться от свежей активации.
+    user.trial_reminder_last_day_sent = 0
+    try:
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise HTTPException(status_code=500, detail=err_detail("db_error"))
+
+    return {
+        "ok": True,
+        "already_active": False,
+        "trial_active": True,
+        "trial_remaining_days": _TRIAL_DAYS,
+        "trial_days_total": _TRIAL_DAYS,
+        "subscription_until": until.isoformat(),
+        "subscription_source": _TRIAL_SUBSCRIPTION_SOURCE,
+    }
 
 
 @router.post("/me/legal-consent")
@@ -1850,6 +2276,13 @@ async def api_chat_managers_add(
             detail=err_detail("admin_pick_right"),
         )
 
+    # Опциональный TTL: 0/None = бессрочно, иначе дней (макс. 365).
+    # Для приглашений-ссылок (когда юзер ещё не открыл бот) дефолт — 7 дней,
+    # чтобы протухшая ссылка не висела вечно.
+    expires_in_days_raw = body.get("expires_in_days")
+    manager_expires_at = _parse_expires_in_days(expires_in_days_raw, default=None)
+    as_invite_link = bool(body.get("as_invite_link"))
+
     target_user: User | None = None
     resolved_username = ""
     if target_id > 0:
@@ -1862,17 +2295,19 @@ async def api_chat_managers_add(
         if target_user:
             target_id = int(getattr(target_user, "telegram_id", 0) or 0)
             resolved_username = str(getattr(target_user, "username", "") or uname)
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=err_detail("invite_user_start_first"),
-            )
+        elif as_invite_link or uname:
+            # Юзер ещё не открыл бот / нашли по username — создаём pending-инвайт
+            # с токеном-ссылкой. Owner скопирует https://t.me/<bot>?start=admin_invite_<token>
+            # и пришлёт нужному человеку. См. start.py handler.
+            resolved_username = uname
 
     owner_uid = int(getattr(chat, "owner_user_id", 0) or 0)
     if target_id > 0 and target_id == owner_uid:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("owner_already_full_access"))
 
     created_status = "sent"
+    new_invite_link: str | None = None
+    new_invite_token: str | None = None
     if target_id > 0 and target_user:
         # Делегированный админ должен быть админом/владельцем этого чата в Telegram.
         mem = await tg_get_chat_member(int(chat_id), int(target_id))
@@ -1896,12 +2331,14 @@ async def api_chat_managers_add(
                 can_broadcast=perms["broadcast"],
                 can_reports=perms["reports"],
                 can_first_post_settings=perms["first_post_settings"],
+                expires_at=manager_expires_at,
             ))
         else:
             existing.can_protection = perms["protection"]
             existing.can_broadcast = perms["broadcast"]
             existing.can_reports = perms["reports"]
             existing.can_first_post_settings = perms["first_post_settings"]
+            existing.expires_at = manager_expires_at
         inv = (
             await session.execute(
                 select(ChatManagerInvite)
@@ -1932,10 +2369,75 @@ async def api_chat_managers_add(
             inv.can_reports = perms["reports"]
             inv.can_first_post_settings = perms["first_post_settings"]
         created_status = "connected"
+    elif as_invite_link or (resolved_username and target_id <= 0):  # noqa: E501
+        # см. ветку ниже — pending-инвайт по ссылке
+        # Pending-инвайт по ссылке: юзера ещё нет в БД (или owner попросил «ссылкой»).
+        # Создаём ChatManagerInvite со status='sent', токеном и TTL (по умолчанию 7 дней).
+        invite_expires_at = manager_expires_at or (
+            datetime.now(timezone.utc) + timedelta(days=_INVITE_DEFAULT_TTL_DAYS)
+        )
+        new_invite_token = _make_invite_token()
+        # Если уже есть pending по тому же username — пересоздаём токен (refresh).
+        existing_pending = None
+        if resolved_username:
+            existing_pending = (
+                await session.execute(
+                    select(ChatManagerInvite)
+                    .where(
+                        ChatManagerInvite.chat_id == int(chat_id),
+                        ChatManagerInvite.owner_user_id == owner_uid,
+                        ChatManagerInvite.target_username == resolved_username,
+                        ChatManagerInvite.connected_user_id.is_(None),
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+        if existing_pending:
+            existing_pending.token = new_invite_token
+            existing_pending.expires_at = invite_expires_at
+            existing_pending.status = "sent"
+            existing_pending.can_protection = perms["protection"]
+            existing_pending.can_broadcast = perms["broadcast"]
+            existing_pending.can_reports = perms["reports"]
+            existing_pending.can_first_post_settings = perms["first_post_settings"]
+        else:
+            session.add(ChatManagerInvite(
+                chat_id=int(chat_id),
+                owner_user_id=owner_uid,
+                target_telegram_id=None,
+                target_username=resolved_username or None,
+                connected_user_id=None,
+                status="sent",
+                token=new_invite_token,
+                expires_at=invite_expires_at,
+                can_protection=perms["protection"],
+                can_broadcast=perms["broadcast"],
+                can_reports=perms["reports"],
+                can_first_post_settings=perms["first_post_settings"],
+            ))
+        created_status = "pending_link"
+        _botname = await _get_bot_username()
+        if _botname:
+            new_invite_link = f"https://t.me/{_botname}?start=admin_invite_{new_invite_token}"
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=err_detail("invite_unrecognized"),
+        )
+    # Audit / activity. См. record_manager_action — flush до commit,
+    # одной транзакцией с основным изменением.
+    if created_status == "connected":
+        await record_manager_action(
+            session, chat_id=int(chat_id), user_id=int(user_id),
+            action_kind="manager_added", target=int(target_id),
+            meta={"perms": perms, "expires_at": _format_dt(manager_expires_at)},
+        )
+    elif created_status == "pending_link":
+        await record_manager_action(
+            session, chat_id=int(chat_id), user_id=int(user_id),
+            action_kind="manager_invite_created",
+            target=resolved_username or None,
+            meta={"perms": perms, "ttl_days": _INVITE_DEFAULT_TTL_DAYS, "via_link": True},
         )
     await session.commit()
     # Личное уведомление приглашённому (если диалог с ботом уже открыт).
@@ -1966,6 +2468,8 @@ async def api_chat_managers_add(
         "invites": await _chat_manager_invites_payload(session, int(chat_id), owner_uid),
         "limit": 0,
         "created_status": created_status,
+        "new_invite_link": new_invite_link,
+        "new_invite_token": new_invite_token,
     }
 
 
@@ -1997,7 +2501,21 @@ async def api_chat_managers_remove(
             ChatManagerInvite.target_telegram_id == int(manager_user_id),
         )
     )
+    await record_manager_action(
+        session, chat_id=int(chat_id), user_id=int(user_id),
+        action_kind="manager_removed", target=int(manager_user_id),
+    )
     await session.commit()
+    try:
+        await _notify_manager_change(
+            session,
+            target_user_id=int(manager_user_id),
+            chat=chat,
+            kind="removed",
+            perms=None,
+        )
+    except Exception:
+        pass
     return {
         "ok": True,
         "managers": await _chat_managers_payload(session, int(chat_id)),
@@ -2053,15 +2571,20 @@ async def api_chat_managers_patch(
             "first_post_settings": False,
         }
 
+    removed = False
     if not any(next_perms.values()):
         await session.execute(
             delete(ChatManager).where(ChatManager.chat_id == int(chat_id), ChatManager.user_id == int(manager_user_id))
         )
+        removed = True
     else:
         row.can_protection = next_perms["protection"]
         row.can_broadcast = next_perms["broadcast"]
         row.can_reports = next_perms["reports"]
         row.can_first_post_settings = next_perms["first_post_settings"]
+        # Опциональное обновление TTL. Если ключ не передан — оставляем как было.
+        if "expires_in_days" in body:
+            row.expires_at = _parse_expires_in_days(body.get("expires_in_days"))
 
     inv = (
         await session.execute(
@@ -2077,7 +2600,27 @@ async def api_chat_managers_patch(
         inv.can_broadcast = next_perms["broadcast"]
         inv.can_reports = next_perms["reports"]
         inv.can_first_post_settings = next_perms["first_post_settings"]
+
+    await record_manager_action(
+        session, chat_id=int(chat_id), user_id=int(user_id),
+        action_kind="manager_removed" if removed else "manager_perms_updated",
+        target=int(manager_user_id),
+        meta=None if removed else {"perms": next_perms},
+    )
     await session.commit()
+
+    # DM-уведомление о смене прав / отзыве. Не критично — глотаем ошибки.
+    try:
+        await _notify_manager_change(
+            session,
+            target_user_id=int(manager_user_id),
+            chat=chat,
+            kind="removed" if removed else "updated",
+            perms=next_perms,
+        )
+    except Exception:
+        pass
+
     return {
         "ok": True,
         "managers": await _chat_managers_payload(session, int(chat_id)),
@@ -2110,12 +2653,167 @@ async def api_chat_manager_invite_cancel(
             ChatManagerInvite.owner_user_id == owner_uid,
         )
     )
+    await record_manager_action(
+        session, chat_id=int(chat_id), user_id=int(user_id),
+        action_kind="manager_invite_cancelled", target=int(invite_id),
+    )
     await session.commit()
     return {
         "ok": True,
         "managers": await _chat_managers_payload(session, int(chat_id)),
         "invites": await _chat_manager_invites_payload(session, int(chat_id), owner_uid),
         "limit": 3,
+    }
+
+
+# =========================================================
+# Фаза 3 «Админы чата»: журнал действий (audit log / activity)
+# =========================================================
+
+
+def _audit_row_public(row: ChatManagerAction, users_map: dict[int, "User"]) -> dict:
+    """Сериализация одной записи журнала. meta хранится как JSON-строка — пытаемся
+    распарсить обратно, чтобы фронту не приходилось json-decode-ить вручную.
+    """
+    import json as _json
+    meta_raw = getattr(row, "action_meta", None)
+    meta_parsed: dict | list | str | None = None
+    if meta_raw:
+        try:
+            meta_parsed = _json.loads(meta_raw)
+        except Exception:
+            meta_parsed = str(meta_raw)
+    uid = int(getattr(row, "user_id", 0) or 0)
+    u = users_map.get(uid)
+    return {
+        "id": int(getattr(row, "id", 0) or 0),
+        "user_id": uid,
+        "user_username": str(getattr(u, "username", "") or "") if u else "",
+        "user_first_name": str(getattr(u, "first_name", "") or "") if u else "",
+        "action_kind": str(getattr(row, "action_kind", "") or ""),
+        "action_target": str(getattr(row, "action_target", "") or "") or None,
+        "meta": meta_parsed,
+        "success": bool(getattr(row, "success", True)),
+        "created_at": _format_dt(getattr(row, "created_at", None)),
+    }
+
+
+@router.get("/chat/{chat_id}/audit")
+async def api_chat_audit(
+    chat_id: int,
+    limit: int = 30,
+    offset: int = 0,
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Audit log: лента действий делегатов/владельца за этот чат.
+
+    Доступ: видит owner и любой делегат с can_protection ИЛИ can_reports
+    (т.е. человек, который реально что-то делает в чате).
+    """
+    await _touch_user_presence(session, user_id)
+    chat = await session.get(Chat, int(chat_id))
+    if not chat:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
+    if not await chat_owner_has_miniapp_premium(session, int(chat_id)):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("premium_required"))
+    owner_uid = int(getattr(chat, "owner_user_id", 0) or 0)
+    can_view = owner_uid == int(user_id)
+    if not can_view:
+        mgr = (
+            await session.execute(
+                select(ChatManager)
+                .where(ChatManager.chat_id == int(chat_id), ChatManager.user_id == int(user_id))
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if mgr and (bool(mgr.can_protection) or bool(mgr.can_reports) or bool(mgr.can_broadcast)):
+            can_view = True
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("only_owner_manage_admins"))
+
+    lim = max(1, min(int(limit or 30), 100))
+    off = max(0, int(offset or 0))
+    rows = (
+        await session.execute(
+            select(ChatManagerAction)
+            .where(ChatManagerAction.chat_id == int(chat_id))
+            .order_by(ChatManagerAction.created_at.desc())
+            .offset(off)
+            .limit(lim)
+        )
+    ).scalars().all()
+    total = int(
+        (
+            await session.execute(
+                select(func.count(ChatManagerAction.id))
+                .where(ChatManagerAction.chat_id == int(chat_id))
+            )
+        ).scalar_one()
+        or 0
+    )
+    uids = {int(getattr(r, "user_id", 0) or 0) for r in rows if int(getattr(r, "user_id", 0) or 0) > 0}
+    users_map: dict[int, User] = {}
+    if uids:
+        urows = (
+            await session.execute(select(User).where(User.telegram_id.in_(list(uids))))
+        ).scalars().all()
+        users_map = {int(u.telegram_id): u for u in urows}
+    return {
+        "chat_id": int(chat_id),
+        "total": total,
+        "offset": off,
+        "limit": lim,
+        "items": [_audit_row_public(r, users_map) for r in rows],
+    }
+
+
+@router.get("/chat/{chat_id}/managers/{manager_user_id}/activity")
+async def api_chat_manager_activity(
+    chat_id: int,
+    manager_user_id: int,
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Активность одного делегата в этом чате: счётчики + 10 последних действий.
+
+    Доступ: только owner (зачем делегату смотреть на чужие действия — пока не нужно).
+    """
+    await _touch_user_presence(session, user_id)
+    chat = await session.get(Chat, int(chat_id))
+    if not chat:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
+    if not await chat_owner_has_miniapp_premium(session, int(chat_id)):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("premium_required"))
+    if int(getattr(chat, "owner_user_id", 0) or 0) != int(user_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("only_owner_manage_admins"))
+    if int(manager_user_id) <= 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("bad_manager_id"))
+
+    stats = await _manager_activity_stats(session, int(chat_id), [int(manager_user_id)])
+    stat = stats.get(int(manager_user_id)) or {"last_action_at": None, "actions_7d": 0, "actions_30d": 0}
+    rows = (
+        await session.execute(
+            select(ChatManagerAction)
+            .where(
+                ChatManagerAction.chat_id == int(chat_id),
+                ChatManagerAction.user_id == int(manager_user_id),
+            )
+            .order_by(ChatManagerAction.created_at.desc())
+            .limit(10)
+        )
+    ).scalars().all()
+    u = (
+        await session.execute(select(User).where(User.telegram_id == int(manager_user_id)).limit(1))
+    ).scalar_one_or_none()
+    users_map = {int(manager_user_id): u} if u else {}
+    return {
+        "chat_id": int(chat_id),
+        "user_id": int(manager_user_id),
+        "last_action_at": _format_dt(stat["last_action_at"]),
+        "actions_7d": int(stat["actions_7d"] or 0),
+        "actions_30d": int(stat["actions_30d"] or 0),
+        "recent": [_audit_row_public(r, users_map) for r in rows],
     }
 
 
@@ -2275,13 +2973,165 @@ async def _link_blacklist_max_for_chat(session: AsyncSession, chat: Chat) -> int
     return 0
 
 
-async def _is_chat_owner_premium(session: AsyncSession, chat: Chat) -> bool:
-    now = datetime.now(timezone.utc)
-    tid = int(getattr(chat, "owner_user_id", 0) or 0)
-    if not tid:
+async def _is_chat_owner_premium(session: AsyncSession, chat: Chat | None) -> bool:
+    if not chat:
         return False
-    owner = (await session.execute(select(User).where(User.telegram_id == tid).limit(1))).scalar_one_or_none()
-    return bool(owner and _is_user_premium_now(owner, now))
+    return await chat_owner_has_miniapp_premium(session, int(chat.id))
+
+
+# ---- Premium-only поля Rule (PATCH /chat/{id}/rule) ----
+# Источник истины для бэк-гейта в `api_chat_rule`: какие ключи PATCH-body
+# принимаются только если владелец чата Premium. Если владелец FREE — эти
+# ключи игнорируются (как уже делает guardian_*). Дублирующий фронт ставит
+# короны на этих фичах через PremiumLockBadge.
+
+# 1. Welcome custom: всё, кроме самого вкл/выкл и legacy `welcome_max_per_min=0`.
+_PREMIUM_RULE_FIELDS_WELCOME: frozenset[str] = frozenset({
+    "welcome_text",
+    "welcome_buttons",  # PATCH-ключ → пишется в welcome_buttons_json
+    "welcome_max_per_min",
+    "welcome_silent_on_raid",
+    "welcome_raid_threshold",
+    "welcome_raid_window_minutes",
+    "welcome_every_n_joins",
+})
+
+# 2. Rules autopost: всё, кроме самих вкл/выкл и текста.
+_PREMIUM_RULE_FIELDS_RULES_AUTOPOST: frozenset[str] = frozenset({
+    "rules_channel_buttons",
+    "rules_channel_delete_window_sec",
+    "rules_channel_autopost_enabled",
+    "rules_channel_autopost_times",
+    "rules_group_buttons",
+    "rules_group_autopost_enabled",
+    "rules_group_autopost_times",
+    "rules_group_pin_on_send",
+    "rules_group_delete_pin_notice",
+    "rules_group_event_on_trigger",
+    "rules_group_event_on_punish",
+    "rules_group_event_trigger_every_n",
+    "rules_group_event_punish_every_n",
+})
+
+# 3. Гранулярные фильтры (media/mention/button/channel_post). Legacy-флаги
+# `filter_media_mode`, `filter_buttons_mode`, `filter_mentions`,
+# `filter_channel_posts_enabled` остаются доступными FREE.
+_PREMIUM_RULE_FIELDS_GRANULAR: frozenset[str] = frozenset({
+    "filter_media_photos", "filter_media_videos", "filter_media_stickers",
+    "filter_media_animations", "filter_media_voice", "filter_media_video_notes",
+    "filter_media_audio", "filter_media_custom_emoji", "filter_media_plain_emoji",
+    "filter_mention_users", "filter_mention_bots", "filter_mention_channels",
+    "filter_mention_text_mention", "filter_mention_hashtags", "filter_mention_bot_commands",
+    "filter_mention_cashtags", "filter_mention_emails",
+    "filter_mention_mass_enabled", "filter_mention_mass_threshold",
+    "filter_button_url", "filter_button_callback", "filter_button_web_app",
+    "filter_button_switch_inline", "filter_button_login", "filter_button_pay",
+    "filter_button_copy_text", "filter_button_reply",
+    "filter_button_mass_enabled", "filter_button_mass_threshold",
+    "filter_channel_posts_action",
+    "filter_channel_post_channels", "filter_channel_post_groups",
+    "filter_channel_post_anon_admin",
+    "filter_channel_post_fwd_channel", "filter_channel_post_fwd_group",
+    "filter_channel_post_no_username", "filter_channel_post_hidden_fwd",
+})
+
+# 4. Audit log — отдельные endpoints (см. `api_chat_audit`).
+# 5. Auto-reports в log-chat.
+_PREMIUM_RULE_FIELDS_AUTO_REPORTS: frozenset[str] = frozenset({"auto_reports_enabled"})
+
+# 6. Antinakrutka — `alert_restrict` режим Premium-only (значение ключа,
+# не сам ключ).
+# 7. Captcha kinds — `join_captcha_kind != "button"` Premium-only (значение).
+# 8. Extra dicts.
+_PREMIUM_RULE_FIELDS_EXTRA_DICTS: frozenset[str] = frozenset({
+    "filter_politics_enabled",
+    "filter_religion_enabled", "filter_religion_promo_only",
+    "filter_esoteric_enabled", "filter_esoteric_promo_only",
+    "filter_racism_enabled", "filter_nazi_enabled", "filter_vulgar_enabled",
+})
+# 9. Global antispam DB.
+_PREMIUM_RULE_FIELDS_GLOBAL_DB: frozenset[str] = frozenset({"use_global_antispam_db"})
+
+# Объединение для удобной фильтрации в `api_chat_rule`.
+# NB: ALERT_RESTRICT и не-button капча проверяются по значениям, а не по ключам.
+_PREMIUM_RULE_FIELDS: frozenset[str] = (
+    _PREMIUM_RULE_FIELDS_WELCOME
+    | _PREMIUM_RULE_FIELDS_RULES_AUTOPOST
+    | _PREMIUM_RULE_FIELDS_GRANULAR
+    | _PREMIUM_RULE_FIELDS_AUTO_REPORTS
+    | _PREMIUM_RULE_FIELDS_EXTRA_DICTS
+    | _PREMIUM_RULE_FIELDS_GLOBAL_DB
+)
+
+# Ключи тела PATCH, которые игнорируются, если у владельца чата нет активного Premium
+# (+ отдельно по значениям режутся alert_restrict и не-button captcha ниже по коду).
+_PREMIUM_PATCH_DENY_KEYS_FREE: frozenset[str] = _PREMIUM_RULE_FIELDS | frozenset({
+    "antinakrutka_action",
+    "antinakrutka_restrict_minutes",
+    "join_captcha_kind",
+})
+
+
+def _mask_rule_public_dict_non_premium(d: dict) -> None:
+    """Маска ответа rule для клиента Mini App при FREE владельце (фактические поля БД могут содержать
+    исторические значения — UI и enforce в боте синхронизируем через API + moderation)."""
+    for k in (
+        "filter_media_photos", "filter_media_videos", "filter_media_stickers",
+        "filter_media_animations", "filter_media_voice", "filter_media_video_notes",
+        "filter_media_audio", "filter_media_custom_emoji", "filter_media_plain_emoji",
+        "filter_mention_users", "filter_mention_bots", "filter_mention_channels",
+        "filter_mention_text_mention", "filter_mention_hashtags", "filter_mention_bot_commands",
+        "filter_mention_cashtags", "filter_mention_emails",
+        "filter_mention_mass_enabled",
+        "filter_button_url", "filter_button_callback", "filter_button_web_app",
+        "filter_button_switch_inline", "filter_button_login", "filter_button_pay",
+        "filter_button_copy_text", "filter_button_reply", "filter_button_mass_enabled",
+        "filter_channel_post_channels", "filter_channel_post_groups",
+        "filter_channel_post_anon_admin",
+        "filter_channel_post_fwd_channel", "filter_channel_post_fwd_group",
+        "filter_channel_post_no_username", "filter_channel_post_hidden_fwd",
+    ):
+        d[k] = False
+    d["filter_mention_mass_threshold"] = 5
+    d["filter_button_mass_threshold"] = 5
+    d["filter_channel_posts_action"] = "delete"
+    d["welcome_text"] = ""
+    d["welcome_buttons"] = []
+    d["welcome_has_photo"] = False
+    d["welcome_max_per_min"] = 0
+    d["welcome_silent_on_raid"] = False
+    d["welcome_raid_threshold"] = 8
+    d["welcome_raid_window_minutes"] = 2
+    d["welcome_every_n_joins"] = 1
+    d["rules_channel_buttons"] = []
+    d["rules_channel_delete_window_sec"] = 0
+    d["rules_channel_autopost_enabled"] = False
+    d["rules_channel_autopost_times"] = []
+    d["rules_channel_has_photo"] = False
+    d["rules_group_buttons"] = []
+    d["rules_group_autopost_enabled"] = False
+    d["rules_group_autopost_times"] = []
+    d["rules_group_has_photo"] = False
+    d["rules_group_pin_on_send"] = True
+    d["rules_group_delete_pin_notice"] = False
+    d["rules_group_event_on_trigger"] = False
+    d["rules_group_event_on_punish"] = False
+    d["rules_group_event_trigger_every_n"] = 1
+    d["rules_group_event_punish_every_n"] = 1
+    d["join_captcha_kind"] = "button"
+    if str(d.get("antinakrutka_action") or "").strip().lower() == "alert_restrict":
+        d["antinakrutka_action"] = "alert"
+    d["auto_reports_enabled"] = False
+    d["use_global_antispam_db"] = False
+    d["filter_politics_enabled"] = False
+    d["filter_religion_enabled"] = False
+    d["filter_religion_promo_only"] = False
+    d["filter_esoteric_enabled"] = False
+    d["filter_esoteric_promo_only"] = False
+    d["filter_racism_enabled"] = False
+    d["filter_nazi_enabled"] = False
+    d["filter_vulgar_enabled"] = False
+    d["spam_spike_notify_managers"] = False
 
 
 async def _link_blacklist_patterns_list(session: AsyncSession, chat_id: int) -> list[str]:
@@ -2416,7 +3266,7 @@ async def api_chat(
         "is_shared": _chat_is_shared_payload(getattr(chat, "owner_user_id", None), int(user_id)),
         "linked_discussion_chat_id": linked_discussion_chat_id,
         "linked_discussion_title": linked_discussion_title,
-        "rule": _rule_to_dict(rule, stopwords_count),
+        "rule": _rule_to_dict(rule, stopwords_count, chat_owner_premium=owner_premium),
         "stopwords": stopwords_list,
         "whitelist_max_domains": max_dom,
         "whitelist_max_users": max_u,
@@ -2506,6 +3356,9 @@ async def api_chat_welcome_photo_upload(
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
+    chat_row_p = await session.get(Chat, int(chat_id))
+    if not chat_row_p or not await _is_chat_owner_premium(session, chat_row_p):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("premium_required"))
     rule = await get_or_create_rule(session, int(chat_id))
     ctype = str(getattr(file, "content_type", "") or "").lower()
     if not ctype.startswith("image/"):
@@ -2545,6 +3398,9 @@ async def api_chat_welcome_photo_delete(
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
+    chat_row_p = await session.get(Chat, int(chat_id))
+    if not chat_row_p or not await _is_chat_owner_premium(session, chat_row_p):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("premium_required"))
     rule = await get_or_create_rule(session, int(chat_id))
     rel = str(getattr(rule, "welcome_photo_path", "") or "").strip()
     rule.welcome_photo_path = None
@@ -2599,6 +3455,9 @@ async def api_chat_rules_photo_upload(
     mode = str(target or "group").strip().lower()
     if mode not in ("group", "channel"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("rules_target_group_or_channel"))
+    chat_row_p = await session.get(Chat, int(chat_id))
+    if not chat_row_p or not await _is_chat_owner_premium(session, chat_row_p):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("premium_required"))
     rule = await get_or_create_rule(session, int(chat_id))
     ctype = str(getattr(file, "content_type", "") or "").lower()
     if not ctype.startswith("image/"):
@@ -2673,6 +3532,9 @@ async def api_chat_rules_photo_delete(
     mode = str(target or "group").strip().lower()
     if mode not in ("group", "channel"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("rules_target_group_or_channel"))
+    chat_row_p = await session.get(Chat, int(chat_id))
+    if not chat_row_p or not await _is_chat_owner_premium(session, chat_row_p):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("premium_required"))
     rule = await get_or_create_rule(session, int(chat_id))
     rel = str(getattr(rule, "rules_group_photo_path" if mode == "group" else "rules_channel_photo_path", "") or "").strip()
     if mode == "group":
@@ -2983,9 +3845,27 @@ async def api_chat_rule(
     rule = await get_or_create_rule(session, int(chat_id))
     chat = await session.get(Chat, int(chat_id))
     owner_premium = await _is_chat_owner_premium(session, chat) if chat else False
+    body = {k: v for k, v in (body or {}).items()}
+    if not owner_premium:
+        body = {k: v for k, v in body.items() if k not in _PREMIUM_PATCH_DENY_KEYS_FREE}
     allowed = {
         "filter_links", "filter_links_mode", "filter_links_scope", "filter_media_mode", "filter_buttons_mode", "filter_mentions",
+        "filter_media_photos", "filter_media_videos", "filter_media_stickers", "filter_media_animations",
+        "filter_media_voice", "filter_media_video_notes", "filter_media_audio", "filter_media_custom_emoji",
+        "filter_media_plain_emoji",
+        "filter_mention_users", "filter_mention_bots", "filter_mention_channels",
+        "filter_mention_text_mention", "filter_mention_hashtags", "filter_mention_bot_commands",
+        "filter_mention_cashtags", "filter_mention_emails",
+        "filter_mention_mass_enabled", "filter_mention_mass_threshold",
+        "filter_button_url", "filter_button_callback", "filter_button_web_app",
+        "filter_button_switch_inline", "filter_button_login", "filter_button_pay",
+        "filter_button_copy_text", "filter_button_reply",
+        "filter_button_mass_enabled", "filter_button_mass_threshold",
         "filter_channel_posts_enabled", "filter_channel_posts_action",
+        "filter_channel_post_channels", "filter_channel_post_groups",
+        "filter_channel_post_anon_admin",
+        "filter_channel_post_fwd_channel", "filter_channel_post_fwd_group",
+        "filter_channel_post_no_username", "filter_channel_post_hidden_fwd",
         "welcome_enabled", "welcome_text", "welcome_buttons",
         "welcome_max_per_min", "welcome_silent_on_raid", "welcome_raid_threshold", "welcome_raid_window_minutes", "welcome_every_n_joins",
         "rules_channel_enabled", "rules_channel_text", "rules_channel_buttons",
@@ -3094,6 +3974,88 @@ async def api_chat_rule(
     if "filter_channel_posts_action" in body and hasattr(rule, "filter_channel_posts_action"):
         sca = str(getattr(rule, "filter_channel_posts_action", "delete") or "delete").strip().lower()
         rule.filter_channel_posts_action = sca if sca in ("delete", "ban") else "delete"
+    # ВАЖНО: переход с legacy filter_media_mode на гранулярные тогглы.
+    # Если в запросе пришёл хотя бы один filter_media_* и при этом filter_media_mode явно не задан —
+    # сбрасываем legacy-режим в 'allow'. Иначе при всех выключенных гранулах сработает старый блок
+    # «всё медиа запрещено» и пользователь увидит «все выключено, но всё равно удаляет».
+    _granular_media_keys = (
+        "filter_media_photos",
+        "filter_media_videos",
+        "filter_media_stickers",
+        "filter_media_animations",
+        "filter_media_voice",
+        "filter_media_video_notes",
+        "filter_media_audio",
+        "filter_media_custom_emoji",
+        "filter_media_plain_emoji",
+    )
+    if any(k in body for k in _granular_media_keys) and "filter_media_mode" not in body:
+        if hasattr(rule, "filter_media_mode"):
+            rule.filter_media_mode = "allow"
+    # Аналогичная история для упоминаний: при PATCH любого filter_mention_* сбрасываем
+    # legacy filter_mentions=False, чтобы старый блок «все @» не пересекался с гранулами.
+    _granular_mention_keys = (
+        "filter_mention_users",
+        "filter_mention_bots",
+        "filter_mention_channels",
+        "filter_mention_text_mention",
+        "filter_mention_hashtags",
+        "filter_mention_bot_commands",
+        "filter_mention_cashtags",
+        "filter_mention_emails",
+        "filter_mention_mass_enabled",
+        "filter_mention_mass_threshold",
+    )
+    if any(k in body for k in _granular_mention_keys) and "filter_mentions" not in body:
+        if hasattr(rule, "filter_mentions"):
+            rule.filter_mentions = False
+    # Валидация порога массовых упоминаний (3..20).
+    if "filter_mention_mass_threshold" in body and hasattr(rule, "filter_mention_mass_threshold"):
+        try:
+            v = int(body.get("filter_mention_mass_threshold"))
+        except (TypeError, ValueError):
+            v = 5
+        rule.filter_mention_mass_threshold = max(2, min(50, v))
+    # Аналогично для кнопок: при PATCH любого filter_button_* сбрасываем legacy
+    # filter_buttons_mode='allow', иначе старая логика «все кнопки запрещены»
+    # пересекается с гранулами.
+    _granular_button_keys = (
+        "filter_button_url",
+        "filter_button_callback",
+        "filter_button_web_app",
+        "filter_button_switch_inline",
+        "filter_button_login",
+        "filter_button_pay",
+        "filter_button_copy_text",
+        "filter_button_reply",
+        "filter_button_mass_enabled",
+        "filter_button_mass_threshold",
+    )
+    if any(k in body for k in _granular_button_keys) and "filter_buttons_mode" not in body:
+        if hasattr(rule, "filter_buttons_mode"):
+            rule.filter_buttons_mode = "allow"
+    # Валидация порога массовых кнопок.
+    if "filter_button_mass_threshold" in body and hasattr(rule, "filter_button_mass_threshold"):
+        try:
+            v = int(body.get("filter_button_mass_threshold"))
+        except (TypeError, ValueError):
+            v = 5
+        rule.filter_button_mass_threshold = max(2, min(50, v))
+    # Аналогично для «сообщений от каналов»: при PATCH любого filter_channel_post_*
+    # сбрасываем legacy filter_channel_posts_enabled=False, чтобы две модели
+    # (старая «всё» и новая «гранулы») не пересекались.
+    _granular_channel_post_keys = (
+        "filter_channel_post_channels",
+        "filter_channel_post_groups",
+        "filter_channel_post_anon_admin",
+        "filter_channel_post_fwd_channel",
+        "filter_channel_post_fwd_group",
+        "filter_channel_post_no_username",
+        "filter_channel_post_hidden_fwd",
+    )
+    if any(k in body for k in _granular_channel_post_keys) and "filter_channel_posts_enabled" not in body:
+        if hasattr(rule, "filter_channel_posts_enabled"):
+            rule.filter_channel_posts_enabled = False
     if "welcome_text" in body and hasattr(rule, "welcome_text"):
         txt = str(body.get("welcome_text") or "")
         rule.welcome_text = txt[:4000]
@@ -3265,13 +4227,33 @@ async def api_chat_rule(
         rule.filter_links_mode = "forbid"
     if hasattr(rule, "filter_links"):
         rule.filter_links = fm != "allow"
+    if not owner_premium:
+        rule.join_captcha_kind = "button"
+        rule.use_global_antispam_db = False
+        rule.auto_reports_enabled = False
+        rule.spam_spike_notify_managers = False
+        for _fname in _PREMIUM_RULE_FIELDS_EXTRA_DICTS:
+            if hasattr(rule, _fname):
+                setattr(rule, _fname, False)
     aa = (getattr(rule, "antinakrutka_action", None) or "alert").strip().lower()
     if aa not in ("alert", "alert_restrict"):
         rule.antinakrutka_action = "alert"
+    elif not owner_premium and aa == "alert_restrict":
+        rule.antinakrutka_action = "alert"
+    # Audit / activity. См. _MANAGER_ACTION_KINDS.
+    # Сохраняем список изменённых ключей (без значений) — достаточно для аудита,
+    # значения могут быть большими и/или приватными.
+    _changed_keys = sorted({k for k in body.keys() if k in allowed})
+    if _changed_keys:
+        await record_manager_action(
+            session, chat_id=int(chat_id), user_id=int(user_id),
+            action_kind="rule_patched",
+            meta={"changed": _changed_keys[:30]},
+        )
     await session.commit()
     await session.refresh(rule)
     stopwords_count = await count_stopwords(session, int(chat_id))
-    return {"rule": _rule_to_dict(rule, stopwords_count)}
+    return {"rule": _rule_to_dict(rule, stopwords_count, chat_owner_premium=owner_premium)}
 
 
 def _rules_reply_markup_from_json(raw_json: str | None) -> dict | None:
@@ -3323,6 +4305,8 @@ async def api_chat_rules_send_now(
     row = await session.get(Chat, int(chat_id))
     if not row or bool(getattr(row, "is_log_chat", False)):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("invalid_chat"))
+    if not await _is_chat_owner_premium(session, row):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("premium_required"))
     rule = await get_or_create_rule(session, int(chat_id))
     target = str(body.get("target") or "group").strip().lower()
     pin_message = bool(body.get("pin"))

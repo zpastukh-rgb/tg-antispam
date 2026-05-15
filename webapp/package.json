@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "start": "serve -s dist",
     "check:locale-mix": "node scripts/check_locale_mix.mjs src",
+    "check:i18n": "node scripts/i18n-lint.mjs",
     "test:protection-filter": "node scripts/test_protection_filter_modal_state.mjs",
     "test:unit": "vitest run"
   },

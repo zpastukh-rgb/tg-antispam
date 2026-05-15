@@ -62,6 +62,33 @@ RU: dict[str, str] = {
         "Откройте Mini App и перейдите в «Подключённые чаты» → «Доступы»."
     ),
     "manager_invite_open_access": "🛡 Открыть доступы Guard",
+    "manager_perms_updated_dm": (
+        "🔧 Ваши права делегата в чате *{chat_title}* обновлены.\n\n"
+        "Новый набор: {perms}"
+    ),
+    "manager_perms_removed_dm": (
+        "🚫 Ваш доступ делегата к чату *{chat_title}* отозван.\n\n"
+        "Если это ошибка — свяжитесь с владельцем чата."
+    ),
+    "manager_perm_label_protection": "Защита",
+    "manager_perm_label_broadcast": "Рассылки",
+    "manager_perm_label_reports": "Отчёты",
+    "manager_perm_label_first_post_settings": "Первый пост",
+    "manager_perms_none": "—",
+    "manager_invite_link_dm_title": "📨 Приглашение в делегаты чата *{chat_title}*",
+    "manager_invite_link_accept": "✅ Принять права",
+    "manager_invite_link_expired": "⌛ Приглашение истекло. Попросите владельца чата прислать новую ссылку.",
+    "manager_invite_link_unknown": "❌ Не удалось распознать приглашение. Попросите владельца прислать новую ссылку.",
+    "manager_invite_link_already": "Вы уже подключены делегатом в *{chat_title}*.",
+    "manager_invite_link_accepted": (
+        "✅ Готово! Вы — делегат чата *{chat_title}*.\n\n"
+        "Набор прав: {perms}\n\n"
+        "Откройте Mini App, чтобы пользоваться доступами."
+    ),
+    "manager_invite_link_need_tg_admin": (
+        "⚠️ Чтобы стать делегатом, вы должны быть админом в самом Telegram-чате *{chat_title}*.\n"
+        "Попросите владельца сначала выдать вам админ-права в Telegram, потом снова откройте ссылку."
+    ),
     "rules_draft_template_default": "Шаблон",
     "channel_rule_draft_default": "Черновик",
     "activity_risk_ok": "в норме",
@@ -174,6 +201,33 @@ EN: dict[str, str] = {
         "Open the Mini App and go to Connected chats → Access."
     ),
     "manager_invite_open_access": "🛡 Open Guard access",
+    "manager_perms_updated_dm": (
+        "🔧 Your delegate permissions in *{chat_title}* were updated.\n\n"
+        "New set: {perms}"
+    ),
+    "manager_perms_removed_dm": (
+        "🚫 Your delegate access to *{chat_title}* has been revoked.\n\n"
+        "If this is a mistake — please contact the chat owner."
+    ),
+    "manager_perm_label_protection": "Protection",
+    "manager_perm_label_broadcast": "Broadcasts",
+    "manager_perm_label_reports": "Reports",
+    "manager_perm_label_first_post_settings": "First post",
+    "manager_perms_none": "—",
+    "manager_invite_link_dm_title": "📨 Invitation to delegate role in *{chat_title}*",
+    "manager_invite_link_accept": "✅ Accept permissions",
+    "manager_invite_link_expired": "⌛ The invitation has expired. Ask the chat owner to send a new link.",
+    "manager_invite_link_unknown": "❌ Couldn't recognise this invitation. Ask the chat owner to resend a fresh link.",
+    "manager_invite_link_already": "You are already a delegate in *{chat_title}*.",
+    "manager_invite_link_accepted": (
+        "✅ Done! You are now a delegate in *{chat_title}*.\n\n"
+        "Permissions: {perms}\n\n"
+        "Open the Mini App to manage the chat."
+    ),
+    "manager_invite_link_need_tg_admin": (
+        "⚠️ To become a delegate you must already be an admin in the Telegram chat *{chat_title}*.\n"
+        "Ask the owner to grant you Telegram admin rights first, then reopen this link."
+    ),
     "rules_draft_template_default": "Template",
     "channel_rule_draft_default": "Draft",
     "activity_risk_ok": "healthy",

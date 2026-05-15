@@ -33,6 +33,12 @@ TARIFF_CHANNEL_LIMITS = {
     Tariff.BUSINESS.value: 20,
 }
 
+# 10-дневный Premium-триал. Окно активации — 10 дней с first_start_at; после нажатия
+# «Активировать» юзер получает Premium на TRIAL_DAYS дней с момента активации (не с /start).
+TRIAL_DAYS = 10
+TRIAL_WINDOW_DAYS = 10
+TRIAL_SUBSCRIPTION_SOURCE = "trial"
+
 
 def _norm_un(v: str | None) -> str | None:
     s = (v or "").strip().lstrip("@").lower()
@@ -165,6 +171,83 @@ def _is_paid_tariff_active(user: User, now: datetime) -> bool:
     if not sub_until and tariff in ("premium", "pro", "business"):
         return True
     return False
+
+
+def trial_window_remaining_days(user: User, now: datetime | None = None) -> int:
+    """Сколько целых суток ещё открыто окно активации триала.
+
+    Окно — `TRIAL_WINDOW_DAYS` дней с `first_start_at` (включительно сегодняшний день).
+    Если `first_start_at` не задан — окно «не открыто», считаем `TRIAL_WINDOW_DAYS`
+    (это нормально для свежеприлетевших юзеров: первое /start обычно ставит
+    `first_start_at` до того, как вызывается эта функция).
+    Возвращает 0..TRIAL_WINDOW_DAYS.
+    """
+    now = now or datetime.now(timezone.utc)
+    fsa = getattr(user, "first_start_at", None)
+    if fsa is None:
+        return TRIAL_WINDOW_DAYS
+    if fsa.tzinfo is None:
+        fsa = fsa.replace(tzinfo=timezone.utc)
+    seconds_elapsed = (now - fsa).total_seconds()
+    days_elapsed = int(seconds_elapsed // 86400)
+    remaining = TRIAL_WINDOW_DAYS - days_elapsed
+    if remaining < 0:
+        return 0
+    if remaining > TRIAL_WINDOW_DAYS:
+        return TRIAL_WINDOW_DAYS
+    return int(remaining)
+
+
+def is_trial_eligible(user: User, now: datetime | None = None) -> bool:
+    """Может ли юзер активировать 10-дневный триал прямо сейчас.
+
+    Условия:
+    1) `trial_used == False` (триал ещё не активировался);
+    2) уже было первое /start (есть `first_start_at`);
+    3) окно активации не закрылось (`trial_window_remaining_days > 0`);
+    4) сейчас нет активной платной подписки (purchase/promo).
+    """
+    if bool(getattr(user, "trial_used", False)):
+        return False
+    if getattr(user, "first_start_at", None) is None:
+        return False
+    if trial_window_remaining_days(user, now) <= 0:
+        return False
+    src = (getattr(user, "subscription_source", None) or "").strip().lower()
+    if src in ("payment", "promo"):
+        return False
+    return True
+
+
+def is_trial_active(user: User, now: datetime | None = None) -> bool:
+    """Идёт ли сейчас 10-дневный Premium-триал (активированный пользователем)."""
+    now = now or datetime.now(timezone.utc)
+    if not bool(getattr(user, "trial_used", False)):
+        return False
+    src = (getattr(user, "subscription_source", None) or "").strip().lower()
+    if src != TRIAL_SUBSCRIPTION_SOURCE:
+        return False
+    sub_until = getattr(user, "subscription_until", None)
+    if sub_until is None:
+        return False
+    if sub_until.tzinfo is None:
+        sub_until = sub_until.replace(tzinfo=timezone.utc)
+    return sub_until > now
+
+
+def trial_active_remaining_days(user: User, now: datetime | None = None) -> int:
+    """Сколько целых суток осталось в активном Premium-триале (0 если не активен)."""
+    if not is_trial_active(user, now):
+        return 0
+    now = now or datetime.now(timezone.utc)
+    sub_until = getattr(user, "subscription_until", None)
+    if sub_until.tzinfo is None:
+        sub_until = sub_until.replace(tzinfo=timezone.utc)
+    seconds_left = (sub_until - now).total_seconds()
+    if seconds_left <= 0:
+        return 0
+    import math
+    return max(0, int(math.ceil(seconds_left / 86400)))
 
 
 async def ensure_user_chat_limit_synced_for_tariff(session: AsyncSession, user: User) -> None:

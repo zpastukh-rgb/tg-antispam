@@ -342,6 +342,197 @@ async def _send_welcome_banner_if_any(bot, chat_id: int) -> None:
         pass
 
 
+def _format_perms_for_dm_local(perms: dict | None, lang: str) -> str:
+    if not perms:
+        return _i18n_t(lang, "api.ui.manager_perms_none")
+    labels: list[str] = []
+    for key in ("protection", "broadcast", "reports", "first_post_settings"):
+        if perms.get(key):
+            labels.append(_i18n_t(lang, f"api.ui.manager_perm_label_{key}"))
+    if not labels:
+        return _i18n_t(lang, "api.ui.manager_perms_none")
+    return ", ".join(labels)
+
+
+async def _accept_admin_invite_link(message: Message, token: str, lang: str) -> None:
+    """Принять права делегата по ссылке t.me/<bot>?start=admin_invite_<token>.
+
+    Логика:
+      1. По token находим ChatManagerInvite. Не нашли / истёк / уже использован — отвечаем соответствующим текстом.
+      2. Если получатель — owner чата, нет смысла принимать.
+      3. Получатель должен быть админом самой Telegram-группы (как и в API-добавлении делегата).
+      4. Создаём/обновляем ChatManager с правами из инвайта, помечаем invite как `connected`.
+      5. Отправляем подтверждение в DM (+ кнопку «открыть Mini App»).
+    """
+    if not token or len(token) < 8:
+        await message.answer(_i18n_t(lang, "api.ui.manager_invite_link_unknown"), parse_mode="Markdown")
+        return
+    if not message.from_user:
+        return
+    user_id = int(message.from_user.id)
+
+    from app.db.session import get_session
+    from app.db.models import Chat
+
+    async with await get_session() as session:
+        inv = (
+            await session.execute(
+                select(ChatManagerInvite).where(ChatManagerInvite.token == token).limit(1)
+            )
+        ).scalar_one_or_none()
+        if not inv:
+            await message.answer(
+                _i18n_t(lang, "api.ui.manager_invite_link_unknown"),
+                parse_mode="Markdown",
+            )
+            return
+        # Истёкшая ссылка — удаляем, чтобы не висела.
+        exp = getattr(inv, "expires_at", None)
+        if exp is not None and exp <= datetime.now(timezone.utc):
+            try:
+                await session.execute(
+                    delete(ChatManagerInvite).where(ChatManagerInvite.id == int(inv.id))
+                )
+                await session.commit()
+            except Exception:
+                pass
+            await message.answer(
+                _i18n_t(lang, "api.ui.manager_invite_link_expired"),
+                parse_mode="Markdown",
+            )
+            return
+
+        chat = await session.get(Chat, int(inv.chat_id))
+        if not chat:
+            await message.answer(
+                _i18n_t(lang, "api.ui.manager_invite_link_unknown"),
+                parse_mode="Markdown",
+            )
+            return
+        chat_title = str(getattr(chat, "title", "") or "") or f"#{int(chat.id)}"
+        owner_uid = int(getattr(chat, "owner_user_id", 0) or 0)
+        if user_id == owner_uid:
+            await message.answer(
+                _i18n_t(lang, "api.ui.manager_invite_link_already", chat_title=chat_title),
+                parse_mode="Markdown",
+            )
+            return
+
+        # Уже есть активный ChatManager для этого user/chat? Тогда просто переподтверждаем
+        # права из инвайта и сообщаем, что доступ уже выдан.
+        existing_mgr = (
+            await session.execute(
+                select(ChatManager)
+                .where(
+                    ChatManager.chat_id == int(inv.chat_id),
+                    ChatManager.user_id == user_id,
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+        # Получатель должен быть админом Telegram-чата (как и при добавлении через API).
+        role: str = ""
+        try:
+            mem = await message.bot.get_chat_member(int(inv.chat_id), user_id)
+            role = str(getattr(mem, "status", "") or "").lower()
+        except Exception:
+            role = ""
+        if role not in ("administrator", "creator"):
+            await message.answer(
+                _i18n_t(lang, "api.ui.manager_invite_link_need_tg_admin", chat_title=chat_title),
+                parse_mode="Markdown",
+            )
+            return
+
+        perms = {
+            "protection": bool(getattr(inv, "can_protection", False)),
+            "broadcast": bool(getattr(inv, "can_broadcast", False)),
+            "reports": bool(getattr(inv, "can_reports", False)),
+            "first_post_settings": bool(getattr(inv, "can_first_post_settings", False)),
+        }
+
+        if existing_mgr:
+            existing_mgr.can_protection = perms["protection"]
+            existing_mgr.can_broadcast = perms["broadcast"]
+            existing_mgr.can_reports = perms["reports"]
+            existing_mgr.can_first_post_settings = perms["first_post_settings"]
+        else:
+            session.add(
+                ChatManager(
+                    chat_id=int(inv.chat_id),
+                    user_id=user_id,
+                    added_by=owner_uid,
+                    can_protection=perms["protection"],
+                    can_broadcast=perms["broadcast"],
+                    can_reports=perms["reports"],
+                    can_first_post_settings=perms["first_post_settings"],
+                )
+            )
+
+        inv.target_telegram_id = inv.target_telegram_id or user_id
+        inv.connected_user_id = user_id
+        inv.status = "connected"
+        # Записываем в audit-log «инвайт принят по ссылке».
+        # Импортируем лениво — чтобы не было циклической зависимости при загрузке модуля.
+        try:
+            from app.api.routes import record_manager_action  # noqa: WPS433
+            await record_manager_action(
+                session,
+                chat_id=int(inv.chat_id),
+                user_id=int(user_id),
+                action_kind="manager_invite_accepted",
+                target=int(user_id),
+                meta={"perms": perms, "via_link": True},
+            )
+        except Exception as e:
+            logger.warning("audit invite_accepted failed: %s", e)
+        # Принятый инвайт больше не нужен по ссылке — но сохраняем запись для аудита.
+        try:
+            await session.commit()
+        except Exception as e:
+            logger.warning("accept admin_invite commit failed: %s", e)
+            await session.rollback()
+            await message.answer(
+                _i18n_t(lang, "api.ui.manager_invite_link_unknown"),
+                parse_mode="Markdown",
+            )
+            return
+
+    # Подтверждение получателю.
+    perms_text = _format_perms_for_dm_local(perms, lang)
+    text = _i18n_t(
+        lang,
+        "api.ui.manager_invite_link_accepted",
+        chat_title=chat_title,
+        perms=perms_text,
+    )
+    kb = None
+    try:
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        from app.api.routes import _delegated_chats_webapp_url
+
+        delegated_url = await _delegated_chats_webapp_url()
+        if delegated_url:
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(
+                        text=_i18n_t(lang, "api.ui.manager_invite_open_access"),
+                        url=delegated_url,
+                    )]
+                ]
+            )
+    except Exception:
+        kb = None
+    try:
+        await message.answer(text, parse_mode="Markdown", reply_markup=kb)
+    except Exception:
+        try:
+            await message.answer(text, parse_mode="Markdown")
+        except Exception:
+            pass
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     """ТЗ Меню: /start открывает главную панель. Deep link addgroup — кнопка «добавить в группу + выдать права»."""
@@ -486,6 +677,17 @@ async def cmd_start(message: Message):
         except Exception:
             pass
         return
+    # Deep link «принять права делегата чата»:
+    # t.me/<bot>?start=admin_invite_<token>. См. ChatManagerInvite.token.
+    if len(args) >= 2 and (args[1] or "").lower().startswith("admin_invite_"):
+        try:
+            raw = args[1] or ""
+            token = raw[len("admin_invite_"):].strip()
+            await _accept_admin_invite_link(message, token, dm_lang)
+        except Exception as e:
+            logger.exception("admin_invite handler error: %s", e)
+        return
+
     # Deep link из Mini App: t.me/bot?start=cleandeleted_CHATID — запуск очистки от удалённых в группе
     # Реферальный deep link: /start ref_<telegram_id>
     if len(args) >= 2 and (args[1] or "").lower().startswith("ref_"):
@@ -607,17 +809,13 @@ async def cmd_start(message: Message):
             await message.answer(_i18n_t(dm_lang, "bot.start.addgroup_text"), parse_mode="Markdown")
         return
 
-    # ТЗ Напоминания: при первом /start записываем время для напоминаний (12ч, 24ч, 3д)
+    # Первый /start: запоминаем момент для воронки напоминаний (12ч/24ч/3д «нет группы»
+    # и серии Premium-trial DM 1..10). Тариф остаётся FREE — триал активируется явно
+    # через Mini App (кнопка «Попробовать 10 дней бесплатно»).
     connected_shared_cabinets = 0
     try:
         from app.db.session import get_session
-        from app.services.user_service import (
-            get_or_create_user,
-            TARIFF_CHAT_LIMITS,
-            TARIFF_GROUP_LIMITS,
-            TARIFF_CHANNEL_LIMITS,
-        )
-        from app.db.models import Tariff
+        from app.services.user_service import get_or_create_user
         from datetime import datetime, timezone
         async with await get_session() as session:
             user = await get_or_create_user(
@@ -627,15 +825,7 @@ async def cmd_start(message: Message):
                 first_name=getattr(message.from_user, "first_name", None),
             )
             if getattr(user, "first_start_at", None) is None:
-                now = datetime.now(timezone.utc)
-                user.first_start_at = now
-                # Первый старт: выдаём 3 дня полного Premium автоматически.
-                user.tariff = Tariff.PREMIUM.value
-                user.chat_limit = TARIFF_CHAT_LIMITS[Tariff.PREMIUM.value]
-                user.group_limit = TARIFF_GROUP_LIMITS[Tariff.PREMIUM.value]
-                user.channel_limit = TARIFF_CHANNEL_LIMITS[Tariff.PREMIUM.value]
-                user.subscription_until = now + timedelta(days=3)
-                user.subscription_source = "trial"
+                user.first_start_at = datetime.now(timezone.utc)
                 await session.commit()
     except Exception:
         pass

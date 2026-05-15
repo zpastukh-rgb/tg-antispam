@@ -618,6 +618,14 @@ const totalTokens = computed(() => {
   return String(Math.max(0, Math.round(total)))
 })
 const tariffIsPremium = computed(() => ['premium', 'pro', 'business'].includes((me.value?.tariff || 'free').toLowerCase()))
+/** 10-дневный Premium-триал: можно ли активировать (FREE + ни разу не активировал + окно открыто). */
+const trialEligible = computed(() => !!me.value && !!me.value.trial_eligible)
+/** Триал сейчас идёт (юзер активировал, осталось N дней Premium бесплатно). */
+const trialActive = computed(() => !!me.value && !!me.value.trial_active)
+/** Кнопка-замена «Усилить защиту»: показывать ли «🚀 Попробовать 10 дней бесплатно». */
+const showTrialCta = computed(() => !tariffIsPremium.value && trialEligible.value)
+/** Сколько дней осталось в активном Premium-триале. */
+const trialRemainingDays = computed(() => Number(me.value?.trial_remaining_days || 0))
 /** Free-аккаунт: на главной не показываем «живую» сводку статистики — нули и пояснение (как в кабинете Guard). */
 const dashboardStatsPremiumLocked = computed(() => !!me.value && !me.value.is_premium)
 /** Карточка «Рассылки» на главной: показываем всем авторизованным (маркетинг); доступ по-прежнему через Premium/делегирование. */
@@ -1310,6 +1318,20 @@ onMounted(async () => {
       delete q.topup
       router.replace({ path: route.path, query: q }).catch(() => {})
     } catch { /* */ }
+  }
+  // Открыть лендинг биллинга и автоматически активировать триал из ?trial=1
+  // (DM-кнопка «🚀 Попробовать 10 дней бесплатно» из reminders).
+  if (String(route.query?.trial || '') === '1') {
+    try {
+      const q = { ...route.query }
+      delete q.trial
+      router.replace({ path: route.path, query: q }).catch(() => {})
+    } catch { /* */ }
+    if (trialEligible.value && !tariffIsPremium.value) {
+      try { await activateTrialClick() } catch { /* */ }
+    } else if (trialActive.value) {
+      showToast(t('dashboard.trial.already_active_toast'))
+    }
   }
   if (String(route.query?.updates || '') === '1') {
     showUpdatesRoadmapModal.value = true
@@ -2283,6 +2305,42 @@ function openBillingSection(opts = {}) {
   }
 }
 
+const trialActivating = ref(false)
+
+async function activateTrialClick() {
+  if (trialActivating.value) return
+  trialActivating.value = true
+  try {
+    const res = await rawApi.activateTrial()
+    if (res?.already_active) {
+      showToast(t('dashboard.trial.already_active_toast'))
+    } else {
+      showToast(t('dashboard.trial.activated_toast', { n: Number(res?.trial_remaining_days || 10) }))
+    }
+    try {
+      const fresh = await rawApi.me()
+      applyMeState(fresh)
+    } catch (_) {
+      // Свежие данные подтянутся в следующем тике — не критично.
+    }
+  } catch (e) {
+    const detail = String(e?.body?.detail || e?.message || '').toLowerCase()
+    let key = 'dashboard.trial.error_generic'
+    if (detail.includes('trial_trial_already_used') || detail.includes('trial_already_used')) {
+      key = 'dashboard.trial.error_already_used'
+    } else if (detail.includes('trial_window_closed') || detail.includes('window_closed')) {
+      key = 'dashboard.trial.error_window_closed'
+    } else if (detail.includes('trial_active_subscription') || detail.includes('active_subscription')) {
+      key = 'dashboard.trial.error_active_subscription'
+    } else if (detail.includes('trial_no_first_start') || detail.includes('no_first_start')) {
+      key = 'dashboard.trial.error_no_first_start'
+    }
+    showToast(t(key))
+  } finally {
+    trialActivating.value = false
+  }
+}
+
 function openPremiumLandingFromAurumGate() {
   showFreeAurumGateModal.value = false
   openBillingSection({ scrollLanding: true })
@@ -3252,7 +3310,17 @@ async function submitReceipt() {
                     </ul>
                     <div class="mt-2 w-full">
                       <button
-                        v-if="!tariffIsPremium"
+                        v-if="showTrialCta"
+                        type="button"
+                        :disabled="trialActivating"
+                        class="flex w-full items-center justify-center gap-1.5 rounded-2xl bg-gradient-to-r from-emerald-700 via-emerald-500 to-lime-300 px-3 py-2.5 text-[11px] font-extrabold leading-tight text-emerald-950 shadow-[0_10px_34px_-10px_rgba(16,185,129,0.65),inset_0_1px_0_rgba(255,255,255,0.3)] ring-1 ring-emerald-300/45 disabled:opacity-60 sm:text-[12px]"
+                        @click="activateTrialClick"
+                      >
+                        <span aria-hidden="true">🚀</span>
+                        {{ trialActivating ? t('dashboard.trial.activating') : t('dashboard.trial.try_free_btn') }}
+                      </button>
+                      <button
+                        v-else-if="!tariffIsPremium"
                         type="button"
                         class="flex w-full items-center justify-center gap-1.5 rounded-2xl bg-gradient-to-r from-amber-950 via-amber-600 to-yellow-300 px-3 py-2.5 text-[11px] font-extrabold leading-tight text-white shadow-[0_10px_34px_-10px_rgba(251,191,36,0.65),inset_0_1px_0_rgba(255,255,255,0.22)] ring-1 ring-amber-300/45 sm:text-[12px]"
                         @click="openBillingSection({ scrollPlans: true })"
@@ -4233,6 +4301,18 @@ async function submitReceipt() {
                 </li>
               </ul>
               <button
+                v-if="showTrialCta"
+                type="button"
+                :disabled="trialActivating"
+                class="relative mx-auto mt-6 flex w-full max-w-md items-center justify-center overflow-hidden rounded-2xl px-4 py-3 text-[15px] font-extrabold tracking-tight text-emerald-950 text-center shadow-[0_14px_42px_-14px_rgba(16,185,129,0.62),inset_0_1px_0_rgba(255,255,255,0.32)] ring-1 ring-emerald-300/45 transition active:scale-[0.99] disabled:opacity-60"
+                style="background: linear-gradient(90deg, #34d399 0%, #10b981 50%, #84cc16 100%);"
+                @click="activateTrialClick"
+              >
+                <span aria-hidden="true" class="mr-1.5">🚀</span>
+                {{ trialActivating ? t('dashboard.trial.activating') : t('dashboard.trial.activate_btn') }}
+              </button>
+              <button
+                v-else
                 type="button"
                 class="relative mx-auto mt-6 flex w-full max-w-md items-center justify-center overflow-hidden rounded-2xl px-4 py-3 text-[15px] font-extrabold tracking-tight text-white text-center shadow-[0_14px_42px_-14px_rgba(243,156,18,0.62),inset_0_1px_0_rgba(255,255,255,0.28)] transition active:scale-[0.99]"
                 style="background: linear-gradient(90deg, #f39c12 0%, #df5a3b 34%, #b043cc 56%, #5c2dc1 74%, #2a1a83 100%);"
@@ -4240,7 +4320,12 @@ async function submitReceipt() {
               >
                 {{ t('dashboard.billing.cta_pick_plan') }}
               </button>
+              <p
+                v-if="showTrialCta"
+                class="mt-3 text-center text-[12px] leading-snug text-emerald-300/85"
+              >{{ t('dashboard.trial.hint_landing') }}</p>
               <button
+                v-if="!showTrialCta"
                 type="button"
                 class="mt-3 w-full py-2 text-center text-[13px] font-medium text-slate-500 underline decoration-slate-600 underline-offset-4 transition hover:text-slate-400"
                 @click="scrollToBillingPremiumCompare"
@@ -4366,6 +4451,18 @@ async function submitReceipt() {
               </div>
 
               <button
+                v-if="showTrialCta"
+                type="button"
+                :disabled="trialActivating"
+                class="relative w-full overflow-hidden rounded-2xl px-4 py-3 text-[15px] font-extrabold tracking-tight text-emerald-950 text-center shadow-[0_14px_42px_-14px_rgba(16,185,129,0.62),inset_0_1px_0_rgba(255,255,255,0.32)] ring-1 ring-emerald-300/45 transition active:scale-[0.99] disabled:opacity-60"
+                style="background: linear-gradient(90deg, #34d399 0%, #10b981 50%, #84cc16 100%);"
+                @click="activateTrialClick"
+              >
+                <span aria-hidden="true" class="mr-1.5">🚀</span>
+                {{ trialActivating ? t('dashboard.trial.activating') : t('dashboard.trial.activate_btn') }}
+              </button>
+              <button
+                v-else
                 type="button"
                 class="relative w-full overflow-hidden rounded-2xl px-4 py-3 text-[15px] font-extrabold tracking-tight text-white text-center shadow-[0_14px_42px_-14px_rgba(243,156,18,0.62),inset_0_1px_0_rgba(255,255,255,0.28)] transition active:scale-[0.99]"
               style="background: linear-gradient(90deg, #f39c12 0%, #df5a3b 34%, #b043cc 56%, #5c2dc1 74%, #2a1a83 100%);"
@@ -4373,11 +4470,16 @@ async function submitReceipt() {
               >
                 {{ t('dashboard.billing.cta_choose_premium_btn') }}
               </button>
+              <p
+                v-if="showTrialCta"
+                class="mt-3 text-center text-[12px] leading-snug text-emerald-300/85"
+              >{{ t('dashboard.trial.hint_landing') }}</p>
             </div>
           </section>
 
-          <!-- 4. Выбор тарифа (карточки как в макете) -->
+          <!-- 4. Выбор тарифа (карточки как в макете) — скрываем, пока юзер не активировал триал -->
           <section
+            v-if="!showTrialCta"
             id="billing-landing-plans"
             ref="billingLandingPlansRef"
             class="relative overflow-hidden rounded-[1.125rem] border border-white/[0.12] bg-black px-4 py-6 text-white ring-1 ring-inset ring-white/[0.06]"

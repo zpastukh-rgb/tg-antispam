@@ -16,6 +16,7 @@ import { createI18n } from 'vue-i18n'
 import { isRef } from 'vue'
 import ru from './ru.js'
 import en from './en.js'
+import { sanitizeI18nMessages } from './sanitizeMessages.js'
 
 const STORAGE_KEY = 'guard.settings.lang'
 export const SUPPORTED_LOCALES = ['ru', 'en']
@@ -59,8 +60,8 @@ export const i18n = createI18n({
   silentFallbackWarn: true,
   silentTranslationWarn: true,
   messages: {
-    ru,
-    en,
+    ru: sanitizeI18nMessages(ru),
+    en: sanitizeI18nMessages(en),
   },
 })
 

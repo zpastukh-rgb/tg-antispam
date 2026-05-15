@@ -84,6 +84,13 @@ class User(Base):
     first_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reminder_stage: Mapped[int] = mapped_column(Integer, default=0)
     reports_reminder_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Триал Premium (10 дней): окно активации = 10 дней с first_start_at;
+    # после активации Premium на 10 дней с момента активации.
+    trial_used: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    trial_activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Последний "оставшийся день", за который уже отправлено DM-напоминание (для дедупа):
+    # >0 — pre-trial серия (окно), <0 — in-trial серия (триал идёт).
+    trial_reminder_last_day_sent: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     credits_balance: Mapped[float] = mapped_column(default=0.0)
     aurum_credits: Mapped[float] = mapped_column(default=0.0)
     bonus_credits: Mapped[float] = mapped_column(default=0.0)
@@ -310,6 +317,22 @@ class Rule(Base):
     # фильтры
     filter_links: Mapped[bool] = mapped_column(Boolean, default=True)
     filter_mentions: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Гранулярные тогглы по типу упоминаний (заменяют filter_mentions, который оставлен как legacy).
+    # Если включён хотя бы один — удаляется ТОЛЬКО соответствующий тип.
+    # Если все выкл — поведение определяется legacy filter_mentions (для обратной совместимости).
+    filter_mention_users: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_mention_bots: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_mention_channels: Mapped[bool] = mapped_column(Boolean, default=False)
+    # text_mention — premium-юзеры без юзернейма (entity text_mention с tg://user?id=...)
+    filter_mention_text_mention: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_mention_hashtags: Mapped[bool] = mapped_column(Boolean, default=False)
+    # bot_command типа /cmd@otherbot — команды чужим ботам
+    filter_mention_bot_commands: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_mention_cashtags: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_mention_emails: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Массовые упоминания: ≥ N упоминаний (mention + text_mention) в одном сообщении
+    filter_mention_mass_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_mention_mass_threshold: Mapped[int] = mapped_column(Integer, default=5)
 
     # режим наказания
     action_mode: Mapped[str] = mapped_column(
@@ -358,7 +381,35 @@ class Rule(Base):
     # all = весь чат и комментарии; channel_comments_only = только треды постов канала (для форум-обсуждений)
     filter_links_scope: Mapped[str] = mapped_column(String(32), default="all")
     filter_media_mode: Mapped[str] = mapped_column(String(16), default="allow")
+    # Гранулярные тогглы по типу медиа. Если включён хотя бы один — удаляем только этот тип.
+    # Если все выкл — медиа разрешено (filter_media_mode остаётся для обратной совместимости и UI Free).
+    filter_media_photos: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_media_videos: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_media_stickers: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_media_animations: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_media_voice: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_media_video_notes: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_media_audio: Mapped[bool] = mapped_column(Boolean, default=False)
+    # custom_emoji — премиум-смайлики внутри обычных текстовых сообщений (через MessageEntity custom_emoji)
+    filter_media_custom_emoji: Mapped[bool] = mapped_column(Boolean, default=False)
+    # plain_emoji — обычные Unicode-эмодзи в тексте/подписи (без entity). Регексом по диапазонам символов.
+    filter_media_plain_emoji: Mapped[bool] = mapped_column(Boolean, default=False)
     filter_buttons_mode: Mapped[str] = mapped_column(String(16), default="allow")
+    # Гранулярные тогглы по типу кнопок (как у медиа и упоминаний).
+    # Если включён хотя бы один — фильтр работает ТОЛЬКО по нему.
+    # Если все выкл — fallback на legacy filter_buttons_mode (для обратной совместимости).
+    filter_button_url: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_button_callback: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_button_web_app: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_button_switch_inline: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_button_login: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_button_pay: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_button_copy_text: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Reply-клавиатура (кнопки внизу экрана пользователя)
+    filter_button_reply: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Массовые: ≥ N кнопок в одном сообщении
+    filter_button_mass_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_button_mass_threshold: Mapped[int] = mapped_column(Integer, default=5)
     all_captcha_minutes: Mapped[int] = mapped_column(Integer, default=0)
     delete_join_messages: Mapped[bool] = mapped_column(Boolean, default=True)
     delete_left_messages: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -386,6 +437,15 @@ class Rule(Base):
     filter_channel_posts_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     # delete | ban (банит именно sender_chat в группе, не пользователя).
     filter_channel_posts_action: Mapped[str] = mapped_column(String(16), default="delete")
+    # Гранулярные тогглы по типу sender_chat / forward (как у медиа, упоминаний, кнопок).
+    # Если включён хотя бы один — работают только они. Иначе fallback на legacy filter_channel_posts_enabled.
+    filter_channel_post_channels: Mapped[bool] = mapped_column(Boolean, default=False)  # от чужих каналов
+    filter_channel_post_groups: Mapped[bool] = mapped_column(Boolean, default=False)  # от чужих групп/чатов
+    filter_channel_post_anon_admin: Mapped[bool] = mapped_column(Boolean, default=False)  # «от имени группы»
+    filter_channel_post_fwd_channel: Mapped[bool] = mapped_column(Boolean, default=False)  # форвард из чужого канала
+    filter_channel_post_fwd_group: Mapped[bool] = mapped_column(Boolean, default=False)  # форвард из чужой группы
+    filter_channel_post_no_username: Mapped[bool] = mapped_column(Boolean, default=False)  # приватные каналы без @
+    filter_channel_post_hidden_fwd: Mapped[bool] = mapped_column(Boolean, default=False)  # скрытые форварды (hidden_user)
 
     # Guard жёсткий словарь: мат / подработки / казино / реклама / обзывательства /
     # антирасист / антифашист / антипошлость / анти-политика / религия / эзотерика
@@ -828,6 +888,10 @@ class ChatManager(Base):
         server_default=func.now()
     )
 
+    # TTL прав делегата. NULL = бессрочно. Если now() > expires_at — права
+    # считаются отозванными, lazy-revocation в _chat_managers_payload().
+    expires_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     __table_args__ = (
         UniqueConstraint("chat_id", "user_id", name="uq_chat_manager"),
     )
@@ -864,9 +928,54 @@ class ChatManagerInvite(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+    # TTL приглашения. По умолчанию 7 дней при создании. NULL = бессрочно.
+    expires_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Случайный токен для ссылки t.me/<bot>?start=admin_invite_<token>.
+    # 32-символьный hex (16 байт urandom). NULL для старых записей до миграции.
+    token: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True, index=True)
 
     __table_args__ = (
         UniqueConstraint("chat_id", "owner_user_id", "target_telegram_id", name="uq_chat_manager_invite_tg"),
+    )
+
+
+# =========================================================
+# CHAT MANAGER ACTIONS (журнал действий делегатов/владельца в чате)
+# =========================================================
+# Фаза 3 «Админы чата»: сохраняем кто и что делал в чате через Mini App.
+# Используется и для активности отдельного делегата, и как общий audit log.
+#
+# action_kind — короткий ключ (см. _MANAGER_ACTION_KINDS в routes). Делать enum
+# не стали, чтобы не править схему при добавлении новых действий.
+# action_target — опциональная строка-идентификатор объекта (user_id, rule_id,
+# invite_id, broadcast_id и т.п.).
+# action_meta — JSON-строка с произвольным контекстом (мы дампим json.dumps).
+# success — `True` если действие выполнилось (для метрик «N успешных за 7д»).
+
+class ChatManagerAction(Base):
+    __tablename__ = "chat_manager_actions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chats.id", ondelete="CASCADE"),
+        index=True,
+    )
+    # Кто сделал действие. Owner тоже пишется (чтобы видеть его действия в общем логе).
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    action_kind: Mapped[str] = mapped_column(String(64), index=True)
+    action_target: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    action_meta: Mapped[str | None] = mapped_column(Text, nullable=True)
+    success: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        index=True,
+    )
+
+    __table_args__ = (
+        Index("ix_chat_manager_actions_chat_created", "chat_id", "created_at"),
+        Index("ix_chat_manager_actions_chat_user_created", "chat_id", "user_id", "created_at"),
     )
 
 

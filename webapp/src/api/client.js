@@ -257,6 +257,7 @@ export const api = {
   me: () => api.get('/api/me'),
   meSetLanguage: (lang) => api.patch('/api/me/language', { language: String(lang || 'ru') }),
   postLegalConsent: (body) => api.post('/api/me/legal-consent', body),
+  activateTrial: () => api.post('/api/me/trial/activate', {}),
   presencePing: () => api.post('/api/presence/ping', {}),
   chats: (mode = 'all', opts = {}) => {
     const q = new URLSearchParams()
@@ -454,6 +455,10 @@ export const api = {
   chatManagerUpdate: (chatId, managerUserId, payload) => api.patch(`/api/chat/${chatId}/managers/${managerUserId}`, payload),
   chatManagerRemove: (chatId, managerUserId) => api.delete(`/api/chat/${chatId}/managers/${managerUserId}`),
   chatManagerInviteCancel: (chatId, inviteId) => api.delete(`/api/chat/${chatId}/manager-invites/${inviteId}`),
+  chatAudit: (chatId, { limit = 30, offset = 0 } = {}) =>
+    api.get(`/api/chat/${chatId}/audit?limit=${limit}&offset=${offset}`),
+  chatManagerActivity: (chatId, managerUserId) =>
+    api.get(`/api/chat/${chatId}/managers/${managerUserId}/activity`),
   copySettings: (chatId, targetChatId) => api.post(`/api/chat/${chatId}/copy-settings`, { target_chat_id: targetChatId }),
   chatMemberUnban: (chatId, targetUserId) =>
     api.post(`/api/chat/${chatId}/member-unban`, { user_id: Number(targetUserId) }),

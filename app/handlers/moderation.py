@@ -62,6 +62,7 @@ from app.services.global_bad_urls import get_effective_global_bad_url_patterns
 from app.services.admin_roles import is_full_admin_user as _is_full_admin_user_role
 from app.services.chat_cleanup import record_seen_member as record_seen_member_cleanup
 from app.services.global_antispam import is_in_global_antispam
+from app.services.chat_owner_premium import chat_owner_has_miniapp_premium
 from app.services.spam_spike_notify import SPAM_MODERATION_REASONS, trigger_spam_spike_for_chat
 from app.services.telegram_notify import send_user_dm
 from app.services.group_connect_actor import is_post_as_linked_channel_in_discussion
@@ -279,7 +280,12 @@ async def _maybe_handle_channel_comment_rules(message: Message) -> None:
         # Отправляем "первый комментарий с правилами" только один раз на тред.
         # После истечения окна удаления не переотправляем снова на каждое новое сообщение.
         if not state:
-            markup = _rules_keyboard_from_json(getattr(rule, "rules_channel_buttons_json", None))
+            owner_rules_prem_ch = await chat_owner_has_miniapp_premium(session, chat_id)
+            markup = (
+                _rules_keyboard_from_json(getattr(rule, "rules_channel_buttons_json", None))
+                if owner_rules_prem_ch
+                else None
+            )
             try:
                 send_kw = dict(chat_id=chat_id, parse_mode="HTML", reply_markup=markup)
                 if send_thread_id is not None:
@@ -288,6 +294,9 @@ async def _maybe_handle_channel_comment_rules(message: Message) -> None:
                     send_kw["reply_parameters"] = ReplyParameters(message_id=reply_anchor_id)
                 rel = str(getattr(rule, "rules_channel_photo_path", "") or "").strip()
                 photo_file_id = str(getattr(rule, "rules_channel_photo_file_id", "") or "").strip()
+                if not owner_rules_prem_ch:
+                    rel = ""
+                    photo_file_id = ""
                 sent = None
                 fp = None
                 if rel:
@@ -370,7 +379,11 @@ async def _maybe_handle_channel_comment_rules(message: Message) -> None:
                 return
             rules_message_id = int(getattr(sent, "message_id", 0) or 0)
             try:
-                ttl = max(0, min(600, int(getattr(rule, "rules_channel_delete_window_sec", 0) or 0)))
+                ttl = (
+                    max(0, min(600, int(getattr(rule, "rules_channel_delete_window_sec", 0) or 0)))
+                    if owner_rules_prem_ch
+                    else 0
+                )
             except Exception:
                 ttl = 0
             _RULES_COMMENT_THREAD_STATE[key] = {
@@ -1226,6 +1239,230 @@ def has_media(message: Message) -> bool:
     )
 
 
+def _has_custom_emoji(message: Message) -> bool:
+    """Премиум-смайлики (custom_emoji entities) внутри обычного сообщения/подписи."""
+    for ent_list in (getattr(message, "entities", None), getattr(message, "caption_entities", None)):
+        if not ent_list:
+            continue
+        for ent in ent_list:
+            if getattr(ent, "type", None) == "custom_emoji":
+                return True
+    return False
+
+
+# Базовые Unicode-диапазоны для обычных эмодзи:
+# - Emoticons / Misc Symbols & Pictographs / Transport / Supplemental Symbols / Symbols & Pictographs Extended-A
+# - Misc Symbols / Dingbats (включая ✅ ❌ ☎ ☀)
+# - Regional indicators (флаги — пары символов U+1F1E6..1F1FF)
+# - Variation selector U+FE0F нам как маркер не нужен, ловим базовый символ.
+_PLAIN_EMOJI_RE = re.compile(
+    "[\U0001F1E6-\U0001F1FF"  # regional indicators
+    "\U0001F300-\U0001F5FF"   # misc symbols and pictographs
+    "\U0001F600-\U0001F64F"   # emoticons
+    "\U0001F680-\U0001F6FF"   # transport and map
+    "\U0001F700-\U0001F77F"   # alchemical
+    "\U0001F780-\U0001F7FF"   # geometric shapes ext
+    "\U0001F800-\U0001F8FF"   # supplemental arrows-c
+    "\U0001F900-\U0001F9FF"   # supplemental symbols and pictographs
+    "\U0001FA00-\U0001FA6F"   # chess, symbols ext
+    "\U0001FA70-\U0001FAFF"   # symbols and pictographs ext-a
+    "\u2600-\u26FF"           # misc symbols
+    "\u2700-\u27BF"           # dingbats
+    "]"
+)
+
+
+def _has_plain_emoji(message: Message) -> bool:
+    """Обычные Unicode-эмодзи в тексте/подписи сообщения (без entity)."""
+    for attr in ("text", "caption"):
+        s = getattr(message, attr, None)
+        if s and _PLAIN_EMOJI_RE.search(s):
+            return True
+    return False
+
+
+def matched_media_kind(message: Message, rule) -> str | None:
+    """
+    Какой именно тип медиа в сообщении запрещён правилом (гранулярные тогглы).
+    Возвращает имя типа ('photos' | 'videos' | 'stickers' | ...) или None.
+    Используется наряду с общим `filter_media_mode` — если ни один гранул не включён,
+    решает старый общий режим.
+    """
+    if getattr(rule, "filter_media_photos", False) and getattr(message, "photo", None):
+        return "photos"
+    if getattr(rule, "filter_media_videos", False) and getattr(message, "video", None):
+        return "videos"
+    if getattr(rule, "filter_media_stickers", False) and getattr(message, "sticker", None):
+        return "stickers"
+    if getattr(rule, "filter_media_animations", False) and getattr(message, "animation", None):
+        return "animations"
+    if getattr(rule, "filter_media_voice", False) and getattr(message, "voice", None):
+        return "voice"
+    if getattr(rule, "filter_media_video_notes", False) and getattr(message, "video_note", None):
+        return "video_notes"
+    if getattr(rule, "filter_media_audio", False) and getattr(message, "audio", None):
+        return "audio"
+    if getattr(rule, "filter_media_custom_emoji", False) and _has_custom_emoji(message):
+        return "custom_emoji"
+    if getattr(rule, "filter_media_plain_emoji", False) and _has_plain_emoji(message):
+        return "plain_emoji"
+    return None
+
+
+def any_granular_media_enabled(rule) -> bool:
+    """Хотя бы один гранулярный тоггл медиа включён."""
+    return bool(
+        getattr(rule, "filter_media_photos", False)
+        or getattr(rule, "filter_media_videos", False)
+        or getattr(rule, "filter_media_stickers", False)
+        or getattr(rule, "filter_media_animations", False)
+        or getattr(rule, "filter_media_voice", False)
+        or getattr(rule, "filter_media_video_notes", False)
+        or getattr(rule, "filter_media_audio", False)
+        or getattr(rule, "filter_media_custom_emoji", False)
+        or getattr(rule, "filter_media_plain_emoji", False)
+    )
+
+
+# -------------------------------------------------------------------------
+# Гранулярные тогглы по типу упоминаний.
+# -------------------------------------------------------------------------
+
+# Кеш для определения типа @username через bot.get_chat() — на 24 часа в RAM.
+# Ключ: lowercase username без '@'. Значение: ('bot' | 'channel' | 'user', expires_at_unix).
+_USERNAME_KIND_CACHE: dict[str, tuple[str, float]] = {}
+_USERNAME_KIND_TTL_OK = 24 * 3600  # успешный ответ кешируем на сутки
+_USERNAME_KIND_TTL_FAIL = 600       # неудачу — на 10 минут (вдруг приватный бан/таймаут)
+
+
+def _username_heuristic_kind(uname: str) -> str | None:
+    """Быстрая эвристика без API: возвращает 'bot' для @xxxbot/@xxx_bot, иначе None."""
+    if not uname:
+        return None
+    s = uname.lstrip("@").lower()
+    if s.endswith("bot") and len(s) >= 5:
+        return "bot"
+    return None
+
+
+async def _classify_username(uname: str, bot) -> str:
+    """
+    Определяет тип @username: 'bot' | 'channel' | 'user'.
+    Сначала пробует эвристику (cyc 0 запросов), потом RAM-кеш, потом bot.get_chat().
+    Никогда не кидает исключений — при недоступности API возвращает 'user'.
+    """
+    if not uname:
+        return "user"
+    s = uname.lstrip("@").lower()
+    h = _username_heuristic_kind(s)
+    if h:
+        return h
+    now = time.time()
+    hit = _USERNAME_KIND_CACHE.get(s)
+    if hit and hit[1] > now:
+        return hit[0]
+    if bot is None:
+        return "user"
+    try:
+        chat = await bot.get_chat(f"@{s}")
+        kind = "user"
+        if chat is not None:
+            t_str = str(getattr(chat, "type", "") or "").lower()
+            if t_str == "private":
+                # Приватный чат = пользователь или бот. Различаем по эвристике суффикса
+                # (Telegram User для бота имеет is_bot=True, но aiogram не всегда даёт это поле здесь).
+                kind = "bot" if s.endswith("bot") else "user"
+            elif t_str in ("channel", "supergroup", "group"):
+                kind = "channel"
+        _USERNAME_KIND_CACHE[s] = (kind, now + _USERNAME_KIND_TTL_OK)
+        return kind
+    except Exception:
+        _USERNAME_KIND_CACHE[s] = ("user", now + _USERNAME_KIND_TTL_FAIL)
+        return "user"
+
+
+def any_granular_mention_enabled(rule) -> bool:
+    """Хотя бы один гранулярный тоггл упоминаний включён."""
+    return bool(
+        getattr(rule, "filter_mention_users", False)
+        or getattr(rule, "filter_mention_bots", False)
+        or getattr(rule, "filter_mention_channels", False)
+        or getattr(rule, "filter_mention_text_mention", False)
+        or getattr(rule, "filter_mention_hashtags", False)
+        or getattr(rule, "filter_mention_bot_commands", False)
+        or getattr(rule, "filter_mention_cashtags", False)
+        or getattr(rule, "filter_mention_emails", False)
+        or getattr(rule, "filter_mention_mass_enabled", False)
+    )
+
+
+async def matched_mention_kind(message: Message, rule, *, bot=None) -> str | None:
+    """
+    Возвращает имя запрещённого типа упоминания/тега ('users'|'bots'|'channels'|'text_mention'|
+    'hashtags'|'bot_commands'|'cashtags'|'emails'|'mass'), или None если ничего не подходит.
+    """
+    text = message.text or ""
+    caption = message.caption or ""
+    text_ents = list(getattr(message, "entities", None) or [])
+    caption_ents = list(getattr(message, "caption_entities", None) or [])
+
+    # 1) Массовые упоминания: считаем суммарно по text + caption.
+    if getattr(rule, "filter_mention_mass_enabled", False):
+        try:
+            threshold = int(getattr(rule, "filter_mention_mass_threshold", 5) or 5)
+        except (TypeError, ValueError):
+            threshold = 5
+        threshold = max(2, min(50, threshold))
+        cnt = sum(
+            1 for e in (text_ents + caption_ents)
+            if str(getattr(e, "type", "") or "") in ("mention", "text_mention")
+        )
+        if cnt >= threshold:
+            return "mass"
+
+    # 2) Идём по entities.
+    for src_text, ent_list in ((text, text_ents), (caption, caption_ents)):
+        for e in ent_list:
+            et = str(getattr(e, "type", "") or "")
+            off = int(getattr(e, "offset", 0) or 0)
+            ln = int(getattr(e, "length", 0) or 0)
+
+            if et == "mention":
+                # @username — определяем тип (бот/канал/юзер).
+                uname = _slice_utf16(src_text, off, ln)
+                kind = await _classify_username(uname, bot)
+                if kind == "bot" and getattr(rule, "filter_mention_bots", False):
+                    return "bots"
+                if kind == "channel" and getattr(rule, "filter_mention_channels", False):
+                    return "channels"
+                if kind == "user" and getattr(rule, "filter_mention_users", False):
+                    return "users"
+            elif et == "text_mention":
+                # Премиум-юзеры без юзернейма (или явное text_mention).
+                u = getattr(e, "user", None)
+                if u and bool(getattr(u, "is_bot", False)) and getattr(rule, "filter_mention_bots", False):
+                    return "bots"
+                if getattr(rule, "filter_mention_text_mention", False):
+                    return "text_mention"
+            elif et == "hashtag":
+                if getattr(rule, "filter_mention_hashtags", False):
+                    return "hashtags"
+            elif et == "bot_command":
+                # Запрещаем только команды чужим ботам — содержат '@'.
+                if getattr(rule, "filter_mention_bot_commands", False):
+                    cmd = _slice_utf16(src_text, off, ln)
+                    if "@" in (cmd or ""):
+                        return "bot_commands"
+            elif et == "cashtag":
+                if getattr(rule, "filter_mention_cashtags", False):
+                    return "cashtags"
+            elif et == "email":
+                if getattr(rule, "filter_mention_emails", False):
+                    return "emails"
+
+    return None
+
+
 def has_buttons(message: Message) -> bool:
     """Сообщение содержит инлайн- или reply-клавиатуру."""
     rm = getattr(message, "reply_markup", None)
@@ -1235,6 +1472,195 @@ def has_buttons(message: Message) -> bool:
         getattr(rm, "inline_keyboard", None)
         or getattr(rm, "keyboard", None)
     )
+
+
+# -------------------------------------------------------------------------
+# Гранулярные тогглы по типу кнопок.
+# -------------------------------------------------------------------------
+
+def any_granular_button_enabled(rule) -> bool:
+    """Хотя бы один гранулярный тоггл кнопок включён."""
+    return bool(
+        getattr(rule, "filter_button_url", False)
+        or getattr(rule, "filter_button_callback", False)
+        or getattr(rule, "filter_button_web_app", False)
+        or getattr(rule, "filter_button_switch_inline", False)
+        or getattr(rule, "filter_button_login", False)
+        or getattr(rule, "filter_button_pay", False)
+        or getattr(rule, "filter_button_copy_text", False)
+        or getattr(rule, "filter_button_reply", False)
+        or getattr(rule, "filter_button_mass_enabled", False)
+    )
+
+
+def _iter_inline_buttons(message: Message):
+    """Итерация по всем InlineKeyboardButton в message.reply_markup.inline_keyboard."""
+    rm = getattr(message, "reply_markup", None)
+    if not rm:
+        return
+    rows = getattr(rm, "inline_keyboard", None) or []
+    for row in rows:
+        if not row:
+            continue
+        for btn in row:
+            if btn is not None:
+                yield btn
+
+
+def matched_button_kind(message: Message, rule) -> str | None:
+    """
+    Возвращает имя запрещённого типа кнопок ('url'|'callback'|'web_app'|'switch_inline'|
+    'login'|'pay'|'copy_text'|'reply'|'mass') или None.
+    """
+    rm = getattr(message, "reply_markup", None)
+    if not rm:
+        return None
+
+    # 1) Reply-клавиатура (keyboard внизу экрана).
+    reply_kb = getattr(rm, "keyboard", None)
+    if reply_kb and getattr(rule, "filter_button_reply", False):
+        # Считаем непустой keyboard уже признаком.
+        for row in reply_kb:
+            if row and any(b for b in row if b is not None):
+                return "reply"
+
+    # 2) Массовость: считаем все кнопки в inline_keyboard суммарно.
+    if getattr(rule, "filter_button_mass_enabled", False):
+        try:
+            threshold = int(getattr(rule, "filter_button_mass_threshold", 5) or 5)
+        except (TypeError, ValueError):
+            threshold = 5
+        threshold = max(2, min(50, threshold))
+        cnt = sum(1 for _ in _iter_inline_buttons(message))
+        if cnt >= threshold:
+            return "mass"
+
+    # 3) Идём по inline-кнопкам и проверяем тип каждой.
+    for btn in _iter_inline_buttons(message):
+        if getattr(btn, "url", None) and getattr(rule, "filter_button_url", False):
+            return "url"
+        if getattr(btn, "callback_data", None) and getattr(rule, "filter_button_callback", False):
+            return "callback"
+        if getattr(btn, "web_app", None) and getattr(rule, "filter_button_web_app", False):
+            return "web_app"
+        # switch_inline_query / switch_inline_query_current_chat / switch_inline_query_chosen_chat
+        if (
+            getattr(btn, "switch_inline_query", None) is not None
+            or getattr(btn, "switch_inline_query_current_chat", None) is not None
+            or getattr(btn, "switch_inline_query_chosen_chat", None) is not None
+        ) and getattr(rule, "filter_button_switch_inline", False):
+            return "switch_inline"
+        if getattr(btn, "login_url", None) and getattr(rule, "filter_button_login", False):
+            return "login"
+        if getattr(btn, "pay", None) and getattr(rule, "filter_button_pay", False):
+            return "pay"
+        # copy_text — новое поле API (CopyTextButton).
+        if getattr(btn, "copy_text", None) and getattr(rule, "filter_button_copy_text", False):
+            return "copy_text"
+
+    return None
+
+
+# -------------------------------------------------------------------------
+# Гранулярные тогглы по типу sender_chat / forward (модалка «Сообщения от каналов»).
+# -------------------------------------------------------------------------
+
+
+def any_granular_channel_post_enabled(rule) -> bool:
+    """Хотя бы один гранулярный тоггл «сообщения от каналов» включён."""
+    return bool(
+        getattr(rule, "filter_channel_post_channels", False)
+        or getattr(rule, "filter_channel_post_groups", False)
+        or getattr(rule, "filter_channel_post_anon_admin", False)
+        or getattr(rule, "filter_channel_post_fwd_channel", False)
+        or getattr(rule, "filter_channel_post_fwd_group", False)
+        or getattr(rule, "filter_channel_post_no_username", False)
+        or getattr(rule, "filter_channel_post_hidden_fwd", False)
+    )
+
+
+def _forward_chat(message: Message):
+    """Возвращает чат-источник форварда (или None).
+    Поддерживает и старый message.forward_from_chat, и aiogram v3 message.forward_origin.chat.
+    """
+    fwd_chat = getattr(message, "forward_from_chat", None)
+    if fwd_chat is not None:
+        return fwd_chat
+    fo = getattr(message, "forward_origin", None)
+    if fo is None:
+        return None
+    # MessageOriginChannel / MessageOriginChat: атрибут .chat
+    return getattr(fo, "chat", None)
+
+
+def _forward_origin_is_hidden(message: Message) -> bool:
+    """forward_origin.type == 'hidden_user' (anonymous forward)."""
+    fo = getattr(message, "forward_origin", None)
+    if fo is None:
+        # legacy aiogram v2: forward_sender_name присутствует если источник скрыт.
+        return bool(getattr(message, "forward_sender_name", None))
+    t = str(getattr(fo, "type", "") or "").lower()
+    return t == "hidden_user"
+
+
+def matched_channel_post_kind(message: Message, rule, chat_id: int) -> str | None:
+    """
+    Определяет, какому из гранулярных тогглов соответствует сообщение.
+    Возвращает 'channels'|'groups'|'anon_admin'|'fwd_channel'|'fwd_group'|
+    'no_username'|'hidden_fwd' или None.
+
+    Порядок важен: сначала более «жёсткие» правила (channels, groups, anon_admin),
+    затем форварды, затем «без username» / «hidden».
+    """
+    # 1) Hidden forward — не зависит от sender_chat и от forward chat.
+    if getattr(rule, "filter_channel_post_hidden_fwd", False):
+        if _forward_origin_is_hidden(message):
+            return "hidden_fwd"
+
+    sc = getattr(message, "sender_chat", None)
+    sc_type = str(getattr(sc, "type", "") or "").lower() if sc is not None else ""
+    sc_id = int(getattr(sc, "id", 0) or 0) if sc is not None else 0
+    sc_username = str(getattr(sc, "username", "") or "").strip().lstrip("@").lower() if sc is not None else ""
+
+    # 2) Анонимные админы текущей группы: sender_chat == message.chat.
+    if sc is not None and sc_id == int(chat_id or 0):
+        if getattr(rule, "filter_channel_post_anon_admin", False):
+            return "anon_admin"
+        # Если этот тоггл выключен — НЕ считаем такое сообщение «от другого канала/группы»,
+        # дальше не проваливаемся в channels/groups.
+        return None
+
+    # 3) От чужого канала (sender_chat).
+    if sc_type == "channel":
+        # «Без @username» — отдельный тоггл, имеет приоритет (более узкий).
+        if not sc_username and getattr(rule, "filter_channel_post_no_username", False):
+            return "no_username"
+        if getattr(rule, "filter_channel_post_channels", False):
+            return "channels"
+
+    # 4) От чужой группы/супергруппы (sender_chat).
+    if sc_type in ("group", "supergroup"):
+        if getattr(rule, "filter_channel_post_groups", False):
+            return "groups"
+
+    # 5) Форварды — учитываются ТОЛЬКО если sender_chat пустой (т.е. пересылку сделал
+    # обычный пользователь, а не «от имени канала/группы»).
+    if sc is None:
+        fwd = _forward_chat(message)
+        if fwd is not None:
+            fwd_type = str(getattr(fwd, "type", "") or "").lower()
+            fwd_username = str(getattr(fwd, "username", "") or "").strip().lstrip("@").lower()
+            if fwd_type == "channel":
+                # «Без @username» приоритетнее.
+                if not fwd_username and getattr(rule, "filter_channel_post_no_username", False):
+                    return "no_username"
+                if getattr(rule, "filter_channel_post_fwd_channel", False):
+                    return "fwd_channel"
+            elif fwd_type in ("group", "supergroup"):
+                if getattr(rule, "filter_channel_post_fwd_group", False):
+                    return "fwd_group"
+
+    return None
 
 
 # =========================================================
@@ -1748,6 +2174,7 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
         await session.refresh(rule)  # свежие данные из БД (настройки из Mini App)
     except Exception:
         pass
+    owner_premium_features = await chat_owner_has_miniapp_premium(session, chat_id)
 
     # главный выключатель антиспама: если ВЫКЛ — не фильтруем
     if not _bool_or_default(getattr(rule, "master_anti_spam", True), True):
@@ -1763,33 +2190,80 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     if not user and sender_chat and _is_channel_comment_context(message):
         return Verdict(False, "channel_discussion_post_skip", "", "delete", log_it=False)
 
-    # Отдельный фильтр сообщений от имени каналов/чатов (sender_chat).
-    if sender_chat and bool(getattr(rule, "filter_channel_posts_enabled", False)):
-        # Разрешаем связанный канал в обсуждении постов.
+    # Отдельный фильтр сообщений от имени каналов/чатов (sender_chat) + форварды.
+    # Сначала ВСЕГДА разрешаем связанный канал в обсуждении постов — иначе Telegram
+    # схлопнет тред и пропадут комментарии к постам.
+    _channel_post_relevant = (
+        sender_chat is not None
+        or _forward_chat(message) is not None
+        or _forward_origin_is_hidden(message)
+    )
+    if _channel_post_relevant:
         try:
             linked_ok = await is_post_as_linked_channel_in_discussion(message.bot, chat_id, message)
         except Exception:
             linked_ok = False
-        # Если не распознали связку через get_chat, не удаляем якорь комментариев к посту канала —
-        # иначе Telegram «схлопывает» тред и пропадают все комментарии под постом.
         if not linked_ok and _is_channel_comment_context(message):
             linked_ok = True
+
         if not linked_ok:
-            sc_username = str(getattr(sender_chat, "username", "") or "").strip().lstrip("@").lower()
+            # Whitelist по @username: проверяем и sender_chat, и forward chat.
+            sc_username = (
+                str(getattr(sender_chat, "username", "") or "").strip().lstrip("@").lower()
+                if sender_chat is not None
+                else ""
+            )
             if sc_username and await whitelist_sender_chat_username(session, chat_id, sc_username):
                 return Verdict(False, "whitelist_sender_chat", "", "delete", log_it=False)
+            _fwd_chat_obj = _forward_chat(message)
+            _fwd_username = (
+                str(getattr(_fwd_chat_obj, "username", "") or "").strip().lstrip("@").lower()
+                if _fwd_chat_obj is not None
+                else ""
+            )
+            if _fwd_username and await whitelist_sender_chat_username(session, chat_id, _fwd_username):
+                return Verdict(False, "whitelist_sender_chat", "", "delete", log_it=False)
+
             sc_action = str(getattr(rule, "filter_channel_posts_action", "delete") or "delete").strip().lower()
             if sc_action not in ("delete", "ban"):
                 sc_action = "delete"
-            return Verdict(
-                True,
-                "channel_post_actor",
-                f"sender_chat:@{sc_username}" if sc_username else f"sender_chat:{int(getattr(sender_chat, 'id', 0) or 0)}",
-                sc_action,
-                mute_minutes=mute_min,
-                log_it=log_enabled,
-                log_extra=("anti-edit" if edited else ""),
-            )
+
+            if owner_premium_features and any_granular_channel_post_enabled(rule):
+                _cp_kind = matched_channel_post_kind(message, rule, chat_id)
+                if _cp_kind:
+                    _cp_target = (
+                        f"sender_chat:@{sc_username}"
+                        if sc_username
+                        else (
+                            f"forward:@{_fwd_username}"
+                            if _fwd_username
+                            else (
+                                f"sender_chat:{int(getattr(sender_chat, 'id', 0) or 0)}"
+                                if sender_chat is not None
+                                else "forward:hidden"
+                            )
+                        )
+                    )
+                    return Verdict(
+                        True,
+                        f"channel_post_{_cp_kind}",
+                        _cp_target,
+                        sc_action,
+                        mute_minutes=mute_min,
+                        log_it=log_enabled,
+                        log_extra=("anti-edit" if edited else ""),
+                    )
+            elif sender_chat is not None and bool(getattr(rule, "filter_channel_posts_enabled", False)):
+                # Legacy: режем ЛЮБОЕ сообщение от имени канала/чата.
+                return Verdict(
+                    True,
+                    "channel_post_actor",
+                    f"sender_chat:@{sc_username}" if sc_username else f"sender_chat:{int(getattr(sender_chat, 'id', 0) or 0)}",
+                    sc_action,
+                    mute_minutes=mute_min,
+                    log_it=log_enabled,
+                    log_extra=("anti-edit" if edited else ""),
+                )
 
     # do not touch whitelisted users
     if user and await whitelist_user(session, chat_id, user_id):
@@ -1814,8 +2288,9 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     # Legacy filter_links + filter_links_mode из Mini App (при «разрешить ссылки» filter_links=False).
     filter_links = _bool_or_default(getattr(rule, "filter_links", True), True)
     filter_mentions = bool(getattr(rule, "filter_mentions", True))
-    _media_mode = getattr(rule, "filter_media_mode", "allow")
-    filter_media = _media_mode in ("forbid", "captcha")
+    # legacy filter_media_mode больше не определяет поведение — гранулярные тогглы заменили его.
+    # Переменная оставлена для возможной диагностики/логирования.
+    _media_mode = getattr(rule, "filter_media_mode", "allow")  # noqa: F841  (legacy, read for logging)
     _buttons_mode = getattr(rule, "filter_buttons_mode", "allow")
     filter_buttons = _buttons_mode in ("forbid", "captcha")
     anti_edit = bool(getattr(rule, "anti_edit", True))
@@ -1901,7 +2376,35 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
         if v_link:
             return v_link
 
-    if filter_mentions:
+    # Упоминания:
+    # 1) Если включён хотя бы один гранулярный тоггл (filter_mention_*) — работают только они.
+    # 2) Иначе — legacy filter_mentions (булев флаг «все @»). Сохраняем для чатов, где
+    #    пользователь ещё не открывал новую модалку. При первом её открытии фронт тихо
+    #    сбрасывает filter_mentions=False, и далее поведение определяется только гранулами.
+    if owner_premium_features and any_granular_mention_enabled(rule):
+        _mention_kind = await matched_mention_kind(message, rule, bot=getattr(message, "bot", None))
+        if _mention_kind:
+            _mk_human = {
+                "users": "упоминание пользователя",
+                "bots": "упоминание бота",
+                "channels": "упоминание канала",
+                "text_mention": "скрытое упоминание",
+                "hashtags": "хештег",
+                "bot_commands": "команда чужому боту",
+                "cashtags": "cashtag",
+                "emails": "email",
+                "mass": "массовые упоминания",
+            }.get(_mention_kind, _mention_kind)
+            return Verdict(
+                True,
+                _with_newbie_reason(f"mention_{_mention_kind}", newbie_win),
+                _mk_human,
+                action,
+                mute_minutes=mute_min,
+                log_it=log_enabled,
+                log_extra=("anti-edit" if edited else ""),
+            )
+    elif filter_mentions:
         mentions = find_mentions_any(message)
         if mentions:
             return Verdict(
@@ -1929,6 +2432,10 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     religion_promo_only = bool(getattr(rule, "filter_religion_promo_only", False))
     use_esoteric = bool(getattr(rule, "filter_esoteric_enabled", False))
     esoteric_promo_only = bool(getattr(rule, "filter_esoteric_promo_only", False))
+    if not owner_premium_features:
+        use_racism = use_nazi = use_vulgar = use_politics = use_religion = use_esoteric = False
+        religion_promo_only = False
+        esoteric_promo_only = False
 
     # Узкие словари проверяем РАНЬШЕ profanity, чтобы конкретные категории
     # (обзывательства/реклама/казино/подработки/расизм/нацизм/пошлость) попадали
@@ -2099,27 +2606,67 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
             )
 
     # -------------------------------------------------
-    # 4) media / стикеры (filter_media_mode: forbid | captcha). Капча на паузе — captcha как action
+    # 4) media / стикеры — только гранулярные тогглы.
+    # Поля: filter_media_photos / videos / stickers / animations / voice / video_notes / audio /
+    #       custom_emoji / plain_emoji.
+    # Legacy filter_media_mode больше не используется в модерации: модалка «Медиа» при первом
+    # открытии очищает его до 'allow', а пользователь сам выбирает что запрещать.
     # -------------------------------------------------
-    if filter_media and has_media(message):
-        # from app.handlers.first_message_captcha import _captcha_passed as captcha_passed_check
-        # if _media_mode == "captcha" and user and captcha_passed_check(chat_id, user_id):
-        #     pass
-        media_action = action  # капча на паузе: "captcha" -> action (delete/mute/ban)
+    _granular_kind = matched_media_kind(message, rule) if owner_premium_features else None
+    if _granular_kind:
+        media_action = action
+        _kind_human = {
+            "photos": "фото",
+            "videos": "видео",
+            "stickers": "стикеры",
+            "animations": "GIF/анимации",
+            "voice": "голосовые",
+            "video_notes": "кружки",
+            "audio": "аудиофайлы",
+            "custom_emoji": "премиум-смайлики",
+            "plain_emoji": "смайлики",
+        }.get(_granular_kind, _granular_kind)
         return Verdict(
-            True, _with_newbie_reason("media", newbie_win), "медиа/стикер", media_action,
+            True,
+            _with_newbie_reason(f"media_{_granular_kind}", newbie_win),
+            f"медиа: {_kind_human}",
+            media_action,
             mute_minutes=mute_min,
             log_it=log_enabled,
             log_extra=("anti-edit" if edited else ""),
         )
 
     # -------------------------------------------------
-    # 5) сообщения с кнопками (filter_buttons_mode: forbid | captcha). Капча на паузе — captcha как action
+    # 5) сообщения с кнопками: гранулярные тогглы filter_button_*.
+    # Если включён хотя бы один granular — работают только они. Иначе fallback на
+    # legacy filter_buttons_mode (forbid|captcha) — для чатов, где новая модалка
+    # ещё не открывалась. При первом открытии фронт тихо сбрасывает legacy=allow,
+    # и далее поведение определяется только гранулами.
     # -------------------------------------------------
-    if filter_buttons and has_buttons(message):
-        # from app.handlers.first_message_captcha import _captcha_passed as captcha_passed_check
-        # if _buttons_mode == "captcha" and user and captcha_passed_check(chat_id, user_id):
-        #     pass
+    if owner_premium_features and any_granular_button_enabled(rule):
+        _btn_kind = matched_button_kind(message, rule)
+        if _btn_kind:
+            _bk_human = {
+                "url": "кнопка со ссылкой",
+                "callback": "callback-кнопка",
+                "web_app": "Mini App-кнопка",
+                "switch_inline": "switch-inline кнопка",
+                "login": "login-кнопка",
+                "pay": "кнопка оплаты",
+                "copy_text": "copy-text кнопка",
+                "reply": "reply-клавиатура",
+                "mass": "много кнопок",
+            }.get(_btn_kind, _btn_kind)
+            return Verdict(
+                True,
+                _with_newbie_reason(f"button_{_btn_kind}", newbie_win),
+                _bk_human,
+                action,
+                mute_minutes=mute_min,
+                log_it=log_enabled,
+                log_extra=("anti-edit" if edited else ""),
+            )
+    elif filter_buttons and has_buttons(message):
         buttons_action = action  # капча на паузе: "captcha" -> action (delete/mute/ban)
         return Verdict(
             True, _with_newbie_reason("buttons", newbie_win), "сообщение с кнопками", buttons_action,
@@ -2532,6 +3079,12 @@ def _moderation_punishment_landed(v: Verdict, deleted_ok: bool, ok_action: bool)
 
 async def _try_send_group_rules_autopost(bot, chat_id: int, rule: Rule) -> bool:
     """Отправить шаблон правил группы (как ручная отправка из Mini App), с опциональным удалением «закрепил»."""
+    try:
+        async with await get_session() as _s_autop:
+            if not await chat_owner_has_miniapp_premium(_s_autop, int(chat_id)):
+                return False
+    except Exception:
+        return False
     text_value = str(getattr(rule, "rules_group_text", "") or "").strip()
     if not text_value:
         return False
@@ -3092,7 +3645,8 @@ async def on_chat_member(event: ChatMemberUpdated):
 
             rule = await get_rule(session, chat_id)
             if bool(getattr(rule, "use_global_antispam_db", False)):
-                if await is_in_global_antispam(session, user_id):
+                owner_glob = await chat_owner_has_miniapp_premium(session, int(chat_id))
+                if owner_glob and await is_in_global_antispam(session, user_id):
                     try:
                         await bot.ban_chat_member(chat_id, user_id)
                     except Exception as e:
@@ -3111,70 +3665,83 @@ async def on_chat_member(event: ChatMemberUpdated):
 
             # Приветствие новых участников (по настройке конкретного чата).
             try:
+                welcome_owner_premium = await chat_owner_has_miniapp_premium(session, int(chat_id))
                 if bool(getattr(rule, "welcome_enabled", False)) and not bool(getattr(user, "is_bot", False)):
                     if bool(getattr(rule, "join_captcha_enabled", False)):
                         raise RuntimeError("welcome_wait_join_captcha")
-                    every_n = max(1, min(500, int(getattr(rule, "welcome_every_n_joins", 1) or 1)))
+                    if welcome_owner_premium:
+                        every_n = max(1, min(500, int(getattr(rule, "welcome_every_n_joins", 1) or 1)))
+                    else:
+                        every_n = 1
                     total_joins_q = await session.execute(
                         select(func.count(NewMember.id)).where(NewMember.chat_id == int(chat_id))
                     )
                     total_joins = int(total_joins_q.scalar() or 0)
                     if every_n > 1 and (total_joins % every_n) != 0:
                         raise RuntimeError("welcome_every_n_joins_skip")
-                    # Режим "молчать при рейде": если за окно уже много входов — приветствия не шлём.
-                    silent_on_raid = bool(getattr(rule, "welcome_silent_on_raid", False))
-                    raid_threshold = max(2, min(200, int(getattr(rule, "welcome_raid_threshold", 8) or 8)))
-                    raid_window_min = max(1, min(60, int(getattr(rule, "welcome_raid_window_minutes", 2) or 2)))
-                    if silent_on_raid:
-                        since = datetime.now(timezone.utc) - timedelta(minutes=raid_window_min)
-                        joins_q = await session.execute(
-                            select(func.count(NewMember.id)).where(
-                                NewMember.chat_id == int(chat_id),
-                                NewMember.joined_at >= since,
-                            )
-                        )
-                        joins_cnt = int(joins_q.scalar() or 0)
-                        if joins_cnt >= raid_threshold:
-                            raise RuntimeError("welcome_silent_on_raid")
-                    # Лимит приветствий в минуту.
-                    max_per_min = max(0, min(60, int(getattr(rule, "welcome_max_per_min", 0) or 0)))
-                    if not _welcome_rate_allowed(int(chat_id), max_per_min):
-                        raise RuntimeError("welcome_rate_limited")
-                    raw_text = str(getattr(rule, "welcome_text", "") or "").strip()
-                    if raw_text:
-                        chat_title = str(getattr(event.chat, "title", "") or "")
-                        uname = str(getattr(user, "username", "") or "").lstrip("@")
-                        username_display = f"@{uname}" if uname else ""
-                        txt = (
-                            raw_text
-                            .replace("{first_name}", html.escape(str(getattr(user, "first_name", "") or "друг"), quote=False))
-                            .replace(
-                                "{full_name}",
-                                html.escape(
-                                    str(getattr(user, "full_name", "") or getattr(user, "first_name", "") or "друг"),
-                                    quote=False,
-                                ),
-                            )
-                            .replace("{username}", html.escape(username_display, quote=False))
-                            .replace("{chat_title}", html.escape(chat_title, quote=False))
-                        )
-                        kb = _welcome_keyboard_from_json(getattr(rule, "welcome_buttons_json", None))
-                        photo_rel = str(getattr(rule, "welcome_photo_path", "") or "").strip()
-                        if photo_rel:
-                            fp = (_welcome_media_root() / photo_rel).resolve()
-                            root = _welcome_media_root().resolve()
-                            if (root in fp.parents or fp == root) and fp.exists() and fp.is_file():
-                                await bot.send_photo(
-                                    chat_id,
-                                    FSInputFile(str(fp)),
-                                    caption=txt[:1024],
-                                    parse_mode="HTML",
-                                    reply_markup=kb,
+                    if welcome_owner_premium:
+                        silent_on_raid = bool(getattr(rule, "welcome_silent_on_raid", False))
+                        raid_threshold = max(2, min(200, int(getattr(rule, "welcome_raid_threshold", 8) or 8)))
+                        raid_window_min = max(1, min(60, int(getattr(rule, "welcome_raid_window_minutes", 2) or 2)))
+                        if silent_on_raid:
+                            since = datetime.now(timezone.utc) - timedelta(minutes=raid_window_min)
+                            joins_q = await session.execute(
+                                select(func.count(NewMember.id)).where(
+                                    NewMember.chat_id == int(chat_id),
+                                    NewMember.joined_at >= since,
                                 )
+                            )
+                            joins_cnt = int(joins_q.scalar() or 0)
+                            if joins_cnt >= raid_threshold:
+                                raise RuntimeError("welcome_silent_on_raid")
+                        max_per_min = max(0, min(60, int(getattr(rule, "welcome_max_per_min", 0) or 0)))
+                    else:
+                        max_per_min = 0
+                    if max_per_min > 0 and not _welcome_rate_allowed(int(chat_id), max_per_min):
+                        raise RuntimeError("welcome_rate_limited")
+
+                    chat_title_raw = str(getattr(event.chat, "title", "") or "")
+                    loc_welcome = await owner_locale_for_chat(session, int(chat_id))
+                    if welcome_owner_premium:
+                        raw_text = str(getattr(rule, "welcome_text", "") or "").strip()
+                        if raw_text:
+                            uname = str(getattr(user, "username", "") or "").lstrip("@")
+                            username_display = f"@{uname}" if uname else ""
+                            txt = (
+                                raw_text
+                                .replace("{first_name}", html.escape(str(getattr(user, "first_name", "") or "друг"), quote=False))
+                                .replace(
+                                    "{full_name}",
+                                    html.escape(
+                                        str(getattr(user, "full_name", "") or getattr(user, "first_name", "") or "друг"),
+                                        quote=False,
+                                    ),
+                                )
+                                .replace("{username}", html.escape(username_display, quote=False))
+                                .replace("{chat_title}", html.escape(chat_title_raw, quote=False))
+                            )
+                            kb = _welcome_keyboard_from_json(getattr(rule, "welcome_buttons_json", None))
+                            photo_rel = str(getattr(rule, "welcome_photo_path", "") or "").strip()
+                            if photo_rel:
+                                fp = (_welcome_media_root() / photo_rel).resolve()
+                                root = _welcome_media_root().resolve()
+                                if (root in fp.parents or fp == root) and fp.exists() and fp.is_file():
+                                    await bot.send_photo(
+                                        chat_id,
+                                        FSInputFile(str(fp)),
+                                        caption=txt[:1024],
+                                        parse_mode="HTML",
+                                        reply_markup=kb,
+                                    )
+                                else:
+                                    await bot.send_message(chat_id, txt[:4000], parse_mode="HTML", reply_markup=kb)
                             else:
                                 await bot.send_message(chat_id, txt[:4000], parse_mode="HTML", reply_markup=kb)
-                        else:
-                            await bot.send_message(chat_id, txt[:4000], parse_mode="HTML", reply_markup=kb)
+                    else:
+                        nm = html.escape(str(getattr(user, "first_name", "") or "friend"), quote=False)
+                        ct = html.escape(chat_title_raw, quote=False)
+                        txt_free = t(loc_welcome, "guard.member_welcome_simple", name=nm, chat_title=ct)
+                        await bot.send_message(chat_id, txt_free[:4000], parse_mode="HTML")
             except Exception as w_err:
                 reason = str(w_err or "").strip().lower()
                 if reason in (
@@ -3222,7 +3789,7 @@ async def on_chat_member(event: ChatMemberUpdated):
             except Exception as e:
                 logger.debug("antinakrutka chat send: %s", e)
 
-            if action == "alert_restrict":
+            if action == "alert_restrict" and await chat_owner_has_miniapp_premium(session, int(chat_id)):
                 until = datetime.now(timezone.utc) + timedelta(minutes=restrict_min)
                 for uid, _ in joins_list:
                     if uid == user_id or await is_admin(bot, chat_id, uid):

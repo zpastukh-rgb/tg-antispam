@@ -1,21 +1,45 @@
-function queryModalBackdropEl(sel) {
+/**
+ * document → #app → BFS по открытым shadowRoot (TMA / обёртки).
+ * @param {string} sel
+ * @returns {{ el: Element | null, where: string | null }}
+ */
+export function queryGuardDomSelector(sel) {
+  if (typeof document === 'undefined' || !sel) return { el: null, where: null }
   try {
     const fromDoc = document.querySelector(sel)
-    if (fromDoc) return fromDoc
+    if (fromDoc) return { el: fromDoc, where: 'document' }
     const app = document.getElementById('app')
-    if (app) {
-      const inApp = app.querySelector(sel)
-      if (inApp) return inApp
-      const sr = app.shadowRoot
-      if (sr) {
-        const inShadow = sr.querySelector(sel)
-        if (inShadow) return inShadow
+    const queue = []
+    const seen = new Set()
+    const push = (root, label) => {
+      if (!root?.querySelector || seen.has(root)) return
+      seen.add(root)
+      queue.push([root, label])
+    }
+    push(app, '#app')
+    if (app?.shadowRoot) push(app.shadowRoot, '#app.shadowRoot')
+    let budget = 0
+    while (queue.length && budget < 500) {
+      budget += 1
+      const [root, label] = queue.shift()
+      const hit = root.querySelector(sel)
+      if (hit) return { el: hit, where: label }
+      try {
+        root.querySelectorAll('*').forEach((node) => {
+          if (node.shadowRoot) push(node.shadowRoot, `${label}/${node.tagName}.sr`)
+        })
+      } catch {
+        //
       }
     }
   } catch {
     //
   }
-  return null
+  return { el: null, where: null }
+}
+
+function queryModalBackdropEl(sel) {
+  return queryGuardDomSelector(sel).el
 }
 
 function collectModalBackdropKeys() {
@@ -67,6 +91,8 @@ export function probeProtectionFilterModalDom(key) {
     } catch {
       teleportRoot = null
     }
+    const anchorQ = queryGuardDomSelector('[data-guard-protection-filter-modals-anchor]')
+    const filterModalsAnchor = anchorQ.el
     return {
       ok: false,
       reason: 'not-in-dom',
@@ -75,6 +101,9 @@ export function probeProtectionFilterModalDom(key) {
       foundKeys,
       teleportRootPresent: !!teleportRoot,
       teleportRootChildren: teleportRoot ? teleportRoot.childElementCount : null,
+      filterModalsAnchorPresent: !!filterModalsAnchor,
+      filterModalsAnchorChildren: filterModalsAnchor ? filterModalsAnchor.childElementCount : null,
+      filterModalsAnchorWhere: anchorQ.where,
     }
   }
   let cs

@@ -21,7 +21,7 @@
  * Как читать цепочку в логах (msg / scope):
  * 1) polyfill: touchend→resolve → synthetic click() → after_native_click_rAF0
  * 2) Protection: openProtectionFilterModal:chain_start (plan.steps — порядок шагов Vue)
- * 3) openProtectionFilterModal:defer_scheduled — только links/mentions (отложенное открытие)
+ * 3) openProtectionFilterModal:timer_scheduled → timer_fired (setTimeout 50 ms после сброса флагов)
  * 4) openProtectionFilterModal — флаги refs; затем filterModalDom:afterNextTick / rAF1 / rAF2
  *    — dom.ok=false «not-in-dom» значит v-if не смонтировал разметку; ok=true но rect.w/h≈0 — слой есть, но не виден
  */
