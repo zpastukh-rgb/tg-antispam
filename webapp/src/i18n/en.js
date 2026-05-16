@@ -74,6 +74,10 @@ export default {
     partner: 'Partner',
     broadcast: 'Broadcast',
     support: 'Support',
+    broadcast_gate_title: 'Broadcasts require Premium',
+    broadcast_gate_sub:
+      'One-off sends, auto campaigns and autopost scheduling are included with Premium, or ask a chat owner to delegate broadcast access.',
+    broadcast_gate_cta: 'Get Premium',
   },
   app: {
     api_base_missing_build:
@@ -93,7 +97,7 @@ export default {
     badge_aria: 'Premium feature',
     badge_title: 'Available with Premium',
     activating: 'Activating…',
-    cta_trial: 'Try free for 10 days',
+    cta_trial: '10 days of Premium — free',
     cta_billing: 'Get Premium',
     cta_dismiss: 'Not now',
     bullets: {
@@ -103,7 +107,8 @@ export default {
       l4: 'Smart captchas, extra dictionaries and the global antispam database',
     },
     feature_desc: {
-      generic: 'This feature is available on Premium. Activate 10 days free — no card, no payment.',
+      generic:
+        'This feature is available with Premium. You can turn on full Premium free for 10 days — no card, no payment.',
       welcome_custom: 'Custom welcome with image, buttons and anti-RAID mode — Premium only.',
       rules_autopost: 'Scheduled rules autopost with image and old-pin deletion — Premium only.',
       granular_filters: 'Granular filters for media, mentions, buttons and channel posts — Premium only.',
@@ -244,6 +249,7 @@ export default {
       payment: { title: 'Subscription', sub: 'Billing history and renewals' },
       data: { title: 'Data and stats', sub: 'PDF export, retention, cleanup' },
       delegation: { title: 'Delegation', sub: 'Grant access to your chats without ownership' },
+      notifications: { title: 'Bot notifications', sub: 'Short reports and other DMs' },
       security: { title: 'Security', sub: 'Sessions, confirmations and PIN' },
     },
     profile: {
@@ -285,6 +291,13 @@ export default {
       purge_button: 'Clear',
       purge_done: 'History and stats for your chats have been cleared',
       purge_failed: 'Could not clear data',
+    },
+    notifications: {
+      menu_title: 'Bot notifications',
+      intro: 'Messages from Guard in your bot chat. Enable and configure notification types below — more will be added over time.',
+      short_reports_title: 'Short reports',
+      short_reports_sub: 'Joins and active groups on a schedule',
+      saved: 'Settings saved',
     },
     delegation: {
       title: 'Delegation',
@@ -433,10 +446,10 @@ export default {
       open_tokens: 'Open tokens',
       buy_premium: 'Get Premium',
       premium_features_title: 'With Premium you get',
-      premium_feature_ai: 'Next-gen AI filter',
-      premium_feature_autoban: 'Auto-ban and anti-raid',
-      premium_feature_support: 'Priority support',
-      premium_feature_stats: 'Extended stats',
+      premium_bullet_1: 'Protection stats and per-chat reports',
+      premium_bullet_2: 'Broadcasts and scheduled autopost',
+      premium_bullet_3: 'Filters: links, media, stop words, newcomer captcha',
+      premium_bullet_4: 'Anti-raids, join waves, auto-moderation',
       protection_status_no_chats: 'Protection paused',
       protection_status_limbo: 'Protection not fully active',
       col_deleted: 'REMOVED',
@@ -449,6 +462,8 @@ export default {
       protected_today_prefix: 'Protected today:',
       home_tab_premium: 'Premium protection',
       home_tab_updates: 'Updates',
+      home_tab_social: 'Social',
+      social_placeholder: 'Guard social links and news will appear here soon.',
       strengthen_protection: 'Boost protection',
       view_all_updates: 'See all updates',
       aurum_heading: 'AURUM tokens',
@@ -473,6 +488,9 @@ export default {
       title: 'Statistics',
       period_sr_only: 'Statistics period',
       period_hint: 'Period for the metrics below',
+      join_report_aria: 'Daily Guard summary in Telegram DMs',
+      join_report_hint:
+        'Short DM summary: joins in the period and active groups. Turn off to stop receiving it.',
       free_locked_banner:
         '😈 Guard: on Free, counters are hidden — you see zeros below. Get Premium to see real protection and growth stats.',
       col_deleted: 'Removed',
@@ -644,16 +662,12 @@ export default {
       label: 'Referral program',
     },
     sections: {
-      links_mentions: 'Links and mentions filter',
-      panel: 'Telegram panel, baseline',
-      spam: 'Extended spam protection',
-      autodel: 'Auto-delete',
-      bcast: 'Broadcasts',
-      autopost: 'Auto-posting',
-      stats: 'Extended stats',
-      reports_track: 'Reports tracking',
-      support: 'Priority support',
-      chat_limit: 'Max channels / groups',
+      stats_reports: 'Stats, growth, per-chat reports',
+      broadcast_autopost: 'Broadcasts & autopost',
+      aurum_export: 'AURUM ✨, PDF, history retention',
+      filters_antiraid: 'Filters, anti-raids, captcha',
+      delegation_cmp: 'Delegate Guard admins',
+      chat_limit: 'Groups & channels (max)',
     },
     plans: {
       title: 'Premium plans',
@@ -745,7 +759,8 @@ export default {
       compare_feature_col: 'Feature',
       referral_tier_free: '1 tier',
       referral_tier_premium: '3 tiers',
-      limits_unlimited: 'Unlimited',
+      limits_free: '3 / 3',
+      limits_premium: '20 / 20',
       cta_choose_premium_btn: 'Choose Premium',
       plan_choice_title: 'Choose a plan',
       show_all_plans: 'Show all plans',
@@ -940,17 +955,17 @@ export default {
       },
     },
     trial: {
-      try_free_btn: 'Try 10 days free',
-      activate_btn: 'Activate Premium for 10 days free',
-      activating: 'Activating…',
+      try_free_btn: '10 days of Premium — free',
+      activate_btn: 'Turn on Premium for 10 days — free',
+      activating: 'Turning on…',
       hint_landing: 'No card, no payment. After 10 days — back to Free.',
-      activated_toast: 'Premium activated for {n} days',
-      already_active_toast: 'Premium trial is already active',
-      error_generic: 'Could not activate the trial. Try again later.',
-      error_already_used: 'Trial already used — subscription only from here.',
-      error_window_closed: 'The trial activation window has closed.',
+      activated_toast: 'Premium is on for {n} days',
+      already_active_toast: 'Your free 10 days of Premium are already active',
+      error_generic: 'Could not start the free period. Try again later.',
+      error_already_used: 'Free period already used — subscription only.',
+      error_window_closed: 'The window for free activation has closed.',
       error_active_subscription: 'You already have an active Premium subscription.',
-      error_no_first_start: 'Run the bot via /start first.',
+      error_no_first_start: 'Open the bot with /start first.',
     },
   },
   protection: {
@@ -1036,8 +1051,10 @@ export default {
       mentions_allowed: 'Mentions allowed',
       media_forbidden: 'Media blocked',
       media_allowed: 'Media allowed',
+      media_captcha: 'Media: use chat action (“captcha” mode)',
       buttons_forbidden: 'Buttons blocked',
       buttons_allowed: 'Buttons allowed',
+      buttons_captcha: 'Buttons: use chat action (“captcha” mode)',
       buttons_granular: 'Blocked: {list}',
       channel_posts_allowed: 'Channel posts allowed',
       channel_posts_granular: 'Blocked: {list}',
@@ -1047,6 +1064,7 @@ export default {
     policy: {
       allow: 'Allowed',
       forbid: 'Forbidden',
+      captcha: 'Captcha',
     },
     links_modal: {
       title: 'Links — Guard policy',
@@ -1165,10 +1183,6 @@ export default {
       guard_paused: '⏸ Guard paused',
       filters_section: 'Filters',
       filters_info_aria: 'About filters',
-      filters_intro:
-        'Settings open in separate sheets — easier to tune modes and whitelists without a wall of buttons.',
-      filters_premium_note_free:
-        'Filter tiles (Links, Mentions, etc.) open without Premium — your tariff does not block them. 🔒 Premium only marks specific sections further down or inside some sheets.',
       filter_links: 'Links',
       filter_mentions: 'Mentions',
       filter_media: 'Media',
@@ -1193,6 +1207,18 @@ export default {
       mentions_modal_body:
         'Usernames ({\'@\'}username) and text mentions. “Forbidden” messages are handled with the shared action (delete / mute / ban).',
       mentions_modal_hint: 'Pick what counts as a mention. Each toggle works independently.',
+      mentions_modal_hint_free:
+        'The first three types (users, bots, channels) work on Free. Everything else and mass mentions need Premium. The Premium offer opens only when you tap a toggle.',
+      mentions_legacy_master: 'Block all mentions ({\'@\'}, hashtags, email…)',
+      mentions_legacy_hint: 'Off — allow mentions with {\'@\'}; on — one legacy switch.',
+      filter_legacy_section_title: 'Basic mode (Free)',
+      filter_legacy_media_hint:
+        'Three modes for all media at once. Per-type tuning (photos, stickers, voice…) below — Premium.',
+      filter_legacy_buttons_hint:
+        'Three modes for all buttons at once. Per-type buttons — Premium.',
+      filter_granular_premium_hint:
+        'Per-type tuning needs Premium for this chat owner (tap a switch to open Premium).',
+      channel_posts_legacy_master: 'Block posts sent as channel / chat actor',
       mention_kinds: {
         users: 'User mentions',
         bots: 'Bot mentions',
@@ -1253,6 +1279,10 @@ export default {
       },
       media_modal_title: '🖼 Media & stickers',
       media_modal_hint: 'Choose which media types to delete. Toggles work independently.',
+      media_modal_captcha_banner:
+        'One setting for the whole list: after any forbidden type, the bot may send a follow-up captcha.',
+      media_modal_premium_rows_hint:
+        'From GIF downward — Premium only (gold row outline; tap opens checkout). Photos, videos and stickers stay on Free.',
       media_kinds: {
         photos: 'Photos',
         videos: 'Videos',
@@ -1281,8 +1311,12 @@ export default {
       buttons_modal_title: '🔘 Messages with buttons',
       buttons_modal_body: 'Inline buttons such as “open”, “bonus”, or “join”.',
       buttons_modal_hint: 'Pick which button types Guard should treat as forbidden. Toggles work independently.',
+      buttons_modal_hint_free:
+        'First three types work on Free. From switch-inline down, plus mass detection — Premium; tap a gold row to open checkout.',
       button_mass_threshold_label: 'Delete when buttons ≥',
       channel_posts_modal_hint: 'Pick which sources Guard should treat as forbidden. Toggles work independently. Trusted {\'@\'}usernames — below.',
+      channel_posts_modal_hint_free:
+        'The first three items are on Free. Forwards and the rest are Premium; tap a gold row or toggle to open checkout.',
       channel_post_kinds: {
         channels: 'From other channels',
         groups: 'From other groups',
@@ -1313,8 +1347,6 @@ export default {
       hard_dict_title: '🚫 Guard: Hard dictionary',
       hard_dict_desc_1:
         'Cuts profanity and obfuscated roots, plus risky topics: sketchy gigs, casino/betting and political talk.',
-      hard_dict_desc_2:
-        'For “Religion” and “Esoteric” there is a “announcements only” mode: everyday chat is left alone; promo-style offers and spam are cut.',
       info_stopwords_aria: 'About stopwords',
       info_hard_dict_aria: 'About the hard dictionary',
       remove_word_aria: 'Remove',
@@ -1431,9 +1463,9 @@ export default {
       pick_chat_for_cleanup: 'Pick a chat above to run cleanup.',
       copy_settings_title: '📤 Copy settings',
       copy_settings_body:
-        'Copy all protection settings from the current chat to the one you pick, or to all chats at once.',
-      copy_select_placeholder: 'Select chat',
-      copy_all_chats: 'All chats',
+        'Copy all protection settings from the current chat to a selected group you own, or to all your groups at once (delegated chats and channels are not listed).',
+      copy_select_placeholder: 'Select group',
+      copy_all_chats: 'All my groups',
       copy_transfer: 'Copy',
       saving_dots: 'Saving…',
       loading_chat_settings: 'Loading chat settings…',
@@ -1576,7 +1608,7 @@ export default {
       cleanup_failed: 'Could not start cleanup',
       pick_other_chat: 'Pick another chat',
       no_targets_copy: 'No other chats to copy to',
-      settings_copied_all: 'Settings copied to all chats ({count})',
+      settings_copied_all: 'Settings copied to all selected groups ({count})',
       settings_copied: 'Settings copied',
       template_name_empty: 'Name cannot be empty',
       template_name_saved: 'Template title saved',
@@ -1638,7 +1670,7 @@ export default {
       select_link: 'Select text, then tap “Link”.',
     },
     confirm: {
-      copy_settings_all: 'Copy current settings to all chats ({count})?',
+      copy_settings_all: 'Copy current settings to all your groups ({count})?',
     },
     pin: {
       need_four: 'Enter 4 digits',
@@ -1727,7 +1759,7 @@ export default {
       no_drafts: 'No drafts yet.',
       autosend_title: 'Auto-post to chat',
       autosend_hint:
-        'Only when ON is enabled above. Two independent counters — “any filter hit” and “punishment only”.',
+        'Only when the rules template above is ON. First counter: every filter hit (including soft outcomes without deletion). Second: only if a message was deleted or mute/ban applied. If you always use hard punishment, both stay nearly in sync; the split matters when warnings or observe modes skip deletion.',
       filter_any: 'Any filter hit',
       every_n_events: 'Every N such events',
       on_punish: 'On punishment (delete / mute / ban)',
@@ -1811,6 +1843,17 @@ export default {
       no: 'NO',
       note:
         'The bot needs permission to restrict members. If restriction fails, the captcha is still sent, but users may write until they pass.',
+    },
+    filter_media_captcha_settings_modal: {
+      title: '🧩 Media filter captcha — settings',
+      enable: 'Enable captcha after forbidden media',
+      ttl: 'Time to answer (min)',
+      kind: 'Challenge type',
+      prefer_dm: 'Send to bot DM first',
+      yes: 'YES',
+      no: 'NO',
+      note:
+        'Independent from entry captcha. After removing forbidden photo/sticker/… the bot restricts the user and sends a challenge. Restriction permission required.',
     },
     antispam_list_modal: {
       title: '📋 Anti-spam database — settings',
@@ -1980,7 +2023,19 @@ export default {
     invited_total: 'Total:',
     paying: 'Paying:',
     transfer_cta: 'Partner ⚡ → AURUM ✨',
+    transfer_confirm_title: 'Transfer to AURUM',
+    transfer_confirm_body: 'Convert partner ⚡ to AURUM ✨? This cannot be undone.',
+    transfer_confirm_cancel: 'Cancel',
+    transfer_confirm_ok: 'Transfer',
     share: 'Share',
+    payout_modal_title: 'Withdraw funds',
+    payout_modal_sub:
+      'RUB requests are processed manually; minimum, commission hold timing, and schedule are described in Documentation.',
+    payout_modal_close_aria: 'Close withdrawal dialog',
+    payout_compact_title: 'RUB withdrawal',
+    available_payout_short: 'Currently available:',
+    payout_compact_hint: 'Open the form to enter amount, SBP/card, payout details and recipient name.',
+    payout_open_modal: 'Request payout',
     available_payout: 'Available to withdraw:',
     pending_unlock: 'Pending unlock (commissions up to ~7 days after referral payment):',
     in_requests: 'In pending requests:',
@@ -1999,6 +2054,8 @@ export default {
     refs_mode_active: 'Most active',
     refs_loading: 'One moment…',
     refs_empty: 'No referrals yet.',
+    refs_tier_hint:
+      'On the Free plan you only earn from level 1; levels 2–3 are available when you have an active Premium subscription (same rates as described in Documentation).',
     refs_status_paying: 'Paying',
     refs_status_free: 'Not paying',
     refs_stats_line: 'Payments: {p} · AI tokens: {t} ⚡',
@@ -2008,6 +2065,8 @@ export default {
     docs_lvl_1: 'Level 1: 15%',
     docs_lvl_2: 'Level 2: 10%',
     docs_lvl_3: 'Level 3: 5%',
+    docs_free_tiers:
+      '🎟 On the Free plan only partner level 1 is available: rewards from direct referrals. Levels 2–3 accrue only with an active Premium subscription (same percentages as above).',
     docs_payouts_note:
       'Payouts are processed manually in RUB. Requests are accepted once a week (Mondays) to reduce fraud risk.',
     docs_reward_for: '💸 Rewards accrue for subscription payments and AI token purchases.',
@@ -2031,6 +2090,24 @@ export default {
     docs_counts_yes: '✅ Counts: subscription payment, AI token purchases.',
     docs_counts_note:
       'ℹ️ In disputed or suspicious cases, accruals may be reviewed by an admin.',
+    tier_net_title: 'Your network',
+    tier_net_l1: 'L1 (invited personally): {n}',
+    tier_net_l2: 'L2 (referrals of your referrals): {n}',
+    tier_net_l3: 'L3 (third tier): {n}',
+    tier_net_total: '└ Total in network: {n} users',
+    tier_accruals_title: 'Confirmed accruals',
+    tier_accruals_sub:
+      'Commission rows unlocked or finalized (status “available” or “paid”) — totals from referrals’ qualifying payments.',
+    tier_level_confirmed_line: '├ L{level} · {pct}% · {pay} payments totaling {rub} ₽ → {tok} ⚡',
+    tier_accruals_total: '└ Subtotal across these rows: {tok} ⚡',
+    tier_pending_title: 'Pending confirmation',
+    tier_pending_sub: 'Commissions on hold until the payout window clears (normally until the Monday after payment).',
+    tier_level_pending_line: '├ L{level} · {pct}% · {pay} payments totaling {rub} ₽ → {tok} ⚡',
+    tier_pending_sum:
+      '└ Pending overall: {pay} payments totaling {rub} ₽ → up to {tok} ⚡ after unlock.',
+    tier_available_title: 'Available balance',
+    tier_available_hint: 'Partner ⚡ tokens already on your wallet (same rate as payouts below); convert to AURUM with the button.',
+    tier_quick_stats: 'Link signups counted as invites: {inv}; with payments: {pay}.',
   },
   subscription: {
     status_title: 'Subscription status',

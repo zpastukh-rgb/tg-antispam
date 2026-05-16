@@ -14,6 +14,11 @@ import { useToast } from '../composables/useToast'
 import { shouldAskPinForAction } from '../utils/settingsSecurity'
 import { formatDateTimeRu, formatDateTimeShortRu } from '../utils/formatDateTime'
 import { openTelegramDeepLink } from '../utils/openTelegramDeepLink'
+import {
+  telegramVerticalSwipeGestureBegin,
+  telegramVerticalSwipeGestureEnd,
+  telegramVerticalSwipeGestureResetAll,
+} from '../utils/telegramVerticalSwipeLock.js'
 
 const router = useRouter()
 const route = useRoute()
@@ -179,6 +184,9 @@ const updatesIndex = ref(0)
 const dashSwitchBusy = ref(false)
 let dashSwitchTimer = null
 const showUpdatesRoadmapModal = ref(false)
+const showPartnerBonusTransferConfirm = ref(false)
+/** Модалка заявки на вывод партнёрского баланса (RUB). */
+const showPartnerPayoutModal = ref(false)
 /** Раскрытый текст обновления в модалке ленты (ключ slide.key) */
 const updatesRoadmapExpanded = ref({})
 let activityTimer = null
@@ -216,47 +224,226 @@ let statBroadcastPointerStartX = 0
 const statBroadcastJustDragged = ref(false)
 let statBroadcastJustDraggedClear = null
 
-/** Ручное переключение: «Обновления ↔ Premium», «Статистика ↔ Рассылки» */
-const homeUpdatesPremiumSlide = ref(0)
+/** Карусель промо: расширенная дорожка с клонами (плавный переход между последним и первым без рывка). */
+let homeHeroCloneResetTok = null
+/** Индекс сегмента на дорожке: 0 и baseLen+1 — клоны; 1..baseLen — реальные слайды (старт на 1). */
+const homeHeroTrackIndex = ref(1)
+
+const HOME_HERO_TRANS_MS = 520
 const homeStatBroadcastSlide = ref(0)
 const homeUpdatesPremiumInstant = ref(false)
 const homeStatBroadcastInstant = ref(false)
+/** Вьюпорт карусели героя (ширина для порога свайпа и clamp drag). */
+const homeHeroCarouselViewportRef = ref(null)
 
-function setUpdatesPremiumSlide(i) {
-  const next = i === 1 ? 1 : 0
-  const cur = homeUpdatesPremiumSlide.value
-  if (next === cur) return
-  if (next < cur) {
-    homeUpdatesPremiumInstant.value = true
-    homeUpdatesPremiumSlide.value = next
-    void nextTick(() => {
-      requestAnimationFrame(() => {
-        homeUpdatesPremiumInstant.value = false
-      })
-    })
-  } else {
-    homeUpdatesPremiumInstant.value = false
-    homeUpdatesPremiumSlide.value = next
+/** Карусель героя: автопрокрутка и полоска прогресса */
+const HOME_HERO_ADVANCE_MS = 5000
+const homeHeroDragDx = ref(0)
+const homeHeroDragging = ref(false)
+let homeHeroPointerId = null
+let homeHeroPointerStartX = 0
+/** px/ms, последний инстант при движении указателя (для «флика»). */
+let homeHeroVx = 0
+let homeHeroLastMoveClientX = 0
+let homeHeroLastMovePerfT = 0
+const homeHeroProgress = ref(0)
+let homeHeroProgressRaf = null
+
+function clearHomeHeroProgressRaf() {
+  if (homeHeroProgressRaf != null) {
+    cancelAnimationFrame(homeHeroProgressRaf)
+    homeHeroProgressRaf = null
   }
 }
 
-function stepUpdatesPremium(delta) {
-  const cur = homeUpdatesPremiumSlide.value
-  const n = cur + delta
-  const next = n <= 0 ? 0 : n >= 1 ? 1 : n
-  if (next === cur) return
-  if (delta < 0) {
-    homeUpdatesPremiumInstant.value = true
-    homeUpdatesPremiumSlide.value = next
-    void nextTick(() => {
-      requestAnimationFrame(() => {
-        homeUpdatesPremiumInstant.value = false
-      })
-    })
-  } else {
-    homeUpdatesPremiumInstant.value = false
-    homeUpdatesPremiumSlide.value = next
+function clearHomeHeroAutoplayFull() {
+  clearHomeHeroProgressRaf()
+  homeHeroProgress.value = 0
+  cancelHeroCloneResetTok()
+}
+
+function heroCarouselTrackTransition() {
+  return `transform ${HOME_HERO_TRANS_MS}ms cubic-bezier(0.22, 1, 0.36, 1)`
+}
+
+/** Доля ширины короткой белой метки на полоске прогресса карусели (остальное — серая дорожка). */
+const HOME_HERO_THUMB_FRAC = 0.18
+
+function homeHeroThumbLeftPct(progress01) {
+  const p = Math.max(0, Math.min(1, Number(progress01) || 0))
+  const w = HOME_HERO_THUMB_FRAC * 100
+  return p * (100 - w)
+}
+
+function heroCarouselTrackStyle() {
+  const trackLen = HOME_HERO_TRACK_SLIDES.value?.length ?? 3
+  const denom = Math.max(1, trackLen)
+  const ti = Math.max(0, Math.min(denom - 1, Number(homeHeroTrackIndex.value) || 0))
+  const pct = ti * (100 / denom)
+  const drag = homeHeroDragDx.value
+  const dragging = homeHeroDragging.value
+  const instant = homeUpdatesPremiumInstant.value
+  const transition = dragging || instant ? 'none' : heroCarouselTrackTransition()
+  return {
+    transform: `translateX(calc(-${pct}% + ${drag}px))`,
+    transition,
   }
+}
+
+function homeHeroCarouselWidthPx() {
+  const el = homeHeroCarouselViewportRef.value
+  const w = el?.getBoundingClientRect?.()?.width ?? 0
+  return w > 0 ? w : 360
+}
+
+function homeHeroRubberbandOverscroll(raw, limitPx) {
+  const x = Math.abs(raw)
+  if (x <= limitPx) return raw
+  const sign = raw < 0 ? -1 : 1
+  const excess = x - limitPx
+  return sign * (limitPx + excess * 0.22)
+}
+
+/** Ограничиваем сдвиг + rubber-band только на первом настоящем слайде (вправо) и последнем (влево). */
+function clampHomeHeroDragDx(rawDx) {
+  const w = homeHeroCarouselWidthPx()
+  const max = w * 1.02
+  let dx = Math.max(-max, Math.min(max, rawDx))
+  const nBase = HOME_HERO_SLIDES.value?.length ?? 0
+  const slide = Number(homeHeroTrackIndex.value) || 0
+  if (!nBase) return dx
+  const lastReal = nBase // индекс последнего настоящего слайда на дорожке
+  if (slide === 1 && dx > 0) {
+    dx = homeHeroRubberbandOverscroll(dx, w * 0.35)
+  } else if (slide === lastReal && dx < 0) {
+    dx = homeHeroRubberbandOverscroll(dx, w * 0.35)
+  }
+  return dx
+}
+
+function cancelHeroCloneResetTok() {
+  if (homeHeroCloneResetTok != null) {
+    window.clearTimeout(homeHeroCloneResetTok)
+    homeHeroCloneResetTok = null
+  }
+}
+
+/** Мгновенный прыжок на индекс дорожки (после клонового кадра контура). */
+function heroSnapInstantTrack(targetIdx) {
+  homeUpdatesPremiumInstant.value = true
+  homeHeroTrackIndex.value = targetIdx
+  void nextTick(() => {
+    requestAnimationFrame(() => {
+      homeUpdatesPremiumInstant.value = false
+    })
+  })
+}
+
+function scheduleHeroCloneSnap(toIdx) {
+  cancelHeroCloneResetTok()
+  homeHeroCloneResetTok = window.setTimeout(() => {
+    homeHeroCloneResetTok = null
+    heroSnapInstantTrack(toIdx)
+    restartHomeHeroAutoplay()
+  }, HOME_HERO_TRANS_MS)
+}
+
+function bumpHomeHeroSlide(delta) {
+  cancelHeroCloneResetTok()
+  homeUpdatesPremiumInstant.value = false
+  const nBase = HOME_HERO_SLIDES.value?.length ?? 0
+  if (!nBase) return
+  const maxIdx = nBase + 1
+  let tgt = Number(homeHeroTrackIndex.value) + delta
+  tgt = Math.max(0, Math.min(maxIdx, tgt))
+  homeHeroTrackIndex.value = tgt
+  if (tgt === nBase + 1) scheduleHeroCloneSnap(1)
+  else if (tgt === 0) scheduleHeroCloneSnap(nBase)
+  else restartHomeHeroAutoplay()
+}
+
+function homeHeroPointerIgnoresSwipe(el) {
+  if (!el || typeof el.closest !== 'function') return true
+  return !!el.closest('[data-no-swipe], a, button, input, textarea, select, label')
+}
+
+function onHomeHeroRailPointerDown(e) {
+  if (homeHeroPointerIgnoresSwipe(e.target)) return
+  if (e.button != null && e.button !== 0) return
+  cancelHeroCloneResetTok()
+  homeHeroPointerId = e.pointerId
+  homeHeroPointerStartX = e.clientX
+  homeHeroDragDx.value = 0
+  homeHeroDragging.value = true
+  homeHeroVx = 0
+  homeHeroLastMoveClientX = e.clientX
+  homeHeroLastMovePerfT = performance.now()
+  clearHomeHeroProgressRaf()
+  try {
+    e.currentTarget?.setPointerCapture?.(e.pointerId)
+    telegramVerticalSwipeGestureBegin(e.pointerId)
+  } catch {
+    //
+  }
+}
+
+function onHomeHeroRailPointerMove(e) {
+  if (!homeHeroDragging.value || e.pointerId !== homeHeroPointerId) return
+  const now = performance.now()
+  const dt = Math.max(4, now - homeHeroLastMovePerfT)
+  homeHeroVx = (e.clientX - homeHeroLastMoveClientX) / dt
+  homeHeroLastMoveClientX = e.clientX
+  homeHeroLastMovePerfT = now
+  homeHeroDragDx.value = clampHomeHeroDragDx(e.clientX - homeHeroPointerStartX)
+}
+
+function onHomeHeroRailPointerUp(e) {
+  if (homeHeroPointerId === null || e.pointerId !== homeHeroPointerId) return
+  telegramVerticalSwipeGestureEnd(e.pointerId)
+  try {
+    e.currentTarget?.releasePointerCapture?.(e.pointerId)
+  } catch {
+    //
+  }
+  const dx = homeHeroDragDx.value
+  const vx = homeHeroVx
+  homeHeroDragging.value = false
+  homeHeroPointerId = null
+  homeHeroDragDx.value = 0
+  homeHeroVx = 0
+
+  const w = homeHeroCarouselWidthPx()
+  const th = Math.max(46, Math.min(108, w * 0.13))
+  const flickL = vx < -0.32 && dx < -10
+  const flickR = vx > 0.32 && dx > 10
+  if (dx < -th || flickL) bumpHomeHeroSlide(1)
+  else if (dx > th || flickR) bumpHomeHeroSlide(-1)
+  else restartHomeHeroAutoplay()
+}
+
+function onHomeHeroRailPointerCancel(e) {
+  onHomeHeroRailPointerUp(e)
+}
+
+function onHomeHeroRailLostPointerCapture(e) {
+  telegramVerticalSwipeGestureEnd(e.pointerId)
+}
+
+function restartHomeHeroAutoplay() {
+  clearHomeHeroProgressRaf()
+  homeHeroProgress.value = 0
+  if (dashCtx.dashboardSection.value !== 'account') return
+  const start = performance.now()
+  const loop = (now) => {
+    const elapsed = now - start
+    homeHeroProgress.value = Math.min(1, elapsed / HOME_HERO_ADVANCE_MS)
+    if (elapsed >= HOME_HERO_ADVANCE_MS) {
+      bumpHomeHeroSlide(1)
+      return
+    }
+    homeHeroProgressRaf = requestAnimationFrame(loop)
+  }
+  homeHeroProgressRaf = requestAnimationFrame(loop)
 }
 
 function stepStatBroadcast(delta) {
@@ -316,6 +503,7 @@ function onStatBroadcastRailPointerDown(e) {
   statBroadcastDragging.value = true
   try {
     e.currentTarget?.setPointerCapture?.(e.pointerId)
+    telegramVerticalSwipeGestureBegin(e.pointerId)
   } catch {
     //
   }
@@ -337,6 +525,7 @@ function onStatBroadcastRailPointerMove(e) {
 
 function onStatBroadcastRailPointerUp(e) {
   if (statBroadcastPointerId === null || e.pointerId !== statBroadcastPointerId) return
+  telegramVerticalSwipeGestureEnd(e.pointerId)
   try {
     e.currentTarget?.releasePointerCapture?.(e.pointerId)
   } catch {
@@ -357,6 +546,10 @@ function onStatBroadcastRailPointerUp(e) {
 
 function onStatBroadcastRailPointerCancel(e) {
   onStatBroadcastRailPointerUp(e)
+}
+
+function onStatBroadcastRailLostPointerCapture(e) {
+  telegramVerticalSwipeGestureEnd(e.pointerId)
 }
 
 function restartStatBroadcastNudge() {
@@ -618,6 +811,31 @@ const totalTokens = computed(() => {
   return String(Math.max(0, Math.round(total)))
 })
 const tariffIsPremium = computed(() => ['premium', 'pro', 'business'].includes((me.value?.tariff || 'free').toLowerCase()))
+
+/** Одни и те же промо-слайды для всех тарифов: языки, спам, rich, казино-спам — затем только баннер «Премиум» зависит от тарифа, и соцсети. */
+const HOME_HERO_SLIDES = computed(() => {
+  const b = import.meta.env.BASE_URL || '/'
+  const u = (name) => `${b.replace(/\/?$/, '/')}${name}`
+  const premiumTariffBanner = tariffIsPremium.value ? u('hero-home/premium-active-banner.png') : u('hero-home/premium.svg')
+  return [
+    { src: u('hero-home/updates-i18n-banner.png') },
+    { src: u('hero-home/spam-wave-banner.png') },
+    { src: u('hero-home/rich-media-banner.png') },
+    { src: u('hero-home/casino-spam-banner.png') },
+    { src: premiumTariffBanner },
+    { src: u('hero-home/social.svg') },
+  ]
+})
+
+/** Расширенная дорожка для wrap без рывка: [соц.] [офиц. слайды…] [языковой]. */
+const HOME_HERO_TRACK_SLIDES = computed(() => {
+  const s = HOME_HERO_SLIDES.value
+  const n = s.length
+  if (!n) return []
+  const lastCl = { ...s[n - 1] }
+  const firstCl = { ...s[0] }
+  return [lastCl, ...s.map((row) => ({ ...row })), firstCl]
+})
 /** 10-дневный Premium-триал: можно ли активировать (FREE + ни разу не активировал + окно открыто). */
 const trialEligible = computed(() => !!me.value && !!me.value.trial_eligible)
 /** Триал сейчас идёт (юзер активировал, осталось N дней Premium бесплатно). */
@@ -626,8 +844,6 @@ const trialActive = computed(() => !!me.value && !!me.value.trial_active)
 const showTrialCta = computed(() => !tariffIsPremium.value && trialEligible.value)
 /** Сколько дней осталось в активном Premium-триале. */
 const trialRemainingDays = computed(() => Number(me.value?.trial_remaining_days || 0))
-/** Free-аккаунт: на главной не показываем «живую» сводку статистики — нули и пояснение (как в кабинете Guard). */
-const dashboardStatsPremiumLocked = computed(() => !!me.value && !me.value.is_premium)
 /** Карточка «Рассылки» на главной: показываем всем авторизованным (маркетинг); доступ по-прежнему через Premium/делегирование. */
 const accountShowBroadcastMiniCard = computed(() => !!me.value)
 const dashboardAvatarSrc = computed(() => {
@@ -772,14 +988,12 @@ const statTrendJoins = computed(() => {
 
 const statsCardUsesPeriod = computed(() => dashboardStatsPeriod.value !== 'today')
 const statsCardDeleted = computed(() => {
-  if (dashboardStatsPremiumLocked.value) return 0
   if (!statsCardUsesPeriod.value) {
     return Math.max(0, Math.round(Number(activitySummary.value?.today?.deleted ?? 0)))
   }
   return Math.max(0, Math.round(Number(dashboardPeriodBreakdown.value?.total_deleted ?? 0)))
 })
 const statsCardJoins = computed(() => {
-  if (dashboardStatsPremiumLocked.value) return 0
   if (!statsCardUsesPeriod.value) {
     return Math.max(0, Math.round(Number(activitySummary.value?.today?.joins ?? 0)))
   }
@@ -787,7 +1001,6 @@ const statsCardJoins = computed(() => {
 })
 const statsCardSavedHoursLabel = computed(() => {
   const isEn = t('common.locale_code') === 'en'
-  if (dashboardStatsPremiumLocked.value) return isEn ? '0 h' : '0 ч'
   const d = statsCardDeleted.value
   if (d === 0) return isEn ? '0 h' : '0 ч'
   const hours = (d * 25) / 1500
@@ -795,7 +1008,6 @@ const statsCardSavedHoursLabel = computed(() => {
   return isEn ? `${hours.toFixed(1)} h` : `${hours.toFixed(1).replace('.', ',')} ч`
 })
 const statsCardTrendDeleted = computed(() => {
-  if (dashboardStatsPremiumLocked.value) return t('dashboard.hero.need_premium')
   if (statsCardUsesPeriod.value) {
     const p = DASHBOARD_STATS_PERIOD_OPTIONS.value.find((x) => x.key === dashboardStatsPeriod.value)
     return p
@@ -805,7 +1017,6 @@ const statsCardTrendDeleted = computed(() => {
   return statTrendDeleted.value
 })
 const statsCardTrendSaved = computed(() => {
-  if (dashboardStatsPremiumLocked.value) return t('dashboard.hero.need_premium')
   if (statsCardUsesPeriod.value) {
     const p = DASHBOARD_STATS_PERIOD_OPTIONS.value.find((x) => x.key === dashboardStatsPeriod.value)
     return p
@@ -815,7 +1026,6 @@ const statsCardTrendSaved = computed(() => {
   return statTrendSaved.value
 })
 const statsCardTrendJoins = computed(() => {
-  if (dashboardStatsPremiumLocked.value) return t('dashboard.hero.need_premium')
   if (statsCardUsesPeriod.value) {
     if (statsCardJoins.value > 0) {
       return t('dashboard.home_shell.joins_total_suffix', { n: statsCardJoins.value })
@@ -827,14 +1037,12 @@ const statsCardTrendJoins = computed(() => {
 
 /** Доля занятых слотов групп по тарифу (вместо «точность AI»). */
 const statGroupsLimitPercent = computed(() => {
-  if (dashboardStatsPremiumLocked.value) return '0%'
   const p = Number(activityGroupsProgress.value || 0)
   if (!Number.isFinite(p)) return '—'
   return `${Math.max(0, Math.min(100, Math.round(p)))}%`
 })
 
 const statGroupsLimitFoot = computed(() => {
-  if (dashboardStatsPremiumLocked.value) return t('dashboard.statsCard.slots_status_premium_needed')
   const left = Math.max(0, Math.round(Number(activityGroupsLimit.value || 0) - Number(activityGroupsCount.value || 0)))
   if (Number(activityGroupsLimit.value || 0) <= 0) return t('dashboard.statsCard.slots_status_no_tariff')
   if (left === 0) return t('dashboard.statsCard.slots_status_limit')
@@ -928,14 +1136,6 @@ watch(showUpdatesRoadmapModal, (open) => {
   if (!open) updatesRoadmapExpanded.value = {}
 })
 
-const ACCOUNT_HOME_PREMIUM_BULLETS = computed(() => [
-  t('dashboard.hero.premium_feature_ai'),
-  t('dashboard.hero.premium_feature_autoban'),
-  t('dashboard.hero.premium_feature_support'),
-  t('dashboard.hero.premium_feature_stats'),
-])
-
-/** Лента обновлений: от новых к более ранним; на главной — только первые UPDATES_HOME_PREVIEW_N */
 const UPDATES_HOME_PREVIEW_N = 3
 
 const UPDATES_SLIDES = computed(() => [
@@ -1084,26 +1284,15 @@ const premiumPayMethodSummary = computed(() => {
 })
 
 /**
- * Лендинг «Free vs Premium»: сверху рефералка и фильтр ссылок/упоминаний (во Free тоже ✓),
- * затем остальное; внизу лимит чатов. Premium в рефералке: «3 уровня» зелёным.
+ * Лендинг «Free vs Premium»: рефералка; 6 ключевых отличий; внизу лимит чатов 3/3 vs 20/20.
  */
 const billingCompareRows = computed(() => [
   { id: 'referral', kind: 'referral', label: t('dashboard.referralRow.label') },
-  {
-    id: 'links_mentions',
-    kind: 'ok',
-    label: t('dashboard.sections.links_mentions'),
-    free: 'ok',
-    premium: 'ok',
-  },
-  { id: 'panel', kind: 'ok', label: t('dashboard.sections.panel'), free: 'ok', premium: 'ok' },
-  { id: 'spam', kind: 'ok', label: t('dashboard.sections.spam'), free: 'no', premium: 'ok' },
-  { id: 'autodel', kind: 'ok', label: t('dashboard.sections.autodel'), free: 'no', premium: 'ok' },
-  { id: 'bcast', kind: 'ok', label: t('dashboard.sections.bcast'), free: 'no', premium: 'ok' },
-  { id: 'autopost', kind: 'ok', label: t('dashboard.sections.autopost'), free: 'no', premium: 'ok' },
-  { id: 'stats', kind: 'ok', label: t('dashboard.sections.stats'), free: 'no', premium: 'ok' },
-  { id: 'reports_track', kind: 'ok', label: t('dashboard.sections.reports_track'), free: 'no', premium: 'ok' },
-  { id: 'support', kind: 'ok', label: t('dashboard.sections.support'), free: 'no', premium: 'ok' },
+  { id: 'stats_reports', kind: 'ok', label: t('dashboard.sections.stats_reports'), free: 'no', premium: 'ok' },
+  { id: 'broadcast_autopost', kind: 'ok', label: t('dashboard.sections.broadcast_autopost'), free: 'no', premium: 'ok' },
+  { id: 'aurum_export', kind: 'ok', label: t('dashboard.sections.aurum_export'), free: 'no', premium: 'ok' },
+  { id: 'filters_antiraid', kind: 'ok', label: t('dashboard.sections.filters_antiraid'), free: 'no', premium: 'ok' },
+  { id: 'delegation', kind: 'ok', label: t('dashboard.sections.delegation_cmp'), free: 'no', premium: 'ok' },
   { id: 'chat_limit', kind: 'limits', label: t('dashboard.sections.chat_limit') },
 ])
 
@@ -1233,7 +1422,9 @@ function updateBodyScrollLock() {
     showPremiumActivatedModal.value ||
     showFreeAurumGateModal.value ||
     showPremiumAurumShowcaseModal.value ||
-    showUpdatesRoadmapModal.value
+    showUpdatesRoadmapModal.value ||
+    showPartnerBonusTransferConfirm.value ||
+    showPartnerPayoutModal.value
   )
   const body = document.body
   const html = document.documentElement
@@ -1355,6 +1546,7 @@ onMounted(async () => {
   startActivityAutoRefresh()
   restartUpdatesRotation()
   restartStatBroadcastNudge()
+  restartHomeHeroAutoplay()
   if (spikeAlertTimer) clearInterval(spikeAlertTimer)
   spikeAlertTimer = setInterval(loadSpikeAlertsState, 30000)
   await tryOpenProtectionReportFromRoute()
@@ -1388,6 +1580,8 @@ watch(
   () => {
     scheduleBroadcastMiniSnapshot()
     restartStatBroadcastNudge()
+    if (dashCtx.dashboardSection.value === 'account') restartHomeHeroAutoplay()
+    else clearHomeHeroAutoplayFull()
   },
   { immediate: true },
 )
@@ -1405,6 +1599,8 @@ watch(
     showFreeAurumGateModal.value,
     showPremiumAurumShowcaseModal.value,
     showUpdatesRoadmapModal.value,
+    showPartnerBonusTransferConfirm.value,
+    showPartnerPayoutModal.value,
   ],
   () => updateBodyScrollLock(),
 )
@@ -1611,6 +1807,7 @@ onBeforeUnmount(() => {
     statBroadcastNudgeTimer = null
   }
   if (statBroadcastJustDraggedClear) clearTimeout(statBroadcastJustDraggedClear)
+  clearHomeHeroAutoplayFull()
   if (paymentRedirectTimer) clearInterval(paymentRedirectTimer)
   stopPaymentActivationFastPolling()
   document.removeEventListener('visibilitychange', onVisibilityPaymentCheck)
@@ -1621,6 +1818,7 @@ onBeforeUnmount(() => {
     document.body.style.overflow = ''
     document.documentElement.style.overflow = ''
   }
+  telegramVerticalSwipeGestureResetAll()
   tokenLandingOrbitPreloadImg = null
 })
 
@@ -1969,6 +2167,43 @@ const partnerBonusTokens = computed(() => {
   const v = Number(partnerData.value?.bonus_credits || 0)
   return Number.isInteger(v) ? String(v) : v.toFixed(2)
 })
+/** Счётчики сети L1–L3 из /api/referral (реальные пользователи в глубину). */
+const partnerNetworkCounts = computed(() => {
+  const n = partnerData.value?.partner_network
+  return {
+    l1: Number(n?.l1 ?? 0),
+    l2: Number(n?.l2 ?? 0),
+    l3: Number(n?.l3 ?? 0),
+    total: Number(n?.total ?? 0),
+  }
+})
+/** Разбивка комиссий по уровням (ожидание / подтверждено). */
+const partnerLevelStatsRows = computed(() => {
+  const raw = partnerData.value?.partner_level_stats
+  if (Array.isArray(raw) && raw.length) return raw
+  const rates = partnerData.value?.level_rates || []
+  const pct = (lv) => Number((rates.find((r) => Number(r.level) === lv) || {}).percent || 0)
+  const z = () => ({ payments: 0, sales_rub: 0, reward_tokens: 0 })
+  return [1, 2, 3].map((level) => ({
+    level,
+    percent: pct(level) || (level === 1 ? 15 : level === 2 ? 10 : 5),
+    pending: z(),
+    confirmed: z(),
+  }))
+})
+const partnerPendingTotals = computed(() =>
+  partnerLevelStatsRows.value.reduce(
+    (a, r) => ({
+      pay: a.pay + Number(r?.pending?.payments || 0),
+      rub: a.rub + Number(r?.pending?.sales_rub || 0),
+      tok: a.tok + Number(r?.pending?.reward_tokens || 0),
+    }),
+    { pay: 0, rub: 0, tok: 0 },
+  ),
+)
+const partnerConfirmedTokensTotal = computed(() =>
+  partnerLevelStatsRows.value.reduce((s, r) => s + Number(r?.confirmed?.reward_tokens || 0), 0),
+)
 const paidFullRefs = computed(() => (referralPeople.value?.full_list || []).filter((x) => !!x?.is_paid))
 const paidActiveRefs = computed(() => (referralPeople.value?.top_active || []).filter((x) => !!x?.is_paid))
 const partnerActiveUntilLabel = computed(() => formatDateTimeRu(partnerData.value?.active_until))
@@ -2473,6 +2708,7 @@ async function submitPayoutRequest() {
     payoutAmountRub.value = ''
     payoutRequisites.value = ''
     await ensurePartnerPayouts()
+    closePartnerPayoutModal()
     alert(t('dashboard.partner_ui.payout_sent'))
   } catch (e) {
     alert(String(e?.body?.detail || e?.message || t('dashboard.partner_ui.payout_failed')))
@@ -2502,6 +2738,29 @@ async function transferPartnerBonusToAurum() {
   } finally {
     bonusTransferLoading.value = false
   }
+}
+
+function openPartnerBonusTransferConfirm() {
+  if (bonusTransferLoading.value) return
+  showPartnerBonusTransferConfirm.value = true
+}
+
+function closePartnerBonusTransferConfirm() {
+  showPartnerBonusTransferConfirm.value = false
+}
+
+async function openPartnerPayoutModal() {
+  showPartnerPayoutModal.value = true
+  await ensurePartnerPayouts()
+}
+
+function closePartnerPayoutModal() {
+  showPartnerPayoutModal.value = false
+}
+
+async function confirmPartnerBonusTransfer() {
+  showPartnerBonusTransferConfirm.value = false
+  await transferPartnerBonusToAurum()
 }
 
 const docsCalc = computed(() => {
@@ -2746,7 +3005,7 @@ async function submitReceipt() {
 
     <div
       v-else-if="me"
-      class="relative isolate -mx-4 min-h-0 px-4 pb-1.5 pt-0 font-display md:-mx-6 md:px-6 md:pt-0"
+      class="relative isolate -mx-4 min-h-0 px-4 pb-1.5 pt-3 font-display md:-mx-6 md:px-6 md:pt-4"
     >
       <SubscriptionManagementPanel
         v-if="dashSection === 'subscription'"
@@ -2904,8 +3163,9 @@ async function submitReceipt() {
 
           <template v-if="dashSection === 'account'">
           <!-- Нижний ряд: AURUM (уже) | чаты (шире) -->
-          <div class="mt-1 grid min-w-0 grid-cols-[minmax(0,40%)_minmax(0,60%)] gap-1.5 md:grid-cols-[minmax(0,38%)_minmax(0,62%)] md:gap-2">
-            <div class="relative min-w-0 rounded-xl border border-amber-400/15 bg-gradient-to-b from-black/45 to-zinc-950/90 px-1 pb-0.5 pt-1 shadow-[0_10px_36px_-18px_rgba(0,0,0,0.65)] backdrop-blur-md md:px-1.5">
+          <div class="mt-1 grid min-w-0 grid-cols-[minmax(0,40%)_minmax(0,60%)] gap-1.5 items-stretch md:grid-cols-[minmax(0,38%)_minmax(0,62%)] md:gap-2">
+            <div class="relative flex h-full min-h-0 min-w-0 flex-col rounded-xl border border-amber-400/15 bg-gradient-to-b from-black/45 to-zinc-950/90 px-1 pb-0.5 pt-1 shadow-[0_10px_36px_-18px_rgba(0,0,0,0.65)] backdrop-blur-md md:px-1.5">
+              <div class="flex min-h-0 flex-1 flex-col">
               <div class="flex items-start justify-between gap-1.5">
                 <div class="min-w-0">
                   <p class="flex items-center gap-0.5 text-[8px] font-bold uppercase tracking-wide text-amber-200/90">
@@ -2915,7 +3175,6 @@ async function submitReceipt() {
                     {{ fmtAmount(me?.aurum_tokens || 0) }}
                     <span class="text-sm">✨</span>
                   </p>
-                  <p class="mt-0.5 text-[9px] text-white/45">{{ t('dashboard.hero.your_balance') }}</p>
                 </div>
                 <div class="relative grid h-9 w-9 shrink-0 place-items-center">
                   <span class="absolute inset-0 rounded-full border border-lime-400/25" />
@@ -2923,7 +3182,7 @@ async function submitReceipt() {
                   <NavIcon name="bolt" class="relative h-4 w-4 text-lime-400 drop-shadow-[0_0_8px_rgba(163,230,53,0.4)]" />
                 </div>
               </div>
-              <div class="mt-1 grid grid-cols-2 gap-0.5">
+              <div class="mt-auto grid grid-cols-2 gap-0.5 pt-1">
                 <button
                   type="button"
                   class="flex min-w-0 items-center justify-center gap-0.5 rounded-md bg-gradient-to-b from-lime-400 to-lime-600 px-1 py-1.5 text-[9px] font-bold leading-tight text-lime-950 shadow-[0_3px_10px_rgba(132,204,22,0.3)] transition hover:brightness-105 sm:text-[10px]"
@@ -2947,13 +3206,14 @@ async function submitReceipt() {
                   {{ t('dashboard.hero.history_short') }}
                 </button>
               </div>
+              </div>
             </div>
 
-            <div class="relative min-w-0 rounded-xl bg-gradient-to-b from-black/40 to-zinc-950/90 px-1.5 pb-0.5 pt-1 shadow-[0_10px_36px_-18px_rgba(0,0,0,0.65)] backdrop-blur-md md:pl-2 md:pr-2">
+            <div class="relative flex h-full min-h-0 min-w-0 flex-col rounded-xl bg-gradient-to-b from-black/40 to-zinc-950/90 px-1.5 pb-0.5 pt-1 shadow-[0_10px_36px_-18px_rgba(0,0,0,0.65)] backdrop-blur-md md:pl-2 md:pr-2">
               <button
                 v-if="spikeActiveShared"
                 type="button"
-                class="absolute right-1 top-1 z-[1] inline-flex items-center justify-center"
+                class="absolute right-1 top-0.5 z-[1] inline-flex items-center justify-center"
                 :title="t('dashboard.chats_mini.threat_tooltip')"
                 :aria-label="t('dashboard.chats_mini.threat_aria')"
                 @click.stop="openSharedThreatChats"
@@ -2961,13 +3221,8 @@ async function submitReceipt() {
                 <span class="absolute inline-flex h-3 w-3 animate-ping rounded-full bg-yellow-400/55" />
                 <span class="relative text-[10px] leading-none text-yellow-300">⚠</span>
               </button>
-              <p class="mb-0.5 flex items-center gap-1 text-[8px] font-bold uppercase tracking-wide text-white/85">
-                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-sky-300/90" aria-hidden="true">
-                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-                </svg>
-                {{ t('dashboard.chats_mini.title') }}
-              </p>
-              <div class="space-y-1.5">
+              <div class="flex min-h-0 flex-1 flex-col pt-0.5">
+              <div class="flex flex-1 flex-col gap-1.5">
                 <div class="flex min-w-0 items-center gap-1.5">
                   <span class="flex h-5 w-5 shrink-0 items-center justify-center" aria-hidden="true">
                     <svg
@@ -3023,6 +3278,9 @@ async function submitReceipt() {
                   </span>
                   <span class="shrink-0 whitespace-nowrap text-[10px] font-semibold leading-tight text-white/95">
                     {{ t('dashboard.hero.channels_short') }}
+                    <span class="ml-0.5 tabular-nums font-medium text-white/90">
+                      {{ activityChannelsCount }} / {{ activityChannelsLimit }}
+                    </span>
                   </span>
                   <div class="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-white/10">
                     <div
@@ -3042,23 +3300,25 @@ async function submitReceipt() {
               </div>
               <button
                 type="button"
-                class="mt-1 flex w-full items-center justify-center gap-0.5 rounded-lg bg-black/30 py-1 text-[10px] font-semibold text-white/90 transition hover:bg-black/45"
+                class="mt-auto flex w-full items-center justify-center gap-0.5 rounded-lg bg-black/30 py-1 text-[10px] font-semibold text-white/90 transition hover:bg-black/45"
                 @click="goManageChats"
               >
                 {{ t('dashboard.chats_mini.manage') }}
                 <span class="text-white/40">›</span>
               </button>
             </div>
+            </div>
           </div>
 
           <!-- Статистика ↔ Рассылки: на всю ширину, свайп / подсказка раз в 3 с -->
           <div
-            class="mt-0.5 w-full min-w-0"
+            class="guard-stat-broadcast-rail mt-0.5 w-full min-w-0"
             :class="accountShowBroadcastMiniCard ? 'cursor-grab touch-pan-x active:cursor-grabbing' : ''"
             @pointerdown="onStatBroadcastRailPointerDown"
             @pointermove="onStatBroadcastRailPointerMove"
             @pointerup="onStatBroadcastRailPointerUp"
             @pointercancel="onStatBroadcastRailPointerCancel"
+            @lostpointercapture="onStatBroadcastRailLostPointerCapture"
           >
             <div class="min-w-0 w-full overflow-hidden rounded-2xl">
             <div
@@ -3068,10 +3328,10 @@ async function submitReceipt() {
             >
               <div :class="accountShowBroadcastMiniCard ? 'w-1/2 shrink-0 pr-[3px]' : 'w-full shrink-0'">
                 <div
-                  class="rounded-2xl border border-white/[0.08] bg-gradient-to-b from-[#101010] to-[#0b0b0b] px-2 pb-1 pt-1 shadow-[0_16px_44px_-24px_rgba(0,0,0,0.9)] ring-1 ring-inset ring-white/[0.04] sm:px-2.5 sm:pb-1.5 sm:pt-1.5"
+                  class="rounded-2xl border border-white/[0.08] bg-gradient-to-b from-[#101010] to-[#0b0b0b] px-2 pb-1 pt-0.5 shadow-[0_16px_44px_-24px_rgba(0,0,0,0.9)] ring-1 ring-inset ring-white/[0.04] sm:px-2.5 sm:pb-1.5 sm:pt-1"
                 >
-                  <div class="flex items-start justify-between gap-2 pb-0.5 pt-0.5">
-                    <div class="-mt-px flex min-w-0 items-center gap-1.5">
+                  <div class="flex items-start justify-between gap-2 pb-0.5">
+                    <div class="flex min-w-0 flex-1 items-center gap-1.5 pt-0.5">
                       <span class="grid h-5 w-5 shrink-0 place-items-center text-lime-400/90" aria-hidden="true">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <path d="M18 20V10M12 20V4M6 20v-6" stroke-linecap="round" />
@@ -3079,11 +3339,10 @@ async function submitReceipt() {
                       </span>
                       <span class="truncate text-[13px] font-semibold leading-none text-white sm:text-[14px]">{{ t('dashboard.stats_strip.title') }}</span>
                     </div>
-                    <label class="relative shrink-0 pt-px">
+                    <label class="relative shrink-0 self-start pt-0.5">
                       <span class="sr-only">{{ t('dashboard.stats_strip.period_sr_only') }}</span>
                       <select
-                        class="pointer-events-auto max-w-[8.5rem] cursor-pointer appearance-none rounded-lg border border-lime-500/40 bg-black/50 py-0.5 pl-2 pr-7 text-[11px] font-semibold leading-none text-lime-400 outline-none ring-0 sm:max-w-none sm:py-1 sm:pl-2 sm:text-[12px] disabled:cursor-not-allowed disabled:opacity-45"
-                        :disabled="dashboardStatsPremiumLocked"
+                        class="pointer-events-auto max-w-[8.5rem] cursor-pointer appearance-none rounded-lg border border-lime-500/40 bg-black/50 py-0.5 pl-2 pr-7 text-[11px] font-semibold leading-none text-lime-400 outline-none ring-0 sm:max-w-none sm:py-1 sm:pl-2 sm:text-[12px]"
                         :value="dashboardStatsPeriod"
                         :title="t('dashboard.stats_strip.period_hint')"
                         @change="onDashboardStatsPeriodChange"
@@ -3102,13 +3361,6 @@ async function submitReceipt() {
                         </svg>
                       </span>
                     </label>
-                  </div>
-
-                  <div
-                    v-if="dashboardStatsPremiumLocked"
-                    class="mt-1.5 rounded-lg border border-violet-500/30 bg-violet-950/35 px-2 py-1.5 text-[10px] leading-snug text-violet-100/95 ring-1 ring-violet-400/15"
-                  >
-                    {{ t('dashboard.stats_strip.free_locked_banner') }}
                   </div>
 
                   <div
@@ -3258,108 +3510,57 @@ async function submitReceipt() {
             </div>
           </div>
 
-          <!-- Обновления ↔ Premium: справа, компактная карточка -->
+          <!-- Карусель промо: только картинки + полоска таймера (клики по премиум — позже) -->
           <div
-            class="ml-auto mr-0 mt-1 w-[min(100%,15rem)] max-w-[15rem] overflow-hidden rounded-2xl bg-gradient-to-b from-[#100c08] to-[#050505] shadow-[0_14px_38px_-18px_rgba(245,158,11,0.35)] ring-1 ring-amber-400/35 sm:w-[min(100%,16rem)] sm:max-w-[16rem]"
+            class="guard-hero-carousel mb-5 mt-0.5 w-full min-w-0 overflow-hidden border-0 shadow-none ring-0 outline-none ring-offset-0 sm:mb-6 sm:mt-1"
           >
             <div
-              class="flex items-center justify-center gap-2 border-b border-amber-500/15 bg-black/25 px-2 py-1.5 sm:gap-3 sm:px-2 sm:py-2"
+              class="relative cursor-grab touch-pan-x select-none border-0 shadow-none ring-0 outline-none ring-offset-0 focus:outline-none focus-visible:outline-none active:cursor-grabbing"
+              @pointerdown="onHomeHeroRailPointerDown"
+              @pointermove="onHomeHeroRailPointerMove"
+              @pointerup="onHomeHeroRailPointerUp"
+              @pointercancel="onHomeHeroRailPointerCancel"
+              @lostpointercapture="onHomeHeroRailLostPointerCapture"
             >
-              <div class="flex min-w-0 flex-1 items-center justify-center gap-2 sm:gap-4">
-                <button
-                  type="button"
-                  class="text-[11px] font-extrabold tracking-tight transition sm:text-[12px]"
-                  :class="
-                    homeUpdatesPremiumSlide === 0
-                      ? 'text-amber-300 drop-shadow-[0_0_16px_rgba(252,211,77,0.35)]'
-                      : 'text-white/38 hover:text-white/70'
-                  "
-                  @click="setUpdatesPremiumSlide(0)"
-                >
-                  {{ t('dashboard.hero.home_tab_premium') }}
-                </button>
-                <button
-                  type="button"
-                  class="text-[11px] font-extrabold tracking-tight transition sm:text-[12px]"
-                  :class="
-                    homeUpdatesPremiumSlide === 1
-                      ? 'text-lime-400 drop-shadow-[0_0_16px_rgba(163,230,53,0.4)]'
-                      : 'text-white/38 hover:text-white/70'
-                  "
-                  @click="setUpdatesPremiumSlide(1)"
-                >
-                  {{ t('dashboard.hero.home_tab_updates') }}
-                </button>
-              </div>
-            </div>
-            <div class="min-h-[9rem] overflow-hidden px-0.5 pb-0.5 sm:min-h-[9.5rem]">
               <div
-                class="flex w-[200%] transition-transform ease-out"
-                :class="homeUpdatesPremiumInstant ? 'duration-0' : 'duration-500'"
-                :style="{ transform: `translateX(-${homeUpdatesPremiumSlide * 50}%)` }"
+                ref="homeHeroCarouselViewportRef"
+                class="relative isolate h-[min(14rem,70vw)] w-full overflow-hidden border-0 shadow-none ring-0 outline-none ring-offset-0 sm:h-[15rem] md:h-[15.75rem] lg:h-[16.25rem]"
               >
-                <div class="w-1/2 shrink-0 p-2 sm:p-2.5">
+                <div
+                  class="flex h-full border-0 shadow-none ring-0 outline-none ring-offset-0"
+                  :style="[
+                    heroCarouselTrackStyle(),
+                    {
+                      width: `${Math.max(1, HOME_HERO_TRACK_SLIDES.length) * 100}%`,
+                    },
+                  ]"
+                >
                   <div
-                    class="flex min-h-[7.5rem] flex-col rounded-xl bg-gradient-to-b from-[#161210] to-[#080705] p-2.5 shadow-[inset_0_1px_0_rgba(251,191,36,0.07),0_10px_28px_-14px_rgba(180,83,9,0.28)] sm:min-h-[8rem] sm:p-3"
+                    v-for="(slide, idx) in HOME_HERO_TRACK_SLIDES"
+                    :key="`hero-track-${idx}-${slide.src}`"
+                    class="relative h-full min-w-0 shrink-0 grow-0 overflow-hidden border-0 bg-black shadow-none ring-0 outline-none ring-offset-0"
+                    :style="{ flex: `0 0 ${100 / Math.max(1, HOME_HERO_TRACK_SLIDES.length)}%` }"
                   >
-                    <ul class="flex-1 space-y-1.5 text-[11px] leading-snug text-white/[0.92] sm:text-[12px]">
-                      <li v-for="(line, i) in ACCOUNT_HOME_PREMIUM_BULLETS" :key="`prem-${i}`" class="flex gap-2">
-                        <span class="shrink-0 font-semibold text-amber-400/95" aria-hidden="true">✓</span>
-                        <span>{{ line }}</span>
-                      </li>
-                    </ul>
-                    <div class="mt-2 w-full">
-                      <button
-                        v-if="showTrialCta"
-                        type="button"
-                        :disabled="trialActivating"
-                        class="flex w-full items-center justify-center gap-1.5 rounded-2xl bg-gradient-to-r from-emerald-700 via-emerald-500 to-lime-300 px-3 py-2.5 text-[11px] font-extrabold leading-tight text-emerald-950 shadow-[0_10px_34px_-10px_rgba(16,185,129,0.65),inset_0_1px_0_rgba(255,255,255,0.3)] ring-1 ring-emerald-300/45 disabled:opacity-60 sm:text-[12px]"
-                        @click="activateTrialClick"
-                      >
-                        <span aria-hidden="true">🚀</span>
-                        {{ trialActivating ? t('dashboard.trial.activating') : t('dashboard.trial.try_free_btn') }}
-                      </button>
-                      <button
-                        v-else-if="!tariffIsPremium"
-                        type="button"
-                        class="flex w-full items-center justify-center gap-1.5 rounded-2xl bg-gradient-to-r from-amber-950 via-amber-600 to-yellow-300 px-3 py-2.5 text-[11px] font-extrabold leading-tight text-white shadow-[0_10px_34px_-10px_rgba(251,191,36,0.65),inset_0_1px_0_rgba(255,255,255,0.22)] ring-1 ring-amber-300/45 sm:text-[12px]"
-                        @click="openBillingSection({ scrollPlans: true })"
-                      >
-                        <span aria-hidden="true">🛡</span>
-                        {{ t('dashboard.hero.strengthen_protection') }}
-                      </button>
-                      <button
-                        v-else
-                        type="button"
-                        class="flex w-full items-center justify-center gap-1.5 rounded-2xl bg-gradient-to-r from-amber-950 via-amber-500 to-yellow-200 px-3 py-2.5 text-[11px] font-extrabold leading-tight text-amber-950 shadow-[0_12px_40px_-12px_rgba(251,191,36,0.75),inset_0_1px_0_rgba(255,255,255,0.35)] ring-1 ring-amber-200/50 sm:text-[12px]"
-                        @click="openBillingSection()"
-                      >
-                        <span aria-hidden="true">👑</span>
-                        {{ t('dashboard.plans.cta_renew') }}
-                      </button>
-                    </div>
+                    <img
+                      :src="slide.src"
+                      alt=""
+                      draggable="false"
+                      decoding="async"
+                      class="pointer-events-none block h-full w-full max-w-none border-0 object-contain object-center outline-none ring-0 ring-offset-0 [box-shadow:none]"
+                    />
                   </div>
                 </div>
-                <div class="w-1/2 shrink-0 p-2 sm:p-2.5">
-                  <ul class="space-y-1.5 text-[10px] leading-snug text-white/[0.88] sm:text-[11px]">
-                    <li
-                      v-for="s in updatesHomePreview"
-                      :key="`upd-${s.key}`"
-                      class="rounded-lg bg-white/[0.04] px-2 py-1 ring-1 ring-lime-400/12"
-                    >
-                      <p class="text-[9px] font-semibold text-lime-300/90">{{ formatUpdateMetaShort(s) }}</p>
-                      <p class="mt-0.5 font-semibold leading-tight text-white">{{ s.headline }}</p>
-                    </li>
-                  </ul>
-                  <div class="mt-2 border-t border-lime-400/12 pt-2">
-                    <button
-                      type="button"
-                      class="flex w-full items-center justify-between gap-1 text-left text-[10px] font-semibold text-white/55 transition hover:text-white/90 sm:text-[11px]"
-                      @click="showUpdatesRoadmapModal = true"
-                    >
-                      <span>{{ t('dashboard.hero.view_all_updates') }}</span>
-                      <span class="text-base font-light text-white/35" aria-hidden="true">›</span>
-                    </button>
+                <div class="pointer-events-none absolute inset-x-7 bottom-2 z-[1] sm:inset-x-9">
+                  <div class="relative h-px w-full rounded-full bg-white/22">
+                    <div
+                      class="absolute top-1/2 min-w-[14px] -translate-y-1/2 rounded-full bg-white shadow-none"
+                      :style="{
+                        left: `${homeHeroThumbLeftPct(homeHeroProgress)}%`,
+                        width: `${HOME_HERO_THUMB_FRAC * 100}%`,
+                        height: '2px',
+                        maxWidth: '5rem',
+                      }"
+                    />
                   </div>
                 </div>
               </div>
@@ -3375,8 +3576,8 @@ async function submitReceipt() {
         <div class="grid grid-cols-3 gap-2">
           <button
             type="button"
-            class="rounded-xl border border-slate-700 bg-slate-800/90 px-1 py-1.5 text-center text-[12px] font-semibold text-slate-100"
-            :class="partnerTab === 'balance' ? 'ring-1 ring-lime-400/70' : ''"
+            class="rounded-xl border border-lime-400/40 bg-[#12141a]/95 px-1 py-1.5 text-center text-[12px] font-semibold text-slate-100 transition hover:border-lime-400/55"
+            :class="partnerTab === 'balance' ? 'ring-2 ring-lime-400/80 border-lime-400/70 shadow-[0_0_14px_rgba(163,230,53,0.12)]' : ''"
             @click="partnerTab = 'balance'"
           >
             <div class="mx-auto mb-1 inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/10 text-white">
@@ -3386,8 +3587,8 @@ async function submitReceipt() {
           </button>
           <button
             type="button"
-            class="rounded-xl border border-slate-700 bg-slate-800/90 px-1 py-1.5 text-center text-[12px] font-semibold text-slate-100"
-            :class="partnerTab === 'refs' ? 'ring-1 ring-lime-400/70' : ''"
+            class="rounded-xl border border-lime-400/40 bg-[#12141a]/95 px-1 py-1.5 text-center text-[12px] font-semibold text-slate-100 transition hover:border-lime-400/55"
+            :class="partnerTab === 'refs' ? 'ring-2 ring-lime-400/80 border-lime-400/70 shadow-[0_0_14px_rgba(163,230,53,0.12)]' : ''"
             @click="partnerTab = 'refs'; ensureReferralPeople()"
           >
             <div class="mx-auto mb-1 inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/10 text-white">
@@ -3397,8 +3598,8 @@ async function submitReceipt() {
           </button>
           <button
             type="button"
-            class="rounded-xl border border-slate-700 bg-slate-800/90 px-1 py-1.5 text-center text-[12px] font-semibold text-slate-100"
-            :class="partnerTab === 'docs' ? 'ring-1 ring-lime-400/70' : ''"
+            class="rounded-xl border border-lime-400/40 bg-[#12141a]/95 px-1 py-1.5 text-center text-[12px] font-semibold text-slate-100 transition hover:border-lime-400/55"
+            :class="partnerTab === 'docs' ? 'ring-2 ring-lime-400/80 border-lime-400/70 shadow-[0_0_14px_rgba(163,230,53,0.12)]' : ''"
             @click="partnerTab = 'docs'"
           >
             <div class="mx-auto mb-1 inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/10 text-white">
@@ -3429,93 +3630,161 @@ async function submitReceipt() {
             <p class="text-xs leading-relaxed text-slate-400">
               {{ t('partner.balance_hint') }}
             </p>
+            <!-- Трёхуровневая сеть и счётчики комиссий (проценты с бэка, токены ⚡ как в балансе) -->
+            <div class="mt-3 space-y-3 rounded-xl border border-slate-600/55 bg-black/35 p-3 text-[12px] leading-relaxed text-slate-200">
+              <div>
+                <p class="flex items-start gap-1.5 text-[13px] font-semibold text-white">
+                  <span aria-hidden="true">👥</span>
+                  {{ t('partner.tier_net_title') }}
+                </p>
+                <p class="mt-2 font-mono text-[11px] text-slate-200 sm:text-[12px]">
+                  ├ {{ t('partner.tier_net_l1', { n: partnerNetworkCounts.l1 }) }}<br>
+                  ├ {{ t('partner.tier_net_l2', { n: partnerNetworkCounts.l2 }) }}<br>
+                  ├ {{ t('partner.tier_net_l3', { n: partnerNetworkCounts.l3 }) }}<br>
+                  └ {{ t('partner.tier_net_total', { n: partnerNetworkCounts.total }) }}
+                </p>
+              </div>
+              <div class="border-t border-white/[0.08] pt-2">
+                <p class="flex items-start gap-1.5 text-[13px] font-semibold text-white">
+                  <span aria-hidden="true">💰</span>
+                  {{ t('partner.tier_accruals_title') }}
+                </p>
+                <p class="mt-1 text-[11px] text-slate-400">{{ t('partner.tier_accruals_sub') }}</p>
+                <div class="mt-2 space-y-1 font-mono text-[11px] text-slate-200 sm:text-[12px]">
+                  <p v-for="row in partnerLevelStatsRows" :key="`pcnf-${row.level}`">
+                    {{ t('partner.tier_level_confirmed_line', { level: row.level, pct: row.percent, pay: row.confirmed?.payments ?? 0, rub: fmtAmount(row.confirmed?.sales_rub ?? 0), tok: fmtAmount(row.confirmed?.reward_tokens ?? 0) }) }}
+                  </p>
+                </div>
+                <p class="mt-2 font-mono text-[11px] text-lime-200/95 sm:text-[12px]">
+                  {{ t('partner.tier_accruals_total', { tok: fmtAmount(partnerConfirmedTokensTotal) }) }}
+                </p>
+              </div>
+              <div class="border-t border-white/[0.08] pt-2">
+                <p class="flex items-start gap-1.5 text-[13px] font-semibold text-white">
+                  <span aria-hidden="true">⏳</span>
+                  {{ t('partner.tier_pending_title') }}
+                </p>
+                <p class="mt-1 text-[11px] text-slate-400">{{ t('partner.tier_pending_sub') }}</p>
+                <div class="mt-2 space-y-1 font-mono text-[11px] text-slate-200 sm:text-[12px]">
+                  <p v-for="row in partnerLevelStatsRows" :key="`ppnd-${row.level}`">
+                    {{ t('partner.tier_level_pending_line', { level: row.level, pct: row.percent, pay: row.pending?.payments ?? 0, rub: fmtAmount(row.pending?.sales_rub ?? 0), tok: fmtAmount(row.pending?.reward_tokens ?? 0) }) }}
+                  </p>
+                </div>
+                <p class="mt-2 font-mono text-[11px] text-amber-200/90 sm:text-[12px]">
+                  {{ t('partner.tier_pending_sum', { pay: partnerPendingTotals.pay, rub: fmtAmount(partnerPendingTotals.rub), tok: fmtAmount(partnerPendingTotals.tok) }) }}
+                </p>
+              </div>
+              <div class="border-t border-white/[0.08] pt-2">
+                <p class="flex items-start gap-1.5 text-[13px] font-semibold text-white">
+                  <span aria-hidden="true">💎</span>
+                  {{ t('partner.tier_available_title') }}
+                </p>
+                <p class="mt-2 font-mono text-[11px] text-slate-100 sm:text-[12px]">
+                  └ {{ fmtAmount(Number(partnerData.bonus_credits || 0)) }} ⚡
+                </p>
+                <p class="mt-1 text-[11px] text-slate-500">{{ t('partner.tier_available_hint') }}</p>
+              </div>
+            </div>
             <p v-if="partnerData.ref_link">
               {{ t('partner.your_link') }}<br>
               └ <button type="button" class="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-xs text-left text-cyan-300" @click="copyPartnerLink">{{ partnerData.ref_link }}</button>
             </p>
-            <p>
-              {{ t('partner.invited') }}<br>
-              └ {{ t('partner.invited_total') }} <b>{{ partnerData.invited_count || 0 }}</b>, {{ t('partner.paying') }} <b>{{ partnerData.paid_count || 0 }}</b>
+            <p class="mt-2 text-[11px] leading-relaxed text-slate-500">
+              {{
+                t('partner.tier_quick_stats', {
+                  inv: Number(partnerData.invited_count || 0),
+                  pay: Number(partnerData.paid_count || 0),
+                })
+              }}
             </p>
           </div>
           <div class="mt-3 flex flex-wrap gap-2">
-            <button type="button" class="guard-green-soft rounded-lg px-3 py-1.5 text-xs font-semibold disabled:opacity-60" :disabled="bonusTransferLoading" @click="transferPartnerBonusToAurum">
+            <button
+              type="button"
+              class="guard-green-soft rounded-lg px-3 py-1.5 text-xs font-semibold disabled:opacity-60"
+              :disabled="bonusTransferLoading"
+              @click="openPartnerBonusTransferConfirm"
+            >
               {{ t('partner.transfer_cta') }}
             </button>
-            <button type="button" class="rounded-lg border border-sky-400/40 bg-sky-500/10 px-3 py-1.5 text-xs font-semibold text-sky-300" @click="sharePartnerLink">
+            <button
+              type="button"
+              class="rounded-lg border border-sky-400/40 bg-sky-500/10 px-3 py-1.5 text-xs font-semibold text-sky-300"
+              @click="sharePartnerLink"
+            >
               {{ t('partner.share') }}
             </button>
           </div>
-          <div class="mt-4 rounded-xl border border-slate-700 bg-slate-800/70 p-3">
-            <p>{{ t('partner.available_payout') }} <b>{{ fmtAmount(partnerPayouts.available_rub || 0) }} ₽</b></p>
-            <p class="mt-0.5">{{ t('partner.pending_unlock') }} <b>{{ fmtAmount(partnerPayouts.pending_rub || 0) }} ₽</b></p>
-            <p class="mt-0.5">{{ t('partner.in_requests') }} <b>{{ fmtAmount(partnerPayouts.reserved_rub || 0) }} ₽</b></p>
-            <p class="mt-0.5">{{ t('partner.paid_out') }} <b>{{ fmtAmount(partnerPayouts.paid_total_rub || 0) }} ₽</b></p>
-            <p class="mt-0.5 text-xs text-slate-400">{{ t('partner.token_rate', { rate: fmtAmount(partnerPayouts.token_rub_rate || 2) }) }}</p>
-            <p class="mt-0.5 text-sm font-semibold text-amber-300">{{ t('partner.min_payout', { rub: fmtAmount(partnerPayouts.min_payout_rub || 1500) }) }}</p>
-            <div class="mt-2 grid gap-2 sm:grid-cols-2">
-              <input v-model="payoutAmountRub" type="number" min="0" step="1" :placeholder="t('partner.amount_placeholder')" class="rounded-lg border border-slate-600 bg-slate-900 px-2.5 py-2 text-xs text-white">
-              <select v-model="payoutMethod" class="rounded-lg border border-slate-600 bg-slate-900 px-2.5 py-2 text-xs text-white">
-                <option value="sbp">{{ t('partner.method_sbp') }}</option>
-                <option value="card">{{ t('partner.method_card') }}</option>
-              </select>
-              <input v-model="payoutRequisites" type="text" :placeholder="t('partner.requisites_placeholder')" class="sm:col-span-2 rounded-lg border border-slate-600 bg-slate-900 px-2.5 py-2 text-xs text-white">
-              <input v-model="payoutFullName" type="text" :placeholder="t('partner.fullname_placeholder')" class="sm:col-span-2 rounded-lg border border-slate-600 bg-slate-900 px-2.5 py-2 text-xs text-white">
-            </div>
-            <button type="button" class="mt-2 guard-green-soft rounded-lg px-3 py-1.5 text-xs font-semibold disabled:opacity-60" :disabled="payoutSubmitting || partnerPayoutsLoading" @click="submitPayoutRequest">
-              {{ t('partner.request_payout') }}
-            </button>
-            <div v-if="(partnerPayouts.commissions || []).length" class="mt-3 rounded-lg border border-slate-700 bg-slate-900/70 p-2">
-              <p class="text-[11px] font-semibold text-slate-300">{{ t('partner.recent_commissions') }}</p>
-              <div v-for="c in (partnerPayouts.commissions || []).slice(0, 5)" :key="`pc-${c.id}`" class="mt-1 text-[11px] text-slate-300">
-                {{ t('partner.level_line', { level: c.level, amount: fmtAmount(c.reward_amount_rub), status: c.status }) }}
+          <div class="partner-payout-trigger mt-4 rounded-xl border border-white/[0.07] bg-gradient-to-br from-[#0c1018] via-[#090d14] to-[#07090e] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+            <div class="flex flex-wrap items-end justify-between gap-3">
+              <div class="min-w-0 flex-1 space-y-1 text-[13px] text-slate-200">
+                <p class="text-[15px] font-bold tracking-tight text-white">{{ t('partner.payout_compact_title') }}</p>
+                <p>
+                  {{ t('partner.available_payout_short') }}
+                  <b class="text-lime-300">{{ fmtAmount(partnerPayouts.available_rub || 0) }} ₽</b>
+                </p>
+                <p class="text-[11px] leading-snug text-slate-500">
+                  {{ t('partner.payout_compact_hint') }}
+                </p>
               </div>
+              <button
+                type="button"
+                class="shrink-0 rounded-xl bg-gradient-to-r from-lime-400 to-emerald-500 px-4 py-2.5 text-[13px] font-extrabold text-black shadow-[0_10px_36px_-12px_rgba(163,230,53,0.65)] transition hover:brightness-[1.06] active:scale-[0.98]"
+                @click="openPartnerPayoutModal"
+              >
+                {{ t('partner.payout_open_modal') }}
+              </button>
             </div>
           </div>
         </div>
         <div v-else-if="partnerData && partnerTab === 'refs'" class="space-y-2">
-          <div class="rounded-3xl bg-white p-4 text-slate-900">
-            <div class="grid grid-cols-2 gap-2 border-b border-slate-200 pb-2 text-center">
+          <div class="rounded-3xl border border-lime-400/25 bg-[#0f1115]/95 p-4 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+            <div class="grid grid-cols-2 gap-2 border-b border-white/10 pb-2 text-center">
               <button
                 type="button"
-                class="pb-1 text-[15px] font-semibold"
-                :class="refsMode === 'full' ? 'border-b-4 border-sky-500 text-sky-600' : 'text-slate-400'"
+                class="pb-1 text-[15px] font-semibold transition"
+                :class="refsMode === 'full' ? 'border-b-4 border-lime-400 text-lime-200' : 'text-white/45'"
                 @click="refsMode = 'full'"
               >
                 {{ t('partner.refs_mode_full') }}
               </button>
               <button
                 type="button"
-                class="pb-1 text-[15px] font-semibold"
-                :class="refsMode === 'active' ? 'border-b-4 border-sky-500 text-sky-600' : 'text-slate-400'"
+                class="pb-1 text-[15px] font-semibold transition"
+                :class="refsMode === 'active' ? 'border-b-4 border-lime-400 text-lime-200' : 'text-white/45'"
                 @click="refsMode = 'active'"
               >
                 {{ t('partner.refs_mode_active') }}
               </button>
             </div>
 
-            <div v-if="referralPeopleLoading" class="py-4 text-center text-sm text-slate-500">
+            <div v-if="referralPeopleLoading" class="py-4 text-center text-sm text-white/55">
               {{ t('partner.refs_loading') }}
             </div>
             <div
               v-else-if="(refsMode === 'full' ? paidFullRefs : paidActiveRefs).length === 0"
-              class="py-8 text-center text-[18px] font-medium text-slate-700"
+              class="space-y-3 py-8 text-center"
             >
-              {{ t('partner.refs_empty') }}
+              <p class="text-[18px] font-medium text-white">
+                {{ t('partner.refs_empty') }}
+              </p>
+              <p class="text-sm leading-relaxed text-white/70">
+                {{ t('partner.refs_tier_hint') }}
+              </p>
             </div>
             <div v-else class="mt-3 space-y-2">
               <div
                 v-for="item in (refsMode === 'full' ? paidFullRefs : paidActiveRefs)"
                 :key="`${refsMode}-${item.user_id}`"
-                class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2"
+                class="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2"
               >
                 <div class="flex items-center justify-between gap-2">
-                  <p class="truncate text-sm font-semibold text-slate-900">{{ displayReferralName(item) }}</p>
-                  <span class="text-xs font-semibold" :class="item.is_paid ? 'text-emerald-600' : 'text-slate-500'">
+                  <p class="truncate text-sm font-semibold text-white">{{ displayReferralName(item) }}</p>
+                  <span class="text-xs font-semibold" :class="item.is_paid ? 'text-lime-300' : 'text-white/50'">
                     {{ item.is_paid ? t('partner.refs_status_paying') : t('partner.refs_status_free') }}
                   </span>
                 </div>
-                <p class="mt-0.5 text-xs text-slate-600">
+                <p class="mt-0.5 text-xs text-white/65">
                   {{ t('partner.refs_stats_line', { p: item.payments_count || 0, t: item.tokens_purchased || 0 }) }}
                 </p>
               </div>
@@ -3523,57 +3792,60 @@ async function submitReceipt() {
           </div>
         </div>
         <div v-else-if="partnerData && partnerTab === 'docs'" class="space-y-2">
-          <div class="rounded-2xl border border-fuchsia-300/35 bg-white p-4 text-slate-900">
-            <p class="text-lg font-extrabold text-[#4bbf67]">{{ t('partner.docs_q_program') }}</p>
-            <p class="mt-2 text-sm">
+          <div class="rounded-2xl border border-lime-400/30 bg-[#0f1115]/95 p-4 text-slate-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+            <p class="text-lg font-extrabold text-lime-400/95">{{ t('partner.docs_q_program') }}</p>
+            <p class="mt-2 text-sm leading-relaxed text-slate-300">
               {{ t('partner.docs_program_intro') }}
             </p>
-            <div class="mt-2 space-y-1 text-sm">
-              <p><span class="inline-flex h-5 w-5 items-center justify-center rounded bg-slate-900 text-xs font-bold text-white">1</span> {{ t('partner.docs_lvl_1') }}</p>
-              <p><span class="inline-flex h-5 w-5 items-center justify-center rounded bg-slate-900 text-xs font-bold text-white">2</span> {{ t('partner.docs_lvl_2') }}</p>
-              <p><span class="inline-flex h-5 w-5 items-center justify-center rounded bg-slate-900 text-xs font-bold text-white">3</span> {{ t('partner.docs_lvl_3') }}</p>
+            <div class="mt-2 space-y-1 text-sm text-slate-300">
+              <p><span class="inline-flex h-5 w-5 items-center justify-center rounded border border-lime-400/40 bg-slate-950/80 text-xs font-bold text-lime-200">1</span> {{ t('partner.docs_lvl_1') }}</p>
+              <p><span class="inline-flex h-5 w-5 items-center justify-center rounded border border-lime-400/40 bg-slate-950/80 text-xs font-bold text-lime-200">2</span> {{ t('partner.docs_lvl_2') }}</p>
+              <p><span class="inline-flex h-5 w-5 items-center justify-center rounded border border-lime-400/40 bg-slate-950/80 text-xs font-bold text-lime-200">3</span> {{ t('partner.docs_lvl_3') }}</p>
             </div>
-            <p class="mt-2 text-sm text-slate-600">
+            <p class="mt-3 rounded-lg border border-amber-400/25 bg-amber-500/[0.08] px-3 py-2 text-sm leading-relaxed text-amber-100/90">
+              {{ t('partner.docs_free_tiers') }}
+            </p>
+            <p class="mt-2 text-sm leading-relaxed text-slate-400">
               {{ t('partner.docs_payouts_note') }}
             </p>
-            <p class="mt-2 text-sm text-slate-700">
+            <p class="mt-2 text-sm leading-relaxed text-slate-300">
               {{ t('partner.docs_reward_for') }}
             </p>
-            <p class="mt-1 text-sm text-slate-700">
+            <p class="mt-1 text-sm leading-relaxed text-slate-400">
               {{ t('partner.docs_token_rate_line') }}
             </p>
           </div>
-          <div class="rounded-2xl border border-fuchsia-300/35 bg-white p-4 text-slate-900">
-            <p class="text-lg font-extrabold text-[#4bbf67]">{{ t('partner.docs_q_accrual') }}</p>
-            <p class="mt-2 text-sm">
+          <div class="rounded-2xl border border-lime-400/30 bg-[#0f1115]/95 p-4 text-slate-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+            <p class="text-lg font-extrabold text-lime-400/95">{{ t('partner.docs_q_accrual') }}</p>
+            <p class="mt-2 text-sm leading-relaxed text-slate-300">
               {{ t('partner.docs_accrual_example') }}
             </p>
-            <p class="mt-2 text-sm italic text-slate-600">
+            <p class="mt-2 text-sm italic text-slate-400">
               {{ t('partner.docs_accrual_auto') }}
             </p>
-            <div class="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
-              <p class="text-sm font-semibold">{{ t('partner.docs_calc_title') }}</p>
-              <input v-model="docsExampleSale" type="number" min="0" step="100" class="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm">
-              <p class="mt-2 text-xs">{{ t('partner.docs_sale_label') }} <b>{{ fmtAmount(docsCalc.amount) }} ₽</b></p>
-              <p class="text-xs"><span class="inline-flex h-4 w-4 items-center justify-center rounded bg-slate-900 text-[10px] font-bold text-white">+</span> {{ t('partner.docs_lvl1_calc') }} <b>{{ fmtAmount(docsCalc.l1) }} ₽</b></p>
-              <p class="text-xs"><span class="inline-flex h-4 w-4 items-center justify-center rounded bg-slate-900 text-[10px] font-bold text-white">+</span> {{ t('partner.docs_lvl2_calc') }} <b>{{ fmtAmount(docsCalc.l2) }} ₽</b></p>
-              <p class="text-xs"><span class="inline-flex h-4 w-4 items-center justify-center rounded bg-slate-900 text-[10px] font-bold text-white">+</span> {{ t('partner.docs_lvl3_calc') }} <b>{{ fmtAmount(docsCalc.l3) }} ₽</b></p>
-              <p class="text-xs">{{ t('partner.docs_total') }} <b>{{ fmtAmount(docsCalc.total) }} ₽</b></p>
+            <div class="mt-3 rounded-xl border border-white/10 bg-slate-950/80 p-3">
+              <p class="text-sm font-semibold text-slate-200">{{ t('partner.docs_calc_title') }}</p>
+              <input v-model="docsExampleSale" type="number" min="0" step="100" class="mt-2 w-full rounded-lg border border-slate-600 bg-[#0a0c10] px-3 py-2 text-sm text-slate-200">
+              <p class="mt-2 text-xs text-slate-300">{{ t('partner.docs_sale_label') }} <b class="text-slate-100">{{ fmtAmount(docsCalc.amount) }} ₽</b></p>
+              <p class="text-xs text-slate-300"><span class="inline-flex h-4 w-4 items-center justify-center rounded border border-lime-400/35 bg-slate-900 text-[10px] font-bold text-lime-200">+</span> {{ t('partner.docs_lvl1_calc') }} <b class="text-slate-100">{{ fmtAmount(docsCalc.l1) }} ₽</b></p>
+              <p class="text-xs text-slate-300"><span class="inline-flex h-4 w-4 items-center justify-center rounded border border-lime-400/35 bg-slate-900 text-[10px] font-bold text-lime-200">+</span> {{ t('partner.docs_lvl2_calc') }} <b class="text-slate-100">{{ fmtAmount(docsCalc.l2) }} ₽</b></p>
+              <p class="text-xs text-slate-300"><span class="inline-flex h-4 w-4 items-center justify-center rounded border border-lime-400/35 bg-slate-900 text-[10px] font-bold text-lime-200">+</span> {{ t('partner.docs_lvl3_calc') }} <b class="text-slate-100">{{ fmtAmount(docsCalc.l3) }} ₽</b></p>
+              <p class="text-xs text-slate-400">{{ t('partner.docs_total') }} <b class="text-slate-100">{{ fmtAmount(docsCalc.total) }} ₽</b></p>
             </div>
           </div>
-          <div class="rounded-2xl border border-fuchsia-300/35 bg-white p-4 text-slate-900">
-            <p class="text-lg font-extrabold text-[#4bbf67]">{{ t('partner.docs_q_withdraw') }}</p>
-            <ol class="mt-2 list-decimal space-y-1 pl-4 text-sm">
+          <div class="rounded-2xl border border-lime-400/30 bg-[#0f1115]/95 p-4 text-slate-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+            <p class="text-lg font-extrabold text-lime-400/95">{{ t('partner.docs_q_withdraw') }}</p>
+            <ol class="mt-2 list-decimal space-y-1 pl-4 text-sm leading-relaxed text-slate-300">
               <li>{{ t('partner.docs_withdraw_1') }}</li>
               <li>{{ t('partner.docs_withdraw_2') }}</li>
               <li>{{ t('partner.docs_withdraw_3') }}</li>
               <li>{{ t('partner.docs_withdraw_4') }}</li>
             </ol>
           </div>
-          <div class="rounded-2xl border border-emerald-300/35 bg-white p-4 text-slate-900">
-            <p class="text-lg font-extrabold text-[#4bbf67]">{{ t('partner.docs_q_what_counts') }}</p>
-            <p class="mt-2 text-sm">{{ t('partner.docs_counts_yes') }}</p>
-            <p class="mt-1 text-sm text-slate-700">
+          <div class="rounded-2xl border border-emerald-400/25 bg-[#0f1115]/95 p-4 text-slate-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+            <p class="text-lg font-extrabold text-lime-400/95">{{ t('partner.docs_q_what_counts') }}</p>
+            <p class="mt-2 text-sm leading-relaxed text-slate-300">{{ t('partner.docs_counts_yes') }}</p>
+            <p class="mt-1 text-sm leading-relaxed text-slate-400">
               {{ t('partner.docs_counts_note') }}
             </p>
           </div>
@@ -4425,12 +4697,12 @@ async function submitReceipt() {
                       class="flex min-w-0 flex-col items-center justify-center border-b border-l border-white/[0.06] px-1.5 py-2.5 text-center"
                       :class="idx % 2 === 1 ? 'bg-white/[0.02]' : 'bg-white/[0.01]'"
                     >
-                      <span class="text-[11px] font-bold tabular-nums tracking-tight text-violet-300/95">3 / 3</span>
+                      <span class="text-[11px] font-bold tabular-nums tracking-tight text-violet-300/95">{{ t('dashboard.billing.limits_free') }}</span>
                     </div>
                     <div
                       class="flex min-w-0 flex-col items-center justify-center border-b border-l border-amber-400/15 bg-amber-500/[0.05] px-1.5 py-2.5 text-center"
                     >
-                      <span class="text-[11px] font-semibold leading-tight text-amber-200/95">{{ t('dashboard.billing.limits_unlimited') }}</span>
+                      <span class="text-[11px] font-semibold tabular-nums leading-tight text-amber-200/95">{{ t('dashboard.billing.limits_premium') }}</span>
                     </div>
                   </template>
                   <template v-else>
@@ -5170,6 +5442,148 @@ async function submitReceipt() {
     </div>
 
     <div
+      v-if="showPartnerBonusTransferConfirm"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px"
+      class="flex items-end justify-center bg-black/75 p-3 pb-[calc(5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-[2px] md:items-center md:pb-6"
+      role="presentation"
+      @click.self="closePartnerBonusTransferConfirm"
+    >
+      <div
+        class="w-full max-w-sm rounded-[1.25rem] border border-white/[0.12] bg-gradient-to-b from-zinc-900/95 to-zinc-950/98 p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.9)] ring-1 ring-inset ring-white/[0.05]"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="partner-bonus-transfer-title"
+        @click.stop
+      >
+        <h3 id="partner-bonus-transfer-title" class="text-base font-bold tracking-tight text-white">
+          {{ t('partner.transfer_confirm_title') }}
+        </h3>
+        <p class="mt-2 text-[13px] leading-relaxed text-white/72">
+          {{ t('partner.transfer_confirm_body') }}
+        </p>
+        <div class="mt-4 flex flex-wrap gap-2">
+          <button
+            type="button"
+            class="min-w-[6rem] flex-1 rounded-xl border border-white/15 bg-white/[0.06] px-3 py-2.5 text-[13px] font-semibold text-white/90 transition hover:bg-white/10"
+            @click="closePartnerBonusTransferConfirm"
+          >
+            {{ t('partner.transfer_confirm_cancel') }}
+          </button>
+          <button
+            type="button"
+            class="min-w-[6rem] flex-1 rounded-xl bg-gradient-to-r from-lime-500 to-emerald-600 px-3 py-2.5 text-[13px] font-extrabold text-slate-950 shadow-[0_8px_28px_-8px_rgba(132,204,22,0.55)] transition hover:brightness-105 active:scale-[0.99] disabled:opacity-50"
+            :disabled="bonusTransferLoading"
+            @click="confirmPartnerBonusTransfer"
+          >
+            {{ t('partner.transfer_confirm_ok') }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div
+      v-if="showPartnerPayoutModal"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:12px;padding-bottom:max(12px, env(safe-area-inset-bottom, 0px))"
+      class="flex items-end justify-center bg-black/80 p-3 pb-[calc(12px+env(safe-area-inset-bottom,0px))] backdrop-blur-md md:items-center md:pb-8"
+      role="presentation"
+      @click.self="closePartnerPayoutModal"
+    >
+      <div
+        class="relative w-full max-w-md overflow-hidden rounded-2xl border border-lime-400/14 bg-gradient-to-b from-[#0f141d] via-[#0b0f16] to-[#050708] shadow-[0_34px_120px_-26px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,255,255,0.05)] ring-1 ring-inset ring-white/[0.05]"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="partner-payout-modal-title"
+        @click.stop
+      >
+        <div
+          class="pointer-events-none absolute inset-0 opacity-[0.11] bg-[radial-gradient(ellipse_90%_50%_at_50%_-10%,rgba(132,204,22,0.45),transparent),radial-gradient(ellipse_60%_40%_at_100%_80%,rgba(16,185,129,0.2),transparent)]"
+        />
+        <div class="relative border-b border-white/[0.06] px-4 pb-3 pt-4">
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <h3 id="partner-payout-modal-title" class="text-[17px] font-extrabold tracking-tight text-white">{{ t('partner.payout_modal_title') }}</h3>
+              <p class="mt-1 text-[12px] leading-snug text-slate-500">{{ t('partner.payout_modal_sub') }}</p>
+            </div>
+            <button
+              type="button"
+              class="-mr-1 -mt-0.5 shrink-0 rounded-lg px-2.5 py-1.5 text-[18px] leading-none text-slate-500 transition hover:bg-white/[0.08] hover:text-white"
+              :aria-label="t('partner.payout_modal_close_aria')"
+              @click="closePartnerPayoutModal"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+        <div class="relative max-h-[min(78vh,580px)] overflow-y-auto overscroll-y-contain px-4 py-4 [-webkit-overflow-scrolling:touch]">
+          <div v-if="partnerPayoutsLoading" class="py-8 text-center text-sm text-slate-500">{{ t('partner.loading') }}</div>
+          <template v-else>
+            <div class="space-y-1.5 rounded-xl border border-white/[0.05] bg-black/30 p-3 text-[13px] text-slate-200">
+              <p>{{ t('partner.available_payout') }} <b class="text-lime-300">{{ fmtAmount(partnerPayouts.available_rub || 0) }} ₽</b></p>
+              <p class="text-slate-300/95">{{ t('partner.pending_unlock') }} <b class="text-amber-200/90">{{ fmtAmount(partnerPayouts.pending_rub || 0) }} ₽</b></p>
+              <p>{{ t('partner.in_requests') }} <b class="text-white">{{ fmtAmount(partnerPayouts.reserved_rub || 0) }} ₽</b></p>
+              <p>{{ t('partner.paid_out') }} <b class="text-white">{{ fmtAmount(partnerPayouts.paid_total_rub || 0) }} ₽</b></p>
+              <p class="text-[12px] text-slate-500">{{ t('partner.token_rate', { rate: fmtAmount(partnerPayouts.token_rub_rate || 2) }) }}</p>
+              <p class="pt-1 text-sm font-bold text-amber-300">{{ t('partner.min_payout', { rub: fmtAmount(partnerPayouts.min_payout_rub || 1500) }) }}</p>
+            </div>
+            <div class="mt-4 grid gap-3">
+              <input
+                v-model="payoutAmountRub"
+                type="number"
+                min="0"
+                step="1"
+                autocomplete="off"
+                inputmode="numeric"
+                :placeholder="t('partner.amount_placeholder')"
+                class="rounded-xl border border-white/[0.1] bg-[#06080d]/95 px-3 py-2.5 text-[14px] text-white outline-none placeholder:text-slate-600 focus:border-lime-500/40 focus:ring-1 focus:ring-lime-500/25"
+              />
+              <select
+                v-model="payoutMethod"
+                class="rounded-xl border border-white/[0.1] bg-[#06080d]/95 px-3 py-2.5 text-[14px] text-white outline-none focus:border-lime-500/40 focus:ring-1 focus:ring-lime-500/25"
+              >
+                <option value="sbp">{{ t('partner.method_sbp') }}</option>
+                <option value="card">{{ t('partner.method_card') }}</option>
+              </select>
+              <input
+                v-model="payoutRequisites"
+                type="text"
+                autocomplete="off"
+                :placeholder="t('partner.requisites_placeholder')"
+                class="rounded-xl border border-white/[0.1] bg-[#06080d]/95 px-3 py-2.5 text-[14px] text-white outline-none placeholder:text-slate-600 focus:border-lime-500/40 focus:ring-1 focus:ring-lime-500/25"
+              />
+              <input
+                v-model="payoutFullName"
+                type="text"
+                autocomplete="name"
+                :placeholder="t('partner.fullname_placeholder')"
+                class="rounded-xl border border-white/[0.1] bg-[#06080d]/95 px-3 py-2.5 text-[14px] text-white outline-none placeholder:text-slate-600 focus:border-lime-500/40 focus:ring-1 focus:ring-lime-500/25"
+              />
+            </div>
+            <button
+              type="button"
+              class="mt-5 w-full rounded-xl bg-gradient-to-r from-lime-400 to-emerald-500 py-3.5 text-[14px] font-extrabold text-black shadow-[0_14px_44px_-16px_rgba(132,204,22,0.55)] transition hover:brightness-[1.05] active:scale-[0.99] disabled:opacity-50"
+              :disabled="payoutSubmitting || partnerPayoutsLoading"
+              @click="submitPayoutRequest"
+            >
+              {{ t('partner.request_payout') }}
+            </button>
+            <div v-if="(partnerPayouts.commissions || []).length" class="mt-5 rounded-xl border border-white/[0.06] bg-black/40 p-3">
+              <p class="text-[11px] font-semibold uppercase tracking-wide text-lime-300/90">{{ t('partner.recent_commissions') }}</p>
+              <div class="divide-y divide-white/[0.05]">
+                <div
+                  v-for="c in (partnerPayouts.commissions || []).slice(0, 8)"
+                  :key="`pcm-${c.id}`"
+                  class="py-2 text-[11px] text-slate-400 first:pt-0 last:pb-0"
+                >
+                  {{ t('partner.level_line', { level: c.level, amount: fmtAmount(c.reward_amount_rub), status: c.status }) }}
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
+
+    <div
       v-if="showFundsMovementModal"
       style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/65 p-3 backdrop-blur-sm md:items-center"
       @click.self="closeFundsMovementModal"
@@ -5817,3 +6231,19 @@ async function submitReceipt() {
 
   </div>
 </template>
+
+<style scoped>
+.guard-hero-carousel {
+  box-shadow: none !important;
+  touch-action: pan-x pinch-zoom;
+  overscroll-behavior-x: contain;
+}
+.guard-stat-broadcast-rail {
+  overscroll-behavior-x: contain;
+}
+.guard-hero-carousel img {
+  border: 0 !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+</style>

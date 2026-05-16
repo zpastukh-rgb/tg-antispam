@@ -378,15 +378,27 @@ const topChannelByMessages = computed(() => {
 })
 const audienceGenderCard = computed(() => {
   const g = props.audienceGender || {}
-  const malePct = Math.max(0, Math.min(100, Number(g?.malePct || 0)))
-  const femalePct = Math.max(0, Math.min(100, Number(g?.femalePct || (100 - malePct))))
-  const knownTotal = Math.max(0, Number(g?.knownTotal || 0))
+  const maleCount = Math.max(0, Number(g?.maleCount || 0))
+  const femaleCount = Math.max(0, Number(g?.femaleCount || 0))
+  const sumNamed = maleCount + femaleCount
+  const knownTotal = Math.max(0, Number(g?.knownTotal || sumNamed))
+  let malePct = Math.max(0, Math.min(100, Number(g?.malePct ?? 0)))
+  let femalePct =
+    g?.femalePct != null && g?.femalePct !== ''
+      ? Math.max(0, Math.min(100, Number(g.femalePct)))
+      : sumNamed > 0
+        ? Math.max(0, Math.min(100, 100 - malePct))
+        : 0
+  if (props.loading || (sumNamed <= 0 && knownTotal <= 0)) {
+    malePct = 0
+    femalePct = 0
+  }
   return {
     audience: Math.max(0, Number(g?.audience || 0)),
     malePct: Number.isFinite(malePct) ? Math.round(malePct * 10) / 10 : 0,
     femalePct: Number.isFinite(femalePct) ? Math.round(femalePct * 10) / 10 : 0,
-    maleCount: Math.max(0, Number(g?.maleCount || 0)),
-    femaleCount: Math.max(0, Number(g?.femaleCount || 0)),
+    maleCount,
+    femaleCount,
     knownTotal,
     unknownCount: Math.max(0, Number(g?.unknownCount || 0)),
     hasAny: knownTotal > 0,

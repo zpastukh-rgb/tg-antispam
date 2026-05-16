@@ -10,7 +10,7 @@
     >
       <div
         v-if="lock.isOpen.value"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:100000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.72);padding:16px"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147484000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.72);padding:16px"
         class="backdrop-blur-md"
         role="presentation"
         @click.self="lock.closeLock()"

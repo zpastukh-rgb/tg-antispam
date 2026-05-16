@@ -11,6 +11,7 @@ import { isMentionsGranularVanillaModalOpen, closeMentionsGranularVanillaModal }
 const i18n = {
   'protection.ui.mentions_modal_title': '💬 Упоминания',
   'protection.ui.mentions_modal_hint': 'Выбери что считать упоминанием.',
+  'protection.ui.mentions_modal_hint_free': 'Free hint',
   'protection.ui.mention_mass_enabled': 'Массовые упоминания',
   'protection.ui.mention_mass_threshold': 'Порог',
 }
@@ -70,7 +71,85 @@ describe('mentionsChain (granular)', () => {
     expect(onUpdateRule).toHaveBeenCalledWith({ filter_mention_mass_threshold: 7 })
   })
 
-  it('legacy filter_mentions=true и все гранулы false → тихий сброс legacy', () => {
+  it('legacy filter_mentions=true без гранул → тихий сброс и на Free', () => {
+    const onUpdateRule = vi.fn(() => Promise.resolve())
+    const rule = makeRule({ filter_mentions: true })
+    runMentionsChain({
+      rule,
+      t,
+      onUpdateRule,
+      ownerHasPremium: false,
+      onPremiumLock: () => {},
+    })
+    expect(onUpdateRule).toHaveBeenCalledWith({ filter_mentions: false })
+    expect(rule.filter_mentions).toBe(false)
+  })
+
+  it('на Free первый переключатель — users (без legacy-блока)', () => {
+    const onUpdateRule = vi.fn(() => Promise.resolve())
+    runMentionsChain({
+      rule: makeRule({ filter_mentions: false }),
+      t,
+      onUpdateRule,
+      ownerHasPremium: false,
+      onPremiumLock: () => {},
+    })
+    const switches = document.querySelectorAll('[role="switch"]')
+    switches[0].click()
+    expect(onUpdateRule).toHaveBeenCalledWith({ filter_mention_users: true })
+  })
+
+  it('на Free премиум-гранула (text_mention) — onPremiumLock без PATCH', () => {
+    const onUpdateRule = vi.fn(() => Promise.resolve())
+    const onPremiumLock = vi.fn()
+    runMentionsChain({
+      rule: makeRule(),
+      t,
+      onUpdateRule,
+      ownerHasPremium: false,
+      onPremiumLock,
+    })
+    const switches = document.querySelectorAll('[role="switch"]')
+    // 0 — users, 1 — bots, 2 — channels (free), 3 — text_mention (premium).
+    switches[3].click()
+    expect(onPremiumLock).toHaveBeenCalled()
+    expect(onUpdateRule).not.toHaveBeenCalled()
+  })
+
+  it('на Free channels (3-й тоггл) патчит rule', () => {
+    const onUpdateRule = vi.fn(() => Promise.resolve())
+    const onPremiumLock = vi.fn()
+    runMentionsChain({
+      rule: makeRule(),
+      t,
+      onUpdateRule,
+      ownerHasPremium: false,
+      onPremiumLock,
+    })
+    const switches = document.querySelectorAll('[role="switch"]')
+    switches[2].click()
+    expect(onUpdateRule).toHaveBeenCalledWith({ filter_mention_channels: true })
+    expect(onPremiumLock).not.toHaveBeenCalled()
+  })
+
+  it('на Free массовые заблокированы — клик по тогглу только onPremiumLock', () => {
+    const onUpdateRule = vi.fn(() => Promise.resolve())
+    const onPremiumLock = vi.fn()
+    runMentionsChain({
+      rule: makeRule(),
+      t,
+      onUpdateRule,
+      ownerHasPremium: false,
+      onPremiumLock,
+    })
+    const switches = document.querySelectorAll('[role="switch"]')
+    // 0..7 — типы, 8 — массовые.
+    switches[MENTION_FILTER_KINDS.length].click()
+    expect(onPremiumLock).toHaveBeenCalled()
+    expect(onUpdateRule).not.toHaveBeenCalled()
+  })
+
+  it('legacy filter_mentions=true и все гранулы false → тихий сброс legacy (Premium-путь)', () => {
     const onUpdateRule = vi.fn(() => Promise.resolve())
     const rule = makeRule({ filter_mentions: true })
     runMentionsChain({ rule, t, onUpdateRule })

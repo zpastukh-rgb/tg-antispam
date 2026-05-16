@@ -471,6 +471,11 @@ class Rule(Base):
     join_captcha_ttl_minutes: Mapped[int] = mapped_column(Integer, default=3)
     join_captcha_kind: Mapped[str] = mapped_column(String(32), default="button")
     join_captcha_prefer_dm: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Капча при нарушении фильтра медиа (независимо от join_captcha)
+    filter_media_captcha_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_media_captcha_ttl_minutes: Mapped[int] = mapped_column(Integer, default=3)
+    filter_media_captcha_kind: Mapped[str] = mapped_column(String(32), default="button")
+    filter_media_captcha_prefer_dm: Mapped[bool] = mapped_column(Boolean, default=False)
     # Приветствие новых участников (по чату).
     welcome_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     welcome_text: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -546,6 +551,8 @@ class JoinCaptchaSession(Base):
     message_chat_id: Mapped[int] = mapped_column(BigInteger)
     message_id: Mapped[int] = mapped_column(BigInteger)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # join — при входе; filter_media — после нарушения гранулярного фильтра медиа (отдельные настройки в rules).
+    captcha_scope: Mapped[str] = mapped_column(String(16), default="join")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

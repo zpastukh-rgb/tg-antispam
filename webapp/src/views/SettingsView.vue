@@ -64,6 +64,66 @@ const pdfPreviewLoading = ref(false)
 const pdfPreview = ref(null)
 const pdfObjectUrl = ref('')
 
+const JOIN_REPORT_ORDER = ['day', '3d', 'week', 'month']
+const joinReportPeriods = ref([])
+const joinReportLoading = ref(false)
+const joinReportSaving = ref(false)
+
+const joinReportPresetOptions = computed(() =>
+  JOIN_REPORT_ORDER.map((id) => ({
+    id,
+    label:
+      id === 'day'
+        ? t('admin.partner_presets.join_day')
+        : id === '3d'
+          ? t('admin.partner_presets.join_3d')
+          : id === 'week'
+            ? t('admin.partner_presets.join_week')
+            : t('admin.partner_presets.join_month'),
+  })),
+)
+
+function joinReportEnabled(id) {
+  return Array.isArray(joinReportPeriods.value) && joinReportPeriods.value.includes(id)
+}
+
+async function loadJoinReportSettings() {
+  joinReportLoading.value = true
+  try {
+    const r = await fetchSilent(() => api.ownerJoinReportSettings())
+    joinReportPeriods.value = Array.isArray(r?.periods) ? [...r.periods] : []
+  } catch {
+    joinReportPeriods.value = []
+  } finally {
+    joinReportLoading.value = false
+  }
+}
+
+async function toggleJoinReportPreset(id) {
+  if (joinReportSaving.value || joinReportLoading.value) return
+  const cur = new Set(joinReportPeriods.value || [])
+  if (cur.has(id)) cur.delete(id)
+  else cur.add(id)
+  const next = JOIN_REPORT_ORDER.filter((p) => cur.has(p))
+  joinReportPeriods.value = next
+  joinReportSaving.value = true
+  try {
+    const r = await fetchSilent(() => api.ownerSetJoinReportSettings(next))
+    joinReportPeriods.value = Array.isArray(r?.periods) ? [...r.periods] : next
+    showToast(t('settings.notifications.saved'))
+  } catch (e) {
+    showToast(messageFromApiError(e))
+    await loadJoinReportSettings()
+  } finally {
+    joinReportSaving.value = false
+  }
+}
+
+watch(panel, (p) => {
+  if (p === 'joinReportSettings') void loadJoinReportSettings()
+})
+
+
 const PDF_PERIOD_OPTIONS = computed(() => [
   { key: 'today', label: t('dashboard.period.today') },
   { key: '7d', label: t('dashboard.period.7d') },
@@ -1203,6 +1263,14 @@ function back() {
     panel.value = 'security'
     return
   }
+  if (panel.value === 'joinReportSettings') {
+    panel.value = 'botNotifications'
+    return
+  }
+  if (panel.value === 'botNotifications') {
+    panel.value = 'hub'
+    return
+  }
   if (['confirmActionsDetail', 'pinSetup', 'pinActions'].includes(panel.value)) {
     panel.value = 'security'
     return
@@ -1223,6 +1291,8 @@ function panelTitle() {
     confirmActionsDetail: t('settings.security.confirm.detail_title'),
     pinSetup: t('settings.security.pin.gate_title'),
     pinActions: t('settings.security.pin.title'),
+    botNotifications: t('settings.notifications.menu_title'),
+    joinReportSettings: t('settings.notifications.short_reports_title'),
   }
   return titles[panel.value] || t('settings.title')
 }
@@ -1324,6 +1394,7 @@ onBeforeUnmount(() => {
             { key: 'profile', title: t('settings.hub.profile.title'), sub: t('settings.hub.profile.sub'), icon: 'account' },
             { key: 'payment', title: t('settings.hub.payment.title'), sub: t('settings.hub.payment.sub'), icon: 'billing' },
             { key: 'data', title: t('settings.hub.data.title'), sub: t('settings.hub.data.sub'), icon: 'reports' },
+            { key: 'botNotifications', title: t('settings.hub.notifications.title'), sub: t('settings.hub.notifications.sub'), icon: 'bell' },
             { key: 'delegation', title: t('settings.hub.delegation.title'), sub: t('settings.hub.delegation.sub'), icon: 'chats' },
             { key: 'security', title: t('settings.hub.security.title'), sub: t('settings.hub.security.sub'), icon: 'shield' },
           ]"
@@ -1561,6 +1632,63 @@ onBeforeUnmount(() => {
                 {{ purgeLoading ? (t('common.locale_code') === 'en' ? 'Deleting…' : 'Удаление…') : t('settings.data.purge_button') }}
               </button>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bot notifications (hub) -->
+      <div v-if="panel === 'botNotifications'" class="space-y-3 pt-3">
+        <p class="px-1 text-[14px] leading-relaxed text-white/50">{{ t('settings.notifications.intro') }}</p>
+        <button
+          type="button"
+          class="group flex w-full items-center gap-3.5 rounded-[22px] border border-white/[0.11] bg-white/[0.07] px-4 py-3.5 text-left shadow-[inset_0_1px_0_0_rgba(255,255,255,0.08),0_20px_50px_-28px_rgba(0,0,0,0.85)] backdrop-blur-2xl transition active:scale-[0.99] hover:bg-white/[0.09]"
+          @click="panel = 'joinReportSettings'"
+        >
+          <span
+            class="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-white/[0.1] bg-white/[0.08] text-white/85 shadow-inner"
+          >
+            <NavIcon name="reports" class="h-6 w-6" />
+          </span>
+          <span class="min-w-0 flex-1">
+            <span class="block text-[16px] font-semibold text-white">{{ t('settings.notifications.short_reports_title') }}</span>
+            <span class="mt-0.5 block text-[13px] text-white/45">{{ t('settings.notifications.short_reports_sub') }}</span>
+          </span>
+          <NavIcon name="chevron-right" class="h-5 w-5 shrink-0 text-white/25 group-hover:text-white/40" />
+        </button>
+      </div>
+
+      <!-- Short reports schedule -->
+      <div v-if="panel === 'joinReportSettings'" class="space-y-4 pt-3">
+        <p class="px-1 text-[14px] leading-relaxed text-white/55">
+          {{ t('dashboard.stats_strip.join_report_hint') }}
+        </p>
+        <div v-if="joinReportLoading" class="rounded-[22px] bg-white/[0.06] px-4 py-10 text-center text-[14px] text-white/40 backdrop-blur-xl">
+          {{ t('common.loading') }}
+        </div>
+        <div v-else class="overflow-hidden rounded-[22px] border border-white/[0.11] bg-white/[0.06] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.07)] backdrop-blur-2xl">
+          <div
+            v-for="(opt, oi) in joinReportPresetOptions"
+            :key="opt.id"
+            class="flex items-center justify-between gap-3 px-4 py-3.5"
+            :class="oi > 0 ? 'border-t border-white/[0.08]' : ''"
+          >
+            <span class="text-[15px] font-medium text-white">{{ opt.label }}</span>
+            <button
+              type="button"
+              role="switch"
+              :aria-checked="joinReportEnabled(opt.id)"
+              :disabled="joinReportSaving"
+              class="relative h-[31px] w-[51px] shrink-0 rounded-full border transition duration-200 disabled:opacity-45"
+              :class="iosSwitchClass(joinReportEnabled(opt.id))"
+              @click="toggleJoinReportPreset(opt.id)"
+            >
+              <span
+                class="absolute left-[3px] top-1/2 h-[25px] w-[25px] rounded-full bg-white shadow-md transition duration-200"
+                :style="{
+                  transform: joinReportEnabled(opt.id) ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)',
+                }"
+              />
+            </button>
           </div>
         </div>
       </div>

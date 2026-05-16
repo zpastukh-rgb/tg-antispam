@@ -15,6 +15,9 @@
  *     onMassToggle: (enabled) => void,                          // вкл/выкл массовых
  *     onMassThreshold: (value) => void,                         // изменение порога
  *     onClose?: () => void,
+ *     granularLocked?: boolean, // deprecated: используйте ownerHasPremium + requiresPremium у строк
+ *     ownerHasPremium?: boolean, // false — Free: открыты только строки без requiresPremium
+ *     onPremiumLock?: () => void,
  *   }
  */
 
@@ -48,7 +51,10 @@ function removeExistingRoot() {
  * Создаёт iOS-style тоггл (track + knob). Возвращает { wrap, setOn(value) }.
  * Клик уже навешан на wrap и зовёт onChange(next).
  */
-export function buildIosToggle(initialOn, onChange) {
+export function buildIosToggle(initialOn, onChange, lockOpts = null) {
+  const locked = !!(lockOpts && lockOpts.locked)
+  const onLockedTap =
+    typeof lockOpts?.onLockedTap === 'function' ? lockOpts.onLockedTap : null
   const wrap = document.createElement('button')
   wrap.type = 'button'
   wrap.setAttribute('role', 'switch')
@@ -95,10 +101,20 @@ export function buildIosToggle(initialOn, onChange) {
   setOn(!!initialOn)
 
   let current = !!initialOn
+  wrap.style.cursor = locked ? 'not-allowed' : 'pointer'
+  wrap.style.opacity = locked ? '0.82' : '1'
   wrap.addEventListener('click', () => {
+    if (locked) {
+      try { onLockedTap?.() } catch (e) { guardFilterChain('MentionsGranularVanilla', 'toggle:locked_throw', errToObj(e)) }
+      return
+    }
     current = !current
     setOn(current)
-    try { onChange?.(current) } catch (e) { guardFilterChain('MentionsGranularVanilla', 'toggle:onChange_throw', errToObj(e)) }
+    try {
+      onChange?.(current)
+    } catch (e) {
+      guardFilterChain('MentionsGranularVanilla', 'toggle:onChange_throw', errToObj(e))
+    }
   })
 
   return { wrap, setOn }
@@ -163,22 +179,40 @@ export function buildMentionsGranularModalElement(opts) {
   hint.style.cssText = 'margin:0 0 12px;font-size:12px;color:#a1a1aa;line-height:1.45'
   hint.textContent = String(opts?.hintText || '')
 
+  const ownerHasPremium = opts?.ownerHasPremium !== false
+
+  const onPremiumLockFn = typeof opts?.onPremiumLock === 'function' ? opts.onPremiumLock : null
+
   const list = document.createElement('ul')
   list.style.cssText = 'list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:8px'
 
   const kindToggles = {}
   for (const k of (opts?.kinds || [])) {
     const li = document.createElement('li')
-    li.style.cssText = [
+    const rowIsPremiumOnly = !!k.requiresPremium
+    const rowLocked = rowIsPremiumOnly && !ownerHasPremium
+    const baseRowStyle = [
       'display:flex',
       'align-items:center',
       'justify-content:space-between',
       'gap:12px',
       'padding:10px 12px',
-      'border:1px solid rgba(255,255,255,0.06)',
-      'background:rgba(255,255,255,0.025)',
       'border-radius:12px',
-    ].join(';')
+    ]
+    if (rowLocked) {
+      li.style.cssText = [
+        ...baseRowStyle,
+        'border:1px solid rgba(234,179,8,0.38)',
+        'box-shadow:inset 0 0 0 1px rgba(250,204,21,0.12)',
+        'background:rgba(250,204,21,0.05)',
+      ].join(';')
+    } else {
+      li.style.cssText = [
+        ...baseRowStyle,
+        'border:1px solid rgba(255,255,255,0.06)',
+        'background:rgba(255,255,255,0.025)',
+      ].join(';')
+    }
     const left = document.createElement('div')
     left.style.cssText = 'display:flex;align-items:center;gap:10px;min-width:0;flex:1'
     const icon = document.createElement('span')
@@ -191,9 +225,19 @@ export function buildMentionsGranularModalElement(opts) {
     left.appendChild(lbl)
 
     const initialOn = !!(opts?.values?.[k.field])
-    const toggle = buildIosToggle(initialOn, (next) => {
-      try { opts?.onToggleKind?.(k.field, next) } catch (e) { guardFilterChain('MentionsGranularVanilla', 'toggleKind:throw', { field: k.field, ...errToObj(e) }) }
-    })
+    const rowLockOpts =
+      rowLocked && onPremiumLockFn ? { locked: true, onLockedTap: onPremiumLockFn } : null
+    const toggle = buildIosToggle(
+      initialOn,
+      (next) => {
+        try {
+          opts?.onToggleKind?.(k.field, next)
+        } catch (e) {
+          guardFilterChain('MentionsGranularVanilla', 'toggleKind:throw', { field: k.field, ...errToObj(e) })
+        }
+      },
+      rowLockOpts,
+    )
     kindToggles[k.field] = toggle
     li.appendChild(left)
     li.appendChild(toggle.wrap)
@@ -201,12 +245,14 @@ export function buildMentionsGranularModalElement(opts) {
   }
 
   // Блок «Массовые упоминания» — отдельная карточка с тогглом и слайдером.
+  const massLocked = !ownerHasPremium
   const massCard = document.createElement('div')
   massCard.style.cssText = [
     'margin-top:12px',
     'padding:12px',
-    'border:1px solid rgba(255,255,255,0.06)',
-    'background:rgba(255,255,255,0.025)',
+    massLocked
+      ? 'border:1px solid rgba(234,179,8,0.38);box-shadow:inset 0 0 0 1px rgba(250,204,21,0.12);background:rgba(250,204,21,0.05)'
+      : 'border:1px solid rgba(255,255,255,0.06);background:rgba(255,255,255,0.025)',
     'border-radius:12px',
     'display:flex',
     'flex-direction:column',
@@ -224,10 +270,20 @@ export function buildMentionsGranularModalElement(opts) {
   massLbl.textContent = String(opts?.massEnabledText || 'Массовые упоминания')
   massLeft.appendChild(massIcon)
   massLeft.appendChild(massLbl)
-  const massToggle = buildIosToggle(!!opts?.mass?.enabled, (next) => {
-    try { opts?.onMassToggle?.(next) } catch (e) { guardFilterChain('MentionsGranularVanilla', 'massToggle:throw', errToObj(e)) }
-    sliderRow.style.display = next ? 'flex' : 'none'
-  })
+  const massLockOpts =
+    massLocked && onPremiumLockFn ? { locked: true, onLockedTap: onPremiumLockFn } : null
+  const massToggle = buildIosToggle(
+    !!opts?.mass?.enabled,
+    (next) => {
+      try {
+        opts?.onMassToggle?.(next)
+      } catch (e) {
+        guardFilterChain('MentionsGranularVanilla', 'massToggle:throw', errToObj(e))
+      }
+      sliderRow.style.display = next ? 'flex' : 'none'
+    },
+    massLockOpts,
+  )
   massHead.appendChild(massLeft)
   massHead.appendChild(massToggle.wrap)
 
@@ -248,10 +304,20 @@ export function buildMentionsGranularModalElement(opts) {
   const valueEl = document.createElement('span')
   valueEl.style.cssText = 'min-width:30px;text-align:right;color:#e5e7eb;font-weight:600'
   valueEl.textContent = `≥${initialThreshold}`
+  if (massLocked) {
+    slider.disabled = true
+    slider.style.opacity = '0.55'
+    slider.style.pointerEvents = 'none'
+  }
+
   slider.addEventListener('input', () => {
     const v = Math.max(3, Math.min(20, Number(slider.value) || 5))
     valueEl.textContent = `≥${v}`
-    try { opts?.onMassThreshold?.(v) } catch (e) { guardFilterChain('MentionsGranularVanilla', 'massThreshold:throw', errToObj(e)) }
+    try {
+      opts?.onMassThreshold?.(v)
+    } catch (e) {
+      guardFilterChain('MentionsGranularVanilla', 'massThreshold:throw', errToObj(e))
+    }
   })
   sliderRow.appendChild(sliderLbl)
   sliderRow.appendChild(slider)

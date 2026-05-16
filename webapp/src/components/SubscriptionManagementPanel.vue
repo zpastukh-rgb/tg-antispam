@@ -58,6 +58,16 @@ const nextChargeLabelLong = computed(() => {
 })
 
 const paymentMethodLabel = computed(() => {
+  if (!isPremium.value) {
+    if (props.profile?.payment_method_bound) {
+      const p = String(props.profile?.payment_method_type || '').toLowerCase()
+      if (p.includes('card')) return t('billing.method.yookassa_card')
+      if (p.includes('sbp')) return t('billing.method.yookassa_sbp')
+      if (p.includes('yoo_money')) return t('billing.method.yookassa')
+      if (p) return `${t('billing.method.yookassa')} (${p})`
+    }
+    return t('subscription.payment_method.none')
+  }
   const source = String(props.profile?.subscription_source || '').toLowerCase()
   if (source === 'promo') return t('billing.method.promo')
   const p = String(props.profile?.payment_method_type || '').toLowerCase()
@@ -323,7 +333,7 @@ watch(
           <span class="text-sm text-white/70">{{ t('subscription.method_label') }}</span>
           <span class="text-sm font-semibold text-white">{{ paymentMethodLabel }}</span>
         </div>
-        <div v-if="promoDetailsLabel" class="flex items-center justify-between px-3 py-3">
+        <div v-if="promoDetailsLabel && isPremium" class="flex items-center justify-between px-3 py-3">
           <span class="text-sm text-white/70">{{ t('subscription.payment_method.promo') }}</span>
           <span class="min-w-0 flex-1 truncate pl-2 text-right text-[12px] font-semibold leading-tight text-lime-200" :title="promoDetailsLabelFull">{{ promoDetailsLabel }}</span>
         </div>
@@ -400,7 +410,7 @@ watch(
       class="w-full rounded-2xl border border-violet-300/35 bg-violet-500/[0.18] py-3.5 text-[15px] font-bold text-white shadow-[0_16px_40px_-20px_rgba(139,92,246,0.65)] transition hover:bg-violet-500/[0.26] active:scale-[0.99]"
       @click="renewSubscriptionButton"
     >
-      {{ t('subscription.extend') }}
+      {{ isPremium ? t('subscription.extend') : t('dashboard.hero.strengthen_protection') }}
     </button>
     </div>
   </div>

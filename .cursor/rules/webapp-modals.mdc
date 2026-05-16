@@ -1,0 +1,43 @@
+---
+description: Conventions for Vue modals in the Telegram Mini App webapp
+globs: webapp/src/**/*.vue
+alwaysApply: false
+---
+
+# Webapp Modals (TMA / WKWebView)
+
+Modals in this project render inside Telegram Mini App (WKWebView), which is fragile:
+Vue Teleport / `position: fixed` sometimes drop out of the DOM. Follow these rules
+whenever you add or edit a modal.
+
+## Mandatory
+
+1. **Lock background scroll.** When the modal is open, set `document.body.style.overflow = 'hidden'`.
+   - Reuse the shared watcher in `ProtectionView.vue` that watches all filter-modal refs at once,
+     or add a `watch(showXxxModal, (open) => { document.body.style.overflow = open ? 'hidden' : '' })`.
+   - On unmount, reset `document.body.style.overflow = ''`.
+
+2. **Dark surface, not slate-blue.** Use `bg-[#101013]` (or `bg-zinc-950`) for the panel — slate
+   gradients render bluish on iOS. Borders: `border-white/10`; secondary text: `text-zinc-400`.
+
+3. **High z-index + plain inline styles.** TMA strips some classes silently. Use both:
+   `style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;..."` AND tailwind classes.
+   Avoid `backdrop-blur-*` — it breaks in TMA.
+
+4. **iOS-style toggles** for on/off lists (see `iosSwitchClass()` and `MEDIA_FILTER_KINDS`
+   pattern in `ProtectionView.vue`). Track `h-[31px] w-[51px]`, knob `h-[25px] w-[25px]`,
+   `translate3d(20px, -50%, 0)` when on.
+
+5. **i18n strings must escape `@<letter>`.** The global sanitizer in
+   `webapp/src/i18n/sanitizeMessages.js` handles this at runtime, but prefer `{'@'}username` in
+   source. Never put a raw `@username` into a message body — vue-i18n compiler throws
+   `SyntaxError: Invalid linked format` and the modal silently fails to mount.
+
+6. **If a Vue modal repeatedly fails to mount in TMA** (`domHasNode: false` after 2x rAF),
+   add a vanilla fallback like `webapp/src/utils/welcomeFallbackModal.js`.
+
+## Anti-patterns
+
+- Do NOT use Vue `Teleport` for modals in this codebase — it has dropped out in production.
+- Do NOT rely on `backdrop-blur-*` for visibility.
+- Do NOT forget the unmount cleanup of `document.body.style.overflow`.

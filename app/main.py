@@ -67,6 +67,7 @@ from app.db.ensure_defaults import (
     ensure_admin_dispatch_bucket_unique,
     ensure_app_settings_schema,
     ensure_join_captcha_schema,
+    ensure_filter_media_captcha_schema,
     ensure_chat_reputation_schema,
     ensure_rules_post_rules_columns,
     ensure_channel_rule_drafts_schema,
@@ -331,6 +332,7 @@ async def on_startup() -> None:
     await ensure_admin_dispatch_bucket_unique(engine)
     await ensure_app_settings_schema(engine)
     await ensure_join_captcha_schema(engine)
+    await ensure_filter_media_captcha_schema(engine)
     await ensure_chat_reputation_schema(engine)
     await ensure_rules_post_rules_columns(engine)
     await ensure_channel_rule_drafts_schema(engine)

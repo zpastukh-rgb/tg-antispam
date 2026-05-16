@@ -1860,6 +1860,54 @@ async def ensure_join_captcha_schema(engine: AsyncEngine) -> None:
     except Exception as e:
         log.warning("ensure_join_captcha_schema table skipped: %s", e)
 
+    scope_sql = """
+        DO $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = 'public' AND table_name = 'join_captcha_sessions'
+          ) AND NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'join_captcha_sessions' AND column_name = 'captcha_scope'
+          ) THEN
+            EXECUTE 'ALTER TABLE join_captcha_sessions ADD COLUMN captcha_scope VARCHAR(16) DEFAULT ''join''';
+          END IF;
+        END $$;
+    """
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text(scope_sql))
+    except Exception as e:
+        log.warning("ensure_join_captcha_schema captcha_scope: %s", e)
+
+
+async def ensure_filter_media_captcha_schema(engine: AsyncEngine) -> None:
+    """Колонки rules: капча для нарушений по медиа (отдельно от join_captcha)."""
+    rule_cols = (
+        ("filter_media_captcha_enabled", "BOOLEAN", "FALSE"),
+        ("filter_media_captcha_ttl_minutes", "INTEGER", "3"),
+        ("filter_media_captcha_kind", "VARCHAR(32)", "'button'"),
+        ("filter_media_captcha_prefer_dm", "BOOLEAN", "FALSE"),
+    )
+    for col_name, col_type, default in rule_cols:
+        default_esc = default.replace("'", "''")
+        sql_str = f"""
+            DO $$
+            BEGIN
+              IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'rules' AND column_name = '{col_name}'
+              ) THEN
+                EXECUTE 'ALTER TABLE rules ADD COLUMN {col_name} {col_type} DEFAULT {default_esc}';
+              END IF;
+            END $$;
+        """
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(sql_str))
+        except Exception as e:
+            log.warning("ensure_filter_media_captcha_schema rules.%s: %s", col_name, e)
+
 
 async def ensure_chat_reputation_schema(engine: AsyncEngine) -> None:
     """Карма в группах: флаг в rules + таблицы слов, очков и событий."""

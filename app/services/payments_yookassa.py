@@ -25,6 +25,7 @@ from app.services.user_service import (
     get_or_create_user,
 )
 from app.services.chat_limit_enforcer import restore_owner_chats_after_premium
+from app.services.chat_owner_premium import user_effective_miniapp_premium
 from app.texts.guardian_billing import PREMIUM_PLANS
 from app.i18n import normalize_locale, t as i18n_t
 
@@ -733,6 +734,9 @@ async def _fulfill_payment(session: AsyncSession, yookassa_id: str, payment_obj:
         ref_res = await session.execute(select(User).where(User.telegram_id == owner_tg_id).limit(1))
         ref_user = ref_res.scalar_one_or_none()
         if not ref_user:
+            continue
+        # Уровни 2–3 только при активной подписке Premium у партнёра, получающего комиссию (Free — только уровень 1).
+        if level > 1 and not user_effective_miniapp_premium(ref_user, now_utc):
             continue
         reward_rub = round(float(row.amount or 0.0) * float(rate), 2)
         reward_tokens = round(reward_rub / PARTNER_TOKEN_RUB_RATE, 2)

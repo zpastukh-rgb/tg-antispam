@@ -644,6 +644,9 @@ MESSAGES: dict[str, dict] = {
             "cb_wrong_answer": "Мимо. Попробуй ещё раз.",
             "cb_ok": "✅ Готово, можешь писать в чате.",
         },
+        "filter_media_captcha": {
+            "ok_passed": "✅ Проверка пройдена. Сообщения снова разрешены.",
+        },
     },
     "reminders": {
         "expired_warning": (

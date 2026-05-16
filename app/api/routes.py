@@ -12,6 +12,7 @@ import asyncio
 import smtplib
 from pathlib import Path
 from uuid import uuid4
+from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from email.message import EmailMessage
 from time import perf_counter
@@ -1189,6 +1190,10 @@ def _rule_to_dict(rule: Rule, stopwords_count: int = 0, *, chat_owner_premium: b
         "join_captcha_ttl_minutes": int(getattr(rule, "join_captcha_ttl_minutes", 3) or 3),
         "join_captcha_kind": str(getattr(rule, "join_captcha_kind", "button") or "button"),
         "join_captcha_prefer_dm": bool(getattr(rule, "join_captcha_prefer_dm", False)),
+        "filter_media_captcha_enabled": bool(getattr(rule, "filter_media_captcha_enabled", False)),
+        "filter_media_captcha_ttl_minutes": int(getattr(rule, "filter_media_captcha_ttl_minutes", 3) or 3),
+        "filter_media_captcha_kind": str(getattr(rule, "filter_media_captcha_kind", "button") or "button"),
+        "filter_media_captcha_prefer_dm": bool(getattr(rule, "filter_media_captcha_prefer_dm", False)),
         "welcome_enabled": bool(getattr(rule, "welcome_enabled", False)),
         "welcome_text": str(getattr(rule, "welcome_text", "") or ""),
         "welcome_buttons": welcome_buttons,
@@ -3016,21 +3021,20 @@ _PREMIUM_RULE_FIELDS_RULES_AUTOPOST: frozenset[str] = frozenset({
 # 3. Гранулярные фильтры (media/mention/button/channel_post). Legacy-флаги
 # `filter_media_mode`, `filter_buttons_mode`, `filter_mentions`,
 # `filter_channel_posts_enabled` остаются доступными FREE.
+# Фото/видео/стикеры — гранулы для FREE; остальные типы медиа — Premium.
+# Упоминания: пользователи, боты, каналы — FREE; остальные гранулы — Premium.
+# Сообщения от каналов: первые три гранулы — FREE; форварды / hidden / без @ — Premium.
+# Кнопки: ссылки / callback / Mini App — FREE; остальные гранулы кнопок — Premium.
 _PREMIUM_RULE_FIELDS_GRANULAR: frozenset[str] = frozenset({
-    "filter_media_photos", "filter_media_videos", "filter_media_stickers",
     "filter_media_animations", "filter_media_voice", "filter_media_video_notes",
     "filter_media_audio", "filter_media_custom_emoji", "filter_media_plain_emoji",
-    "filter_mention_users", "filter_mention_bots", "filter_mention_channels",
     "filter_mention_text_mention", "filter_mention_hashtags", "filter_mention_bot_commands",
     "filter_mention_cashtags", "filter_mention_emails",
     "filter_mention_mass_enabled", "filter_mention_mass_threshold",
-    "filter_button_url", "filter_button_callback", "filter_button_web_app",
     "filter_button_switch_inline", "filter_button_login", "filter_button_pay",
     "filter_button_copy_text", "filter_button_reply",
     "filter_button_mass_enabled", "filter_button_mass_threshold",
     "filter_channel_posts_action",
-    "filter_channel_post_channels", "filter_channel_post_groups",
-    "filter_channel_post_anon_admin",
     "filter_channel_post_fwd_channel", "filter_channel_post_fwd_group",
     "filter_channel_post_no_username", "filter_channel_post_hidden_fwd",
 })
@@ -3069,6 +3073,7 @@ _PREMIUM_PATCH_DENY_KEYS_FREE: frozenset[str] = _PREMIUM_RULE_FIELDS | frozenset
     "antinakrutka_action",
     "antinakrutka_restrict_minutes",
     "join_captcha_kind",
+    "filter_media_captcha_kind",
 })
 
 
@@ -3076,18 +3081,13 @@ def _mask_rule_public_dict_non_premium(d: dict) -> None:
     """Маска ответа rule для клиента Mini App при FREE владельце (фактические поля БД могут содержать
     исторические значения — UI и enforce в боте синхронизируем через API + moderation)."""
     for k in (
-        "filter_media_photos", "filter_media_videos", "filter_media_stickers",
         "filter_media_animations", "filter_media_voice", "filter_media_video_notes",
         "filter_media_audio", "filter_media_custom_emoji", "filter_media_plain_emoji",
-        "filter_mention_users", "filter_mention_bots", "filter_mention_channels",
         "filter_mention_text_mention", "filter_mention_hashtags", "filter_mention_bot_commands",
         "filter_mention_cashtags", "filter_mention_emails",
         "filter_mention_mass_enabled",
-        "filter_button_url", "filter_button_callback", "filter_button_web_app",
         "filter_button_switch_inline", "filter_button_login", "filter_button_pay",
         "filter_button_copy_text", "filter_button_reply", "filter_button_mass_enabled",
-        "filter_channel_post_channels", "filter_channel_post_groups",
-        "filter_channel_post_anon_admin",
         "filter_channel_post_fwd_channel", "filter_channel_post_fwd_group",
         "filter_channel_post_no_username", "filter_channel_post_hidden_fwd",
     ):
@@ -3119,6 +3119,7 @@ def _mask_rule_public_dict_non_premium(d: dict) -> None:
     d["rules_group_event_trigger_every_n"] = 1
     d["rules_group_event_punish_every_n"] = 1
     d["join_captcha_kind"] = "button"
+    d["filter_media_captcha_kind"] = "button"
     if str(d.get("antinakrutka_action") or "").strip().lower() == "alert_restrict":
         d["antinakrutka_action"] = "alert"
     d["auto_reports_enabled"] = False
@@ -3881,6 +3882,10 @@ async def api_chat_rule(
         "join_captcha_ttl_minutes",
         "join_captcha_kind",
         "join_captcha_prefer_dm",
+        "filter_media_captcha_enabled",
+        "filter_media_captcha_ttl_minutes",
+        "filter_media_captcha_kind",
+        "filter_media_captcha_prefer_dm",
         "all_captcha_minutes",
         "delete_join_messages",
         "delete_left_messages",
@@ -3939,6 +3944,23 @@ async def api_chat_rule(
     if "join_captcha_kind" in body:
         k = str(getattr(rule, "join_captcha_kind", "button") or "button").strip().lower()
         rule.join_captcha_kind = k if k in (
+            "button",
+            "math",
+            "emoji",
+            "digits",
+            "word_send",
+            "word_guess",
+            "word_emoji",
+        ) else "button"
+    if "filter_media_captcha_ttl_minutes" in body:
+        try:
+            v = int(getattr(rule, "filter_media_captcha_ttl_minutes", 3) or 3)
+        except (TypeError, ValueError):
+            v = 3
+        rule.filter_media_captcha_ttl_minutes = max(1, min(5, v))
+    if "filter_media_captcha_kind" in body:
+        k = str(getattr(rule, "filter_media_captcha_kind", "button") or "button").strip().lower()
+        rule.filter_media_captcha_kind = k if k in (
             "button",
             "math",
             "emoji",
@@ -4229,6 +4251,7 @@ async def api_chat_rule(
         rule.filter_links = fm != "allow"
     if not owner_premium:
         rule.join_captcha_kind = "button"
+        rule.filter_media_captcha_kind = "button"
         rule.use_global_antispam_db = False
         rule.auto_reports_enabled = False
         rule.spam_spike_notify_managers = False
@@ -5069,6 +5092,129 @@ async def api_billing_token_packs():
     return {"items": items}
 
 
+def _reward_rub_to_partner_tokens(reward_rub: float) -> float:
+    return round(float(reward_rub or 0.0) / float(PARTNER_TOKEN_RUB_RATE), 2)
+
+
+async def _referral_partner_dashboard_network(session: AsyncSession, viewer_tg_id: int) -> dict[str, Any]:
+    """Размер деревьев: кого пригласили вы (L1), их приглашённые (L2), следующий слой (L3)."""
+    l1_rows = (
+        await session.execute(
+            select(User.telegram_id).where(User.referred_by_tg_id == int(viewer_tg_id)),
+        )
+    ).all()
+    l1_ids = sorted({int(r[0]) for r in l1_rows if r[0]})
+
+    if not l1_ids:
+        l2_ids: list[int] = []
+    else:
+        l2_rows = (
+            await session.execute(
+                select(User.telegram_id).where(User.referred_by_tg_id.in_(l1_ids)),
+            )
+        ).all()
+        l2_ids = sorted({int(r[0]) for r in l2_rows if r[0]})
+
+    if not l2_ids:
+        l3_ids: list[int] = []
+    else:
+        l3_rows = (
+            await session.execute(
+                select(User.telegram_id).where(User.referred_by_tg_id.in_(l2_ids)),
+            )
+        ).all()
+        l3_ids = sorted({int(r[0]) for r in l3_rows if r[0]})
+
+    n1 = len(l1_ids)
+    n2 = len(l2_ids)
+    n3 = len(l3_ids)
+    return {"l1": n1, "l2": n2, "l3": n3, "total": n1 + n2 + n3}
+
+
+async def _referral_partner_level_dashboard(session: AsyncSession, owner: User, viewer_tg_id: int) -> dict[str, Any]:
+    """Агрегаты PartnerCommission по уровням (ожидание / подтверждено к использованию) + сеть."""
+    pct_by_level = {lvl: int(round(rate * 100)) for lvl, rate in REFERRAL_LEVEL_RATES}
+    default_rows = [
+        {
+            "level": lv,
+            "percent": int(pct_by_level.get(lv, 0)),
+            "pending": {"payments": 0, "sales_rub": 0.0, "reward_tokens": 0.0},
+            "confirmed": {"payments": 0, "sales_rub": 0.0, "reward_tokens": 0.0},
+        }
+        for lv in (1, 2, 3)
+    ]
+    partner_level_stats = default_rows
+
+    try:
+        net = await _referral_partner_dashboard_network(session, viewer_tg_id)
+    except Exception:
+        net = {"l1": 0, "l2": 0, "l3": 0, "total": 0}
+
+    try:
+        buckets: defaultdict[int, dict[str, dict[str, float | int]]] = defaultdict(
+            lambda: {
+                "pending": {"payments": 0, "sales_rub": 0.0, "reward_rub": 0.0},
+                "confirmed": {"payments": 0, "sales_rub": 0.0, "reward_rub": 0.0},
+            },
+        )
+        q = await session.execute(
+            select(
+                PartnerCommission.level,
+                PartnerCommission.status,
+                func.count(PartnerCommission.id),
+                func.coalesce(func.sum(PartnerCommission.sales_amount_rub), 0.0),
+                func.coalesce(func.sum(PartnerCommission.reward_amount_rub), 0.0),
+            ).where(
+                PartnerCommission.owner_user_id == int(owner.id),
+                PartnerCommission.level.in_((1, 2, 3)),
+                PartnerCommission.status.in_(("pending", "available", "paid")),
+            ).group_by(
+                PartnerCommission.level,
+                PartnerCommission.status,
+            ),
+        )
+        for level_raw, stat, cnt, sales_sum, rew_sum in q.all():
+            lv = int(level_raw or 0)
+            if lv not in (1, 2, 3):
+                continue
+            blk = buckets[lv]
+            if stat == "pending":
+                tgt = blk["pending"]
+            elif stat in ("available", "paid"):
+                tgt = blk["confirmed"]
+            else:
+                continue
+            tgt["payments"] = int(tgt["payments"]) + int(cnt or 0)
+            tgt["sales_rub"] = float(tgt["sales_rub"]) + float(sales_sum or 0.0)
+            tgt["reward_rub"] = float(tgt["reward_rub"]) + float(rew_sum or 0.0)
+
+        partner_level_stats = []
+        for lv in (1, 2, 3):
+            blk = buckets[lv]
+            pnd = blk["pending"]
+            cfd = blk["confirmed"]
+            partner_level_stats.append(
+                {
+                    "level": lv,
+                    "percent": int(pct_by_level.get(lv, 0)),
+                    "pending": {
+                        "payments": int(pnd["payments"]),
+                        "sales_rub": round(float(pnd["sales_rub"]), 2),
+                        "reward_tokens": _reward_rub_to_partner_tokens(float(pnd["reward_rub"])),
+                    },
+                    "confirmed": {
+                        "payments": int(cfd["payments"]),
+                        "sales_rub": round(float(cfd["sales_rub"]), 2),
+                        "reward_tokens": _reward_rub_to_partner_tokens(float(cfd["reward_rub"])),
+                    },
+                },
+            )
+    except Exception:
+        partner_level_stats = default_rows
+
+    return {"partner_network": net, "partner_level_stats": partner_level_stats}
+
+
 async def _referral_move_all_bonus_to_aurum(session: AsyncSession, user_id: int) -> dict:
     """Перевод всех партнёрских токенов в AURUM (единый счёт для рассылок)."""
     user = await get_or_create_user(session, user_id)
@@ -5123,6 +5269,7 @@ async def api_referral(
         if last_months
         else i18n_t(loc, "api.ui.referral_access_no_period")
     )
+    tier_dash = await _referral_partner_level_dashboard(session, user, user_id)
     return {
         "access_label": access_label,
         "days_left": int(days_left),
@@ -5136,6 +5283,7 @@ async def api_referral(
         "share_count": shares,
         "paid_count": paid,
         "level_rates": [{"level": int(l), "percent": int(r * 100)} for l, r in REFERRAL_LEVEL_RATES],
+        **tier_dash,
     }
 
 

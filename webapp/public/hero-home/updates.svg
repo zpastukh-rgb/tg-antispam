@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f140f"/>
+      <stop offset="100%" style="stop-color:#050806"/>
+    </linearGradient>
+  </defs>
+  <rect width="960" height="540" fill="url(#bg)"/>
+  <text x="480" y="268" fill="#84cc16" text-anchor="middle" font-family="system-ui,sans-serif" font-size="34" font-weight="700">1=>2;5=8O</text>
+  <text x="480" y="312" fill="#a3e63588" text-anchor="middle" font-family="system-ui,sans-serif" font-size="18">0<5=8B5 D09; hero-home/updates.svg</text>
+</svg>

@@ -3,9 +3,11 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import NavIcon from './NavIcon.vue'
+import GuardTeleport from './GuardTeleport.vue'
 import { useDashboardSection } from '../composables/useDashboardSection'
 import { useApi } from '../composables/useApi'
 import { useCabinetMode } from '../composables/useCabinetMode'
+import { hasFullAdminRights } from '../utils/adminAccess'
 
 const route = useRoute()
 const router = useRouter()
@@ -15,6 +17,7 @@ const { setCabinetMode } = useCabinetMode()
 const { t } = useI18n()
 const PREMIUM_CACHE_KEY = 'guard.me.is_premium.v1'
 const DELEGATED_BC_CACHE_KEY = 'guard.me.has_delegated_broadcast.v1'
+const BROADCAST_NAV_ALLOWED_KEY = 'guard.me.broadcast_nav_allowed.v1'
 const spikeActiveOwner = ref(false)
 const spikeActiveShared = ref(false)
 let spikeTimer = null
@@ -38,6 +41,18 @@ const baseItems = computed(() => [
 ])
 const isPremiumUser = ref(false)
 const hasDelegatedBroadcast = ref(false)
+const broadcastGateModalOpen = ref(false)
+const broadcastNavGateReady = ref(false)
+function computeBroadcastNavAllowed(me) {
+  if (!me) return false
+  if (hasFullAdminRights(me)) return true
+  if (!!me.is_premium) return true
+  const tf = String(me.tariff || '').toLowerCase()
+  if (['premium', 'pro', 'business'].includes(tf)) return true
+  if (!!me.has_delegated_broadcast) return true
+  if (!!me.has_managed_shared_chat) return true
+  return false
+}
 function _readBoolCache(key) {
   try {
     const raw = localStorage.getItem(key)
@@ -59,10 +74,20 @@ function readPremiumCache() { return _readBoolCache(PREMIUM_CACHE_KEY) }
 function writePremiumCache(v) { _writeBoolCache(PREMIUM_CACHE_KEY, v) }
 function readDelegatedBcCache() { return _readBoolCache(DELEGATED_BC_CACHE_KEY) }
 function writeDelegatedBcCache(v) { _writeBoolCache(DELEGATED_BC_CACHE_KEY, v) }
+function readBroadcastNavCache() {
+  return _readBoolCache(BROADCAST_NAV_ALLOWED_KEY)
+}
+function writeBroadcastNavCache(v) {
+  _writeBoolCache(BROADCAST_NAV_ALLOWED_KEY, v)
+}
 const cachedPremium = readPremiumCache()
 if (cachedPremium !== null) isPremiumUser.value = !!cachedPremium
 const cachedDelegatedBc = readDelegatedBcCache()
 if (cachedDelegatedBc !== null) hasDelegatedBroadcast.value = !!cachedDelegatedBc
+const bNavCached = readBroadcastNavCache()
+const broadcastNavAllowed = ref(
+  bNavCached !== null ? bNavCached : readPremiumCache() === true || readDelegatedBcCache() === true,
+)
 
 /** «Рассылка» в таббаре видна всем авторизованным (маркетинг); реальный доступ в кабинете — Premium / делегирование. */
 const canSeeBroadcasts = computed(() => hasInitData.value)
@@ -127,7 +152,14 @@ function updateActiveIndicator(withSqueeze = false) {
   })
 }
 
-function onTap(item) {
+function goBroadcastGateSubscription() {
+  broadcastGateModalOpen.value = false
+  setDashboardSection('subscription')
+  const nav = router.push({ path: '/', query: { ...route.query, section: 'subscription' } })
+  if (nav && typeof nav.catch === 'function') nav.catch(() => {})
+}
+
+async function onTap(item) {
   if (item.to === 'support') {
     const url = 'https://t.me/Help_guard'
     const tg = window.Telegram?.WebApp
@@ -151,6 +183,15 @@ function onTap(item) {
     return
   }
   if (item.adminTab) {
+    if (item.adminTab === 'broadcasts') {
+      if (!broadcastNavGateReady.value) {
+        await loadPremiumFlag()
+      }
+      if (!broadcastNavAllowed.value) {
+        broadcastGateModalOpen.value = true
+        return
+      }
+    }
     setCabinetMode('owner')
     const nav = router.push({ path: item.to, query: { ...route.query, tab: item.adminTab } })
     if (nav && typeof nav.catch === 'function') nav.catch(() => {})
@@ -177,15 +218,23 @@ async function loadSpikeAlerts() {
   }
 }
 async function loadPremiumFlag() {
-  if (!hasInitData.value) return
+  if (!hasInitData.value) {
+    broadcastNavGateReady.value = true
+    return
+  }
   try {
     const me = await api.me()
     isPremiumUser.value = !!me?.is_premium
     writePremiumCache(!!me?.is_premium)
     hasDelegatedBroadcast.value = !!me?.has_delegated_broadcast
     writeDelegatedBcCache(!!me?.has_delegated_broadcast)
+    const allowed = computeBroadcastNavAllowed(me)
+    broadcastNavAllowed.value = allowed
+    writeBroadcastNavCache(allowed)
   } catch {
     //
+  } finally {
+    broadcastNavGateReady.value = true
   }
 }
 
@@ -275,6 +324,41 @@ watch(
       </button>
     </div>
   </nav>
+
+  <GuardTeleport>
+    <div
+      v-if="broadcastGateModalOpen"
+      class="fixed inset-0 z-[95000] flex items-end justify-center bg-[#0b0d14] p-4 pb-[max(1rem,calc(5.5rem+env(safe-area-inset-bottom,0px)))] pt-[max(0.75rem,env(safe-area-inset-top,0px))] md:items-center md:pb-8"
+      role="presentation"
+      @click.self="broadcastGateModalOpen = false"
+    >
+      <div
+        class="w-full max-w-sm rounded-2xl border border-white/10 bg-[#141820] p-5 text-center shadow-[0_24px_64px_-24px_rgba(0,0,0,0.92)] ring-1 ring-white/[0.04]"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="t('nav.broadcast_gate_title')"
+        @click.stop
+      >
+        <p class="text-[10px] font-extrabold uppercase tracking-[0.2em] text-amber-300/90">Premium</p>
+        <p class="mt-2 text-[18px] font-extrabold text-white">{{ t('nav.broadcast_gate_title') }}</p>
+        <p class="mt-2 text-[13px] leading-snug text-zinc-400">{{ t('nav.broadcast_gate_sub') }}</p>
+        <button
+          type="button"
+          class="mt-5 w-full rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 py-3 text-[15px] font-extrabold text-white shadow-[0_14px_36px_-14px_rgba(99,102,241,0.75)] transition hover:brightness-110 active:scale-[0.99]"
+          @click="goBroadcastGateSubscription"
+        >
+          {{ t('nav.broadcast_gate_cta') }}
+        </button>
+        <button
+          type="button"
+          class="mt-3 w-full rounded-lg py-2.5 text-[13px] font-semibold text-zinc-500 transition hover:text-zinc-300"
+          @click="broadcastGateModalOpen = false"
+        >
+          {{ t('premium_lock.cta_dismiss') }}
+        </button>
+      </div>
+    </div>
+  </GuardTeleport>
 </template>
 
 <style scoped>

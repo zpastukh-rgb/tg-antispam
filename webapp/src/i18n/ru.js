@@ -77,6 +77,10 @@ export default {
     partner: 'Партнёр',
     broadcast: 'Рассылка',
     support: 'Поддержка',
+    broadcast_gate_title: 'Рассылка доступна с Premium',
+    broadcast_gate_sub:
+      'Разовые рассылки, автокампании и автопост оформляются по подписке. Оформите Premium или получите делегированный доступ от владельца чата.',
+    broadcast_gate_cta: 'Получить Premium',
   },
   app: {
     api_base_missing_build:
@@ -96,7 +100,7 @@ export default {
     badge_aria: 'Premium-функция',
     badge_title: 'Доступно только в Premium',
     activating: 'Активируем…',
-    cta_trial: 'Попробовать 10 дней бесплатно',
+    cta_trial: '10 дней Premium бесплатно',
     cta_billing: 'Оформить Premium',
     cta_dismiss: 'Не сейчас',
     bullets: {
@@ -106,7 +110,8 @@ export default {
       l4: 'Умные капчи, расширенные словари и глобальная антиспам-база',
     },
     feature_desc: {
-      generic: 'Эта функция доступна в Premium-тарифе. Активируйте 10 дней бесплатно — без карты и без оплат.',
+      generic:
+        'Эта функция доступна в Premium. Можно включить полный Premium на 10 дней бесплатно — без карты и без оплат.',
       welcome_custom: 'Кастомное приветствие новичков с картинкой, кнопками и анти-RAID режимом — только в Premium.',
       rules_autopost: 'Автопостинг правил группы по расписанию, с картинкой и удалением старого пина — только в Premium.',
       granular_filters: 'Гранулярные фильтры медиа, упоминаний, кнопок и сообщений от каналов — только в Premium.',
@@ -247,6 +252,7 @@ export default {
       payment: { title: 'Подписка', sub: 'История операций и продление' },
       data: { title: 'Данные и статистика', sub: 'Экспорт PDF, хранение, очистка' },
       delegation: { title: 'Делегирование', sub: 'Доступы к вашим чатам без передачи владения' },
+      notifications: { title: 'Уведомления от бота', sub: 'Короткие отчёты и другие сообщения в ЛС' },
       security: { title: 'Безопасность', sub: 'Сессии, подтверждения и код' },
     },
     profile: {
@@ -288,6 +294,13 @@ export default {
       purge_button: 'Очистить',
       purge_done: 'История и статистика по вашим чатам очищены',
       purge_failed: 'Не удалось очистить данные',
+    },
+    notifications: {
+      menu_title: 'Уведомления от бота',
+      intro: 'Сообщения от Guard в личку с ботом. Ниже можно включить и настроить типы уведомлений — список будет пополняться.',
+      short_reports_title: 'Короткие отчёты',
+      short_reports_sub: 'Вступления и активные группы по расписанию',
+      saved: 'Настройки сохранены',
     },
     delegation: {
       title: 'Делегирование',
@@ -438,10 +451,10 @@ export default {
       open_tokens: 'Перейти к токенам',
       buy_premium: 'Получить Premium',
       premium_features_title: 'С Premium вы получаете',
-      premium_feature_ai: 'AI‑фильтр нового поколения',
-      premium_feature_autoban: 'Автобан и анти‑рейды',
-      premium_feature_support: 'Приоритетная поддержка',
-      premium_feature_stats: 'Расширенную статистику',
+      premium_bullet_1: 'Статистика защиты и отчёты по чатам',
+      premium_bullet_2: 'Рассылки и автопост по расписанию',
+      premium_bullet_3: 'Фильтры: ссылки, медиа, стоп-слова, капча для новичков',
+      premium_bullet_4: 'Анти-рейды, волны входа и авто-модерация',
       protection_status_no_chats: 'Защита отключена',
       protection_status_limbo: 'Защита не активна',
       col_deleted: 'УДАЛЕНО',
@@ -454,6 +467,8 @@ export default {
       protected_today_prefix: 'Защищено сегодня:',
       home_tab_premium: 'Premium защита',
       home_tab_updates: 'Обновления',
+      home_tab_social: 'Соцсети',
+      social_placeholder: 'Скоро здесь будут ссылки и новости Guard в соцсетях.',
       strengthen_protection: 'Усилить защиту',
       view_all_updates: 'Смотреть все обновления',
       aurum_heading: 'Токены AURUM',
@@ -478,6 +493,9 @@ export default {
       title: 'Статистика',
       period_sr_only: 'Период статистики',
       period_hint: 'Период для показателей ниже',
+      join_report_aria: 'Короткий отчёт Guard в личные сообщения раз в сутки',
+      join_report_hint:
+        'Короткий отчёт в ЛС: вступившие за период и активные группы. Выключите, чтобы не получать.',
       free_locked_banner:
         '😈 Guard: на Free счётчики скрыты — ниже нули. Подключите Premium, чтобы видеть реальную статистику защиты и роста.',
       col_deleted: 'Удалено',
@@ -649,16 +667,12 @@ export default {
       label: 'Реферальная программа',
     },
     sections: {
-      links_mentions: 'Фильтр ссылок и упоминаний',
-      panel: 'Панель в Telegram, базовая работа',
-      spam: 'Расширенная защита от спама',
-      autodel: 'Автоудаление',
-      bcast: 'Рассылки',
-      autopost: 'Автопостинг',
-      stats: 'Расширенная статистика',
-      reports_track: 'Отслеживание отчётов',
-      support: 'Приоритетная поддержка',
-      chat_limit: 'Макс. каналов / групп',
+      stats_reports: 'Статистика, рост, отчёты по чатам',
+      broadcast_autopost: 'Рассылки и автопост',
+      aurum_export: 'AURUM ✨, PDF, хранение истории',
+      filters_antiraid: 'Фильтры, анти-рейды, капча',
+      delegation_cmp: 'Делегирование админов Guard',
+      chat_limit: 'Группы и каналы (макс.)',
     },
     plans: {
       title: 'Тарифы Premium',
@@ -751,7 +765,8 @@ export default {
       compare_feature_col: 'Функция',
       referral_tier_free: '1 уровень',
       referral_tier_premium: '3 уровня',
-      limits_unlimited: 'Без лимитов',
+      limits_free: '3 / 3',
+      limits_premium: '20 / 20',
       cta_choose_premium_btn: 'Выбрать Premium',
       plan_choice_title: 'Выбор тарифа',
       show_all_plans: 'Показать все тарифы',
@@ -947,15 +962,15 @@ export default {
       },
     },
     trial: {
-      try_free_btn: 'Попробовать 10 дней бесплатно',
-      activate_btn: 'Активировать Premium на 10 дней бесплатно',
-      activating: 'Активируем…',
-      hint_landing: 'Без карты и оплат. После 10 дней — обратно на Free.',
-      activated_toast: 'Premium активирован на {n} дней',
-      already_active_toast: 'Premium-триал уже активен',
-      error_generic: 'Не удалось активировать триал. Попробуйте позже.',
-      error_already_used: 'Триал уже использован — доступна только подписка.',
-      error_window_closed: 'Окно активации триала закрылось.',
+      try_free_btn: '10 дней Premium бесплатно',
+      activate_btn: 'Включить Premium на 10 дней без оплаты',
+      activating: 'Подключаем…',
+      hint_landing: 'Без карты и оплат. После 10 дней — снова Free.',
+      activated_toast: 'Premium подключён на {n} дней',
+      already_active_toast: 'Бесплатные 10 дней Premium уже активны',
+      error_generic: 'Не удалось включить бесплатный период. Попробуйте позже.',
+      error_already_used: 'Бесплатный период уже использован — доступна только подписка.',
+      error_window_closed: 'Время для бесплатного подключения истекло.',
       error_active_subscription: 'У вас уже есть активная подписка Premium.',
       error_no_first_start: 'Сначала запустите бота через /start.',
     },
@@ -1043,8 +1058,10 @@ export default {
       mentions_allowed: 'Упоминания разрешены',
       media_forbidden: 'Медиа запрещено',
       media_allowed: 'Медиа разрешено',
+      media_captcha: 'Медиа: как действие чата (режим «капча»)',
       buttons_forbidden: 'Кнопки запрещены',
       buttons_allowed: 'Кнопки разрешены',
+      buttons_captcha: 'Кнопки: как действие чата (режим «капча»)',
       buttons_granular: 'Запрещены: {list}',
       channel_posts_allowed: 'Сообщения от каналов разрешены',
       channel_posts_ban: 'Режутся + канал-источник банится',
@@ -1054,6 +1071,7 @@ export default {
     policy: {
       allow: 'Разрешено',
       forbid: 'Запрещено',
+      captcha: 'Капча',
     },
     links_modal: {
       title: 'Ссылки — политика Guard',
@@ -1172,10 +1190,6 @@ export default {
       guard_paused: '⏸ Guard на паузе',
       filters_section: 'Фильтры',
       filters_info_aria: 'Информация по фильтрам',
-      filters_intro:
-        'Настройки открываются в отдельных окнах — так спокойнее крутить режимы и белые списки без простыни кнопок.',
-      filters_premium_note_free:
-        'Плитки «Ссылки», «Упоминания» и остальные открываются без Premium — тариф здесь их не режет. Метки 🔒 Premium бывают у отдельных блоков ниже по экрану или внутри некоторых окон.',
       filter_links: 'Ссылки',
       filter_mentions: 'Упоминания',
       filter_media: 'Медиа',
@@ -1200,6 +1214,19 @@ export default {
       mentions_modal_body:
         'Юзернеймы ({\'@\'}username) и текстовые упоминания. «Запрещено» — удаляются по общему действию (удалить / мут / бан).',
       mentions_modal_hint: 'Выбери что считать упоминанием. Каждый переключатель работает независимо.',
+      mentions_modal_hint_free:
+        'Первые три типа (пользователи, боты, каналы) — на Free; остальные и массовые — Premium. Модалка Premium открывается только при нажатии на переключатель.',
+      mentions_legacy_master: 'Запрещать любые упоминания ({\'@\'}, хештеги, email…)',
+      mentions_legacy_hint:
+        'Выключи — разрешаем {\'@\'} и прочее. Включи — один общий режим, как раньше.',
+      filter_legacy_section_title: 'Базовый режим (Free)',
+      filter_legacy_media_hint:
+        'Три режима для всего медиа сразу. Отдельно фото, стикеры, голос и т.д. — блок ниже, с Premium.',
+      filter_legacy_buttons_hint:
+        'Три режима для всех кнопок сразу. Разбор по типам кнопок — Premium.',
+      filter_granular_premium_hint:
+        'Детализация по типам — с Premium подписки владельца этого чата (тап по переключателю откроет экран Premium).',
+      channel_posts_legacy_master: 'Резать сообщения от имени канала/чата',
       mention_kinds: {
         users: 'Упоминания пользователей',
         bots: 'Упоминания ботов',
@@ -1260,6 +1287,10 @@ export default {
       },
       media_modal_title: '🖼 Медиа и стикеры',
       media_modal_hint: 'Выбери какие типы медиа удалять. Переключатели работают независимо.',
+      media_modal_captcha_banner:
+        'Одна настройка на весь список: после запрета любого выбранного типа медиа бот может отправить капчу.',
+      media_modal_premium_rows_hint:
+        'С GIF и ниже — только Premium (золотая обводка строки; тап откроет оформление). Фото, видео и стикеры — на Free.',
       media_kinds: {
         photos: 'Фото',
         videos: 'Видео',
@@ -1288,8 +1319,12 @@ export default {
       buttons_modal_title: '🔘 Сообщения с кнопками',
       buttons_modal_body: 'Inline-кнопки вроде «перейти», «бонус», «вступить».',
       buttons_modal_hint: 'Выбери какие типы кнопок Guard будет считать запрещёнными. Переключатели работают независимо.',
+      buttons_modal_hint_free:
+        'Первые три типа — на Free. С switch-inline и ниже, а также «массовые» — Premium; тап по золотой строке откроет оформление.',
       button_mass_threshold_label: 'Удалять, если кнопок ≥',
       channel_posts_modal_hint: 'Выбери, какие источники Guard будет считать запрещёнными. Переключатели работают независимо. Доверенные {\'@\'}username — ниже.',
+      channel_posts_modal_hint_free:
+        'Первые три пункта — на Free. Форварды и прочее — Premium; тап по золотой строке или переключателю откроет оформление.',
       channel_post_kinds: {
         channels: 'От чужих каналов',
         groups: 'От чужих групп',
@@ -1320,8 +1355,6 @@ export default {
       hard_dict_title: '🚫 Guard: Жёсткий словарь',
       hard_dict_desc_1:
         'Режет мат и искажённые формы по корням, а также подозрительные темы: подработки-скам, казино/ставки и политические обсуждения.',
-      hard_dict_desc_2:
-        'У фильтров «Религия» и «Эзотерика» есть режим «только объявления»: не трогает обычный разговор, режет услуги, цены, призыв в лс/канал и похожий спам.',
       info_stopwords_aria: 'Информация по стоп-словам',
       info_hard_dict_aria: 'Информация по жёсткому словарю',
       remove_word_aria: 'Удалить',
@@ -1438,9 +1471,9 @@ export default {
       pick_chat_for_cleanup: 'Выберите чат выше, чтобы запустить очистку.',
       copy_settings_title: '📤 Перенести настройки',
       copy_settings_body:
-        'Скопировать все настройки защиты из текущего чата в выбранный или сразу во все чаты.',
-      copy_select_placeholder: 'Выберите чат',
-      copy_all_chats: 'Во все чаты',
+        'Скопировать все настройки защиты из текущего чата в выбранную свою группу или сразу во все свои группы (без делегированных чатов и каналов).',
+      copy_select_placeholder: 'Выберите группу',
+      copy_all_chats: 'Во все свои группы',
       copy_transfer: 'Перенести',
       saving_dots: 'Сохранение…',
       loading_chat_settings: 'Загружаю настройки чата…',
@@ -1583,7 +1616,7 @@ export default {
       cleanup_failed: 'Не удалось запустить очистку',
       pick_other_chat: 'Выберите другой чат',
       no_targets_copy: 'Нет других чатов для переноса',
-      settings_copied_all: 'Настройки перенесены во все чаты ({count})',
+      settings_copied_all: 'Настройки перенесены во все выбранные группы ({count})',
       settings_copied: 'Настройки перенесены',
       template_name_empty: 'Имя не может быть пустым',
       template_name_saved: 'Название шаблона сохранено',
@@ -1645,7 +1678,7 @@ export default {
       select_link: 'Выдели текст, затем нажми «Ссылка».',
     },
     confirm: {
-      copy_settings_all: 'Перенести текущие настройки во все чаты ({count})?',
+      copy_settings_all: 'Перенести текущие настройки во все свои группы ({count})?',
     },
     pin: {
       need_four: 'Введите 4 цифры',
@@ -1734,7 +1767,7 @@ export default {
       no_drafts: 'Черновиков пока нет.',
       autosend_title: 'Автоотправка в чат',
       autosend_hint:
-        'Только при включённом ВКЛ выше. Два независимых счётчика — «любой исход фильтра» и «только наказание».',
+        'Только если шаблон правил выше включён (ВКЛ). Первый счётчик — каждое срабатывание фильтра (в т.ч. «мягкий» исход без удаления). Второй — только если сообщение реально удалено или выдан мут/бан. Если у вас везде жёсткое наказание, оба счётчика почти совпадут; разница важна при предупреждении/наблюдении без бана.',
       filter_any: 'Любое срабатывание фильтра',
       every_n_events: 'Каждые N таких событий',
       on_punish: 'На наказание (delete / мут / бан)',
@@ -1819,6 +1852,17 @@ export default {
       no: 'НЕТ',
       note:
         'Нужны права бота «блокировать» участников. Если не смогу ограничить — всё равно пришлю капчу, но писать смогут до прохождения.',
+    },
+    filter_media_captcha_settings_modal: {
+      title: 'Капча при нарушении медиа — настройки',
+      enable: 'Включить капчу после запрещённого медиа',
+      ttl: 'Время на ответ (мин)',
+      kind: 'Тип проверки',
+      prefer_dm: 'Сначала в личку боту',
+      yes: 'ДА',
+      no: 'НЕТ',
+      note:
+        'Отдельно от капчи при входе. После удаления запрещённого фото/стикера/… бот ограничит отправку и предложит проверку. Нужны права ограничивать участников.',
     },
     antispam_list_modal: {
       title: 'Антиспам база — настройки',
@@ -1988,7 +2032,20 @@ export default {
     invited_total: 'Всего:',
     paying: 'Оплачивают:',
     transfer_cta: 'Партнёрские → AURUM ✨',
+    transfer_confirm_title: 'Перевод в AURUM',
+    transfer_confirm_body:
+      'Перевести партнёрские ⚡ в AURUM ✨? Это действие нельзя отменить.',
+    transfer_confirm_cancel: 'Отмена',
+    transfer_confirm_ok: 'Перевести',
     share: 'Поделиться',
+    payout_modal_title: 'Вывод средств',
+    payout_modal_sub:
+      'Заявка в RUB обрабатывается вручную; минимум, удержание комиссий и график — в разделе «Документация».',
+    payout_modal_close_aria: 'Закрыть окно вывода',
+    payout_compact_title: 'Вывод в рублях',
+    available_payout_short: 'Сейчас доступно:',
+    payout_compact_hint: 'Откройте форму: сумма, СБП или карта, реквизиты и ФИО.',
+    payout_open_modal: 'Запросить вывод',
     available_payout: 'Доступно к выводу:',
     pending_unlock: 'Ожидает разблокировки (комиссии до ~7 дней после оплаты реферала):',
     in_requests: 'В заявках:',
@@ -2007,6 +2064,8 @@ export default {
     refs_mode_active: 'Самые активные',
     refs_loading: 'Секундочку…',
     refs_empty: 'Рефералы отсутствуют.',
+    refs_tier_hint:
+      'На тарифе Free начисляется только 1-й уровень; уровни 2 и 3 — при активной подписке Premium у вас.',
     refs_status_paying: 'Платит',
     refs_status_free: 'Без оплаты',
     refs_stats_line: 'Оплат: {p} · Токены ИИ: {t} ⚡',
@@ -2016,6 +2075,8 @@ export default {
     docs_lvl_1: 'Уровень 1: 15%',
     docs_lvl_2: 'Уровень 2: 10%',
     docs_lvl_3: 'Уровень 3: 5%',
+    docs_free_tiers:
+      '🎟 На тарифе Free доступен только 1-й уровень (прямые рефералы). Уровни 2 и 3 не начисляются, пока у вас не активна подписка Premium.',
     docs_payouts_note:
       'Выплаты выполняются вручную в RUB. Заявки принимаются раз в неделю (по понедельникам), чтобы снизить риск мошенничества.',
     docs_reward_for: '💸 Вознаграждение начисляется за оплату подписки и за покупку токенов ИИ.',
@@ -2039,6 +2100,23 @@ export default {
     docs_counts_yes: '✅ Начисляется: оплата подписки, покупка токенов ИИ.',
     docs_counts_note:
       'ℹ️ В спорных или подозрительных случаях начисления могут быть пересмотрены администратором.',
+    tier_net_title: 'Ваша сеть',
+    tier_net_l1: 'L1 (приглашены лично): {n}',
+    tier_net_l2: 'L2 (рефералы ваших рефералов): {n}',
+    tier_net_l3: 'L3 (третий уровень): {n}',
+    tier_net_total: '└ Всего в сети: {n} чел.',
+    tier_accruals_title: 'Подтверждённые начисления',
+    tier_accruals_sub:
+      'Строки комиссий без холдинга или уже включённые в выплату (статусы «доступно» или «выплачено»). Суммы по оплатам рефералов.',
+    tier_level_confirmed_line: '├ L{level} · {pct}% · {pay} оплат на {rub} ₽ → {tok} ⚡',
+    tier_accruals_total: '└ Итого по этим строкам: {tok} ⚡',
+    tier_pending_title: 'В ожидании подтверждения',
+    tier_pending_sub: 'Комиссии в статусе ожидания (обычно до ближайшего понедельника после оплаты).',
+    tier_level_pending_line: '├ L{level} · {pct}% · {pay} оплат на {rub} ₽ → {tok} ⚡',
+    tier_pending_sum: '└ Сводно в ожидании: {pay} оплат на {rub} ₽ → будет {tok} ⚡ после разблокировки.',
+    tier_available_title: 'Доступно к использованию',
+    tier_available_hint: 'Партнёрские токены ⚡ уже на счёте (курс как в блоке выплат ниже); можно перевести в AURUM.',
+    tier_quick_stats: 'По ссылке записано как приглашённых: {inv}; с оплатой: {pay}.',
   },
   subscription: {
     status_title: 'Статус подписки',

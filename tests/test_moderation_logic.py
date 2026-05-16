@@ -226,15 +226,28 @@ def test_plain_emoji_does_not_false_positive_on_punctuation():
         assert matched_media_kind(_StubMessage(text=txt), rule) is None
 
 
-def test_any_granular_media_enabled_includes_plain_emoji():
-    from app.handlers.moderation import any_granular_media_enabled
+def test_matched_media_kind_free_ignores_premium_granules():
+    """Без Premium учитываются только фото/видео/стикеры; анимации и остальное — нет."""
+    from app.handlers.moderation import matched_media_kind
 
-    assert any_granular_media_enabled(_StubRule(filter_media_plain_emoji=True)) is True
+    rule_anim = _StubRule(filter_media_animations=True)
+    assert matched_media_kind(_StubMessage(animation={"file_id": "a"}), rule_anim, owner_premium_features=False) is None
+    assert matched_media_kind(_StubMessage(animation={"file_id": "a"}), rule_anim, owner_premium_features=True) == "animations"
+
+    rule_st = _StubRule(filter_media_stickers=True)
+    assert (
+        matched_media_kind(_StubMessage(sticker={"file_id": "s"}), rule_st, owner_premium_features=False) == "stickers"
+    )
 
 
-# -------------------------------------------------------------------------
-# Гранулярные тогглы по типу упоминаний (filter_mention_*).
-# -------------------------------------------------------------------------
+def test_any_granular_media_free_tier():
+    from app.handlers.moderation import any_granular_media_free_tier
+
+    assert any_granular_media_free_tier(_StubRule()) is False
+    assert any_granular_media_free_tier(_StubRule(filter_media_photos=True)) is True
+    assert any_granular_media_free_tier(_StubRule(filter_media_animations=True)) is False
+
+
 
 
 class _MentionRule:
@@ -539,6 +552,34 @@ def test_matched_button_kind_web_app():
     assert matched_button_kind(msg, _ButtonRule()) is None
 
 
+def test_matched_button_kind_switch_inline_ignored_without_premium():
+    """На FREE гранула switch-inline в правиле не должна матчиться."""
+    from app.handlers.moderation import matched_button_kind
+
+    msg = _BtnMessage(inline_keyboard=[[_Btn(switch_inline_query="x")]])
+    rule = _ButtonRule(filter_button_switch_inline=True)
+    assert matched_button_kind(msg, rule, owner_premium_features=False) is None
+
+
+def test_matched_button_kind_reply_ignored_without_premium():
+    from app.handlers.moderation import matched_button_kind
+
+    msg = _BtnMessage(keyboard=[[object()]])
+    assert (
+        matched_button_kind(msg, _ButtonRule(filter_button_reply=True), owner_premium_features=False) is None
+    )
+
+
+def test_matched_button_kind_mass_ignored_without_premium():
+    from app.handlers.moderation import matched_button_kind
+
+    row = [_Btn(callback_data=f"c{i}") for i in range(5)]
+    msg = _BtnMessage(inline_keyboard=[row])
+    rule = _ButtonRule(filter_button_mass_enabled=True, filter_button_mass_threshold=3)
+    assert matched_button_kind(msg, rule) == "mass"
+    assert matched_button_kind(msg, rule, owner_premium_features=False) is None
+
+
 def test_matched_button_kind_switch_inline_variants():
     from app.handlers.moderation import matched_button_kind
 
@@ -731,6 +772,34 @@ def test_matched_channel_post_kind_no_username_priority():
     # Если no_username выкл — срабатывает channels.
     rule_only_channels = _ChannelPostRule(filter_channel_post_channels=True)
     assert matched_channel_post_kind(msg, rule_only_channels, CHAT_ID) == "channels"
+
+
+def test_matched_channel_post_kind_no_username_free_tier_falls_through_to_channels():
+    """Без Premium флаг no_username игнорируется — срабатывает channels."""
+    from app.handlers.moderation import matched_channel_post_kind
+
+    msg = _CPMessage(sender_chat=_SenderChat(id=-100444, type="channel", username=None))
+    rule_both = _ChannelPostRule(filter_channel_post_channels=True, filter_channel_post_no_username=True)
+    assert matched_channel_post_kind(msg, rule_both, CHAT_ID, owner_premium_features=False) == "channels"
+
+
+def test_matched_channel_post_kind_fwd_requires_premium():
+    from app.handlers.moderation import matched_channel_post_kind
+
+    fwd = _SenderChat(id=-100555, type="channel", username="newschan")
+    msg = _CPMessage(forward_from_chat=fwd)
+    rule = _ChannelPostRule(filter_channel_post_fwd_channel=True)
+    assert matched_channel_post_kind(msg, rule, CHAT_ID) == "fwd_channel"
+    assert matched_channel_post_kind(msg, rule, CHAT_ID, owner_premium_features=False) is None
+
+
+def test_matched_channel_post_kind_hidden_requires_premium():
+    from app.handlers.moderation import matched_channel_post_kind
+
+    msg = _CPMessage(forward_origin=_ForwardOrigin(type="hidden_user", chat=None))
+    rule = _ChannelPostRule(filter_channel_post_hidden_fwd=True)
+    assert matched_channel_post_kind(msg, rule, CHAT_ID) == "hidden_fwd"
+    assert matched_channel_post_kind(msg, rule, CHAT_ID, owner_premium_features=False) is None
 
 
 def test_matched_channel_post_kind_fwd_channel_only_when_no_sender_chat():

@@ -734,6 +734,8 @@ class Verdict:
     mute_minutes: int = 0
     log_it: bool = True
     log_extra: str = ""
+    # После удаления нарушившего медиа — запустить капчу по filter_media_captcha_* (не join_captcha).
+    filter_media_captcha_after: bool = False
 
 
 # =========================================================
@@ -1281,12 +1283,15 @@ def _has_plain_emoji(message: Message) -> bool:
     return False
 
 
-def matched_media_kind(message: Message, rule) -> str | None:
+def matched_media_kind(message: Message, rule, *, owner_premium_features: bool = True) -> str | None:
     """
     Какой именно тип медиа в сообщении запрещён правилом (гранулярные тогглы).
     Возвращает имя типа ('photos' | 'videos' | 'stickers' | ...) или None.
-    Используется наряду с общим `filter_media_mode` — если ни один гранул не включён,
-    решает старый общий режим.
+    Если включён хотя бы один гранулярный тумблер медиа, правило решают только они;
+    иначе в модерации используется legacy `filter_media_mode`.
+
+    Без Premium у владельца чата учитываются только три базовых типа: фото, видео, стикеры
+    (остальные гранулы в UI закрыты Premium и здесь игнорируются).
     """
     if getattr(rule, "filter_media_photos", False) and getattr(message, "photo", None):
         return "photos"
@@ -1294,6 +1299,8 @@ def matched_media_kind(message: Message, rule) -> str | None:
         return "videos"
     if getattr(rule, "filter_media_stickers", False) and getattr(message, "sticker", None):
         return "stickers"
+    if not owner_premium_features:
+        return None
     if getattr(rule, "filter_media_animations", False) and getattr(message, "animation", None):
         return "animations"
     if getattr(rule, "filter_media_voice", False) and getattr(message, "voice", None):
@@ -1321,6 +1328,15 @@ def any_granular_media_enabled(rule) -> bool:
         or getattr(rule, "filter_media_audio", False)
         or getattr(rule, "filter_media_custom_emoji", False)
         or getattr(rule, "filter_media_plain_emoji", False)
+    )
+
+
+def any_granular_media_free_tier(rule) -> bool:
+    """Базовые гранулы медиа без подписки: только фото / видео / стикеры."""
+    return bool(
+        getattr(rule, "filter_media_photos", False)
+        or getattr(rule, "filter_media_videos", False)
+        or getattr(rule, "filter_media_stickers", False)
     )
 
 
@@ -1396,18 +1412,43 @@ def any_granular_mention_enabled(rule) -> bool:
     )
 
 
-async def matched_mention_kind(message: Message, rule, *, bot=None) -> str | None:
+def any_granular_mention_free_tier(rule) -> bool:
+    """FREE: @юзеры, @боты, упоминания каналов/групп (гранулы без Premium)."""
+    return bool(
+        getattr(rule, "filter_mention_users", False)
+        or getattr(rule, "filter_mention_bots", False)
+        or getattr(rule, "filter_mention_channels", False)
+    )
+
+
+async def matched_mention_kind(
+    message: Message,
+    rule,
+    *,
+    bot=None,
+    owner_premium_features: bool = True,
+) -> str | None:
     """
     Возвращает имя запрещённого типа упоминания/тега ('users'|'bots'|'channels'|'text_mention'|
     'hashtags'|'bot_commands'|'cashtags'|'emails'|'mass'), или None если ничего не подходит.
+    Без Premium в чате учитываются фильтры «пользователи», «боты» и «каналы/группы»;
+    остальные гранулы в UI закрыты Premium и здесь игнорируются.
     """
+    def _flag(name: str) -> bool:
+        v = bool(getattr(rule, name, False))
+        if owner_premium_features:
+            return v
+        if name in ("filter_mention_users", "filter_mention_bots", "filter_mention_channels"):
+            return v
+        return False
+
     text = message.text or ""
     caption = message.caption or ""
     text_ents = list(getattr(message, "entities", None) or [])
     caption_ents = list(getattr(message, "caption_entities", None) or [])
 
     # 1) Массовые упоминания: считаем суммарно по text + caption.
-    if getattr(rule, "filter_mention_mass_enabled", False):
+    if _flag("filter_mention_mass_enabled"):
         try:
             threshold = int(getattr(rule, "filter_mention_mass_threshold", 5) or 5)
         except (TypeError, ValueError):
@@ -1431,33 +1472,33 @@ async def matched_mention_kind(message: Message, rule, *, bot=None) -> str | Non
                 # @username — определяем тип (бот/канал/юзер).
                 uname = _slice_utf16(src_text, off, ln)
                 kind = await _classify_username(uname, bot)
-                if kind == "bot" and getattr(rule, "filter_mention_bots", False):
+                if kind == "bot" and _flag("filter_mention_bots"):
                     return "bots"
-                if kind == "channel" and getattr(rule, "filter_mention_channels", False):
+                if kind == "channel" and _flag("filter_mention_channels"):
                     return "channels"
-                if kind == "user" and getattr(rule, "filter_mention_users", False):
+                if kind == "user" and _flag("filter_mention_users"):
                     return "users"
             elif et == "text_mention":
                 # Премиум-юзеры без юзернейма (или явное text_mention).
                 u = getattr(e, "user", None)
-                if u and bool(getattr(u, "is_bot", False)) and getattr(rule, "filter_mention_bots", False):
+                if u and bool(getattr(u, "is_bot", False)) and _flag("filter_mention_bots"):
                     return "bots"
-                if getattr(rule, "filter_mention_text_mention", False):
+                if _flag("filter_mention_text_mention"):
                     return "text_mention"
             elif et == "hashtag":
-                if getattr(rule, "filter_mention_hashtags", False):
+                if _flag("filter_mention_hashtags"):
                     return "hashtags"
             elif et == "bot_command":
                 # Запрещаем только команды чужим ботам — содержат '@'.
-                if getattr(rule, "filter_mention_bot_commands", False):
+                if _flag("filter_mention_bot_commands"):
                     cmd = _slice_utf16(src_text, off, ln)
                     if "@" in (cmd or ""):
                         return "bot_commands"
             elif et == "cashtag":
-                if getattr(rule, "filter_mention_cashtags", False):
+                if _flag("filter_mention_cashtags"):
                     return "cashtags"
             elif et == "email":
-                if getattr(rule, "filter_mention_emails", False):
+                if _flag("filter_mention_emails"):
                     return "emails"
 
     return None
@@ -1507,10 +1548,22 @@ def _iter_inline_buttons(message: Message):
                 yield btn
 
 
-def matched_button_kind(message: Message, rule) -> str | None:
+def any_granular_button_free_tier(rule) -> bool:
+    """Базовые гранулы кнопок без подписки: URL / callback / Mini App."""
+    return bool(
+        getattr(rule, "filter_button_url", False)
+        or getattr(rule, "filter_button_callback", False)
+        or getattr(rule, "filter_button_web_app", False)
+    )
+
+
+def matched_button_kind(message: Message, rule, *, owner_premium_features: bool = True) -> str | None:
     """
     Возвращает имя запрещённого типа кнопок ('url'|'callback'|'web_app'|'switch_inline'|
     'login'|'pay'|'copy_text'|'reply'|'mass') или None.
+
+    Без Premium у владельца чата учитываются только три базовых типа inline-кнопок
+    (URL / callback / Mini App); reply, массовые и остальные гранулы игнорируются.
     """
     rm = getattr(message, "reply_markup", None)
     if not rm:
@@ -1518,14 +1571,14 @@ def matched_button_kind(message: Message, rule) -> str | None:
 
     # 1) Reply-клавиатура (keyboard внизу экрана).
     reply_kb = getattr(rm, "keyboard", None)
-    if reply_kb and getattr(rule, "filter_button_reply", False):
+    if owner_premium_features and reply_kb and getattr(rule, "filter_button_reply", False):
         # Считаем непустой keyboard уже признаком.
         for row in reply_kb:
             if row and any(b for b in row if b is not None):
                 return "reply"
 
     # 2) Массовость: считаем все кнопки в inline_keyboard суммарно.
-    if getattr(rule, "filter_button_mass_enabled", False):
+    if owner_premium_features and getattr(rule, "filter_button_mass_enabled", False):
         try:
             threshold = int(getattr(rule, "filter_button_mass_threshold", 5) or 5)
         except (TypeError, ValueError):
@@ -1543,6 +1596,8 @@ def matched_button_kind(message: Message, rule) -> str | None:
             return "callback"
         if getattr(btn, "web_app", None) and getattr(rule, "filter_button_web_app", False):
             return "web_app"
+        if not owner_premium_features:
+            continue
         # switch_inline_query / switch_inline_query_current_chat / switch_inline_query_chosen_chat
         if (
             getattr(btn, "switch_inline_query", None) is not None
@@ -1603,17 +1658,28 @@ def _forward_origin_is_hidden(message: Message) -> bool:
     return t == "hidden_user"
 
 
-def matched_channel_post_kind(message: Message, rule, chat_id: int) -> str | None:
+def any_granular_channel_post_free_tier(rule) -> bool:
+    """Базовые гранулы без подписки: чужие каналы / группы / анонимные админы."""
+    return bool(
+        getattr(rule, "filter_channel_post_channels", False)
+        or getattr(rule, "filter_channel_post_groups", False)
+        or getattr(rule, "filter_channel_post_anon_admin", False)
+    )
+
+
+def matched_channel_post_kind(
+    message: Message, rule, chat_id: int, *, owner_premium_features: bool = True
+) -> str | None:
     """
     Определяет, какому из гранулярных тогглов соответствует сообщение.
     Возвращает 'channels'|'groups'|'anon_admin'|'fwd_channel'|'fwd_group'|
     'no_username'|'hidden_fwd' или None.
 
-    Порядок важен: сначала более «жёсткие» правила (channels, groups, anon_admin),
-    затем форварды, затем «без username» / «hidden».
+    Без Premium учитываются только три базовых гранула (channels/groups/anon_admin);
+    форварды, hidden и «без @» — только с Premium.
     """
-    # 1) Hidden forward — не зависит от sender_chat и от forward chat.
-    if getattr(rule, "filter_channel_post_hidden_fwd", False):
+    # 1) Hidden forward — Premium.
+    if owner_premium_features and getattr(rule, "filter_channel_post_hidden_fwd", False):
         if _forward_origin_is_hidden(message):
             return "hidden_fwd"
 
@@ -1632,8 +1698,7 @@ def matched_channel_post_kind(message: Message, rule, chat_id: int) -> str | Non
 
     # 3) От чужого канала (sender_chat).
     if sc_type == "channel":
-        # «Без @username» — отдельный тоггл, имеет приоритет (более узкий).
-        if not sc_username and getattr(rule, "filter_channel_post_no_username", False):
+        if owner_premium_features and (not sc_username) and getattr(rule, "filter_channel_post_no_username", False):
             return "no_username"
         if getattr(rule, "filter_channel_post_channels", False):
             return "channels"
@@ -1643,15 +1708,15 @@ def matched_channel_post_kind(message: Message, rule, chat_id: int) -> str | Non
         if getattr(rule, "filter_channel_post_groups", False):
             return "groups"
 
-    # 5) Форварды — учитываются ТОЛЬКО если sender_chat пустой (т.е. пересылку сделал
-    # обычный пользователь, а не «от имени канала/группы»).
+    # 5) Форварды и остальное — только Premium.
+    if not owner_premium_features:
+        return None
     if sc is None:
         fwd = _forward_chat(message)
         if fwd is not None:
             fwd_type = str(getattr(fwd, "type", "") or "").lower()
             fwd_username = str(getattr(fwd, "username", "") or "").strip().lstrip("@").lower()
             if fwd_type == "channel":
-                # «Без @username» приоритетнее.
                 if not fwd_username and getattr(rule, "filter_channel_post_no_username", False):
                     return "no_username"
                 if getattr(rule, "filter_channel_post_fwd_channel", False):
@@ -2228,8 +2293,13 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
             if sc_action not in ("delete", "ban"):
                 sc_action = "delete"
 
-            if owner_premium_features and any_granular_channel_post_enabled(rule):
-                _cp_kind = matched_channel_post_kind(message, rule, chat_id)
+            _granular_cp_applies = (owner_premium_features and any_granular_channel_post_enabled(rule)) or (
+                (not owner_premium_features) and any_granular_channel_post_free_tier(rule)
+            )
+            if _granular_cp_applies:
+                _cp_kind = matched_channel_post_kind(
+                    message, rule, chat_id, owner_premium_features=owner_premium_features
+                )
                 if _cp_kind:
                     _cp_target = (
                         f"sender_chat:@{sc_username}"
@@ -2288,9 +2358,8 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     # Legacy filter_links + filter_links_mode из Mini App (при «разрешить ссылки» filter_links=False).
     filter_links = _bool_or_default(getattr(rule, "filter_links", True), True)
     filter_mentions = bool(getattr(rule, "filter_mentions", True))
-    # legacy filter_media_mode больше не определяет поведение — гранулярные тогглы заменили его.
-    # Переменная оставлена для возможной диагностики/логирования.
-    _media_mode = getattr(rule, "filter_media_mode", "allow")  # noqa: F841  (legacy, read for logging)
+    _media_mode_raw = getattr(rule, "filter_media_mode", "allow") or "allow"
+    _media_mode = str(_media_mode_raw).strip().lower()
     _buttons_mode = getattr(rule, "filter_buttons_mode", "allow")
     filter_buttons = _buttons_mode in ("forbid", "captcha")
     anti_edit = bool(getattr(rule, "anti_edit", True))
@@ -2377,12 +2446,19 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
             return v_link
 
     # Упоминания:
-    # 1) Если включён хотя бы один гранулярный тоггл (filter_mention_*) — работают только они.
-    # 2) Иначе — legacy filter_mentions (булев флаг «все @»). Сохраняем для чатов, где
-    #    пользователь ещё не открывал новую модалку. При первом её открытии фронт тихо
-    #    сбрасывает filter_mentions=False, и далее поведение определяется только гранулами.
-    if owner_premium_features and any_granular_mention_enabled(rule):
-        _mention_kind = await matched_mention_kind(message, rule, bot=getattr(message, "bot", None))
+    # 1) При Premium — любые включённые гранулы filter_mention_*.
+    # 2) Без Premium — только гранулы «пользователи» и «боты» (остальные тогглы в БД не учитываем).
+    # 3) Иначе — legacy filter_mentions («все @»), пока чат не перешёл на гранулы.
+    _granular_mention_applies = (owner_premium_features and any_granular_mention_enabled(rule)) or (
+        (not owner_premium_features) and any_granular_mention_free_tier(rule)
+    )
+    if _granular_mention_applies:
+        _mention_kind = await matched_mention_kind(
+            message,
+            rule,
+            bot=getattr(message, "bot", None),
+            owner_premium_features=owner_premium_features,
+        )
         if _mention_kind:
             _mk_human = {
                 "users": "упоминание пользователя",
@@ -2606,34 +2682,56 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
             )
 
     # -------------------------------------------------
-    # 4) media / стикеры — только гранулярные тогглы.
-    # Поля: filter_media_photos / videos / stickers / animations / voice / video_notes / audio /
-    #       custom_emoji / plain_emoji.
-    # Legacy filter_media_mode больше не используется в модерации: модалка «Медиа» при первом
-    # открытии очищает его до 'allow', а пользователь сам выбирает что запрещать.
+    # 4) Медиа: при Premium и хотя бы одном грануле — полный набор filter_media_*.
+    # Без Premium — только базовые гранулы (фото/видео/стикеры), см. any_granular_media_free_tier.
+    # Иначе — legacy filter_media_mode (allow|forbid|captcha): так FREE и старые чаты
+    # без открытой модалки сохраняют «режем всё медиа», пока пользователь не уйдёт в гранулы с Premium.
     # -------------------------------------------------
-    _granular_kind = matched_media_kind(message, rule) if owner_premium_features else None
-    if _granular_kind:
+    _granular_media_applies = (owner_premium_features and any_granular_media_enabled(rule)) or (
+        (not owner_premium_features) and any_granular_media_free_tier(rule)
+    )
+    if _granular_media_applies:
+        _granular_kind = matched_media_kind(message, rule, owner_premium_features=owner_premium_features)
+        if _granular_kind:
+            media_action = action
+            _kind_human = {
+                "photos": "фото",
+                "videos": "видео",
+                "stickers": "стикеры",
+                "animations": "GIF/анимации",
+                "voice": "голосовые",
+                "video_notes": "кружки",
+                "audio": "аудиофайлы",
+                "custom_emoji": "премиум-смайлики",
+                "plain_emoji": "смайлики",
+            }.get(_granular_kind, _granular_kind)
+            fm_captcha = bool(getattr(rule, "filter_media_captcha_enabled", False))
+            out_action = "delete" if fm_captcha else media_action
+            return Verdict(
+                True,
+                _with_newbie_reason(f"media_{_granular_kind}", newbie_win),
+                f"медиа: {_kind_human}",
+                out_action,
+                mute_minutes=mute_min,
+                log_it=log_enabled,
+                log_extra=("anti-edit" if edited else ""),
+                filter_media_captcha_after=fm_captcha,
+            )
+        # granular модель уже включена, но это сообщение ни под один гранулярный тип не попало —
+        # не смешиваем с legacy bulk filter_media_mode.
+    elif _media_mode in ("forbid", "captcha") and has_media(message):
         media_action = action
-        _kind_human = {
-            "photos": "фото",
-            "videos": "видео",
-            "stickers": "стикеры",
-            "animations": "GIF/анимации",
-            "voice": "голосовые",
-            "video_notes": "кружки",
-            "audio": "аудиофайлы",
-            "custom_emoji": "премиум-смайлики",
-            "plain_emoji": "смайлики",
-        }.get(_granular_kind, _granular_kind)
+        fm_captcha = bool(getattr(rule, "filter_media_captcha_enabled", False)) and _media_mode == "captcha"
+        out_action = "delete" if fm_captcha else media_action
         return Verdict(
             True,
-            _with_newbie_reason(f"media_{_granular_kind}", newbie_win),
-            f"медиа: {_kind_human}",
-            media_action,
+            _with_newbie_reason("media", newbie_win),
+            "медиа",
+            out_action,
             mute_minutes=mute_min,
             log_it=log_enabled,
             log_extra=("anti-edit" if edited else ""),
+            filter_media_captcha_after=fm_captcha,
         )
 
     # -------------------------------------------------
@@ -2643,8 +2741,11 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     # ещё не открывалась. При первом открытии фронт тихо сбрасывает legacy=allow,
     # и далее поведение определяется только гранулами.
     # -------------------------------------------------
-    if owner_premium_features and any_granular_button_enabled(rule):
-        _btn_kind = matched_button_kind(message, rule)
+    _granular_button_applies = (owner_premium_features and any_granular_button_enabled(rule)) or (
+        (not owner_premium_features) and any_granular_button_free_tier(rule)
+    )
+    if _granular_button_applies:
+        _btn_kind = matched_button_kind(message, rule, owner_premium_features=owner_premium_features)
         if _btn_kind:
             _bk_human = {
                 "url": "кнопка со ссылкой",
@@ -3325,6 +3426,17 @@ async def pipeline(message: Message, *, edited: bool = False) -> None:
 
             owner_loc = await owner_locale_for_chat(session, message.chat.id)
             ok_action, action_label, deleted_ok = await apply_action(message, v, locale=owner_loc)
+            if getattr(v, "filter_media_captcha_after", False) and message.from_user:
+                try:
+                    from app.handlers.join_captcha import maybe_start_filter_media_captcha
+
+                    chat_row_fm = await session.get(Chat, message.chat.id)
+                    rule_fm = await get_rule(session, message.chat.id)
+                    await maybe_start_filter_media_captcha(
+                        message.bot, session, message.chat, chat_row_fm, rule_fm, message.from_user
+                    )
+                except Exception as fm_err:
+                    logger.exception("filter_media_captcha start: %s", fm_err)
             try:
                 print(
                     f"[GUARD TRACE] applied chat={message.chat.id} user={getattr(message.from_user, 'id', None)} "

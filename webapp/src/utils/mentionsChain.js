@@ -32,21 +32,38 @@ export const MENTION_FILTER_KINDS = Object.freeze([
   { key: 'emails', field: 'filter_mention_emails', icon: '📧' },
 ])
 
+/** Free tier: пользователи, боты, каналы/группы (@channel); остальные гранулы — Premium. */
+export const MENTION_FREE_KIND_KEYS = new Set(['users', 'bots', 'channels'])
+
+export function isMentionKindPremiumOnly(key) {
+  return !!key && !MENTION_FREE_KIND_KEYS.has(key)
+}
+
+function isGranularMentionField(field) {
+  if (field === 'filter_mention_mass_enabled' || field === 'filter_mention_mass_threshold') return true
+  return MENTION_FILTER_KINDS.some((k) => k.field === field)
+}
+
 /**
  * @param {{
  *   rule: Record<string, unknown> | null | undefined,
  *   t: (key: string) => string,
  *   onUpdateRule: (patch: Record<string, unknown>) => Promise<unknown> | unknown,
  *   source?: string,
+ *   onPremiumLock?: () => void,
+ *   ownerHasPremium?: boolean,
  * }} ctx
  * @returns {HTMLElement | null}
  */
 export function runMentionsChain(ctx) {
   const source = ctx?.source || 'manual'
+  /** undefined / true — полный Premium; false — Free (гранулы только users/bots). */
+  const ownerHasPremium = ctx?.ownerHasPremium !== false
   guardFilterChain('Protection', 'mentionsChainPure:enter', {
     source,
     hasRule: !!ctx?.rule,
     legacyForbid: !!ctx?.rule?.filter_mentions,
+    ownerHasPremium,
   })
   if (!ctx?.rule) {
     guardFilterChain('Protection', 'mentionsChainPure:abort_no_rule', { source })
@@ -65,9 +82,7 @@ export function runMentionsChain(ctx) {
     }
   }
 
-  // Тихая миграция: если у чата legacy filter_mentions=true и все гранулы false,
-  // сразу сбрасываем legacy → false (как мы сделали с медиа). Гранулярная модалка
-  // стартует с пустым состоянием — пользователь сам выбирает что запрещать.
+  // Тихая миграция: legacy «все @» снимаем при открытии, если ещё нет ни одной гранулы.
   const anyGranular = MENTION_FILTER_KINDS.some((k) => !!ctx.rule[k.field])
     || !!ctx.rule.filter_mention_mass_enabled
   if (!!ctx.rule.filter_mentions && !anyGranular) {
@@ -84,13 +99,17 @@ export function runMentionsChain(ctx) {
   }
 
   const titleText = safeT('protection.ui.mentions_modal_title', '💬 Упоминания')
-  const hintText = safeT('protection.ui.mentions_modal_hint', 'Выбери что считать упоминанием. Каждый переключатель работает независимо.')
+  let hintText = safeT('protection.ui.mentions_modal_hint', 'Выбери что считать упоминанием. Каждый переключатель работает независимо.')
+  if (!ownerHasPremium) {
+    hintText = safeT('protection.ui.mentions_modal_hint_free', hintText)
+  }
   const massEnabledText = safeT('protection.ui.mention_mass_enabled', 'Массовые упоминания')
   const massThresholdText = safeT('protection.ui.mention_mass_threshold', 'Порог')
 
   const kinds = MENTION_FILTER_KINDS.map((k) => ({
     ...k,
     label: safeT(`protection.ui.mention_kinds.${k.key}`, k.key),
+    requiresPremium: isMentionKindPremiumOnly(k.key),
   }))
 
   const values = {}
@@ -109,8 +128,29 @@ export function runMentionsChain(ctx) {
     massThreshold: mass.threshold,
   })
 
+  function patchAllowed(field) {
+    if (ownerHasPremium) return true
+    if (field === 'filter_mentions') return true
+    if (!isGranularMentionField(field)) return true
+    if (
+      field === 'filter_mention_users'
+      || field === 'filter_mention_bots'
+      || field === 'filter_mention_channels'
+    )
+      return true
+    return false
+  }
+
   // Хелпер для обновления rule оптимистично + PATCH (с откатом при ошибке).
   function patchField(field, value) {
+    if (!patchAllowed(field)) {
+      try {
+        ctx.onPremiumLock?.()
+      } catch (err) {
+        guardFilterChain('Protection', 'mentionsChainPure:premiumLockThrow', errToObj(err))
+      }
+      return
+    }
     if (ctx.rule[field] === value) return
     const prev = ctx.rule[field]
     ctx.rule[field] = value
@@ -132,6 +172,15 @@ export function runMentionsChain(ctx) {
     const node = openMentionsGranularVanillaModal({
       titleText,
       hintText,
+      ownerHasPremium,
+      granularLocked: false,
+      onPremiumLock: () => {
+        try {
+          ctx?.onPremiumLock?.()
+        } catch (err) {
+          guardFilterChain('Protection', 'mentions:vaniPremiumLock_throw', errToObj(err))
+        }
+      },
       massEnabledText,
       massThresholdText,
       kinds,

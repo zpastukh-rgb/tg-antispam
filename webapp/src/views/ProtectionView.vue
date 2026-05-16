@@ -279,6 +279,8 @@ function openMentionsModalChain(source) {
     t: (key) => tt(key),
     onUpdateRule: (patch) => updateRule(patch),
     source,
+    ownerHasPremium: canUsePremiumForCurrentChat.value,
+    onPremiumLock: () => openPremiumLock('granular_filters'),
   })
   guardFilterChain('Protection', 'mentionsChain:result', {
     ts: Date.now(),
@@ -304,18 +306,23 @@ function openProtectionFilterModal(which, source) {
     return
   }
 
-  // Media: при первом открытии модалки тихо сбрасываем legacy filter_media_mode в 'allow'
-  // (если был 'forbid'/'captcha') — гранулярные тогглы стартуют с ВЫКЛ, как и должно быть в UI.
   if (which === 'media') {
-    try { resetLegacyMediaModeIfNeeded() } catch {}
+    try {
+      resetLegacyMediaModeIfNeeded()
+    } catch {}
   }
-  // Buttons: то же самое для filter_buttons_mode — переход на гранулярную модель.
-  if (which === 'buttons') {
-    try { resetLegacyButtonsModeIfNeeded() } catch {}
+  const canMigrateToGranular = canUsePremiumForCurrentChat.value
+  // При первом открытии тихий сброс legacy для кнопок и постов каналов — только если чат уже на Premium.
+  if (which === 'buttons' && canMigrateToGranular) {
+    try {
+      resetLegacyButtonsModeIfNeeded()
+    } catch {}
   }
   // Channel posts: то же самое для filter_channel_posts_enabled — переход на гранулярную модель.
-  if (which === 'channelPosts') {
-    try { resetLegacyChannelPostsIfNeeded() } catch {}
+  if (which === 'channelPosts' && canMigrateToGranular) {
+    try {
+      resetLegacyChannelPostsIfNeeded()
+    } catch {}
   }
 
   const flags = protectionFilterModalFlags(which)
@@ -463,6 +470,7 @@ const showPublicAlertsSettingsModal = ref(false)
 const showGuardianPeriodicHelpModal = ref(false)
 const showJoinCaptchaInfoModal = ref(false)
 const showJoinCaptchaSettingsModal = ref(false)
+const showFilterMediaCaptchaSettingsModal = ref(false)
 const showSpamSpikeSettingsModal = ref(false)
 const showSpamSpikeInfoModal = ref(false)
 const showWelcomeSettingsModal = ref(false)
@@ -950,6 +958,13 @@ const copySectionPremiumClass = computed(() => {
   if ((chatsList.value || []).length <= 1) return ''
   return 'ring-1 ring-amber-400/35 ring-inset shadow-[0_0_24px_-10px_rgba(251,191,36,0.12)]'
 })
+/** Золотая подсветка гранулярных строк — только для Free (для Premium те же тёмные карточки, что и обычные). */
+function granularPremiumRowClass(isPremiumKind) {
+  if (!isPremiumKind || !premiumFeatureLocked.value) {
+    return 'border border-white/[0.06] bg-white/[0.025]'
+  }
+  return 'border border-amber-400/35 bg-amber-500/[0.06] shadow-[inset_0_0_0_1px_rgba(250,204,21,0.14)]'
+}
 function sortChatsByAvailability(list) {
   return [...(list || [])].sort((a, b) => {
     const lockDiff = Number(!!a?.locked_by_limit) - Number(!!b?.locked_by_limit)
@@ -1035,6 +1050,10 @@ const pickerDelegatedChats = computed(() =>
 )
 const pickerOwnChats = computed(() =>
   sortChatsByAvailability((chatsList.value || []).filter((c) => !c.is_shared && !isChannelListRow(c))),
+)
+/** Цели для «Перенести настройки»: только свои группы, без делегированных и каналов; без текущего чата. */
+const copySettingsTargetChats = computed(() =>
+  (pickerOwnChats.value || []).filter((c) => Number(c.id) !== Number(chat.value?.id || 0)),
 )
 function delegatedCanProtection(chatRow) {
   if (!chatRow?.is_shared) return true
@@ -1166,6 +1185,27 @@ function closeFreeLimitsPremiumModal() {
 
 function openPremiumLock(feature, opts = {}) {
   openLock({ feature, me: lastMeSnapshot.value, ...opts })
+}
+
+/** Гранулярные режимы (типы медиа/кнопок/постов/упоминаний) для текущего чата требуют Premium. Legacy-режимы остаются на Free. */
+function ensureGranularFiltersPremium() {
+  if (canUsePremiumForCurrentChat.value) return true
+  openPremiumLock('granular_filters')
+  return false
+}
+
+/** Расширенные тематики жёсткого словаря — только с Premium. */
+function requireExtraDictPremiumOrModal() {
+  if (!canUsePremiumForCurrentChat.value) {
+    openPremiumLock('extra_dicts')
+    return false
+  }
+  return true
+}
+
+function tryExtraDictToggle(doUpdate) {
+  if (!requireExtraDictPremiumOrModal()) return
+  doUpdate()
 }
 
 function onSpamSpikeNotifyManagersToggle() {
@@ -1389,6 +1429,7 @@ async function toggleMasterProtection() {
 
 async function toggleReligionHardDict() {
   if (!chat.value?.rule) return
+  if (!requireExtraDictPremiumOrModal()) return
   const on = !chat.value.rule.filter_religion_enabled
   await updateRule(
     on
@@ -1399,11 +1440,13 @@ async function toggleReligionHardDict() {
 
 async function toggleReligionPromoOnly() {
   if (!chat.value?.rule || !chat.value.rule.filter_religion_enabled) return
+  if (!requireExtraDictPremiumOrModal()) return
   await updateRule({ filter_religion_promo_only: !chat.value.rule.filter_religion_promo_only })
 }
 
 async function toggleEsotericHardDict() {
   if (!chat.value?.rule) return
+  if (!requireExtraDictPremiumOrModal()) return
   const on = !chat.value.rule.filter_esoteric_enabled
   await updateRule(
     on
@@ -1414,6 +1457,7 @@ async function toggleEsotericHardDict() {
 
 async function toggleEsotericPromoOnly() {
   if (!chat.value?.rule || !chat.value.rule.filter_esoteric_enabled) return
+  if (!requireExtraDictPremiumOrModal()) return
   await updateRule({ filter_esoteric_promo_only: !chat.value.rule.filter_esoteric_promo_only })
 }
 
@@ -1441,6 +1485,11 @@ const MEDIA_FILTER_KINDS = Object.freeze([
   { key: 'plain_emoji', field: 'filter_media_plain_emoji', icon: '🙂' },
   { key: 'custom_emoji', field: 'filter_media_custom_emoji', icon: '😀' },
 ])
+/** Базовые гранулы без подписки (остальные — Premium в UI). Совпадает с moderation.any_granular_media_free_tier. */
+const MEDIA_FREE_KIND_KEYS = new Set(['photos', 'videos', 'stickers'])
+function isMediaKindPremiumOnly(key) {
+  return !!key && !MEDIA_FREE_KIND_KEYS.has(key)
+}
 
 function iosSwitchClass(on) {
   return on
@@ -1448,8 +1497,24 @@ function iosSwitchClass(on) {
     : 'border-white/[0.14] bg-white/[0.09]'
 }
 
+function openMediaFilterCaptchaSettings() {
+  showFilterMediaCaptchaSettingsModal.value = true
+}
+
+/** Кнопка «Капча» в баннере медиа: зелёная, если включена общая капча после запрета медиа (`filter_media_captcha_*`). */
+function mediaRowCaptchaBtnClass() {
+  const on = !!chat.value?.rule?.filter_media_captcha_enabled
+  return on
+    ? 'border border-emerald-500/40 bg-emerald-500/20 text-emerald-100 shadow-[0_0_12px_-6px_rgba(16,185,129,0.4)]'
+    : 'border border-white/[0.12] bg-zinc-800/75 text-zinc-500'
+}
+
 async function toggleMediaKind(field) {
   if (!chat.value?.rule || !field) return
+  const kind = MEDIA_FILTER_KINDS.find((k) => k.field === field)
+  if (kind && isMediaKindPremiumOnly(kind.key)) {
+    if (!ensureGranularFiltersPremium()) return
+  }
   const next = !chat.value.rule[field]
   // Оптимистичное обновление: переключатель должен мгновенно реагировать.
   chat.value.rule[field] = next
@@ -1502,9 +1567,18 @@ const BUTTON_FILTER_KINDS = Object.freeze([
   { key: 'copy_text', field: 'filter_button_copy_text', icon: '📋' },
   { key: 'reply', field: 'filter_button_reply', icon: '⌨️' },
 ])
+/** Первые три типа кнопок без подписки; остальные гранулы — Premium (совпадает с moderation.any_granular_button_free_tier). */
+const BUTTON_FREE_KIND_KEYS = new Set(['url', 'callback', 'web_app'])
+function isButtonKindPremiumOnly(key) {
+  return !!key && !BUTTON_FREE_KIND_KEYS.has(key)
+}
 
 async function toggleButtonKind(field) {
   if (!chat.value?.rule || !field) return
+  const kind = BUTTON_FILTER_KINDS.find((k) => k.field === field)
+  if (kind && isButtonKindPremiumOnly(kind.key)) {
+    if (!ensureGranularFiltersPremium()) return
+  }
   const next = !chat.value.rule[field]
   chat.value.rule[field] = next
   // Любой тап по гранулярному тогглу = переходим на новую модель.
@@ -1529,8 +1603,29 @@ async function toggleButtonKind(field) {
   }
 }
 
+function onButtonKindRowClick(kind, ev) {
+  if (!isButtonKindPremiumOnly(kind.key) || !premiumFeatureLocked.value) return
+  const t = ev?.target
+  if (t && typeof t.closest === 'function' && t.closest('button[role="switch"]')) return
+  try {
+    openPremiumLock('granular_filters')
+  } catch {}
+}
+
+function onButtonMassCardClick(ev) {
+  if (!premiumFeatureLocked.value) return
+  const t = ev?.target
+  if (t && typeof t.closest === 'function') {
+    if (t.closest('button[role="switch"]') || t.closest('input[type="range"]')) return
+  }
+  try {
+    openPremiumLock('granular_filters')
+  } catch {}
+}
+
 async function toggleButtonMassEnabled() {
   if (!chat.value?.rule) return
+  if (!ensureGranularFiltersPremium()) return
   const next = !chat.value.rule.filter_button_mass_enabled
   chat.value.rule.filter_button_mass_enabled = next
   const patch = { filter_button_mass_enabled: next }
@@ -1551,6 +1646,7 @@ async function toggleButtonMassEnabled() {
 let _buttonMassThresholdTimer = null
 function setButtonMassThreshold(value) {
   if (!chat.value?.rule) return
+  if (!ensureGranularFiltersPremium()) return
   const v = Math.max(3, Math.min(20, Number(value) || 5))
   chat.value.rule.filter_button_mass_threshold = v
   // Дебаунс PATCH, чтобы драг по слайдеру не слал десятки запросов.
@@ -1585,9 +1681,26 @@ const CHANNEL_POST_FILTER_KINDS = Object.freeze([
   { key: 'no_username', field: 'filter_channel_post_no_username', icon: '🚫' },
   { key: 'hidden_fwd', field: 'filter_channel_post_hidden_fwd', icon: '👻' },
 ])
+const CHANNEL_POST_FREE_KIND_KEYS = new Set(['channels', 'groups', 'anon_admin'])
+function isChannelPostKindPremiumOnly(key) {
+  return !!key && !CHANNEL_POST_FREE_KIND_KEYS.has(key)
+}
+
+function onChannelPostKindRowClick(kind, ev) {
+  if (!isChannelPostKindPremiumOnly(kind.key) || !premiumFeatureLocked.value) return
+  const t = ev?.target
+  if (t && typeof t.closest === 'function' && t.closest('button[role="switch"]')) return
+  try {
+    openPremiumLock('granular_filters')
+  } catch {}
+}
 
 async function toggleChannelPostKind(field) {
   if (!chat.value?.rule || !field) return
+  const kind = CHANNEL_POST_FILTER_KINDS.find((k) => k.field === field)
+  if (kind && isChannelPostKindPremiumOnly(kind.key)) {
+    if (!ensureGranularFiltersPremium()) return
+  }
   const next = !chat.value.rule[field]
   chat.value.rule[field] = next
   // Любой тап по гранулярному тогглу = переходим на новую модель.
@@ -1621,6 +1734,45 @@ function resetLegacyChannelPostsIfNeeded() {
   updateRule({ filter_channel_posts_enabled: false }).catch((e) => {
     try { guardFilterChain('Protection', 'channelPosts:legacy_reset_error', { name: e?.name, message: e?.message }) } catch {}
   })
+}
+
+const LEGACY_FILTER_MEDIA_MODES = Object.freeze(['allow', 'forbid', 'captcha'])
+const LEGACY_FILTER_BUTTON_MODES = Object.freeze(['allow', 'forbid', 'captcha'])
+
+async function setLegacyFilterMediaMode(modeRaw) {
+  if (!chat.value?.rule) return
+  const m = String(modeRaw || 'allow').toLowerCase()
+  if (!LEGACY_FILTER_MEDIA_MODES.includes(m)) return
+  const prev = String(chat.value.rule.filter_media_mode || 'allow').toLowerCase()
+  chat.value.rule.filter_media_mode = m
+  try {
+    await updateRule({ filter_media_mode: m })
+  } catch (e) {
+    chat.value.rule.filter_media_mode = prev
+    try {
+      guardFilterChain('Protection', 'setLegacyFilterMediaMode:error', { name: e?.name, message: e?.message })
+    } catch {
+      //
+    }
+  }
+}
+
+async function setLegacyFilterButtonsMode(modeRaw) {
+  if (!chat.value?.rule) return
+  const m = String(modeRaw || 'allow').toLowerCase()
+  if (!LEGACY_FILTER_BUTTON_MODES.includes(m)) return
+  const prev = String(chat.value.rule.filter_buttons_mode || 'allow').toLowerCase()
+  chat.value.rule.filter_buttons_mode = m
+  try {
+    await updateRule({ filter_buttons_mode: m })
+  } catch (e) {
+    chat.value.rule.filter_buttons_mode = prev
+    try {
+      guardFilterChain('Protection', 'setLegacyFilterButtonsMode:error', { name: e?.name, message: e?.message })
+    } catch {
+      //
+    }
+  }
 }
 
 function linkScopeButtonClass(currentScope, optValue) {
@@ -1826,7 +1978,7 @@ async function doCopySettings() {
   copyLoading.value = true
   try {
     if (copyTargetId.value === '__all__') {
-      const targets = (chatsList.value || []).filter((c) => Number(c.id) !== Number(chat.value.id))
+      const targets = copySettingsTargetChats.value || []
       if (!targets.length) {
         showToast(tt('protection.toasts.no_targets_copy'))
         return
@@ -1935,9 +2087,9 @@ const mediaSummary = computed(() => {
   if (forbiddenKeys.length === 0) {
     // Учитываем legacy «всё запрещено» (старое поле filter_media_mode), на случай если новые тогглы ещё не выставлены.
     const m = String(rule.filter_media_mode || 'allow').toLowerCase()
-    return m === 'forbid'
-      ? tt('protection.summaries.media_forbidden')
-      : tt('protection.ui.media_summary_allowed')
+    if (m === 'forbid') return tt('protection.summaries.media_forbidden')
+    if (m === 'captcha') return tt('protection.summaries.media_captcha')
+    return tt('protection.ui.media_summary_allowed')
   }
   if (forbiddenKeys.length <= 3) {
     const names = forbiddenKeys
@@ -1965,9 +2117,9 @@ const buttonsSummary = computed(() => {
   // Если ни одна грануляция не включена → fallback на legacy buttons_mode.
   if (enabledShort.length === 0 && !massOn) {
     const m = String(rule.filter_buttons_mode || 'allow').toLowerCase()
-    return m === 'forbid'
-      ? tt('protection.summaries.buttons_forbidden')
-      : tt('protection.summaries.buttons_allowed')
+    if (m === 'forbid') return tt('protection.summaries.buttons_forbidden')
+    if (m === 'captcha') return tt('protection.summaries.buttons_captcha')
+    return tt('protection.summaries.buttons_allowed')
   }
   const parts = [...enabledShort]
   if (massOn) {
@@ -3559,7 +3711,7 @@ async function closePostRulesSettingsModal() {
 
 // Любая открытая модалка фильтра защиты должна блокировать прокрутку фона:
 // иначе пользователь скроллит «Защиту» под полупрозрачной подложкой и мажет UX.
-// Один общий watcher на все filter-модалки (links/media/buttons/channelPosts).
+// Один общий watcher: фильтры, настройки, все справочные модалки по «i».
 // Mentions/welcome обрабатываются их vanilla-модалками отдельно.
 watch(
   [
@@ -3567,6 +3719,28 @@ watch(
     showMediaFilterModal,
     showButtonsFilterModal,
     showChannelPostsFilterModal,
+    showPublicAlertsSettingsModal,
+    showPublicAlertsHelpModal,
+    showPublicAlertsStyleHelpModal,
+    showReputationSettingsModal,
+    showReputationWordsModal,
+    showReputationTopModal,
+    showSpamSpikeSettingsModal,
+    showSpamSpikeInfoModal,
+    showHardDictInfoModal,
+    showCleanupInfoModal,
+    showFiltersInfoModal,
+    showSilenceInfoModal,
+    showGuardianPeriodicHelpModal,
+    showStopwordsInfoModal,
+    showReputationInfoModal,
+    showMainInfoModal,
+    showChatSwitchInfoModal,
+    showAntinakrutkaInfoModal,
+    showJoinCaptchaInfoModal,
+    showAntispamInfoModal,
+    showNewbieInfoModal,
+    showSilencePickerModal,
   ],
   (vals) => {
     if (!document?.body?.style) return
@@ -3986,6 +4160,9 @@ async function applyAntinakrutkaPreset(preset) {
 /** Панели: тёмное «жидкое стекло» — градиент, внутренний блик, кольцо */
 const protCard =
   'rounded-2xl border border-white/[0.11] bg-gradient-to-br from-white/[0.1] via-white/[0.04] to-black/25 p-3 text-slate-100 shadow-[0_10px_40px_-12px_rgba(0,0,0,0.65),inset_0_1px_0_rgba(255,255,255,0.11),inset_0_-1px_0_rgba(0,0,0,0.18)] backdrop-blur-xl ring-1 ring-amber-500/[0.04]'
+/** То же без видимой рамки (карточки вроде «Публичные сообщения») */
+const protCardNoBorder =
+  'rounded-2xl border-0 bg-gradient-to-br from-white/[0.1] via-white/[0.04] to-black/25 p-3 text-slate-100 shadow-[0_10px_40px_-12px_rgba(0,0,0,0.65),inset_0_1px_0_rgba(255,255,255,0.11),inset_0_-1px_0_rgba(0,0,0,0.18)] backdrop-blur-xl ring-0'
 /** Полоса выбора чата: «жидкое стекло», без холодного синего обода */
 const protCardChatBar =
   'rounded-xl border border-white/[0.11] bg-gradient-to-br from-white/[0.09] via-zinc-950/55 to-black/55 p-2.5 text-slate-100 shadow-[0_14px_40px_-14px_rgba(0,0,0,0.75),inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(0,0,0,0.2)] backdrop-blur-xl backdrop-saturate-150 ring-1 ring-inset ring-white/[0.05]'
@@ -4047,7 +4224,7 @@ const protCardIndigo =
     <div v-else-if="chat?.rule" class="space-y-3.5">
       <!-- Только полоса чата липнет под шапкой App (h-14). Плашка «под угрозой» ниже — обычный скролл. -->
       <!-- pointer-events-none на обёртке/карте/чипе: при скролле полоса висит над фильтрами и модалками
-           (z=2147483100 — выше Vue-модалок z=200000 и vanilla-модалок mentionsVanillaModal z=2147483000),
+           (z=2147483100 — выше Vue-модалок z=200000, PremiumLockModal z=2147484000 и vanilla mentions z=2147483000),
            иначе тапы ловит стекло или широкий чип (flex-1). Ловим только «Выбрать чат» и «i». -->
       <div
         class="pointer-events-none sticky top-14 -mx-4 px-4 py-2 md:-mx-6 md:px-6"
@@ -4323,15 +4500,6 @@ const protCardIndigo =
           </button>
         </div>
         <div class="space-y-3">
-          <p class="text-[11px] leading-relaxed text-slate-500">
-            {{ tt('protection.ui.filters_intro') }}
-          </p>
-          <p
-            v-if="premiumFeatureLocked"
-            class="text-[10px] leading-snug text-amber-100/85"
-          >
-            {{ tt('protection.ui.filters_premium_note_free') }}
-          </p>
           <div
             id="protection-filter-grid"
             class="relative z-[50] isolate grid grid-cols-2 gap-2"
@@ -4484,7 +4652,7 @@ const protCardIndigo =
               <h3 class="text-xs font-semibold text-rose-200">{{ tt('protection.ui.hard_dict_title') }}</h3>
               <button
                 type="button"
-                class="prot-info-btn prot-info-btn--danger"
+                class="prot-info-btn prot-info-btn--ink prot-info-btn--corner-sm"
                 :aria-label="tt('protection.ui.info_hard_dict_aria')"
                 @click="showHardDictInfoModal = true"
               >
@@ -4493,9 +4661,6 @@ const protCardIndigo =
             </div>
             <p class="mb-3 text-xs text-rose-100/90">
               {{ tt('protection.ui.hard_dict_desc_1') }}
-            </p>
-            <p class="mt-2 border-t border-white/10 pt-2 text-[10px] leading-snug text-slate-400">
-              {{ tt('protection.ui.hard_dict_desc_2') }}
             </p>
             <div class="space-y-2">
           <div class="flex items-center justify-between gap-2">
@@ -4568,13 +4733,23 @@ const protCardIndigo =
                   />
                 </button>
               </div>
-              <div class="flex items-center justify-between gap-2">
-                <span class="text-xs text-rose-100/90">{{ tt('protection.filters.antiracist_detail') }}</span>
+              <div class="flex items-start justify-between gap-2">
+                <span class="flex min-w-0 items-start gap-1.5 text-xs leading-snug text-rose-100/90">
+                  <PremiumLockBadge
+                    v-if="premiumFeatureLocked"
+                    variant="crown"
+                    size="xs"
+                    class="mt-0.5 shrink-0"
+                    interactive
+                    @click="openPremiumLock('extra_dicts')"
+                  />
+                  <span class="min-w-0 flex-1 break-words">{{ tt('protection.filters.antiracist_detail') }}</span>
+                </span>
                 <button
                   type="button"
                   :class="hardDictSwitchClass(chat.rule.filter_racism_enabled)"
                   class="relative h-[30px] w-[50px] shrink-0 rounded-full border transition duration-200"
-                  @click="updateRule({ filter_racism_enabled: !chat.rule.filter_racism_enabled })"
+                  @click="tryExtraDictToggle(() => updateRule({ filter_racism_enabled: !chat.rule.filter_racism_enabled }))"
                 >
                   <span
                     class="absolute left-[2px] top-1/2 h-[24px] w-[24px] rounded-full bg-white shadow-md transition duration-200"
@@ -4582,13 +4757,23 @@ const protCardIndigo =
                   />
                 </button>
               </div>
-              <div class="flex items-center justify-between gap-2">
-                <span class="text-xs text-rose-100/90">{{ tt('protection.filters.antifascist_detail') }}</span>
+              <div class="flex items-start justify-between gap-2">
+                <span class="flex min-w-0 items-start gap-1.5 text-xs leading-snug text-rose-100/90">
+                  <PremiumLockBadge
+                    v-if="premiumFeatureLocked"
+                    variant="crown"
+                    size="xs"
+                    class="mt-0.5 shrink-0"
+                    interactive
+                    @click="openPremiumLock('extra_dicts')"
+                  />
+                  <span class="min-w-0 flex-1 break-words">{{ tt('protection.filters.antifascist_detail') }}</span>
+                </span>
                 <button
                   type="button"
                   :class="hardDictSwitchClass(chat.rule.filter_nazi_enabled)"
                   class="relative h-[30px] w-[50px] shrink-0 rounded-full border transition duration-200"
-                  @click="updateRule({ filter_nazi_enabled: !chat.rule.filter_nazi_enabled })"
+                  @click="tryExtraDictToggle(() => updateRule({ filter_nazi_enabled: !chat.rule.filter_nazi_enabled }))"
                 >
                   <span
                     class="absolute left-[2px] top-1/2 h-[24px] w-[24px] rounded-full bg-white shadow-md transition duration-200"
@@ -4596,13 +4781,23 @@ const protCardIndigo =
                   />
                 </button>
               </div>
-              <div class="flex items-center justify-between gap-2">
-                <span class="text-xs text-rose-100/90">{{ tt('protection.filters.vulgar_detail') }}</span>
+              <div class="flex items-start justify-between gap-2">
+                <span class="flex min-w-0 items-start gap-1.5 text-xs leading-snug text-rose-100/90">
+                  <PremiumLockBadge
+                    v-if="premiumFeatureLocked"
+                    variant="crown"
+                    size="xs"
+                    class="mt-0.5 shrink-0"
+                    interactive
+                    @click="openPremiumLock('extra_dicts')"
+                  />
+                  <span class="min-w-0 flex-1 break-words">{{ tt('protection.filters.vulgar_detail') }}</span>
+                </span>
                 <button
                   type="button"
                   :class="hardDictSwitchClass(chat.rule.filter_vulgar_enabled)"
                   class="relative h-[30px] w-[50px] shrink-0 rounded-full border transition duration-200"
-                  @click="updateRule({ filter_vulgar_enabled: !chat.rule.filter_vulgar_enabled })"
+                  @click="tryExtraDictToggle(() => updateRule({ filter_vulgar_enabled: !chat.rule.filter_vulgar_enabled }))"
                 >
                   <span
                     class="absolute left-[2px] top-1/2 h-[24px] w-[24px] rounded-full bg-white shadow-md transition duration-200"
@@ -4610,13 +4805,23 @@ const protCardIndigo =
                   />
                 </button>
               </div>
-              <div class="flex items-center justify-between gap-2">
-                <span class="text-xs text-rose-100/90">{{ tt('protection.filters.politics_detail') }}</span>
+              <div class="flex items-start justify-between gap-2">
+                <span class="flex min-w-0 items-start gap-1.5 text-xs leading-snug text-rose-100/90">
+                  <PremiumLockBadge
+                    v-if="premiumFeatureLocked"
+                    variant="crown"
+                    size="xs"
+                    class="mt-0.5 shrink-0"
+                    interactive
+                    @click="openPremiumLock('extra_dicts')"
+                  />
+                  <span class="min-w-0 flex-1 break-words">{{ tt('protection.filters.politics_detail') }}</span>
+                </span>
                 <button
                   type="button"
                   :class="hardDictSwitchClass(chat.rule.filter_politics_enabled)"
                   class="relative h-[30px] w-[50px] shrink-0 rounded-full border transition duration-200"
-                  @click="updateRule({ filter_politics_enabled: !chat.rule.filter_politics_enabled })"
+                  @click="tryExtraDictToggle(() => updateRule({ filter_politics_enabled: !chat.rule.filter_politics_enabled }))"
                 >
                   <span
                     class="absolute left-[2px] top-1/2 h-[24px] w-[24px] rounded-full bg-white shadow-md transition duration-200"
@@ -4627,7 +4832,17 @@ const protCardIndigo =
               <div class="space-y-1">
                 <div class="flex items-start justify-between gap-2">
                   <div class="min-w-0">
-                    <span class="block text-xs text-rose-100/90">{{ tt('protection.filters.religion') }}</span>
+                    <span class="flex min-w-0 items-start gap-1.5 text-xs leading-snug text-rose-100/90">
+                      <PremiumLockBadge
+                        v-if="premiumFeatureLocked"
+                        variant="crown"
+                        size="xs"
+                        class="mt-0.5 shrink-0"
+                        interactive
+                        @click="openPremiumLock('extra_dicts')"
+                      />
+                      <span class="min-w-0 flex-1 break-words">{{ tt('protection.filters.religion') }}</span>
+                    </span>
                     <span v-if="chat.rule.filter_religion_enabled" class="mt-0.5 block text-[10px] leading-snug text-slate-500">
                       {{
                         chat.rule.filter_religion_promo_only
@@ -4669,7 +4884,17 @@ const protCardIndigo =
               <div class="space-y-1">
                 <div class="flex items-start justify-between gap-2">
                   <div class="min-w-0">
-                    <span class="block text-xs text-rose-100/90">{{ tt('protection.filters.esoteric') }}</span>
+                    <span class="flex min-w-0 items-start gap-1.5 text-xs leading-snug text-rose-100/90">
+                      <PremiumLockBadge
+                        v-if="premiumFeatureLocked"
+                        variant="crown"
+                        size="xs"
+                        class="mt-0.5 shrink-0"
+                        interactive
+                        @click="openPremiumLock('extra_dicts')"
+                      />
+                      <span class="min-w-0 flex-1 break-words">{{ tt('protection.filters.esoteric') }}</span>
+                    </span>
                     <span v-if="chat.rule.filter_esoteric_enabled" class="mt-0.5 block text-[10px] leading-snug text-slate-500">
                       {{
                         chat.rule.filter_esoteric_promo_only
@@ -4804,9 +5029,17 @@ const protCardIndigo =
       </section>
 
       <!-- Публичные сообщения от Guard -->
-      <section :class="protCard">
-        <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <div class="flex min-w-0 flex-wrap items-center gap-2">
+      <section :class="[protCardNoBorder, 'relative']">
+        <button
+          type="button"
+          class="prot-info-btn prot-info-btn--ink prot-info-btn--corner-sm absolute right-2 top-2 z-[1]"
+          :aria-label="tt('protection.ui.info_public_messages_aria')"
+          @click="showPublicAlertsHelpModal = true"
+        >
+          i
+        </button>
+        <div class="mb-2 min-w-0 pr-10">
+          <div class="flex flex-wrap items-center gap-2">
             <h2 class="text-sm font-semibold tracking-wide text-slate-50">{{ tt('protection.ui.public_messages_title') }}</h2>
             <PremiumLockBadge
               v-if="premiumFeatureLocked"
@@ -4816,14 +5049,6 @@ const protCardIndigo =
               @click="openPremiumLock('guardian_interval')"
             />
           </div>
-          <button
-            type="button"
-            class="prot-info-btn prot-info-btn--frost"
-            :aria-label="tt('protection.ui.info_public_messages_aria')"
-            @click="showPublicAlertsHelpModal = true"
-          >
-            i
-          </button>
         </div>
         <p
           v-if="premiumFeatureLocked"
@@ -4989,7 +5214,10 @@ const protCardIndigo =
         <button
           type="button"
           :class="[
-            'mt-2 rounded-lg border border-white/15 bg-white/10 px-3 py-1.5 text-xs font-semibold text-slate-100 hover:bg-white/15',
+            'mt-2 rounded-xl px-3 py-1.5 text-xs font-semibold transition',
+            canUsePremiumForCurrentChat
+              ? 'guard-green-soft font-bold text-slate-900 hover:brightness-105'
+              : 'border border-white/15 bg-white/10 text-slate-100 hover:bg-white/15',
             premiumFeatureLocked && 'border-amber-400/30',
           ]"
           @click="onAntinakrutkaOpenSettingsClick"
@@ -5155,9 +5383,9 @@ const protCardIndigo =
             class="rounded-lg border border-white/15 bg-white/10 px-2.5 py-1.5 text-xs text-slate-100"
           >
             <option :value="null">{{ tt('protection.ui.copy_select_placeholder') }}</option>
-            <option value="__all__">{{ tt('protection.ui.copy_all_chats') }}</option>
+            <option v-if="copySettingsTargetChats.length > 1" value="__all__">{{ tt('protection.ui.copy_all_chats') }}</option>
             <option
-              v-for="c in (chatsList || []).filter((x) => x.id !== chat?.id)"
+              v-for="c in copySettingsTargetChats"
               :key="c.id"
               :value="String(c.id)"
             >
@@ -5218,19 +5446,24 @@ const protCardIndigo =
       </div>
     </div>
 
-    <GuardTeleport>
+    <GuardTeleport guard-to="body">
     <div
       v-if="showPublicAlertsSettingsModal && chat?.rule"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/65 p-3 md:items-center"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-end justify-center overscroll-none p-3 backdrop-blur-sm md:items-center"
       @click.self="showPublicAlertsSettingsModal = false"
     >
-      <div class="w-full max-w-xl rounded-2xl border border-cyan-400/20 bg-gradient-to-b from-slate-900/95 via-slate-950/95 to-black/95 p-4 text-slate-100 shadow-[0_24px_80px_-22px_rgba(0,0,0,0.9),inset_0_1px_0_rgba(255,255,255,0.1)] backdrop-blur-2xl ring-1 ring-cyan-300/20">
+      <div
+        class="public-alerts-settings-dialog max-h-[min(92dvh,900px)] w-full max-w-xl overscroll-contain overflow-y-auto rounded-2xl bg-[#101013] p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]"
+        role="dialog"
+        aria-modal="true"
+      >
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold uppercase tracking-wide text-cyan-100">{{ tt('protection.public_alerts_settings_modal.title') }}</h3>
+          <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-100">{{ tt('protection.public_alerts_settings_modal.title') }}</h3>
           <div class="flex items-center gap-1.5">
             <button
               type="button"
-              class="prot-info-btn"
+              class="prot-info-btn prot-info-btn--ink"
               :aria-label="tt('protection.ui.info_public_alerts_settings_aria')"
               @click="showPublicAlertsHelpModal = true"
             >
@@ -5238,7 +5471,7 @@ const protCardIndigo =
             </button>
             <button
               type="button"
-              class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
+              class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
               @click="showPublicAlertsSettingsModal = false"
             >
               ✕
@@ -5246,9 +5479,9 @@ const protCardIndigo =
           </div>
         </div>
         <div class="space-y-3">
-          <div class="rounded-xl border border-cyan-300/20 bg-cyan-500/[0.08] p-2.5 backdrop-blur-md">
+          <div class="rounded-xl bg-white/[0.03] p-2.5">
             <div class="mb-2 flex items-center justify-between gap-2">
-              <p class="text-[11px] font-semibold uppercase tracking-wide text-cyan-100">{{ tt('protection.public_alerts_settings_modal.duty_messages') }}</p>
+              <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-200">{{ tt('protection.public_alerts_settings_modal.duty_messages') }}</p>
               <button
                 type="button"
                 :class="boolToggleClass(!!chat.rule.guardian_periodic_enabled)"
@@ -5282,9 +5515,9 @@ const protCardIndigo =
             </div>
           </div>
 
-          <div class="rounded-xl border border-cyan-300/20 bg-cyan-500/[0.08] p-2.5 backdrop-blur-md">
+          <div class="rounded-xl bg-white/[0.03] p-2.5">
             <div class="mb-2 flex items-center justify-between gap-2">
-              <p class="text-[11px] font-semibold uppercase tracking-wide text-cyan-100">{{ tt('protection.public_alerts_settings_modal.public_alerts') }}</p>
+              <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-200">{{ tt('protection.public_alerts_settings_modal.public_alerts') }}</p>
               <button
                 type="button"
                 :class="boolToggleClass(!!chat.rule.public_alerts_enabled)"
@@ -5365,46 +5598,100 @@ const protCardIndigo =
     </div>
     </GuardTeleport>
 
-    <GuardTeleport>
+    <!-- Справка по публичным сообщениям: в body и выше модалки настроек (200000), иначе окажется под оверлеем -->
+    <GuardTeleport guard-to="body">
     <div
-      v-if="showSpamSpikeInfoModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/60 p-3 md:items-center"
-      @click.self="showSpamSpikeInfoModal = false"
+      v-if="showPublicAlertsHelpModal"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:205000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
+      @click.self="showPublicAlertsHelpModal = false"
     >
-      <div class="w-full max-w-xl rounded-2xl border border-orange-300/35 bg-white p-4 shadow-2xl dark:border-orange-500/35 dark:bg-slate-900">
+      <div class="w-full max-w-xl rounded-2xl border border-white/[0.08] bg-[#101013] p-4 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-sm font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.spam_spike.title') }}</h3>
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.modals.public_alerts.title') }}</h3>
           <button
             type="button"
-            class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
-            @click="showSpamSpikeInfoModal = false"
-          >
-            ✕
-          </button>
+            class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
+            @click="showPublicAlertsHelpModal = false"
+          >✕</button>
         </div>
-        <div class="space-y-2 text-xs leading-relaxed text-gray-700 dark:text-slate-300">
-          <p>{{ tt('protection.modals.spam_spike.p1') }}</p>
-          <p>{{ tt('protection.modals.spam_spike.p2') }}</p>
-          <p>{{ tt('protection.modals.spam_spike.p3') }}</p>
-          <p v-html="tt('protection.modals.spam_spike.p4_threshold')" />
-          <p v-html="tt('protection.modals.spam_spike.p5_window')" />
-          <p v-html="tt('protection.modals.spam_spike.p6_notify')" />
-          <p v-html="tt('protection.modals.spam_spike.p7_master')" />
+        <div class="space-y-2 text-xs leading-relaxed text-slate-300">
+          <p>
+            {{ tt('protection.modals.public_alerts.p1') }}
+          </p>
+          <p>
+            {{ tt('protection.modals.public_alerts.p2') }}
+          </p>
+          <p class="text-[11px] text-slate-500">
+            {{ tt('protection.modals.public_alerts.p3', { style: currentPublicAlertsStyleLabel }) }}
+          </p>
+          <div class="rounded-xl bg-white/[0.04] p-2.5 text-[11px] text-slate-200">
+            <p class="mb-1 font-semibold text-slate-100">
+              {{ tt('protection.modals.public_alerts.box_title', { style: currentPublicAlertsStyleLabel }) }}
+            </p>
+            <p>{{ tt('protection.modals.public_alerts.ex_spam') }} «{{ currentPublicAlertsExamples.spam?.[0] }}»</p>
+            <p>{{ tt('protection.modals.public_alerts.ex_link') }} «{{ currentPublicAlertsExamples.link?.[0] }}»</p>
+            <p>{{ tt('protection.modals.public_alerts.ex_bad_words') }} «{{ currentPublicAlertsExamples.bad_words?.[0] }}»</p>
+            <p>{{ tt('protection.modals.public_alerts.ex_mute') }} «{{ currentPublicAlertsExamples.mute?.[0] }}»</p>
+            <p>{{ tt('protection.modals.public_alerts.ex_ban') }} «{{ currentPublicAlertsExamples.ban?.[0] }}»</p>
+          </div>
+          <p class="text-[11px] text-slate-500">
+            {{ tt('protection.modals.public_alerts.p4') }}
+          </p>
         </div>
       </div>
     </div>
     <div
+      v-if="showPublicAlertsStyleHelpModal"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:205000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
+      @click.self="showPublicAlertsStyleHelpModal = false"
+    >
+      <div class="w-full max-w-xl rounded-2xl border border-white/[0.08] bg-[#101013] p-4 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
+        <div class="mb-3 flex items-center justify-between gap-2">
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.modals.public_alerts_style.title') }}</h3>
+          <button
+            type="button"
+            class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
+            @click="showPublicAlertsStyleHelpModal = false"
+          >✕</button>
+        </div>
+        <div class="space-y-3 text-xs leading-relaxed text-slate-300">
+          <div class="rounded-xl bg-white/[0.04] p-2.5">
+            <p class="mb-1 font-semibold text-lime-200">
+              {{ tt('protection.modals.public_alerts_style.active', { style: currentPublicAlertsStyleLabel }) }}
+            </p>
+            <p>{{ tt('protection.modals.public_alerts_style.ex_spam') }} «{{ currentPublicAlertsExamples.spam?.[1] || currentPublicAlertsExamples.spam?.[0] }}»</p>
+            <p>{{ tt('protection.modals.public_alerts_style.ex_link') }} «{{ currentPublicAlertsExamples.link?.[1] || currentPublicAlertsExamples.link?.[0] }}»</p>
+            <p>{{ tt('protection.modals.public_alerts_style.ex_bad') }} «{{ currentPublicAlertsExamples.bad_words?.[1] || currentPublicAlertsExamples.bad_words?.[0] }}»</p>
+            <p>{{ tt('protection.modals.public_alerts_style.ex_mute_ban') }} «{{ currentPublicAlertsExamples.mute?.[0] }}» / «{{ currentPublicAlertsExamples.ban?.[0] }}»</p>
+          </div>
+          <p class="text-[11px] text-slate-500">
+            {{ tt('protection.modals.public_alerts_style.p_footer') }}
+          </p>
+        </div>
+      </div>
+    </div>
+    </GuardTeleport>
+
+    <GuardTeleport>
+    <div
       v-if="showSpamSpikeSettingsModal && chat?.rule"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/65 p-3 md:items-center"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none bg-black/80 p-3 pt-[max(12px,env(safe-area-inset-top))] pb-[max(12px,env(safe-area-inset-bottom))] backdrop-blur-sm"
       @click.self="showSpamSpikeSettingsModal = false"
     >
-      <div class="w-full max-w-xl rounded-2xl border border-white/12 bg-zinc-950/78 p-4 text-slate-100 shadow-[0_26px_90px_-24px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-2xl">
-        <div class="mb-3 flex items-center justify-between gap-2">
+      <div
+        class="flex max-h-[min(88dvh,calc(100dvh-24px))] w-full max-w-xl flex-col overflow-hidden rounded-2xl bg-[#0a0a0c] p-3 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]"
+        role="dialog"
+        aria-modal="true"
+      >
+        <div class="mb-2 flex shrink-0 items-center justify-between gap-2">
           <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-100">{{ tt('protection.spam_spike_settings_modal.title') }}</h3>
           <div class="flex items-center gap-1.5">
             <button
               type="button"
-              class="prot-info-btn"
+              class="prot-info-btn prot-info-btn--ink prot-info-btn--corner-sm"
               :aria-label="tt('protection.ui.info_spam_spike_aria')"
               @click="showSpamSpikeInfoModal = true"
             >
@@ -5412,7 +5699,7 @@ const protCardIndigo =
             </button>
             <button
               type="button"
-              class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
+              class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
               @click="showSpamSpikeSettingsModal = false"
             >
               ✕
@@ -5420,12 +5707,12 @@ const protCardIndigo =
           </div>
         </div>
 
-        <div class="space-y-3">
-          <p class="rounded-xl border border-white/10 bg-white/[0.04] p-2.5 text-[11px] leading-relaxed text-slate-200">
+        <div class="min-h-0 flex-1 space-y-2.5 overflow-y-auto overscroll-contain pr-0.5">
+          <p class="rounded-xl bg-white/[0.04] p-2.5 text-[11px] leading-relaxed text-slate-300">
             {{ tt('protection.spam_spike_settings_modal.note') }}
           </p>
 
-          <div class="rounded-xl border border-white/10 bg-white/[0.04] p-2.5 backdrop-blur-md">
+          <div class="rounded-xl bg-white/[0.04] p-2.5">
             <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-200">{{ tt('protection.spam_spike_settings_modal.threshold') }}</p>
             <div class="mt-2 flex flex-wrap gap-2">
               <button
@@ -5441,7 +5728,7 @@ const protCardIndigo =
             </div>
           </div>
 
-          <div class="rounded-xl border border-white/10 bg-white/[0.04] p-2.5 backdrop-blur-md">
+          <div class="rounded-xl bg-white/[0.04] p-2.5">
             <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-200">{{ tt('protection.spam_spike_settings_modal.window') }}</p>
             <div class="mt-2 flex flex-wrap gap-2">
               <button
@@ -5457,7 +5744,7 @@ const protCardIndigo =
             </div>
           </div>
 
-          <div class="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-white/[0.04] p-2.5 backdrop-blur-md">
+          <div class="flex items-center justify-between gap-2 rounded-xl bg-white/[0.04] p-2.5">
             <div>
               <p class="text-xs font-semibold text-slate-100">{{ tt('protection.spam_spike_settings_modal.notify_title') }}</p>
               <p class="text-[11px] text-slate-400">{{ tt('protection.spam_spike_settings_modal.notify_hint') }}</p>
@@ -5481,7 +5768,7 @@ const protCardIndigo =
             </div>
           </div>
 
-          <div class="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-white/[0.04] p-2.5 backdrop-blur-md">
+          <div class="flex items-center justify-between gap-2 rounded-xl bg-white/[0.04] p-2.5">
             <p class="text-xs text-slate-300">{{ tt('protection.spam_spike_settings_modal.master_trigger') }}</p>
             <button
               type="button"
@@ -5495,17 +5782,50 @@ const protCardIndigo =
         </div>
       </div>
     </div>
+
+    <!-- Справка «всплеск удалений»: body + выше модалки настроек (200000) -->
+    <GuardTeleport guard-to="body">
+    <div
+      v-if="showSpamSpikeInfoModal"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:205000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 pt-[max(12px,env(safe-area-inset-top))] pb-[max(12px,env(safe-area-inset-bottom))] backdrop-blur-sm"
+      @click.self="showSpamSpikeInfoModal = false"
+    >
+      <div class="max-h-[min(88dvh,calc(100dvh-24px))] w-full max-w-xl overflow-y-auto overscroll-contain rounded-2xl bg-[#101013] p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
+        <div class="mb-3 flex items-center justify-between gap-2">
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.modals.spam_spike.title') }}</h3>
+          <button
+            type="button"
+            class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
+            @click="showSpamSpikeInfoModal = false"
+          >
+            ✕
+          </button>
+        </div>
+        <div class="space-y-2 text-xs leading-relaxed text-slate-300">
+          <p>{{ tt('protection.modals.spam_spike.p1') }}</p>
+          <p>{{ tt('protection.modals.spam_spike.p2') }}</p>
+          <p>{{ tt('protection.modals.spam_spike.p3') }}</p>
+          <p v-html="tt('protection.modals.spam_spike.p4_threshold')" />
+          <p v-html="tt('protection.modals.spam_spike.p5_window')" />
+          <p v-html="tt('protection.modals.spam_spike.p6_notify')" />
+          <p v-html="tt('protection.modals.spam_spike.p7_master')" />
+        </div>
+      </div>
+    </div>
+    </GuardTeleport>
     <div
       v-if="showCleanupInfoModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
       @click.self="showCleanupInfoModal = false"
     >
-      <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
+      <div class="max-h-[min(88dvh,calc(100dvh-24px))] w-full max-w-xl overflow-y-auto overscroll-contain rounded-2xl border border-white/[0.08] bg-[#101013] p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.cleanup.title') }}</h3>
-          <button type="button" class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="showCleanupInfoModal = false">✕</button>
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.modals.cleanup.title') }}</h3>
+          <button type="button" class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]" @click="showCleanupInfoModal = false">✕</button>
         </div>
-        <div class="space-y-2 text-xs text-gray-700 dark:text-gray-300">
+        <div class="space-y-2 text-xs leading-relaxed text-slate-300">
           <p>{{ tt('protection.modals.cleanup.p1') }}</p>
           <p>{{ tt('protection.modals.cleanup.p2') }}</p>
           <p>{{ tt('protection.modals.cleanup.p3') }}</p>
@@ -5514,15 +5834,16 @@ const protCardIndigo =
     </div>
     <div
       v-if="showFiltersInfoModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
       @click.self="showFiltersInfoModal = false"
     >
-      <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
+      <div class="max-h-[min(88dvh,calc(100dvh-24px))] w-full max-w-xl overflow-y-auto overscroll-contain rounded-2xl border border-white/[0.08] bg-[#101013] p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.filters.title') }}</h3>
-          <button type="button" class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="showFiltersInfoModal = false">✕</button>
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.modals.filters.title') }}</h3>
+          <button type="button" class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]" @click="showFiltersInfoModal = false">✕</button>
         </div>
-        <div class="space-y-2 text-xs text-gray-700 dark:text-gray-300">
+        <div class="space-y-2 text-xs leading-relaxed text-slate-300">
           <p>{{ tt('protection.modals.filters.p1') }}</p>
           <p>{{ tt('protection.modals.filters.p2') }}</p>
           <p>{{ tt('protection.modals.filters.p3') }}</p>
@@ -5532,110 +5853,46 @@ const protCardIndigo =
     </div>
     <div
       v-if="showSilenceInfoModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
       @click.self="showSilenceInfoModal = false"
     >
-      <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
+      <div class="max-h-[min(88dvh,calc(100dvh-24px))] w-full max-w-xl overflow-y-auto overscroll-contain rounded-2xl border border-white/[0.08] bg-[#101013] p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.silence.title') }}</h3>
-          <button type="button" class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="showSilenceInfoModal = false">✕</button>
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.modals.silence.title') }}</h3>
+          <button type="button" class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]" @click="showSilenceInfoModal = false">✕</button>
         </div>
-        <div class="space-y-2 text-xs text-gray-700 dark:text-gray-300">
+        <div class="space-y-2 text-xs leading-relaxed text-slate-300">
           <p>{{ tt('protection.modals.silence.p1') }}</p>
           <p>{{ tt('protection.modals.silence.p2') }}</p>
-          <p class="text-xs text-slate-400">{{ tt('protection.modals.silence.p3') }}</p>
-        </div>
-      </div>
-    </div>
-    <div
-      v-if="showPublicAlertsHelpModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/65 p-3"
-      @click.self="showPublicAlertsHelpModal = false"
-    >
-      <div class="w-full max-w-xl rounded-2xl border border-lime-400/35 bg-white p-4 shadow-2xl dark:border-lime-500/30 dark:bg-slate-900">
-        <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-sm font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.public_alerts.title') }}</h3>
-          <button type="button" class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="showPublicAlertsHelpModal = false">✕</button>
-        </div>
-        <div class="space-y-2 text-xs leading-relaxed text-gray-700 dark:text-slate-300">
-          <p>
-            {{ tt('protection.modals.public_alerts.p1') }}
-          </p>
-          <p>
-            {{ tt('protection.modals.public_alerts.p2') }}
-          </p>
-          <p class="text-[11px] text-gray-500 dark:text-slate-400">
-            {{ tt('protection.modals.public_alerts.p3', { style: currentPublicAlertsStyleLabel }) }}
-          </p>
-          <div class="rounded-xl border border-lime-400/25 bg-lime-500/10 p-2.5 text-[11px] text-slate-700 dark:text-slate-200">
-            <p class="mb-1 font-semibold text-slate-800 dark:text-slate-100">
-              {{ tt('protection.modals.public_alerts.box_title', { style: currentPublicAlertsStyleLabel }) }}
-            </p>
-            <p>{{ tt('protection.modals.public_alerts.ex_spam') }} «{{ currentPublicAlertsExamples.spam?.[0] }}»</p>
-            <p>{{ tt('protection.modals.public_alerts.ex_link') }} «{{ currentPublicAlertsExamples.link?.[0] }}»</p>
-            <p>{{ tt('protection.modals.public_alerts.ex_bad_words') }} «{{ currentPublicAlertsExamples.bad_words?.[0] }}»</p>
-            <p>{{ tt('protection.modals.public_alerts.ex_mute') }} «{{ currentPublicAlertsExamples.mute?.[0] }}»</p>
-            <p>{{ tt('protection.modals.public_alerts.ex_ban') }} «{{ currentPublicAlertsExamples.ban?.[0] }}»</p>
-          </div>
-          <p class="text-[11px] text-gray-500 dark:text-slate-400">
-            {{ tt('protection.modals.public_alerts.p4') }}
-          </p>
-        </div>
-      </div>
-    </div>
-    <div
-      v-if="showPublicAlertsStyleHelpModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/65 p-3"
-      @click.self="showPublicAlertsStyleHelpModal = false"
-    >
-      <div class="w-full max-w-xl rounded-2xl border border-sky-400/30 bg-white p-4 shadow-2xl dark:border-sky-500/30 dark:bg-slate-900">
-        <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-sm font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.public_alerts_style.title') }}</h3>
-          <button
-            type="button"
-            class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
-            @click="showPublicAlertsStyleHelpModal = false"
-          >✕</button>
-        </div>
-        <div class="space-y-3 text-xs leading-relaxed text-gray-700 dark:text-slate-300">
-          <div class="rounded-xl border border-lime-400/25 bg-lime-500/10 p-2.5">
-            <p class="mb-1 font-semibold text-lime-900 dark:text-lime-200">
-              {{ tt('protection.modals.public_alerts_style.active', { style: currentPublicAlertsStyleLabel }) }}
-            </p>
-            <p>{{ tt('protection.modals.public_alerts_style.ex_spam') }} «{{ currentPublicAlertsExamples.spam?.[1] || currentPublicAlertsExamples.spam?.[0] }}»</p>
-            <p>{{ tt('protection.modals.public_alerts_style.ex_link') }} «{{ currentPublicAlertsExamples.link?.[1] || currentPublicAlertsExamples.link?.[0] }}»</p>
-            <p>{{ tt('protection.modals.public_alerts_style.ex_bad') }} «{{ currentPublicAlertsExamples.bad_words?.[1] || currentPublicAlertsExamples.bad_words?.[0] }}»</p>
-            <p>{{ tt('protection.modals.public_alerts_style.ex_mute_ban') }} «{{ currentPublicAlertsExamples.mute?.[0] }}» / «{{ currentPublicAlertsExamples.ban?.[0] }}»</p>
-          </div>
-          <p class="text-[11px] text-gray-500 dark:text-slate-400">
-            {{ tt('protection.modals.public_alerts_style.p_footer') }}
-          </p>
+          <p class="text-xs text-slate-500">{{ tt('protection.modals.silence.p3') }}</p>
         </div>
       </div>
     </div>
     <div
       v-if="showGuardianPeriodicHelpModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
       @click.self="showGuardianPeriodicHelpModal = false"
     >
-      <div class="w-full max-w-xl rounded-2xl border border-emerald-400/30 bg-white p-4 shadow-2xl dark:border-emerald-500/30 dark:bg-slate-900">
+      <div class="max-h-[min(88dvh,calc(100dvh-24px))] w-full max-w-xl overflow-y-auto overscroll-contain rounded-2xl border border-white/[0.08] bg-[#101013] p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-sm font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.guardian_periodic.title') }}</h3>
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.modals.guardian_periodic.title') }}</h3>
           <button
             type="button"
-            class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
+            class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
             @click="showGuardianPeriodicHelpModal = false"
           >✕</button>
         </div>
-        <div class="space-y-2 text-xs leading-relaxed text-gray-700 dark:text-slate-300">
+        <div class="space-y-2 text-xs leading-relaxed text-slate-300">
           <p>
             {{ tt('protection.modals.guardian_periodic.p1') }}
           </p>
-          <p class="text-[11px] text-gray-500 dark:text-slate-400">
+          <p class="text-[11px] text-slate-500">
             {{ tt('protection.modals.guardian_periodic.p2') }}
           </p>
-          <div class="rounded-xl border border-emerald-400/25 bg-emerald-500/10 p-2.5 text-[11px]">
-            <p class="mb-1 font-semibold text-emerald-900 dark:text-emerald-200">{{ tt('protection.modals.guardian_periodic.examples_title') }}</p>
+          <div class="rounded-xl bg-white/[0.05] p-2.5 text-[11px] text-slate-200">
+            <p class="mb-1 font-semibold text-emerald-200/95">{{ tt('protection.modals.guardian_periodic.examples_title') }}</p>
             <p v-for="(txt, idx) in guardianPeriodicExamples" :key="`gp-ex-${idx}`">• «{{ txt }}»</p>
           </div>
         </div>
@@ -5643,13 +5900,14 @@ const protCardIndigo =
     </div>
     <div
       v-if="showSilencePickerModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
       @click.self="showSilencePickerModal = false"
     >
-      <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
+      <div class="w-full max-w-xl rounded-2xl border border-white/[0.08] bg-[#101013] p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.silence_picker_modal.title') }}</h3>
-          <button type="button" class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="showSilencePickerModal = false">✕</button>
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.silence_picker_modal.title') }}</h3>
+          <button type="button" class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]" @click="showSilencePickerModal = false">✕</button>
         </div>
         <div class="grid grid-cols-2 gap-2">
             <button
@@ -5675,69 +5933,73 @@ const protCardIndigo =
     </div>
     <div
       v-if="showStopwordsInfoModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
       @click.self="showStopwordsInfoModal = false"
     >
-      <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
+      <div class="max-h-[min(88dvh,calc(100dvh-24px))] w-full max-w-xl overflow-y-auto overscroll-contain rounded-2xl border border-white/[0.08] bg-[#101013] p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.stopwords.title') }}</h3>
-          <button type="button" class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="showStopwordsInfoModal = false">✕</button>
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.modals.stopwords.title') }}</h3>
+          <button type="button" class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]" @click="showStopwordsInfoModal = false">✕</button>
         </div>
-        <div class="space-y-2 text-xs text-gray-700 dark:text-gray-300">
+        <div class="space-y-2 text-xs leading-relaxed text-slate-300">
           <p>{{ tt('protection.modals.stopwords.p1') }}</p>
           <p>{{ tt('protection.modals.stopwords.p2') }}</p>
-          <p class="text-xs text-slate-400">{{ tt('protection.modals.stopwords.p3') }}</p>
+          <p class="text-xs text-slate-500">{{ tt('protection.modals.stopwords.p3') }}</p>
         </div>
       </div>
     </div>
     <div
       v-if="showHardDictInfoModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
       @click.self="showHardDictInfoModal = false"
     >
-      <div class="w-full max-w-xl rounded-2xl border border-red-300/60 bg-white p-4 shadow-2xl dark:border-red-700/60 dark:bg-gray-800">
+      <div class="max-h-[min(88dvh,calc(100dvh-24px))] w-full max-w-xl overflow-y-auto overscroll-contain rounded-2xl border border-white/[0.08] bg-[#101013] p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.hard_dict.title') }}</h3>
-          <button type="button" class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="showHardDictInfoModal = false">✕</button>
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.modals.hard_dict.title') }}</h3>
+          <button type="button" class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]" @click="showHardDictInfoModal = false">✕</button>
         </div>
-        <div class="space-y-2 text-xs text-gray-700 dark:text-gray-300">
+        <div class="space-y-2 text-xs leading-relaxed text-slate-300">
           <p>{{ tt('protection.modals.hard_dict.p1') }}</p>
           <p>{{ tt('protection.modals.hard_dict.p2') }}</p>
-          <p class="text-xs text-slate-400">{{ tt('protection.modals.hard_dict.p3') }}</p>
+          <p class="text-xs text-slate-500">{{ tt('protection.modals.hard_dict.p3') }}</p>
         </div>
       </div>
     </div>
     <div
       v-if="showReputationInfoModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/70 p-3 backdrop-blur-[3px] md:items-center"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-end justify-center overscroll-none bg-black/80 p-3 backdrop-blur-sm md:items-center"
       @click.self="showReputationInfoModal = false"
     >
-      <div class="w-full max-w-xl rounded-2xl border border-white/12 bg-gradient-to-b from-zinc-900/80 to-zinc-950/95 p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.9)] ring-1 ring-inset ring-white/[0.06] backdrop-blur-2xl">
+      <div class="max-h-[min(88dvh,calc(100dvh-24px))] w-full max-w-xl overflow-y-auto overscroll-contain rounded-2xl border border-white/[0.08] bg-[#101013] p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
         <div class="mb-3 flex items-center justify-between gap-2">
           <h3 class="text-sm font-semibold text-white">{{ tt('protection.modals.reputation.title') }}</h3>
-          <button type="button" class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-white/10 hover:text-white" @click="showReputationInfoModal = false">✕</button>
+          <button type="button" class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]" @click="showReputationInfoModal = false">✕</button>
         </div>
-        <div class="space-y-2 text-xs leading-relaxed text-slate-200/90">
+        <div class="space-y-2 text-xs leading-relaxed text-slate-300">
           <p>{{ tt('protection.modals.reputation.p1') }}</p>
           <p>{{ tt('protection.modals.reputation.p2') }}</p>
           <p>{{ tt('protection.modals.reputation.p3') }}</p>
           <p>{{ tt('protection.modals.reputation.p4') }}</p>
-          <p><b>{{ tt('protection.modals.reputation.words_label') }}</b> {{ (reputationDefaultWords || []).join(', ') || '—' }}</p>
+          <p><b class="text-slate-200">{{ tt('protection.modals.reputation.words_label') }}</b> {{ (reputationDefaultWords || []).join(', ') || '—' }}</p>
         </div>
       </div>
     </div>
     <div
       v-if="showReputationSettingsModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/70 p-3 backdrop-blur-[3px]"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
       @click.self="showReputationSettingsModal = false"
     >
-      <div class="flex max-h-[84vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-white/12 bg-gradient-to-b from-zinc-900/85 to-zinc-950/95 p-3 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.9)] ring-1 ring-inset ring-white/[0.06] backdrop-blur-2xl">
-        <div class="mb-2 flex items-center justify-between gap-2 border-b border-white/10 pb-2">
+      <div class="flex max-h-[84vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl bg-[#101013] p-3 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
+        <div class="mb-2 flex items-center justify-between gap-2 pb-2">
           <h3 class="text-sm font-semibold text-white">{{ tt('protection.reputation_settings_modal.title') }}</h3>
           <button type="button" class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-white/10 hover:text-white" @click="showReputationSettingsModal = false">✕</button>
         </div>
-        <div class="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
-          <div class="rounded-lg border border-white/12 bg-black/25 p-2">
+        <div class="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain pr-1">
+          <div class="rounded-lg bg-white/[0.04] p-2">
             <p class="text-[10px] font-semibold uppercase tracking-wide text-slate-300">{{ tt('protection.reputation_settings_modal.words_in_base') }}</p>
             <p class="mt-1 text-[11px] text-slate-300/90">{{ (reputationDefaultWords || []).join(', ') || '—' }}</p>
           </div>
@@ -5746,7 +6008,7 @@ const protCardIndigo =
               v-model="newReputationWord"
               type="text"
               :placeholder="tt('protection.reputation_settings_modal.custom_word_placeholder')"
-              class="min-w-0 flex-1 rounded-lg border border-white/15 bg-black/25 px-2.5 py-1.5 text-xs text-slate-100 placeholder:text-slate-500"
+              class="min-w-0 flex-1 rounded-lg border-0 bg-white/[0.06] px-2.5 py-1.5 text-xs text-slate-100 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)] placeholder:text-slate-500"
               :disabled="reputationWordsLoading"
               @keydown.enter.prevent="addReputationWord()"
             />
@@ -5760,7 +6022,7 @@ const protCardIndigo =
             </button>
           </div>
           <div class="grid gap-2 sm:grid-cols-2">
-            <div class="rounded-lg border border-white/12 bg-black/25 p-2">
+            <div class="rounded-lg bg-white/[0.04] p-2">
               <div class="flex items-center justify-between gap-2">
                 <p class="text-[10px] font-semibold uppercase tracking-wide text-slate-300">{{ tt('protection.reputation_settings_modal.my_words') }}</p>
                 <button
@@ -5789,7 +6051,7 @@ const protCardIndigo =
               </ul>
               <p v-else class="mt-1 text-[11px] text-slate-400">{{ tt('protection.reputation_settings_modal.no_custom_words') }}</p>
             </div>
-            <div class="rounded-lg border border-white/12 bg-black/25 p-2">
+            <div class="rounded-lg bg-white/[0.04] p-2">
               <div class="flex items-center justify-between gap-2">
                 <p class="text-[10px] font-semibold uppercase tracking-wide text-slate-300">{{ tt('protection.reputation_settings_modal.top_group') }}</p>
                 <button
@@ -5826,25 +6088,26 @@ const protCardIndigo =
     </div>
     <div
       v-if="showMainInfoModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
       @click.self="showMainInfoModal = false"
     >
-      <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
+      <div class="max-h-[min(88dvh,calc(100dvh-24px))] w-full max-w-xl overflow-y-auto overscroll-contain rounded-2xl border border-white/[0.08] bg-[#101013] p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.main.title') }}</h3>
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.modals.main.title') }}</h3>
               <button
                 type="button"
-            class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
+            class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
             @click="showMainInfoModal = false"
               >
             ✕
               </button>
             </div>
-        <div class="space-y-2 text-xs text-gray-700 dark:text-gray-300">
+        <div class="space-y-2 text-xs leading-relaxed text-slate-300">
           <p>{{ tt('protection.modals.main.p1') }}</p>
           <p>{{ tt('protection.modals.main.p2') }}</p>
           <p>{{ tt('protection.modals.main.p3') }}</p>
-          <p class="text-xs text-slate-400">
+          <p class="text-xs text-slate-500">
             {{ tt('protection.modals.main.p4') }}
           </p>
           </div>
@@ -5852,19 +6115,20 @@ const protCardIndigo =
     </div>
     <div
       v-if="showReputationWordsModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/70 p-3 backdrop-blur-[3px]"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
       @click.self="showReputationWordsModal = false"
     >
-      <div class="flex max-h-[84vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-white/12 bg-gradient-to-b from-zinc-900/85 to-zinc-950/95 p-3 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.9)] ring-1 ring-inset ring-white/[0.06] backdrop-blur-2xl">
-        <div class="mb-2 flex items-center justify-between gap-2 border-b border-white/10 pb-2">
+      <div class="flex max-h-[84vh] w-full max-w-md flex-col overflow-hidden rounded-2xl bg-[#101013] p-3 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
+        <div class="mb-2 flex items-center justify-between gap-2 pb-2">
           <h3 class="text-sm font-semibold text-white">{{ tt('protection.reputation_settings_modal.my_words') }}</h3>
           <button type="button" class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-white/10 hover:text-white" @click="showReputationWordsModal = false">✕</button>
         </div>
-        <div class="min-h-0 flex-1 space-y-1.5 overflow-y-auto pr-1">
+        <div class="min-h-0 flex-1 space-y-1.5 overflow-y-auto overscroll-contain pr-1">
           <div
             v-for="w in reputationWords"
             :key="`rep-word-modal-${w}`"
-            class="flex items-center justify-between rounded-md border border-white/10 bg-white/[0.06] px-2 py-1 text-xs"
+            class="flex items-center justify-between rounded-md bg-white/[0.06] px-2 py-1 text-xs shadow-[inset_0_0_0_1px_rgba(255,255,255,0.05)]"
           >
             <span class="text-slate-100">{{ w }}</span>
             <button type="button" class="rounded p-0.5 text-rose-300 hover:bg-rose-500/15" :disabled="reputationWordsLoading" @click="removeReputationWord(w)">✕</button>
@@ -5874,19 +6138,20 @@ const protCardIndigo =
     </div>
     <div
       v-if="showReputationTopModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/70 p-3 backdrop-blur-[3px]"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
       @click.self="showReputationTopModal = false"
     >
-      <div class="flex max-h-[84vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-white/12 bg-gradient-to-b from-zinc-900/85 to-zinc-950/95 p-3 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.9)] ring-1 ring-inset ring-white/[0.06] backdrop-blur-2xl">
-        <div class="mb-2 flex items-center justify-between gap-2 border-b border-white/10 pb-2">
+      <div class="flex max-h-[84vh] w-full max-w-md flex-col overflow-hidden rounded-2xl bg-[#101013] p-3 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
+        <div class="mb-2 flex items-center justify-between gap-2 pb-2">
           <h3 class="text-sm font-semibold text-white">{{ tt('protection.reputation_settings_modal.top_group') }}</h3>
           <button type="button" class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-white/10 hover:text-white" @click="showReputationTopModal = false">✕</button>
         </div>
-        <div class="min-h-0 flex-1 space-y-1.5 overflow-y-auto pr-1">
+        <div class="min-h-0 flex-1 space-y-1.5 overflow-y-auto overscroll-contain pr-1">
           <div
             v-for="(row, idx) in reputationTop"
             :key="`rep-top-modal-${row.user_id}`"
-            class="flex items-center justify-between rounded-md border border-white/10 bg-white/[0.06] px-2 py-1 text-xs"
+            class="flex items-center justify-between rounded-md bg-white/[0.06] px-2 py-1 text-xs shadow-[inset_0_0_0_1px_rgba(255,255,255,0.05)]"
           >
             <button
               type="button"
@@ -5902,24 +6167,25 @@ const protCardIndigo =
     </div>
     <div
       v-if="showChatSwitchInfoModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
       @click.self="showChatSwitchInfoModal = false"
     >
-      <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
+      <div class="max-h-[min(88dvh,calc(100dvh-24px))] w-full max-w-xl overflow-y-auto overscroll-contain rounded-2xl border border-white/[0.08] bg-[#101013] p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.chat_switch.title') }}</h3>
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.modals.chat_switch.title') }}</h3>
           <button
             type="button"
-            class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
+            class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
             @click="showChatSwitchInfoModal = false"
           >
             ✕
           </button>
         </div>
-        <div class="space-y-2 text-xs text-gray-700 dark:text-gray-300">
+        <div class="space-y-2 text-xs leading-relaxed text-slate-300">
           <p>{{ tt('protection.modals.chat_switch.p1') }}</p>
           <p>{{ tt('protection.modals.chat_switch.p2') }}</p>
-          <p class="text-xs text-slate-400">
+          <p class="text-xs text-slate-500">
             {{ tt('protection.modals.chat_switch.p3') }}
           </p>
         </div>
@@ -6035,14 +6301,15 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="welcomeImagePreviewUrl && showWelcomeSettingsModal"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/75 p-4 backdrop-blur-[2px]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+        class="flex items-center justify-center overscroll-none bg-black/80 p-4 backdrop-blur-sm"
         role="dialog"
         aria-modal="true"
         @click.self="welcomeImagePreviewUrl = ''"
       >
-        <div class="w-full max-w-2xl rounded-2xl border border-white/12 bg-zinc-950/88 p-3 shadow-2xl backdrop-blur-xl" @click.stop>
+        <div class="w-full max-w-2xl rounded-2xl border border-white/[0.08] bg-[#101013] p-3 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]" @click.stop>
           <div class="mb-2 flex justify-end">
-            <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="welcomeImagePreviewUrl = ''">✕</button>
+            <button type="button" class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]" @click="welcomeImagePreviewUrl = ''">✕</button>
           </div>
           <img :src="welcomeImagePreviewUrl" :alt="tt('protection.ui.welcome_photo_preview_alt')" class="max-h-[78vh] w-full rounded-lg object-contain" />
         </div>
@@ -6053,28 +6320,28 @@ const protCardIndigo =
     <div
       v-if="showWelcomeSettingsModal && chat?.rule"
       data-guard-protection-welcome-modal
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px"
-      class="flex items-center justify-center bg-black/55 p-3 sm:p-4 backdrop-blur-[2px]"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none bg-black/75 p-3 pt-[max(12px,env(safe-area-inset-top))] pb-[max(12px,env(safe-area-inset-bottom))] backdrop-blur-sm sm:p-4"
       role="dialog"
       aria-modal="true"
       @click.self="closeWelcomeSettingsModal()"
     >
         <div
-          class="flex max-h-[min(90vh,48rem)] w-full max-w-2xl flex-col overflow-hidden rounded-[1.35rem] border border-white/12 bg-zinc-950/76 p-0 text-zinc-100 shadow-[0_34px_90px_-28px_rgba(0,0,0,0.78),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-2xl backdrop-saturate-150"
+          class="welcome-settings-shell flex max-h-[min(90vh,48rem)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-[#101013] p-0 text-zinc-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]"
           @click.stop
         >
-          <div class="flex items-center justify-between border-b border-white/6 bg-gradient-to-r from-white/[0.04] to-transparent px-4 py-3">
+          <div class="flex items-center justify-between border-b border-white/[0.06] bg-[#0c0c0f] px-4 py-3">
             <div class="flex items-center gap-2">
               <h3 class="text-sm font-semibold text-white">{{ tt('protection.welcome_modal.title') }}</h3>
               <button
                 type="button"
-                class="link-glass-info-btn"
-                :class="welcomeInfoModal === 'main' ? 'link-glass-info-btn--active' : ''"
+                class="prot-info-btn prot-info-btn--ink prot-info-btn--corner-sm"
+                :class="welcomeInfoModal === 'main' ? 'ring-1 ring-lime-400/35' : ''"
                 :aria-label="tt('protection.ui.welcome_hint_main_aria')"
                 @click="welcomeInfoModal = welcomeInfoModal === 'main' ? '' : 'main'"
-              >ⓘ</button>
+              >i</button>
             </div>
-            <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-white/10" @click="closeWelcomeSettingsModal()">✕</button>
+            <button type="button" class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-400 transition hover:bg-white/[0.1]" @click="closeWelcomeSettingsModal()">✕</button>
           </div>
           <div class="min-h-[min(38vh,14rem)] max-h-[min(78vh,42rem)] flex-1 space-y-3 overflow-y-auto px-3 py-3 sm:px-4">
             <div class="glass-panel flex items-center justify-between gap-2 p-3">
@@ -6090,7 +6357,7 @@ const protCardIndigo =
             </div>
             <p
               v-if="chat?.rule?.delete_join_messages"
-              class="rounded-xl border border-amber-400/25 bg-amber-950/20 px-3 py-2 text-[11px] leading-relaxed text-amber-100"
+              class="rounded-xl bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-100/95"
             >
               {{ tt('protection.welcome_modal.service_join_hint') }}
             </p>
@@ -6099,11 +6366,11 @@ const protCardIndigo =
                 <p class="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ tt('protection.welcome_modal.format_heading') }}</p>
                 <button
                   type="button"
-                  class="link-glass-info-btn"
-                  :class="welcomeInfoModal === 'text' ? 'link-glass-info-btn--active' : ''"
+                  class="prot-info-btn prot-info-btn--ink prot-info-btn--corner-sm"
+                  :class="welcomeInfoModal === 'text' ? 'ring-1 ring-lime-400/35' : ''"
                   :aria-label="tt('protection.ui.welcome_hint_editor_aria')"
                   @click="welcomeInfoModal = welcomeInfoModal === 'text' ? '' : 'text'"
-                >ⓘ</button>
+                >i</button>
               </div>
               <div class="mb-2 flex flex-wrap items-center gap-2">
                 <label class="post-rules-tool-btn cursor-pointer px-3 py-1.5 text-[11px] font-semibold">
@@ -6202,7 +6469,7 @@ const protCardIndigo =
               <div
                 ref="welcomeBodyRef"
                 contenteditable="true"
-                class="welcome-rich-editor max-h-56 min-h-[8rem] w-full overflow-y-auto rounded-xl border border-white/10 bg-slate-950/90 px-3 py-2 text-sm leading-relaxed text-slate-100 focus-within:border-white/20 focus-within:ring-1 focus-within:ring-white/10"
+                class="welcome-rich-editor max-h-56 min-h-[8rem] w-full overflow-y-auto rounded-xl border-0 bg-black/50 px-3 py-2 text-sm leading-relaxed text-slate-100 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)] focus-within:shadow-[inset_0_0_0_1px_rgba(163,230,53,0.35)]"
                 :data-placeholder="tt('protection.welcome_modal.placeholder_example')"
                 @input="onWelcomeBodyInput"
                 @click="onWelcomeBodyClick"
@@ -6218,11 +6485,11 @@ const protCardIndigo =
                 <p class="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ tt('protection.welcome_modal.rate_heading') }}</p>
                 <button
                   type="button"
-                  class="link-glass-info-btn"
-                  :class="welcomeInfoModal === 'rate' ? 'link-glass-info-btn--active' : ''"
+                  class="prot-info-btn prot-info-btn--ink prot-info-btn--corner-sm"
+                  :class="welcomeInfoModal === 'rate' ? 'ring-1 ring-lime-400/35' : ''"
                   :aria-label="tt('protection.ui.welcome_hint_rate_aria')"
                   @click="welcomeInfoModal = welcomeInfoModal === 'rate' ? '' : 'rate'"
-                >ⓘ</button>
+                >i</button>
               </div>
               <div class="mb-2 grid grid-cols-2 gap-2">
                 <div>
@@ -6233,7 +6500,7 @@ const protCardIndigo =
                   <p class="mb-1 text-[10px] text-zinc-500">{{ tt('protection.welcome_modal.extra_limit') }}</p>
                   <div class="flex flex-wrap gap-1.5">
                     <button
-                      v-for="n in [0,1,2,3,5,10]"
+                      v-for="n in [0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 30]"
                       :key="`wel-rate-${n}`"
                       type="button"
                       class="rounded-lg px-2 py-1 text-[11px] font-semibold"
@@ -6252,11 +6519,11 @@ const protCardIndigo =
                   <span class="text-xs text-slate-200">{{ tt('protection.welcome_modal.silent_raid') }}</span>
                   <button
                     type="button"
-                    class="link-glass-info-btn shrink-0"
-                    :class="welcomeInfoModal === 'raid' ? 'link-glass-info-btn--active' : ''"
+                    class="prot-info-btn prot-info-btn--ink prot-info-btn--corner-sm shrink-0"
+                    :class="welcomeInfoModal === 'raid' ? 'ring-1 ring-lime-400/35' : ''"
                     :aria-label="tt('protection.ui.welcome_hint_raid_aria')"
                     @click="welcomeInfoModal = welcomeInfoModal === 'raid' ? '' : 'raid'"
-                  >ⓘ</button>
+                  >i</button>
                 </div>
                 <button
                   type="button"
@@ -6279,9 +6546,9 @@ const protCardIndigo =
               </div>
             </div>
           </div>
-          <div class="flex items-center justify-end gap-2 border-t border-white/10 px-3 py-2.5 sm:px-4">
-            <button type="button" class="post-rules-action-btn post-rules-action-btn--cancel" @click="showWelcomeSettingsModal = false">{{ tt('protection.welcome_modal.cancel') }}</button>
-            <button type="button" class="post-rules-action-btn post-rules-action-btn--save" :disabled="welcomeBusy" @click="saveWelcomeSettings()">{{ welcomeBusy ? tt('protection.welcome_modal.saving') : tt('protection.welcome_modal.save') }}</button>
+          <div class="flex items-center justify-end gap-2 border-t border-white/[0.06] bg-[#0a0a0c] px-3 py-2.5 sm:px-4">
+            <button type="button" class="rounded-xl bg-white/[0.06] px-3 py-2 text-xs font-semibold text-slate-300 transition hover:bg-white/[0.1]" @click="showWelcomeSettingsModal = false">{{ tt('protection.welcome_modal.cancel') }}</button>
+            <button type="button" class="guard-green-soft rounded-xl px-3 py-2 text-xs font-bold text-slate-900 disabled:opacity-50" :disabled="welcomeBusy" @click="saveWelcomeSettings()">{{ welcomeBusy ? tt('protection.welcome_modal.saving') : tt('protection.welcome_modal.save') }}</button>
           </div>
         </div>
       </div>
@@ -6289,16 +6556,17 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="showPostRulesSettingsModal && chat?.rule"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/55 p-3 sm:p-4 backdrop-blur-[2px]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+        class="flex items-center justify-center overscroll-none bg-black/75 p-3 sm:p-4 backdrop-blur-sm"
         role="dialog"
         aria-modal="true"
         @click.self="closePostRulesSettingsModal()"
       >
         <div
-          class="flex max-h-[min(90vh,48rem)] w-full max-w-3xl flex-col overflow-hidden rounded-[1.35rem] border border-white/12 bg-zinc-950/76 p-0 text-zinc-100 shadow-[0_34px_90px_-28px_rgba(0,0,0,0.78),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-2xl backdrop-saturate-150"
+          class="post-rules-settings-shell flex max-h-[min(90vh,48rem)] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-[#101013] p-0 text-zinc-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]"
           @click.stop
         >
-          <div class="flex items-center justify-between border-b border-white/6 bg-gradient-to-r from-white/[0.04] to-transparent px-4 py-3">
+          <div class="flex items-center justify-between border-b border-white/[0.06] bg-[#0c0c0f] px-4 py-3">
             <div>
               <div class="flex items-center gap-2">
                 <h3 class="text-sm font-semibold text-white">{{ tt('protection.group_rules_ui.header_title') }}</h3>
@@ -6311,7 +6579,7 @@ const protCardIndigo =
               <p class="text-[10px]" :class="postRulesServerDirty ? 'text-rose-300' : 'text-emerald-300'">{{ postRulesGroupEditingLabel }}</p>
               <p class="truncate text-[11px] text-slate-400">{{ tt('protection.group_rules_ui.group_prefix') }} {{ postRulesCurrentGroupTitle() }}</p>
             </div>
-            <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-white/10" @click="closePostRulesSettingsModal()">✕</button>
+            <button type="button" class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-400 transition hover:bg-white/[0.1]" @click="closePostRulesSettingsModal()">✕</button>
           </div>
 
           <div class="space-y-2 px-4 pt-2">
@@ -6320,7 +6588,7 @@ const protCardIndigo =
               <div class="flex items-center gap-1.5">
                 <button
                   type="button"
-                  class="inline-flex h-5 min-w-5 items-center justify-center rounded-full border border-cyan-400/35 bg-cyan-950/30 px-1 text-[10px] font-extrabold text-cyan-200"
+                  class="prot-info-btn prot-info-btn--ink prot-info-btn--corner-sm"
                   :aria-label="tt('protection.ui.info_group_rules_telegram_aria')"
                   @click="postRulesGroupInfoOpen = !postRulesGroupInfoOpen"
                 >i</button>
@@ -6497,18 +6765,18 @@ const protCardIndigo =
               </div>
           </div>
 
-          <div class="post-rules-footer flex flex-col gap-1 border-t border-white/10 px-3 py-2 sm:px-4">
+          <div class="post-rules-footer flex flex-col gap-1 border-t border-white/[0.06] bg-[#0a0a0c] px-3 py-2 sm:px-4">
             <div class="flex flex-wrap items-center justify-end gap-2">
-              <button type="button" class="post-rules-action-btn post-rules-action-btn--cancel" @click="closePostRulesSettingsModal()">{{ tt('protection.group_rules_ui.close') }}</button>
+              <button type="button" class="rounded-xl bg-white/[0.06] px-3 py-2 text-xs font-semibold text-slate-300 transition hover:bg-white/[0.1]" @click="closePostRulesSettingsModal()">{{ tt('protection.group_rules_ui.close') }}</button>
               <button
                 type="button"
-                class="post-rules-action-btn border border-cyan-400/40 bg-cyan-500/25 text-cyan-50 hover:bg-cyan-500/35"
+                class="guard-green-soft rounded-xl px-3 py-2 text-xs font-bold text-slate-900 disabled:opacity-50"
                 :disabled="postRulesSendBusy || postRulesSaveBusy"
                 @click="sendPostRulesNowGroup()"
               >{{ postRulesSendBusy ? tt('protection.group_rules_ui.sending') : tt('protection.group_rules_ui.send_group') }}</button>
               <button
                 type="button"
-                class="post-rules-action-btn post-rules-action-btn--save"
+                class="guard-green-soft rounded-xl px-3 py-2 text-xs font-bold text-slate-900 disabled:opacity-50"
                 :disabled="postRulesSaveBusy"
                 @click="savePostRulesSettings()"
               >{{ postRulesSaveBusy ? tt('protection.group_rules_ui.save_saving') : tt('protection.group_rules_ui.save') }}</button>
@@ -6688,43 +6956,44 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="welcomeInfoModal && showWelcomeSettingsModal"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200010;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+        class="flex items-center justify-center overscroll-none p-4 backdrop-blur-sm"
         role="dialog"
         aria-modal="true"
         @click.self="welcomeInfoModal = ''"
       >
         <div
-          class="w-full max-w-md overflow-hidden rounded-[1.25rem] border border-white/15 bg-zinc-950/90 text-zinc-100 shadow-2xl backdrop-blur-xl ring-1 ring-white/10"
+          class="max-h-[min(76dvh,28rem)] w-full max-w-md overflow-hidden rounded-2xl border border-white/[0.08] bg-[#101013] text-zinc-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]"
           @click.stop
         >
-          <div class="flex items-center justify-between border-b border-white/10 bg-gradient-to-r from-white/[0.06] to-transparent px-4 py-2.5">
+          <div class="flex items-center justify-between border-b border-white/[0.06] bg-[#0c0c0f] px-4 py-2.5">
             <h4 class="pr-2 text-sm font-semibold text-white">
               <template v-if="welcomeInfoModal === 'main'">{{ tt('protection.welcome_hints.title_main') }}</template>
               <template v-else-if="welcomeInfoModal === 'text'">{{ tt('protection.welcome_hints.title_text') }}</template>
               <template v-else-if="welcomeInfoModal === 'rate'">{{ tt('protection.welcome_hints.title_rate') }}</template>
               <template v-else-if="welcomeInfoModal === 'raid'">{{ tt('protection.welcome_hints.title_raid') }}</template>
             </h4>
-            <button type="button" class="shrink-0 rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-white/10" @click="welcomeInfoModal = ''" :aria-label="tt('common.close')">✕</button>
+            <button type="button" class="shrink-0 rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]" @click="welcomeInfoModal = ''" :aria-label="tt('common.close')">✕</button>
           </div>
-          <div class="max-h-[min(60vh,22rem)] overflow-y-auto px-4 py-3">
+          <div class="max-h-[min(60vh,22rem)] overflow-y-auto overscroll-contain px-4 py-3">
             <div
               v-if="welcomeInfoModal === 'main'"
-              class="rounded-2xl border border-cyan-400/20 bg-cyan-500/[0.08] p-3 text-[11px] leading-relaxed text-zinc-200 backdrop-blur-md"
+              class="rounded-xl bg-white/[0.05] p-3 text-[11px] leading-relaxed text-slate-300"
               v-html="tt('protection.welcome_hints.main_html')"
             />
             <div
               v-else-if="welcomeInfoModal === 'text'"
-              class="rounded-xl border border-violet-400/20 bg-violet-500/[0.08] p-2.5 text-[11px] leading-relaxed text-zinc-200"
+              class="rounded-xl bg-white/[0.05] p-2.5 text-[11px] leading-relaxed text-slate-300"
               v-html="tt('protection.welcome_hints.text_html')"
             />
             <div
               v-else-if="welcomeInfoModal === 'rate'"
-              class="rounded-xl border border-cyan-400/20 bg-cyan-500/[0.08] p-2.5 text-[11px] leading-relaxed text-zinc-200"
+              class="rounded-xl bg-white/[0.05] p-2.5 text-[11px] leading-relaxed text-slate-300"
               v-html="tt('protection.welcome_hints.rate_html')"
             />
             <div
               v-else-if="welcomeInfoModal === 'raid'"
-              class="rounded-xl border border-amber-400/20 bg-amber-500/[0.08] p-2.5 text-[11px] leading-relaxed text-zinc-200"
+              class="rounded-xl bg-white/[0.05] p-2.5 text-[11px] leading-relaxed text-slate-300"
               v-html="tt('protection.welcome_hints.raid_html')"
             />
           </div>
@@ -6735,41 +7004,42 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="showWelcomeButtonsModal && showWelcomeSettingsModal"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200010;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+        class="flex items-center justify-center overscroll-none p-4 backdrop-blur-sm"
         role="dialog"
         aria-modal="true"
         @click.self="showWelcomeButtonsModal = false"
       >
-        <div class="w-full max-w-2xl overflow-hidden rounded-[1.25rem] border border-white/15 bg-zinc-950/90 text-zinc-100 shadow-2xl backdrop-blur-xl ring-1 ring-white/10" @click.stop>
-          <div class="flex items-center justify-between border-b border-white/10 bg-gradient-to-r from-white/[0.06] to-transparent px-4 py-2.5">
+        <div class="w-full max-w-2xl overflow-hidden rounded-2xl border border-white/[0.08] bg-[#101013] text-zinc-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]" @click.stop>
+          <div class="flex items-center justify-between border-b border-white/[0.06] bg-[#0c0c0f] px-4 py-2.5">
             <h4 class="text-sm font-semibold text-white">{{ tt('protection.editor_buttons_modal.title') }}</h4>
-            <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="showWelcomeButtonsModal = false">✕</button>
+            <button type="button" class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]" @click="showWelcomeButtonsModal = false">✕</button>
           </div>
-          <div class="max-h-[70vh] overflow-y-auto px-4 py-3">
-            <div v-for="(row, ri) in welcomeButtonRows" :key="`wkb-${ri}`" class="mb-3 rounded-xl border border-white/10 bg-white/[0.04] p-3">
+          <div class="max-h-[70vh] overflow-y-auto overscroll-contain px-4 py-3">
+            <div v-for="(row, ri) in welcomeButtonRows" :key="`wkb-${ri}`" class="mb-3 rounded-xl bg-white/[0.04] p-3">
               <div class="mb-2 flex items-center justify-between gap-2">
                 <p class="text-xs font-semibold text-slate-200">{{ tt('protection.editor_buttons_modal.row', { n: ri + 1 }) }}</p>
-                <button type="button" class="rounded-lg border border-rose-400/25 bg-rose-500/15 px-2 py-0.5 text-[10px] text-rose-100 hover:bg-rose-500/25" @click="welcomeRemoveRow(ri)">{{ tt('protection.editor_buttons_modal.remove_row') }}</button>
+                <button type="button" class="rounded-lg bg-rose-500/15 px-2 py-0.5 text-[10px] text-rose-100 hover:bg-rose-500/25" @click="welcomeRemoveRow(ri)">{{ tt('protection.editor_buttons_modal.remove_row') }}</button>
               </div>
               <div
                 v-for="(btn, bi) in row"
                 :key="`wkbtn-${ri}-${bi}`"
                 class="mb-2 grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto]"
               >
-                <input v-model="btn.text" type="text" class="rounded-lg border border-white/14 bg-white/[0.06] px-2.5 py-1.5 text-xs sm:col-span-2" :placeholder="tt('protection.editor_buttons_modal.btn_placeholder')" />
-                <input v-model="btn.url" type="text" class="rounded-lg border border-white/14 bg-white/[0.06] px-2.5 py-1.5 text-xs" :placeholder="tt('protection.editor_buttons_modal.url_placeholder')" />
-                <input v-model="btn.web_app_url" type="text" class="rounded-lg border border-white/14 bg-white/[0.06] px-2.5 py-1.5 text-xs" :placeholder="tt('protection.editor_buttons_modal.web_app_placeholder')" />
-                <input v-model="btn.callback_data" type="text" class="rounded-lg border border-white/14 bg-white/[0.06] px-2.5 py-1.5 text-xs sm:col-span-2" :placeholder="tt('protection.editor_buttons_modal.callback_placeholder')" />
-                <button type="button" class="rounded-lg border border-rose-400/35 bg-rose-500/20 px-2.5 py-1.5 text-xs text-rose-100" @click="welcomeRemoveButton(ri, bi)">{{ tt('protection.editor_buttons_modal.remove') }}</button>
-                <button type="button" class="rounded-lg border border-emerald-400/35 bg-emerald-500/20 px-2.5 py-1.5 text-xs font-semibold text-emerald-100" :disabled="welcomeBusy" @click="welcomeSaveButtonsFromModal()">{{ tt('protection.editor_buttons_modal.save_row') }}</button>
+                <input v-model="btn.text" type="text" class="rounded-lg border-0 bg-white/[0.06] px-2.5 py-1.5 text-xs shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)] sm:col-span-2" :placeholder="tt('protection.editor_buttons_modal.btn_placeholder')" />
+                <input v-model="btn.url" type="text" class="rounded-lg border-0 bg-white/[0.06] px-2.5 py-1.5 text-xs shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]" :placeholder="tt('protection.editor_buttons_modal.url_placeholder')" />
+                <input v-model="btn.web_app_url" type="text" class="rounded-lg border-0 bg-white/[0.06] px-2.5 py-1.5 text-xs shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]" :placeholder="tt('protection.editor_buttons_modal.web_app_placeholder')" />
+                <input v-model="btn.callback_data" type="text" class="rounded-lg border-0 bg-white/[0.06] px-2.5 py-1.5 text-xs shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)] sm:col-span-2" :placeholder="tt('protection.editor_buttons_modal.callback_placeholder')" />
+                <button type="button" class="rounded-lg bg-rose-500/20 px-2.5 py-1.5 text-xs text-rose-100 hover:bg-rose-500/30" @click="welcomeRemoveButton(ri, bi)">{{ tt('protection.editor_buttons_modal.remove') }}</button>
+                <button type="button" class="rounded-lg bg-emerald-500/15 px-2.5 py-1.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-500/25" :disabled="welcomeBusy" @click="welcomeSaveButtonsFromModal()">{{ tt('protection.editor_buttons_modal.save_row') }}</button>
               </div>
               <button type="button" class="text-xs font-semibold text-violet-300" @click="welcomeAddButton(ri)">{{ tt('protection.editor_buttons_modal.add_btn') }}</button>
             </div>
-            <button type="button" class="w-full rounded-lg border border-violet-500/40 py-2 text-sm font-semibold text-violet-200" @click="welcomeAddRow">{{ tt('protection.editor_buttons_modal.add_row') }}</button>
+            <button type="button" class="w-full rounded-xl bg-white/[0.06] py-2 text-sm font-semibold text-slate-200 hover:bg-white/[0.1]" @click="welcomeAddRow">{{ tt('protection.editor_buttons_modal.add_row') }}</button>
           </div>
-          <div class="flex items-center justify-end gap-2 border-t border-white/10 px-4 py-3">
-            <button type="button" class="rounded-lg border border-white/15 bg-white/10 px-3 py-2 text-xs font-semibold text-slate-200 hover:bg-white/15" @click="showWelcomeButtonsModal = false">{{ tt('protection.editor_buttons_modal.close') }}</button>
-            <button type="button" class="guard-green-soft rounded-lg px-3 py-2 text-xs font-semibold text-slate-900 disabled:opacity-50" :disabled="welcomeBusy" @click="welcomeSaveButtonsFromModal()">{{ welcomeBusy ? tt('protection.editor_buttons_modal.saving_buttons') : tt('protection.editor_buttons_modal.save_buttons') }}</button>
+          <div class="flex items-center justify-end gap-2 border-t border-white/[0.06] bg-[#0a0a0c] px-4 py-3">
+            <button type="button" class="rounded-xl bg-white/[0.06] px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-white/[0.1]" @click="showWelcomeButtonsModal = false">{{ tt('protection.editor_buttons_modal.close') }}</button>
+            <button type="button" class="guard-green-soft rounded-xl px-3 py-2 text-xs font-bold text-slate-900 disabled:opacity-50" :disabled="welcomeBusy" @click="welcomeSaveButtonsFromModal()">{{ welcomeBusy ? tt('protection.editor_buttons_modal.saving_buttons') : tt('protection.editor_buttons_modal.save_buttons') }}</button>
           </div>
         </div>
       </div>
@@ -6778,25 +7048,28 @@ const protCardIndigo =
     <GuardTeleport>
       <div
         v-if="welcomeLinkModalOpen"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-start justify-center bg-black/60 p-4 md:items-center"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200010;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+        class="flex items-start justify-center overscroll-none p-4 backdrop-blur-sm md:items-center"
         role="dialog"
         aria-modal="true"
         @click.self="welcomeLinkModalOpen = false"
       >
-        <div class="w-full max-w-md rounded-2xl border border-violet-400/50 bg-slate-900 p-4 shadow-2xl" @click.stop>
-          <div class="mb-2 flex items-center justify-between">
-            <p class="text-base font-semibold text-white">{{ tt('protection.link_modal.add_title') }}</p>
-            <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="welcomeLinkModalOpen = false">✕</button>
+        <div class="w-full max-w-md overflow-hidden rounded-2xl border border-white/[0.08] bg-[#101013] shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]" @click.stop>
+          <div class="flex items-center justify-between border-b border-white/[0.06] bg-[#0c0c0f] px-4 py-3">
+            <p class="pr-2 text-base font-semibold text-white">{{ tt('protection.link_modal.add_title') }}</p>
+            <button type="button" class="shrink-0 rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]" @click="welcomeLinkModalOpen = false">✕</button>
           </div>
-          <input
-            v-model="welcomeLinkUrl"
-            type="text"
-            :placeholder="tt('protection.editor_buttons_modal.url_placeholder')"
-            class="w-full rounded-xl border border-slate-600 bg-slate-950 px-3 py-2 text-sm text-white"
-          />
-          <div class="mt-3 flex gap-2">
-            <button type="button" class="rounded-xl bg-violet-600 px-4 py-2 text-sm font-semibold text-white" @click="welcomeApplyLinkModal">{{ tt('common.apply') }}</button>
-            <button type="button" class="rounded-lg border border-white/15 px-3 py-2 text-sm text-slate-200 hover:bg-white/10" @click="welcomeLinkModalOpen = false">{{ tt('common.cancel') }}</button>
+          <div class="px-4 py-4">
+            <input
+              v-model="welcomeLinkUrl"
+              type="text"
+              :placeholder="tt('protection.editor_buttons_modal.url_placeholder')"
+              class="w-full rounded-xl border-0 bg-black/50 px-3 py-2.5 text-sm text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)] focus:outline-none focus:ring-1 focus:ring-lime-400/35"
+            />
+            <div class="mt-3 flex flex-wrap gap-2">
+              <button type="button" class="guard-green-soft rounded-xl px-4 py-2 text-sm font-bold text-slate-900" @click="welcomeApplyLinkModal">{{ tt('common.apply') }}</button>
+              <button type="button" class="rounded-xl bg-white/[0.06] px-4 py-2 text-sm font-semibold text-slate-300 hover:bg-white/[0.1]" @click="welcomeLinkModalOpen = false">{{ tt('common.cancel') }}</button>
+            </div>
           </div>
         </div>
       </div>
@@ -7239,11 +7512,19 @@ const protCardIndigo =
             <button type="button" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/10" @click="showChannelPostsFilterModal = false">✕</button>
           </div>
           <p class="mb-3 text-[12px] leading-snug text-zinc-400">{{ tt('protection.ui.channel_posts_modal_hint') }}</p>
+          <p v-if="premiumFeatureLocked" class="mb-3 text-[11px] leading-snug text-zinc-500">
+            {{ tt('protection.ui.channel_posts_modal_hint_free') }}
+          </p>
           <ul class="space-y-2">
             <li
               v-for="kind in CHANNEL_POST_FILTER_KINDS"
               :key="kind.field"
-              class="flex items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-2.5"
+              class="flex items-center justify-between gap-3 rounded-xl px-3 py-2.5"
+              :class="[
+                granularPremiumRowClass(isChannelPostKindPremiumOnly(kind.key)),
+                isChannelPostKindPremiumOnly(kind.key) && premiumFeatureLocked ? 'cursor-pointer' : 'cursor-default',
+              ]"
+              @click="onChannelPostKindRowClick(kind, $event)"
             >
               <div class="flex min-w-0 flex-1 items-center gap-2.5">
                 <span class="text-lg leading-none">{{ kind.icon }}</span>
@@ -7258,7 +7539,7 @@ const protCardIndigo =
                 :aria-checked="!!chat.rule[kind.field]"
                 class="relative h-[31px] w-[51px] shrink-0 rounded-full border transition duration-200"
                 :class="iosSwitchClass(!!chat.rule[kind.field])"
-                @click="toggleChannelPostKind(kind.field)"
+                @click.stop="toggleChannelPostKind(kind.field)"
               >
                 <span
                   class="absolute left-[3px] top-1/2 h-[25px] w-[25px] rounded-full bg-white shadow-md transition duration-200"
@@ -7364,29 +7645,52 @@ const protCardIndigo =
             <button type="button" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/10" @click="showMediaFilterModal = false">✕</button>
           </div>
           <p class="mb-3 text-[12px] leading-snug text-zinc-400">{{ tt('protection.ui.media_modal_hint') }}</p>
+          <p v-if="premiumFeatureLocked" class="mb-3 text-[11px] leading-snug text-zinc-500">
+            {{ tt('protection.ui.media_modal_premium_rows_hint') }}
+          </p>
+          <div
+            class="mb-3 flex items-center justify-between gap-3 rounded-xl border border-white/[0.08] bg-white/[0.03] px-3 py-2.5"
+          >
+            <p class="min-w-0 flex-1 text-[11px] leading-snug text-zinc-500">
+              {{ tt('protection.ui.media_modal_captcha_banner') }}
+            </p>
+            <button
+              type="button"
+              class="shrink-0 rounded-md px-2 py-1 text-[10px] font-extrabold uppercase tracking-wide transition active:scale-[0.98]"
+              :class="mediaRowCaptchaBtnClass()"
+              @click="openMediaFilterCaptchaSettings"
+            >
+              {{ tt('protection.policy.captcha') }}
+            </button>
+          </div>
           <ul class="space-y-2">
             <li
               v-for="kind in MEDIA_FILTER_KINDS"
               :key="kind.field"
-              class="flex items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-2.5"
+              class="flex items-center justify-between gap-2 rounded-xl px-3 py-2.5"
+              :class="granularPremiumRowClass(isMediaKindPremiumOnly(kind.key))"
             >
               <div class="flex min-w-0 flex-1 items-center gap-2.5">
                 <span class="text-lg leading-none">{{ kind.icon }}</span>
-                <span class="truncate text-[13px] font-medium text-white">{{ tt(`protection.ui.media_kinds.${kind.key}`) }}</span>
+                <span class="truncate text-[13px] font-medium text-white">
+                  {{ tt(`protection.ui.media_kinds.${kind.key}`) }}
+                </span>
               </div>
-              <button
-                type="button"
-                role="switch"
-                :aria-checked="!!chat.rule[kind.field]"
-                class="relative h-[31px] w-[51px] shrink-0 rounded-full border transition duration-200"
-                :class="iosSwitchClass(!!chat.rule[kind.field])"
-                @click="toggleMediaKind(kind.field)"
-              >
-                <span
-                  class="absolute left-[3px] top-1/2 h-[25px] w-[25px] rounded-full bg-white shadow-md transition duration-200"
-                  :style="{ transform: chat.rule[kind.field] ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }"
-                />
-              </button>
+              <div class="flex shrink-0 items-center">
+                <button
+                  type="button"
+                  role="switch"
+                  :aria-checked="!!chat.rule[kind.field]"
+                  class="relative h-[31px] w-[51px] shrink-0 rounded-full border transition duration-200"
+                  :class="iosSwitchClass(!!chat.rule[kind.field])"
+                  @click="toggleMediaKind(kind.field)"
+                >
+                  <span
+                    class="absolute left-[3px] top-1/2 h-[25px] w-[25px] rounded-full bg-white shadow-md transition duration-200"
+                    :style="{ transform: chat.rule[kind.field] ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }"
+                  />
+                </button>
+              </div>
             </li>
           </ul>
         </div>
@@ -7420,11 +7724,19 @@ const protCardIndigo =
             <button type="button" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/10" @click="showButtonsFilterModal = false">✕</button>
           </div>
           <p class="mb-3 text-[12px] leading-snug text-zinc-400">{{ tt('protection.ui.buttons_modal_hint') }}</p>
+          <p v-if="premiumFeatureLocked" class="mb-3 text-[11px] leading-snug text-zinc-500">
+            {{ tt('protection.ui.buttons_modal_hint_free') }}
+          </p>
           <ul class="space-y-2">
             <li
               v-for="kind in BUTTON_FILTER_KINDS"
               :key="kind.field"
-              class="flex items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-2.5"
+              class="flex items-center justify-between gap-3 rounded-xl px-3 py-2.5"
+              :class="[
+                granularPremiumRowClass(isButtonKindPremiumOnly(kind.key)),
+                isButtonKindPremiumOnly(kind.key) && premiumFeatureLocked ? 'cursor-pointer' : 'cursor-default',
+              ]"
+              @click="onButtonKindRowClick(kind, $event)"
             >
               <div class="flex min-w-0 flex-1 items-center gap-2.5">
                 <span class="text-lg leading-none">{{ kind.icon }}</span>
@@ -7439,7 +7751,7 @@ const protCardIndigo =
                 :aria-checked="!!chat.rule[kind.field]"
                 class="relative h-[31px] w-[51px] shrink-0 rounded-full border transition duration-200"
                 :class="iosSwitchClass(!!chat.rule[kind.field])"
-                @click="toggleButtonKind(kind.field)"
+                @click.stop="toggleButtonKind(kind.field)"
               >
                 <span
                   class="absolute left-[3px] top-1/2 h-[25px] w-[25px] rounded-full bg-white shadow-md transition duration-200"
@@ -7447,7 +7759,11 @@ const protCardIndigo =
                 />
               </button>
             </li>
-            <li class="rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-2.5">
+            <li
+              class="rounded-xl px-3 py-2.5"
+              :class="[granularPremiumRowClass(true), premiumFeatureLocked ? 'cursor-pointer' : 'cursor-default']"
+              @click="onButtonMassCardClick($event)"
+            >
               <div class="flex items-center justify-between gap-3">
                 <div class="flex min-w-0 flex-1 items-center gap-2.5">
                   <span class="text-lg leading-none">📊</span>
@@ -7462,7 +7778,7 @@ const protCardIndigo =
                   :aria-checked="!!chat.rule.filter_button_mass_enabled"
                   class="relative h-[31px] w-[51px] shrink-0 rounded-full border transition duration-200"
                   :class="iosSwitchClass(!!chat.rule.filter_button_mass_enabled)"
-                  @click="toggleButtonMassEnabled()"
+                  @click.stop="toggleButtonMassEnabled()"
                 >
                   <span
                     class="absolute left-[3px] top-1/2 h-[25px] w-[25px] rounded-full bg-white shadow-md transition duration-200"
@@ -7501,32 +7817,33 @@ const protCardIndigo =
         </div>
       </div>
 
-    <GuardTeleport>
+    <GuardTeleport guard-to="body">
     <div
       v-if="showAntinakrutkaSettingsModal && chat?.rule"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
       @click.self="showAntinakrutkaSettingsModal = false"
     >
-      <div class="w-full max-w-xl rounded-2xl border border-cyan-400/22 bg-gradient-to-b from-slate-900/95 via-slate-950/95 to-black/95 p-4 text-slate-100 shadow-[0_26px_90px_-24px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,255,255,0.1)] backdrop-blur-2xl ring-1 ring-cyan-300/20">
-        <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold uppercase tracking-wide text-cyan-100">{{ tt('protection.antinakrutka_settings_modal.title') }}</h3>
+      <div class="w-full max-w-xl overflow-hidden rounded-2xl border border-white/[0.08] bg-[#101013] text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
+        <div class="flex items-center justify-between gap-2 border-b border-white/[0.06] bg-[#0c0c0f] px-4 py-3">
+          <h3 class="pr-2 text-xs font-semibold uppercase tracking-wide text-white">{{ tt('protection.antinakrutka_settings_modal.title') }}</h3>
           <button
             type="button"
-            class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
+            class="shrink-0 rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
             @click="showAntinakrutkaSettingsModal = false"
           >
             ✕
           </button>
         </div>
-        <div class="space-y-3">
-          <div class="rounded-xl border border-cyan-300/20 bg-cyan-500/[0.08] p-2.5 backdrop-blur-md">
-            <p class="mb-1 text-xs text-slate-300">{{ tt('protection.antinakrutka_settings_modal.quick') }}</p>
+        <div class="max-h-[min(80dvh,calc(100dvh-24px))] space-y-3 overflow-y-auto overscroll-contain p-4">
+          <div class="rounded-xl bg-white/[0.05] p-2.5">
+            <p class="mb-1 text-xs text-slate-400">{{ tt('protection.antinakrutka_settings_modal.quick') }}</p>
             <div class="grid grid-cols-3 gap-2">
               <button
                 v-for="preset in antinakrutkaModePresets"
                 :key="`anti-set-${preset.key}`"
                 type="button"
-                class="rounded-lg border px-2 py-2 text-xs font-semibold transition"
+                class="rounded-lg px-2 py-2 text-xs font-semibold transition"
                 :class="antiraidPresetClass(preset.key)"
                 @click="applyAntinakrutkaPreset(preset)"
               >
@@ -7534,7 +7851,7 @@ const protCardIndigo =
               </button>
             </div>
           </div>
-          <div class="flex items-center justify-between gap-2 rounded-xl border border-cyan-300/20 bg-cyan-500/[0.08] p-2.5 backdrop-blur-md">
+          <div class="flex items-center justify-between gap-2 rounded-xl bg-white/[0.05] p-2.5">
             <span class="text-xs text-slate-300">{{ tt('protection.antinakrutka_settings_modal.enable') }}</span>
             <button
               type="button"
@@ -7614,61 +7931,63 @@ const protCardIndigo =
     <GuardTeleport>
     <div
       v-if="showAntinakrutkaInfoModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
       @click.self="showAntinakrutkaInfoModal = false"
     >
-      <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
+      <div class="max-h-[min(88dvh,calc(100dvh-24px))] w-full max-w-xl overflow-y-auto overscroll-contain rounded-2xl border border-white/[0.08] bg-[#101013] p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.antinakrutka.title') }}</h3>
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.modals.antinakrutka.title') }}</h3>
           <button
             type="button"
-            class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
+            class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
             @click="showAntinakrutkaInfoModal = false"
           >
             ✕
           </button>
         </div>
-        <div class="space-y-3 text-xs text-gray-700 dark:text-gray-300">
+        <div class="space-y-3 text-xs leading-relaxed text-slate-300">
           <p>
             {{ tt('protection.modals.antinakrutka.p1') }}
           </p>
-          <div class="rounded-lg border border-gray-200 bg-gray-50 p-3 dark:border-gray-700 dark:bg-gray-900/40">
-            <p class="font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.antinakrutka.moods_title') }}</p>
+          <div class="rounded-lg bg-white/[0.05] p-3">
+            <p class="font-semibold text-slate-100">{{ tt('protection.modals.antinakrutka.moods_title') }}</p>
             <p class="mt-1">{{ tt('protection.modals.antinakrutka.mood_soft') }}</p>
             <p>{{ tt('protection.modals.antinakrutka.mood_std') }}</p>
             <p>{{ tt('protection.modals.antinakrutka.mood_hard') }}</p>
           </div>
-          <div class="rounded-lg border border-emerald-300/70 bg-emerald-50 p-3 dark:border-emerald-700/70 dark:bg-emerald-950/20">
-            <p class="font-semibold text-emerald-900 dark:text-emerald-200">{{ tt('protection.modals.antinakrutka.tip_title') }}</p>
-            <p class="mt-1 text-emerald-800 dark:text-emerald-300">
+          <div class="rounded-lg bg-emerald-500/10 p-3 text-emerald-100/95">
+            <p class="font-semibold text-emerald-200">{{ tt('protection.modals.antinakrutka.tip_title') }}</p>
+            <p class="mt-1">
               {{ tt('protection.modals.antinakrutka.tip_body') }}
             </p>
           </div>
-          <p class="text-xs text-slate-400">
+          <p class="text-xs text-slate-500">
             {{ tt('protection.modals.antinakrutka.p_footer') }}
           </p>
         </div>
       </div>
     </div>
     </GuardTeleport>
-    <GuardTeleport>
+    <GuardTeleport guard-to="body">
     <div
       v-if="showJoinCaptchaSettingsModal && chat?.rule"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/65 p-3 md:items-center"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-end justify-center overscroll-none p-3 backdrop-blur-sm md:items-center"
       @click.self="showJoinCaptchaSettingsModal = false"
     >
-      <div class="w-full max-w-xl rounded-2xl border border-indigo-400/22 bg-gradient-to-b from-slate-900/95 via-slate-950/95 to-black/95 p-4 text-slate-100 shadow-[0_26px_90px_-24px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,255,255,0.1)] backdrop-blur-2xl ring-1 ring-indigo-300/20">
-        <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold uppercase tracking-wide text-indigo-100">{{ tt('protection.join_captcha_settings_modal.title') }}</h3>
+      <div class="w-full max-w-xl overflow-hidden rounded-2xl border border-white/[0.08] bg-[#101013] text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
+        <div class="flex items-center justify-between gap-2 border-b border-white/[0.06] bg-[#0c0c0f] px-4 py-3">
+          <h3 class="pr-2 text-xs font-semibold uppercase tracking-wide text-white">{{ tt('protection.join_captcha_settings_modal.title') }}</h3>
           <button
             type="button"
-            class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
+            class="shrink-0 rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
             @click="showJoinCaptchaSettingsModal = false"
           >
             ✕
           </button>
         </div>
-        <div class="space-y-3">
+        <div class="max-h-[min(82dvh,calc(100dvh-24px))] space-y-3 overflow-y-auto overscroll-contain p-4">
           <div>
             <p class="mb-1 text-xs text-slate-400">{{ tt('protection.join_captcha_settings_modal.ttl') }}</p>
             <div class="flex flex-wrap gap-2">
@@ -7676,7 +7995,7 @@ const protCardIndigo =
                 v-for="m in joinCaptchaTtlPresets"
                 :key="`jc-ttl-modal-${m}`"
                 type="button"
-                :class="(chat.rule.join_captcha_ttl_minutes ?? 3) === m ? 'guard-green-soft' : protToggleOff"
+                :class="(chat.rule.join_captcha_ttl_minutes ?? 3) === m ? 'guard-green-soft font-bold text-slate-900' : protToggleOff"
                 class="rounded-lg px-2.5 py-1 text-xs"
                 @click="updateRule({ join_captcha_ttl_minutes: m })"
               >
@@ -7691,7 +8010,7 @@ const protCardIndigo =
                 v-for="k in joinCaptchaKinds"
                 :key="`jc-kind-modal-${k.value}`"
                 type="button"
-                :class="(chat.rule.join_captcha_kind || 'button') === k.value ? 'guard-green-soft' : protToggleOff"
+                :class="(chat.rule.join_captcha_kind || 'button') === k.value ? 'guard-green-soft font-bold text-slate-900' : protToggleOff"
                 class="rounded-lg px-2 py-1 text-[11px] leading-tight"
                 @click="updateRule({ join_captcha_kind: k.value })"
               >
@@ -7699,7 +8018,7 @@ const protCardIndigo =
               </button>
             </div>
           </div>
-          <div class="mt-2 flex items-center justify-between gap-2">
+          <div class="mt-2 flex items-center justify-between gap-2 rounded-xl bg-white/[0.05] px-3 py-2.5">
             <span class="text-xs text-slate-300">{{ tt('protection.join_captcha_settings_modal.prefer_dm') }}</span>
             <button
               type="button"
@@ -7717,56 +8036,138 @@ const protCardIndigo =
       </div>
     </div>
     </GuardTeleport>
+    <GuardTeleport guard-to="body">
+    <div
+      v-if="showFilterMediaCaptchaSettingsModal && chat?.rule"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-end justify-center overscroll-none p-3 backdrop-blur-sm md:items-center"
+      @click.self="showFilterMediaCaptchaSettingsModal = false"
+    >
+      <div class="w-full max-w-xl overflow-hidden rounded-2xl border border-white/[0.08] bg-[#101013] text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
+        <div class="flex items-center justify-between gap-2 border-b border-white/[0.06] bg-[#0c0c0f] px-4 py-3">
+          <h3 class="pr-2 text-xs font-semibold uppercase tracking-wide text-white">{{ tt('protection.filter_media_captcha_settings_modal.title') }}</h3>
+          <button
+            type="button"
+            class="shrink-0 rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
+            @click="showFilterMediaCaptchaSettingsModal = false"
+          >
+            ✕
+          </button>
+        </div>
+        <div class="max-h-[min(82dvh,calc(100dvh-24px))] space-y-3 overflow-y-auto overscroll-contain p-4">
+          <div class="flex items-center justify-between gap-2 rounded-xl bg-white/[0.05] px-3 py-2.5">
+            <span class="text-xs text-slate-300">{{ tt('protection.filter_media_captcha_settings_modal.enable') }}</span>
+            <button
+              type="button"
+              :class="boolToggleClass(!!chat.rule.filter_media_captcha_enabled)"
+              class="rounded-lg px-2.5 py-1 text-xs"
+              @click="updateRule({ filter_media_captcha_enabled: !chat.rule.filter_media_captcha_enabled })"
+            >
+              {{ chat.rule.filter_media_captcha_enabled ? tt('protection.filter_media_captcha_settings_modal.yes') : tt('protection.filter_media_captcha_settings_modal.no') }}
+            </button>
+          </div>
+          <div>
+            <p class="mb-1 text-xs text-slate-400">{{ tt('protection.filter_media_captcha_settings_modal.ttl') }}</p>
+            <div class="flex flex-wrap gap-2">
+              <button
+                v-for="m in joinCaptchaTtlPresets"
+                :key="`fmc-ttl-modal-${m}`"
+                type="button"
+                :class="(chat.rule.filter_media_captcha_ttl_minutes ?? 3) === m ? 'guard-green-soft font-bold text-slate-900' : protToggleOff"
+                class="rounded-lg px-2.5 py-1 text-xs"
+                @click="updateRule({ filter_media_captcha_ttl_minutes: m })"
+              >
+                {{ m }}
+              </button>
+            </div>
+          </div>
+          <div>
+            <p class="mb-1 text-xs text-slate-400">{{ tt('protection.filter_media_captcha_settings_modal.kind') }}</p>
+            <div class="flex max-h-[10rem] flex-wrap gap-1.5 overflow-y-auto pr-0.5">
+              <button
+                v-for="k in joinCaptchaKinds"
+                :key="`fmc-kind-modal-${k.value}`"
+                type="button"
+                :class="(chat.rule.filter_media_captcha_kind || 'button') === k.value ? 'guard-green-soft font-bold text-slate-900' : protToggleOff"
+                class="rounded-lg px-2 py-1 text-[11px] leading-tight"
+                @click="updateRule({ filter_media_captcha_kind: k.value })"
+              >
+                {{ k.label }}
+              </button>
+            </div>
+          </div>
+          <div class="mt-2 flex items-center justify-between gap-2 rounded-xl bg-white/[0.05] px-3 py-2.5">
+            <span class="text-xs text-slate-300">{{ tt('protection.filter_media_captcha_settings_modal.prefer_dm') }}</span>
+            <button
+              type="button"
+              :class="boolToggleClass(!!chat.rule.filter_media_captcha_prefer_dm)"
+              class="rounded-lg px-2.5 py-1 text-xs"
+              @click="updateRule({ filter_media_captcha_prefer_dm: !chat.rule.filter_media_captcha_prefer_dm })"
+            >
+              {{ chat.rule.filter_media_captcha_prefer_dm ? tt('protection.filter_media_captcha_settings_modal.yes') : tt('protection.filter_media_captcha_settings_modal.no') }}
+            </button>
+          </div>
+          <p class="text-[11px] leading-snug text-slate-500">
+            {{ tt('protection.filter_media_captcha_settings_modal.note') }}
+          </p>
+        </div>
+      </div>
+    </div>
+    </GuardTeleport>
     <GuardTeleport>
     <div
       v-if="showJoinCaptchaInfoModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
       @click.self="showJoinCaptchaInfoModal = false"
     >
-      <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
+      <div class="max-h-[min(88dvh,calc(100dvh-24px))] w-full max-w-xl overflow-y-auto overscroll-contain rounded-2xl border border-white/[0.08] bg-[#101013] p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.join_captcha.title') }}</h3>
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.modals.join_captcha.title') }}</h3>
           <button
             type="button"
-            class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
+            class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
             @click="showJoinCaptchaInfoModal = false"
           >
             ✕
           </button>
         </div>
-        <div class="space-y-2 text-xs leading-relaxed text-gray-700 dark:text-gray-300">
+        <div class="space-y-2 text-xs leading-relaxed text-slate-300">
           <p>
             {{ tt('protection.modals.join_captcha.p1') }}
           </p>
-          <p class="rounded-lg border border-amber-200/80 bg-amber-50/90 p-2.5 text-[11px] text-amber-950 dark:border-amber-700/50 dark:bg-amber-950/25 dark:text-amber-100">
+          <p class="rounded-lg bg-amber-500/10 p-2.5 text-[11px] text-amber-100/95">
             {{ tt('protection.modals.join_captcha.p2') }}
           </p>
-          <p class="text-[11px] text-gray-500 dark:text-gray-400">
+          <p class="text-[11px] text-slate-500">
             {{ tt('protection.modals.join_captcha.p3') }}
           </p>
-          <p class="text-[11px] text-gray-500 dark:text-gray-400">
+          <p class="text-[11px] text-slate-500">
             {{ tt('protection.modals.join_captcha.p4') }}
           </p>
         </div>
       </div>
     </div>
+    </GuardTeleport>
+    <GuardTeleport>
     <div
       v-if="showAntispamInfoModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
       @click.self="showAntispamInfoModal = false"
     >
-      <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
+      <div class="max-h-[min(88dvh,calc(100dvh-24px))] w-full max-w-xl overflow-y-auto overscroll-contain rounded-2xl border border-white/[0.08] bg-[#101013] p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.antispam_db.title') }}</h3>
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.modals.antispam_db.title') }}</h3>
           <button
             type="button"
-            class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
+            class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
             @click="showAntispamInfoModal = false"
           >
             ✕
           </button>
         </div>
-        <div class="space-y-2 text-xs text-gray-700 dark:text-gray-300">
+        <div class="space-y-2 text-xs leading-relaxed text-slate-300">
           <p>{{ tt('protection.modals.antispam_db.p1') }}</p>
           <p>{{ tt('protection.modals.antispam_db.p2') }}</p>
           <p>{{ tt('protection.modals.antispam_db.p3') }}</p>
@@ -7774,23 +8175,26 @@ const protCardIndigo =
         </div>
       </div>
     </div>
+    </GuardTeleport>
+    <GuardTeleport>
     <div
       v-if="showNewbieInfoModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
       @click.self="showNewbieInfoModal = false"
     >
-      <div class="w-full max-w-xl rounded-2xl border border-sky-300/50 bg-white p-4 shadow-2xl dark:border-sky-700/60 dark:bg-gray-800">
+      <div class="max-h-[min(88dvh,calc(100dvh-24px))] w-full max-w-xl overflow-y-auto overscroll-contain rounded-2xl border border-white/[0.08] bg-[#101013] p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold text-gray-900 dark:text-white">{{ tt('protection.modals.newbie.title') }}</h3>
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.modals.newbie.title') }}</h3>
           <button
             type="button"
-            class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
+            class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
             @click="showNewbieInfoModal = false"
           >
             ✕
           </button>
         </div>
-        <div class="space-y-2 text-xs text-gray-700 dark:text-gray-300">
+        <div class="space-y-2 text-xs leading-relaxed text-slate-300">
           <p>{{ tt('protection.modals.newbie.p1') }}</p>
           <p>{{ tt('protection.modals.newbie.p2') }}</p>
           <p>{{ tt('protection.modals.newbie.p3_when') }}</p>
@@ -7799,25 +8203,27 @@ const protCardIndigo =
       </div>
     </div>
     </GuardTeleport>
-    <GuardTeleport>
+    <GuardTeleport guard-to="body">
     <div
       v-if="showAntispamListModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/65 p-3"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
       @click.self="showAntispamListModal = false"
     >
-      <div class="w-full max-w-xl rounded-2xl border border-cyan-400/22 bg-gradient-to-b from-slate-900/95 via-slate-950/95 to-black/95 p-4 text-slate-100 shadow-[0_26px_90px_-24px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,255,255,0.1)] backdrop-blur-2xl ring-1 ring-cyan-300/20">
-        <div class="mb-3 flex items-center justify-between gap-2">
-          <h3 class="text-xs font-semibold uppercase tracking-wide text-cyan-100">{{ tt('protection.antispam_list_modal.title') }}</h3>
+      <div class="w-full max-w-xl overflow-hidden rounded-2xl border border-white/[0.08] bg-[#101013] text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
+        <div class="flex items-center justify-between gap-2 border-b border-white/[0.06] bg-[#0c0c0f] px-4 py-3">
+          <h3 class="pr-2 text-xs font-semibold uppercase tracking-wide text-white">{{ tt('protection.antispam_list_modal.title') }}</h3>
           <button
             type="button"
-            class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
+            class="shrink-0 rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
             @click="showAntispamListModal = false"
           >
             ✕
           </button>
         </div>
+        <div class="max-h-[min(82dvh,calc(100dvh-24px))] overflow-y-auto overscroll-contain p-4">
         <p
-          class="mb-3 rounded-xl border border-cyan-300/20 bg-cyan-500/[0.08] p-2.5 text-[11px] leading-relaxed text-slate-200/90 backdrop-blur-md"
+          class="mb-3 rounded-xl bg-white/[0.05] p-2.5 text-[11px] leading-relaxed text-slate-300"
           v-html="tt('protection.antispam_list_modal.intro_html')"
         />
         <div class="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
@@ -7825,13 +8231,13 @@ const protCardIndigo =
             v-model="newAntispamUserId"
             type="text"
             :placeholder="tt('protection.antispam_list_modal.placeholder_id')"
-            class="min-w-0 rounded-lg border border-white/15 bg-white/10 px-2.5 py-2 text-xs text-slate-100 placeholder:text-slate-400"
+            class="min-w-0 rounded-xl border-0 bg-black/50 px-2.5 py-2 text-xs text-slate-100 placeholder:text-slate-500 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)] focus:outline-none focus:ring-1 focus:ring-lime-400/35"
             :disabled="antispamLoading"
             @keydown.enter.prevent="addAntispamUser()"
           />
           <button
             type="button"
-            class="guard-green-soft w-full rounded-lg px-3 py-2 text-xs font-semibold disabled:opacity-50 sm:w-auto"
+            class="guard-green-soft w-full rounded-xl px-3 py-2 text-xs font-bold text-slate-900 disabled:opacity-50 sm:w-auto"
             :disabled="antispamLoading || !(newAntispamUserId || '').trim()"
             @click="addAntispamUser()"
           >
@@ -7843,12 +8249,12 @@ const protCardIndigo =
           <li
             v-for="item in antispamItems"
             :key="`base-${item.user_id}`"
-            class="flex items-center justify-between gap-2 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs"
+            class="flex items-center justify-between gap-2 rounded-lg border-0 bg-white/[0.04] px-2.5 py-1.5 text-xs shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]"
           >
             <span class="min-w-0 flex-1 text-slate-100">{{ item.display_label || item.user_id }}{{ item.reason ? ` — ${item.reason}` : '' }}</span>
             <button
               type="button"
-              class="shrink-0 rounded-lg border border-rose-300/35 bg-rose-500/15 px-2.5 py-1 text-xs font-medium text-rose-100 hover:bg-rose-500/25"
+              class="shrink-0 rounded-lg bg-rose-500/15 px-2.5 py-1 text-xs font-medium text-rose-100 hover:bg-rose-500/25"
               :disabled="antispamLoading"
               @click="removeAntispamUser(item.user_id)"
             >
@@ -7856,6 +8262,7 @@ const protCardIndigo =
             </button>
           </li>
         </ul>
+        </div>
       </div>
     </div>
     </GuardTeleport>
@@ -7992,6 +8399,26 @@ const protCardIndigo =
     inset 0 1px 0 rgba(255, 255, 255, 0.18),
     0 4px 14px -6px rgba(0, 0, 0, 0.4);
   color: #fff;
+}
+/* Глубокий тёмный «i» — карточка публичных сообщений и шапка настроек */
+.prot-info-btn--ink {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: linear-gradient(155deg, rgba(24, 24, 27, 0.96) 0%, rgba(9, 9, 11, 0.99) 100%);
+  box-shadow:
+    0 4px 14px -6px rgba(0, 0, 0, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  color: #cbd5e1;
+}
+.prot-info-btn--ink:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+}
+/* Компактная «i» в углу карточки «Публичные сообщения» */
+.prot-info-btn--corner-sm {
+  height: 1.4rem;
+  min-width: 1.4rem;
+  padding: 0 0.28rem;
+  border-radius: 9999px;
+  font-size: 0.55rem;
 }
 .chatbar-info-btn {
   height: 1.65rem;
@@ -8225,8 +8652,14 @@ const protCardIndigo =
     0 10px 24px -14px rgba(167, 139, 250, 0.75),
     inset 0 1px 0 rgba(255, 255, 255, 0.16);
 }
+.post-rules-settings-shell .glass-panel,
+.welcome-settings-shell .glass-panel {
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.04) 0%, rgba(0, 0, 0, 0.2) 100%);
+  box-shadow: none;
+}
 .post-rules-footer {
-  background: linear-gradient(180deg, rgba(2, 6, 23, 0.35), rgba(2, 6, 23, 0.62));
+  background: linear-gradient(180deg, rgba(10, 10, 12, 0.96), rgba(6, 6, 8, 0.99));
 }
 .post-rules-action-btn {
   border-radius: 0.72rem;

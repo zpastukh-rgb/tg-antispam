@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+  <defs>
+    <linearGradient id="bgp" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#140f08"/>
+      <stop offset="100%" style="stop-color:#080604"/>
+    </linearGradient>
+  </defs>
+  <rect width="960" height="540" fill="url(#bgp)"/>
+  <text x="480" y="268" fill="#fcd34d" text-anchor="middle" font-family="system-ui,sans-serif" font-size="34" font-weight="700">Premium 70I8B0</text>
+  <text x="480" y="312" fill="#fbbf2488" text-anchor="middle" font-family="system-ui,sans-serif" font-size="18">0<5=8B5 D09; hero-home/premium.svg</text>
+</svg>

@@ -232,26 +232,46 @@ async def _delete_message_later(bot, chat_id: int, message_id: int, delay_sec: f
         pass
 
 
-async def _finish_success(bot, chat_id: int, user_id: int, message_chat_id: int, message_id: int, payload: dict[str, Any]) -> None:
+async def _finish_success(
+    bot,
+    chat_id: int,
+    user_id: int,
+    message_chat_id: int,
+    message_id: int,
+    payload: dict[str, Any],
+    *,
+    captcha_scope: str = "join",
+) -> None:
     try:
         await bot.delete_message(int(message_chat_id), int(message_id))
     except Exception:
         pass
-    sent_welcome = False
-    try:
-        sent_welcome = await _send_welcome_after_captcha(bot, chat_id, user_id)
-    except Exception as e:
-        logger.warning("welcome after captcha failed chat=%s user=%s err=%s", chat_id, user_id, e)
-    if not sent_welcome:
+    if (captcha_scope or "join") == "filter_media":
         try:
             async with await get_session() as session:
                 loc = await owner_locale_for_chat(session, int(chat_id))
-            ok_msg = await bot.send_message(int(chat_id), t(loc, "guard.join_captcha.ok_passed"))
+            ok_msg = await bot.send_message(int(chat_id), t(loc, "guard.filter_media_captcha.ok_passed"))
             ok_mid = int(getattr(ok_msg, "message_id", 0) or 0)
             if ok_mid > 0:
                 asyncio.create_task(_delete_message_later(bot, int(chat_id), ok_mid, 3.0))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("filter_media_captcha ok ack chat=%s user=%s err=%s", chat_id, user_id, e)
+    else:
+        sent_welcome = False
+        try:
+            sent_welcome = await _send_welcome_after_captcha(bot, chat_id, user_id)
+        except Exception as e:
+            logger.warning("welcome after captcha failed chat=%s user=%s err=%s", chat_id, user_id, e)
+        if not sent_welcome:
+            try:
+                async with await get_session() as session:
+                    loc = await owner_locale_for_chat(session, int(chat_id))
+                ok_msg = await bot.send_message(int(chat_id), t(loc, "guard.join_captcha.ok_passed"))
+                ok_mid = int(getattr(ok_msg, "message_id", 0) or 0)
+                if ok_mid > 0:
+                    asyncio.create_task(_delete_message_later(bot, int(chat_id), ok_mid, 3.0))
+            except Exception:
+                pass
     await _unrestrict(bot, chat_id, user_id)
 
 
@@ -388,6 +408,7 @@ async def on_join_captcha_text(message: Message) -> None:
         target_uid = int(row.user_id)
         mcid = int(row.message_chat_id)
         mid = int(row.message_id)
+        cscope = str(getattr(row, "captcha_scope", None) or "join")
         await session.delete(row)
         await session.commit()
 
@@ -395,40 +416,26 @@ async def on_join_captcha_text(message: Message) -> None:
         await message.delete()
     except Exception:
         pass
-    await _finish_success(message.bot, chat_id, target_uid, mcid, mid, data)
+    await _finish_success(message.bot, chat_id, target_uid, mcid, mid, data, captcha_scope=cscope)
 
 
-async def maybe_start_join_captcha(bot, session, tg_chat: Chat, chat_row: Any, rule: Any, user: User) -> None:
-    if not bool(getattr(rule, "join_captcha_enabled", False)):
-        return
-    if getattr(user, "is_bot", False):
-        return
-    if tg_chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        return
+async def _materialize_join_style_captcha(
+    bot,
+    session,
+    tg_chat: Chat,
+    user: User,
+    *,
+    loc: str,
+    ttl: int,
+    kind: str,
+    prefer_dm: bool,
+    captcha_scope: str,
+    send_bank: tuple[str, ...],
+    guess_bank: tuple[str, ...],
+    emoji_sets: tuple,
+) -> None:
     chat_id = tg_chat.id
     user_id = user.id
-    if await is_admin(bot, chat_id, user_id):
-        return
-
-    loc = await owner_locale_for_chat(session, int(chat_id))
-    send_bank, guess_bank, emoji_sets = _word_banks(loc)
-
-    ttl = max(1, min(5, int(getattr(rule, "join_captcha_ttl_minutes", 3) or 3)))
-    kind = (getattr(rule, "join_captcha_kind", None) or "button").strip().lower()
-    if kind not in ALL_KINDS:
-        kind = "button"
-    if not await chat_owner_has_miniapp_premium(session, int(chat_id)):
-        kind = "button"
-    prefer_dm = bool(getattr(rule, "join_captcha_prefer_dm", False))
-
-    await session.execute(
-        delete(JoinCaptchaSession).where(
-            JoinCaptchaSession.chat_id == chat_id,
-            JoinCaptchaSession.user_id == user_id,
-        )
-    )
-    await session.flush()
-
     token = _gen_token()
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=ttl)
     name = html.escape(_display_name(user, loc))
@@ -579,8 +586,6 @@ async def maybe_start_join_captcha(bot, session, tg_chat: Chat, chat_row: Any, r
     if kind == "digits" and not sent_msg:
         dfb = digits_plain or "0000"
         try:
-            async with await get_session() as session:
-                loc = await owner_locale_for_chat(session, int(chat_id))
             sent_msg = await bot.send_message(
                 chat_id,
                 t(
@@ -618,12 +623,108 @@ async def maybe_start_join_captcha(bot, session, tg_chat: Chat, chat_row: Any, r
         message_chat_id=message_chat_id,
         message_id=message_id,
         expires_at=expires_at,
+        captcha_scope=(captcha_scope or "join"),
     )
     session.add(sess)
     await session.commit()
 
     delay_sec = float(ttl * 60)
     asyncio.create_task(_expire_join_captcha(bot, token, delay_sec))
+
+
+async def maybe_start_join_captcha(bot, session, tg_chat: Chat, chat_row: Any, rule: Any, user: User) -> None:
+    if not bool(getattr(rule, "join_captcha_enabled", False)):
+        return
+    if getattr(user, "is_bot", False):
+        return
+    if tg_chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return
+    chat_id = tg_chat.id
+    user_id = user.id
+    if await is_admin(bot, chat_id, user_id):
+        return
+
+    loc = await owner_locale_for_chat(session, int(chat_id))
+    send_bank, guess_bank, emoji_sets = _word_banks(loc)
+
+    ttl = max(1, min(5, int(getattr(rule, "join_captcha_ttl_minutes", 3) or 3)))
+    kind = (getattr(rule, "join_captcha_kind", None) or "button").strip().lower()
+    if kind not in ALL_KINDS:
+        kind = "button"
+    if not await chat_owner_has_miniapp_premium(session, int(chat_id)):
+        kind = "button"
+    prefer_dm = bool(getattr(rule, "join_captcha_prefer_dm", False))
+
+    await session.execute(
+        delete(JoinCaptchaSession).where(
+            JoinCaptchaSession.chat_id == chat_id,
+            JoinCaptchaSession.user_id == user_id,
+        )
+    )
+    await session.flush()
+
+    await _materialize_join_style_captcha(
+        bot,
+        session,
+        tg_chat,
+        user,
+        loc=loc,
+        ttl=ttl,
+        kind=kind,
+        prefer_dm=prefer_dm,
+        captcha_scope="join",
+        send_bank=send_bank,
+        guess_bank=guess_bank,
+        emoji_sets=emoji_sets,
+    )
+
+
+async def maybe_start_filter_media_captcha(bot, session, tg_chat: Chat, chat_row: Any, rule: Any, user: User) -> None:
+    """Капча после нарушения гранулярного фильтра медиа: отдельные настройки filter_media_captcha_* в rules."""
+    if not bool(getattr(rule, "filter_media_captcha_enabled", False)):
+        return
+    if getattr(user, "is_bot", False):
+        return
+    if tg_chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return
+    chat_id = tg_chat.id
+    user_id = user.id
+    if await is_admin(bot, chat_id, user_id):
+        return
+
+    loc = await owner_locale_for_chat(session, int(chat_id))
+    send_bank, guess_bank, emoji_sets = _word_banks(loc)
+
+    ttl = max(1, min(5, int(getattr(rule, "filter_media_captcha_ttl_minutes", 3) or 3)))
+    kind = (getattr(rule, "filter_media_captcha_kind", None) or "button").strip().lower()
+    if kind not in ALL_KINDS:
+        kind = "button"
+    if not await chat_owner_has_miniapp_premium(session, int(chat_id)):
+        kind = "button"
+    prefer_dm = bool(getattr(rule, "filter_media_captcha_prefer_dm", False))
+
+    await session.execute(
+        delete(JoinCaptchaSession).where(
+            JoinCaptchaSession.chat_id == chat_id,
+            JoinCaptchaSession.user_id == user_id,
+        )
+    )
+    await session.flush()
+
+    await _materialize_join_style_captcha(
+        bot,
+        session,
+        tg_chat,
+        user,
+        loc=loc,
+        ttl=ttl,
+        kind=kind,
+        prefer_dm=prefer_dm,
+        captcha_scope="filter_media",
+        send_bank=send_bank,
+        guess_bank=guess_bank,
+        emoji_sets=emoji_sets,
+    )
 
 
 async def _expire_join_captcha(bot, token: str, delay_sec: float) -> None:
@@ -637,6 +738,7 @@ async def _expire_join_captcha(bot, token: str, delay_sec: float) -> None:
         user_id = int(row.user_id)
         mcid = int(row.message_chat_id)
         mid = int(row.message_id)
+        cscope = str(getattr(row, "captcha_scope", None) or "join")
         await session.delete(row)
         await session.commit()
     try:
@@ -648,6 +750,12 @@ async def _expire_join_captcha(bot, token: str, delay_sec: float) -> None:
     except Exception as e:
         logger.debug("join_captcha expire delete_msg: %s", e)
         await record_join_captcha_expire_delete_failed(chat_id, user_id, mcid, mid, e)
+    if cscope == "filter_media":
+        try:
+            await _unrestrict(bot, chat_id, user_id)
+        except Exception:
+            pass
+        return
     try:
         await bot.ban_chat_member(chat_id, user_id)
         await bot.unban_chat_member(chat_id, user_id)
@@ -706,8 +814,9 @@ async def on_join_captcha_cb(cb: CallbackQuery) -> None:
         mcid = int(row.message_chat_id)
         mid = int(row.message_id)
         payload = _unpack_options(row.options_json)
+        cscope = str(getattr(row, "captcha_scope", None) or "join")
         session.delete(row)
         await session.commit()
 
     await cb.answer(t(loc, "guard.join_captcha.cb_ok"))
-    await _finish_success(cb.bot, chat_id, target_uid, mcid, mid, payload)
+    await _finish_success(cb.bot, chat_id, target_uid, mcid, mid, payload, captcha_scope=cscope)

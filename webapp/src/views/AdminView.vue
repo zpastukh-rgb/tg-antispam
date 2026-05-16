@@ -573,6 +573,10 @@ function bcRecentStatusLabel(item) {
 }
 
 async function openQuickBroadcastDraft() {
+  if (isOwnerCabinet.value && !meAdminProfile.value?.is_premium) {
+    void router.push({ path: '/', query: { section: 'billing', scroll: 'plans' } })
+    return
+  }
   if (bcOpeningQuickDraft.value) return
   bcOpeningQuickDraft.value = true
   try {
@@ -868,8 +872,8 @@ const partnerAudienceGenderData = ref({
   male: 0,
   female: 0,
   unknown: 0,
-  male_pct: 35.4,
-  female_pct: 64.6,
+  male_pct: 0,
+  female_pct: 0,
   known_total: 0,
   audience_total: 0,
   is_estimate: true,
@@ -878,8 +882,8 @@ const partnerAudienceGenderLastValid = ref({
   male: 0,
   female: 0,
   unknown: 0,
-  male_pct: 35.4,
-  female_pct: 64.6,
+  male_pct: 0,
+  female_pct: 0,
   known_total: 0,
   audience_total: 0,
   is_estimate: true,
@@ -1124,8 +1128,8 @@ async function loadPartnerHourlyActivity() {
       male: 0,
       female: 0,
       unknown: 0,
-      male_pct: 35.4,
-      female_pct: 64.6,
+      male_pct: 0,
+      female_pct: 0,
       known_total: 0,
       audience_total: 0,
       is_estimate: true,
@@ -1444,12 +1448,66 @@ function partnerFmtInt(n) {
 }
 const partnerAudienceGender = computed(() => {
   const cur = partnerAudienceGenderData.value || {}
-  const curKnown = Number(cur?.known_total || (Number(cur?.male || 0) + Number(cur?.female || 0)))
-  const src = curKnown > 0 ? cur : (partnerAudienceGenderLastValid.value || cur)
-  const malePctRaw = Number(src?.male_pct || 0)
-  const femalePctRaw = Number(src?.female_pct || 0)
-  const malePct = Math.max(0, Math.min(100, malePctRaw || 0))
-  const femalePct = Math.max(0, Math.min(100, femalePctRaw || 0))
+  const maleC = Math.max(0, Number(cur?.male || 0))
+  const femaleC = Math.max(0, Number(cur?.female || 0))
+  const curKnown = Number(cur?.known_total || maleC + femaleC)
+
+  if (partnerHourlyLoading.value) {
+    const chats = partnerHourlyData.value?.chats || []
+    let audience = Number(cur?.audience_total || 0)
+    if (partnerSelectedChatMeta.value) {
+      audience = Math.max(audience, Number(partnerSelectedChatMeta.value?.members_count || 0))
+    } else {
+      audience = Math.max(audience, chats.reduce((acc, c) => acc + Number(c?.members_count || 0), 0))
+    }
+    return {
+      malePct: 0,
+      femalePct: 0,
+      audience,
+      maleCount: 0,
+      femaleCount: 0,
+      unknownCount: 0,
+      knownTotal: 0,
+      isEstimate: true,
+    }
+  }
+
+  if (curKnown <= 0 || maleC + femaleC <= 0) {
+    const chats = partnerHourlyData.value?.chats || []
+    let audience = Number(cur?.audience_total || 0)
+    if (partnerSelectedChatMeta.value) {
+      audience = Math.max(audience, Number(partnerSelectedChatMeta.value?.members_count || 0))
+    } else {
+      audience = Math.max(audience, chats.reduce((acc, c) => acc + Number(c?.members_count || 0), 0))
+    }
+    const unknownCount = Math.max(0, Number(cur?.unknown || 0))
+    return {
+      malePct: 0,
+      femalePct: 0,
+      audience,
+      maleCount: 0,
+      femaleCount: 0,
+      unknownCount,
+      knownTotal: 0,
+      isEstimate: !!cur?.is_estimate,
+    }
+  }
+
+  const src = curKnown > 0 ? cur : partnerAudienceGenderLastValid.value || cur
+  const maleCount = Number(src?.male || 0)
+  const femaleCount = Number(src?.female || 0)
+  const namedSum = maleCount + femaleCount
+  let malePct = 0
+  let femalePct = 0
+  if (namedSum > 0) {
+    malePct = Math.max(0, Math.min(100, (maleCount / namedSum) * 100))
+    femalePct = Math.max(0, Math.min(100, 100 - malePct))
+  } else {
+    const malePctRaw = Number(src?.male_pct || 0)
+    const femalePctRaw = Number(src?.female_pct || 0)
+    malePct = Math.max(0, Math.min(100, malePctRaw || 0))
+    femalePct = Math.max(0, Math.min(100, femalePctRaw || 0))
+  }
   const chats = partnerHourlyData.value?.chats || []
   let audience = Number(src?.audience_total || 0)
   if (partnerSelectedChatMeta.value) {
@@ -1457,20 +1515,21 @@ const partnerAudienceGender = computed(() => {
   } else {
     audience = Math.max(audience, chats.reduce((acc, c) => acc + Number(c?.members_count || 0), 0))
   }
-  const maleCount = Number(src?.male || 0)
-  const femaleCount = Number(src?.female || 0)
   const unknownCount = Number(src?.unknown || 0)
   const knownTotal = Number(src?.known_total || maleCount + femaleCount)
   return {
-    malePct,
-    femalePct,
+    malePct: Math.round(malePct * 10) / 10,
+    femalePct: Math.round(femalePct * 10) / 10,
     audience,
     maleCount,
     femaleCount,
     unknownCount,
     knownTotal,
-    isEstimate: !!src?.is_estimate || curKnown <= 0,
+    isEstimate: !!src?.is_estimate,
   }
+})
+watch(ownerProtectionStatsMode, (m) => {
+  if (String(m || '') === 'growth') ownerProtectionReportOpen.value = false
 })
 const partnerReachWindows = computed(() => {
   const slots = partnerHourlyData.value?.slots || []
@@ -2106,6 +2165,10 @@ function openBcCampaignUxManage(camp) {
   bcCampaignUxOpen.value = true
 }
 async function openBcCampaignUxList() {
+  if (isOwnerCabinet.value && !meAdminProfile.value?.is_premium) {
+    void router.push({ path: '/', query: { section: 'billing', scroll: 'plans' } })
+    return
+  }
   bcCampaignUxOpen.value = true
   bcCampaignUxScreen.value = 'list'
   await loadAutopostCampaigns()
@@ -2444,6 +2507,25 @@ function bcAutopostBuildPayload() {
   }
 }
 
+/** После загрузки списков групп/каналов: убираем id, которых нет в допустимом списке (смена кабинета owner↔delegated и т.д.). */
+function bcSanitizeSelectionsToEligibleLists() {
+  const allowedG = new Set((bcBroadcastGroups.value || []).map((c) => bcNormalizeChatId(c)))
+  bcSelectedGroupIds.value = [...new Set((bcSelectedGroupIds.value || []).map(Number).filter((id) => allowedG.has(Number(id))))]
+  const allowedCh = new Set((bcBroadcastChannels.value || []).map((c) => bcNormalizeChatId(c)))
+  bcSelectedChannelIds.value = [...new Set((bcSelectedChannelIds.value || []).map(Number).filter((id) => allowedCh.has(Number(id))))]
+  const prevG = bcAutopostingForm.value.group_chat_ids || []
+  const prevCh = bcAutopostingForm.value.channel_chat_ids || []
+  const nextG = prevG.map(Number).filter((id) => allowedG.has(id))
+  const nextCh = prevCh.map(Number).filter((id) => allowedCh.has(id))
+  if (nextG.length !== prevG.length || nextCh.length !== prevCh.length) {
+    bcAutopostingForm.value = {
+      ...bcAutopostingForm.value,
+      group_chat_ids: [...nextG],
+      channel_chat_ids: [...nextCh],
+    }
+  }
+}
+
 async function loadBroadcastEligibleGroups() {
   try {
     const sc = bcBroadcastGroupScope.value === 'all' ? 'all' : 'mine'
@@ -2455,9 +2537,18 @@ async function loadBroadcastEligibleGroups() {
     bcBroadcastGroups.value = onlyForeign
       ? items.filter((x) => Number(x?.owner_telegram_id || 0) !== myTg)
       : items
+    bcSanitizeSelectionsToEligibleLists()
     tryApplyDelegatedPreferredGroup()
     if (isDelegatedFreeBroadcastCabinet.value) {
       applyDelegatedFreeBroadcastGroupLock()
+    } else if (onlyForeign && bcBroadcastGroups.value.length === 1 && !(bcSelectedGroupIds.value || []).length) {
+      const gid = bcNormalizeChatId(bcBroadcastGroups.value[0])
+      bcSelectedGroupIds.value = [gid]
+      bcAutopostingForm.value = {
+        ...bcAutopostingForm.value,
+        group_chat_ids: [gid],
+        autopost_target: 'groups',
+      }
     }
     bcBroadcastCanScopeAll.value = !!r?.can_scope_all
   } catch {
@@ -2481,6 +2572,24 @@ function applyDelegatedFreeBroadcastGroupLock() {
     ...bcAutopostingForm.value,
     group_chat_ids: [...chosen],
     autopost_target: 'groups',
+  }
+}
+
+/** Free + делегирование рассылки: допустимы только каналы из ответа API; без выбора — все переданные id. */
+function applyDelegatedFreeBroadcastChannelLock() {
+  const ids = (bcBroadcastChannels.value || [])
+    .map((c) => bcNormalizeChatId(c))
+    .filter((x) => Number.isFinite(x) && x !== 0)
+  if (!ids.length) return
+  const allowed = new Set(ids)
+  let chosen = (bcSelectedChannelIds.value || []).map(Number).filter((x) => allowed.has(x))
+  if (!chosen.length) {
+    chosen = [...ids]
+  }
+  bcSelectedChannelIds.value = [...chosen]
+  bcAutopostingForm.value = {
+    ...bcAutopostingForm.value,
+    channel_chat_ids: [...chosen],
   }
 }
 
@@ -2539,6 +2648,21 @@ async function loadBroadcastEligibleChannels() {
     bcBroadcastChannels.value = onlyForeignCh
       ? items.filter((x) => Number(x?.owner_telegram_id || 0) !== myTg)
       : items
+    bcSanitizeSelectionsToEligibleLists()
+    if (isDelegatedFreeBroadcastCabinet.value) {
+      applyDelegatedFreeBroadcastChannelLock()
+    } else if (
+      onlyForeignCh &&
+      bcBroadcastChannels.value.length === 1 &&
+      !(bcSelectedChannelIds.value || []).length
+    ) {
+      const cid = bcNormalizeChatId(bcBroadcastChannels.value[0])
+      bcSelectedChannelIds.value = [cid]
+      bcAutopostingForm.value = {
+        ...bcAutopostingForm.value,
+        channel_chat_ids: [cid],
+      }
+    }
   } catch {
     bcBroadcastChannels.value = []
   }
@@ -5934,7 +6058,10 @@ watch(
             </button>
           </div>
           <div v-else class="col-span-2 min-h-0 space-y-2">
-            <div class="flex items-center justify-between gap-2 rounded-2xl bg-gradient-to-r from-cyan-950/70 via-sky-950/60 to-indigo-950/70 px-3 py-2.5 ring-1 ring-cyan-300/20">
+            <div
+              v-if="ownerProtectionStatsMode === 'protection'"
+              class="flex items-center justify-between gap-2 rounded-2xl bg-gradient-to-r from-cyan-950/70 via-sky-950/60 to-indigo-950/70 px-3 py-2.5 ring-1 ring-cyan-300/20"
+            >
               <button
                 type="button"
                 class="rounded-xl border border-cyan-400/35 bg-cyan-500/10 px-3 py-1.5 text-[11px] font-semibold text-cyan-100 shadow-[0_10px_24px_-16px_rgba(34,211,238,0.75)] transition hover:bg-cyan-500/20"
@@ -5956,7 +6083,7 @@ watch(
               @report-context-change="onOwnerProtectionReportContextChange"
             />
             <div
-              v-if="ownerProtectionReportOpen"
+              v-if="ownerProtectionReportOpen && ownerProtectionStatsMode === 'protection'"
               class="rounded-[24px] bg-gradient-to-br from-[#050b1f]/96 via-[#09132d]/95 to-[#02050e]/98 p-3 shadow-[0_35px_90px_-36px_rgba(6,182,212,0.7)] ring-1 ring-cyan-300/20 backdrop-blur-2xl"
             >
               <div class="mb-2 flex items-center justify-between">
@@ -7254,11 +7381,11 @@ watch(
       <GuardTeleport>
         <div
           v-if="bcQuickDraftModalOpen"
-          style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex min-h-[100dvh] min-w-0 flex-col bg-[#09090b] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
+          class="fixed inset-0 z-[95000] flex min-h-[100dvh] min-w-0 flex-col bg-[#0b0d14] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
           @click.self="closeQuickBroadcastDraft"
         >
           <div class="flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-2">
-            <div class="flex min-h-0 flex-1 flex-col bg-[#0b111b]/95 p-3 text-zinc-100">
+            <div class="flex min-h-0 flex-1 flex-col bg-[#12161f] p-3 text-zinc-100">
           <div class="mb-2 flex items-start justify-between gap-2 pb-2">
             <div class="min-w-0 flex-1">
               <p class="truncate text-[19px] font-black text-white">{{ tt('admin.broadcast_ui.quick_new_broadcast') }}</p>
@@ -7392,11 +7519,11 @@ watch(
       <GuardTeleport>
         <div
           v-if="bcSendTargetModalOpen"
-          style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex min-h-[100dvh] min-w-0 flex-col bg-[#09090b] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
+          class="fixed inset-0 z-[95000] flex min-h-[100dvh] min-w-0 flex-col bg-[#0b0d14] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
           @click.self="bcSendTargetModalOpen = false"
         >
           <div class="flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-2">
-            <div class="flex min-h-0 w-full flex-1 flex-col rounded-2xl border border-white/[0.04] bg-[#0b111b]/95 p-3 text-zinc-100 shadow-[0_24px_72px_-28px_rgba(0,0,0,0.9)] ring-1 ring-white/[0.02]">
+            <div class="flex min-h-0 w-full flex-1 flex-col rounded-2xl border border-white/[0.04] bg-[#12161f] p-3 text-zinc-100 shadow-[0_24px_72px_-28px_rgba(0,0,0,0.9)] ring-1 ring-white/[0.02]">
           <div class="flex items-center justify-between gap-2">
             <div class="flex min-w-0 items-center gap-1">
               <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-transparent text-[14px] text-white/90 hover:bg-white/[0.08]" @click="bcSendTargetModalOpen = false">←</button>
@@ -7488,11 +7615,11 @@ watch(
       <GuardTeleport>
       <div
         v-if="bcConfirmModalOpen"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex flex-col overflow-y-auto bg-[#070b12] px-1.5 pb-[max(5.75rem,calc(5.25rem+env(safe-area-inset-bottom,0px)))] pt-[max(0.25rem,calc(env(safe-area-inset-top,0px)+46px))]"
+        class="fixed inset-0 z-[95000] flex flex-col overflow-y-auto bg-[#0b0d14] px-1.5 pb-[max(5.75rem,calc(5.25rem+env(safe-area-inset-bottom,0px)))] pt-[max(0.25rem,calc(env(safe-area-inset-top,0px)+46px))]"
         @click.self="bcConfirmModalOpen = false"
       >
         <div
-          class="mx-auto flex w-full max-w-[min(28rem,calc(100vw-0.75rem))] min-h-[calc(100dvh-7.9rem)] flex-col rounded-2xl border border-white/[0.08] bg-[#0a101a]/92 px-2.5 py-2.5 text-zinc-100 shadow-[0_22px_70px_-30px_rgba(0,0,0,0.88)]"
+          class="mx-auto flex w-full max-w-[min(28rem,calc(100vw-0.75rem))] min-h-[calc(100dvh-7.9rem)] flex-col rounded-2xl border border-white/[0.08] bg-[#101622] px-2.5 py-2.5 text-zinc-100 shadow-[0_22px_70px_-30px_rgba(0,0,0,0.88)]"
         >
           <div class="flex items-center gap-2">
             <button type="button" class="inline-flex h-7 w-7 items-center justify-center rounded-full bg-transparent text-[13px] text-white/90 hover:bg-white/[0.08]" @click="bcConfirmModalOpen = false">←</button>
@@ -7547,10 +7674,10 @@ watch(
 
       <div
         v-if="bcShowAllRecentModal"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/75 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
+        class="fixed inset-0 z-[95000] flex items-end justify-center bg-[#0b0d14] px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
         @click.self="bcShowAllRecentModal = false"
       >
-        <div class="w-full max-w-lg rounded-2xl border border-white/12 bg-[#0b111b]/96 p-3 text-zinc-100 shadow-[0_24px_64px_-24px_rgba(0,0,0,0.92)]">
+        <div class="w-full max-w-lg rounded-2xl border border-white/12 bg-[#12161f] p-3 text-zinc-100 shadow-[0_24px_64px_-24px_rgba(0,0,0,0.92)]">
           <div class="mb-2 flex items-center justify-between border-b border-white/10 pb-2">
             <p class="text-[16px] font-extrabold text-white">{{ tt('admin.broadcast_ui.all_recent_title') }}</p>
             <button type="button" class="rounded-lg px-2 py-1 text-sm text-zinc-300 hover:bg-white/10" @click="bcShowAllRecentModal = false">✕</button>
@@ -8070,9 +8197,9 @@ watch(
     <GuardTeleport>
       <div
         v-if="bcCampaignUxOpen"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex h-[100dvh] min-w-0 flex-col overflow-hidden bg-[#05070B] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] text-white"
+        class="fixed inset-0 z-[95000] flex h-[100dvh] min-w-0 flex-col overflow-hidden bg-[#0b0d14] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] text-white"
       >
-        <div class="flex items-center justify-between border-b border-white/10 bg-black/20 px-4 py-3 backdrop-blur-sm">
+        <div class="flex items-center justify-between border-b border-white/10 bg-[#12141c] px-4 py-3">
           <button type="button" class="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/[0.03] text-white/90 transition hover:bg-white/[0.08] active:scale-[0.98]" @click="bcCampaignUxBack">←</button>
           <div class="min-w-0 text-center">
             <p class="truncate text-[19px] font-extrabold tracking-tight">{{ bcCampaignUxScreen === 'list' ? tt('admin.bc_campaign.title_list') : bcCampaignUxScreen === 'manage' ? (bcCampaignUxManageItem?.title || tt('admin.bc_campaign.title_manage')) : bcCampaignUxScreen === 'stats' ? tt('admin.bc_campaign.title_stats') : tt('admin.bc_campaign.title_new') }}</p>
@@ -8364,9 +8491,9 @@ watch(
     <GuardTeleport>
       <div
         v-if="bcCampaignUxRecipientPickerOpen"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex h-[100dvh] min-w-0 flex-col overflow-hidden bg-[#05070B] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] text-white"
+        class="fixed inset-0 z-[95000] flex h-[100dvh] min-w-0 flex-col overflow-hidden bg-[#0b0d14] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] text-white"
       >
-        <div class="flex items-center justify-between border-b border-white/10 bg-black/20 px-4 py-3 backdrop-blur-sm">
+        <div class="flex items-center justify-between border-b border-white/10 bg-[#12141c] px-4 py-3">
           <p class="text-[16px] font-bold">{{ bcCampaignUxRecipientPickerKind === 'channels' ? tt('admin.bc_campaign.picker_channels') : tt('admin.bc_campaign.picker_groups') }}</p>
           <button type="button" class="rounded-lg px-2 py-1 text-sm text-zinc-300 transition hover:bg-white/10" @click="bcCampaignUxRecipientPickerOpen = false">✕</button>
         </div>
@@ -8398,14 +8525,14 @@ watch(
 
     <div
       v-if="bcAutopostingModalOpen"
-      class="bc-autopost-modal-overlay fixed inset-0 z-[300] flex min-h-0 flex-col items-center justify-center overflow-y-auto overscroll-contain bg-black/75 px-3 py-4 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
+      class="bc-autopost-modal-overlay fixed inset-0 z-[300] flex min-h-0 flex-col items-center justify-center overflow-y-auto overscroll-contain bg-[#0b0d14] px-3 py-4 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))]"
       @click.self="bcAutopostingModalOpen = false"
     >
       <div
-        class="bc-autopost-modal-card mx-auto flex w-full max-w-md min-h-0 max-h-[min(88dvh,40rem)] flex-col overflow-hidden rounded-2xl bg-zinc-950/[0.92] text-zinc-100 shadow-[0_28px_80px_-24px_rgba(0,0,0,0.88)] ring-1 ring-white/[0.08] backdrop-blur-2xl sm:max-h-[min(86vh,42rem)]"
+        class="bc-autopost-modal-card mx-auto flex w-full max-w-md min-h-0 max-h-[min(88dvh,40rem)] flex-col overflow-hidden rounded-2xl bg-[#16171e] text-zinc-100 shadow-[0_28px_80px_-24px_rgba(0,0,0,0.88)] ring-1 ring-white/[0.08] sm:max-h-[min(86vh,42rem)]"
         @click.stop
       >
-        <div class="shrink-0 bg-zinc-900/50 p-4 pb-2 backdrop-blur-md">
+        <div class="shrink-0 bg-[#1a1c24] p-4 pb-2">
           <div class="flex items-center justify-between gap-2">
             <h3 class="text-sm font-semibold text-zinc-100">
               {{
@@ -9902,7 +10029,7 @@ watch(
     <GuardTeleport>
       <div
         v-if="bcSendModalOpen"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex min-h-[100dvh] min-w-0 flex-col bg-[#09090b] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
+        class="fixed inset-0 z-[95000] flex min-h-[100dvh] min-w-0 flex-col bg-[#0b0d14] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
         @click.self="bcSendModalState === 'sending' ? null : closeBcSendModal()"
       >
         <div
