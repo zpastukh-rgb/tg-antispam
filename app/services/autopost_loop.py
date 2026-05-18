@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import or_, select, text
@@ -467,11 +467,24 @@ async def _autopost_process_one_loaded_ap(
     if next_slot >= n:
         return
 
+    catch_up_active = False
+    catch_raw = state.get("run_catch_up_until")
+    if catch_raw:
+        try:
+            cu = datetime.fromisoformat(str(catch_raw).replace("Z", "+00:00"))
+            if cu.tzinfo is None:
+                cu = cu.replace(tzinfo=timezone.utc)
+            catch_up_active = (now_local.astimezone(timezone.utc) - cu.astimezone(timezone.utc)) <= _AUTOPOST_SLOT_GRACE
+        except Exception:
+            catch_up_active = False
+
+    max_late = _AUTOPOST_SLOT_GRACE if catch_up_active else _AUTOPOST_MISSED_MAX_LATE
+
     # Пропуск «устаревших» слотов только при n>1: иначе при postsPerDay=1 один пропуск >50 мин
     # выставлял next_slot>=n и автопост молча не работал до следующего календарного дня.
     if n > 1:
         ns = next_slot
-        while ns < n and (now_local - fire_times[ns]) > _AUTOPOST_MISSED_MAX_LATE:
+        while ns < n and (now_local - fire_times[ns]) > max_late:
             ns += 1
         if ns != next_slot:
             state["next_slot"] = ns
@@ -480,6 +493,11 @@ async def _autopost_process_one_loaded_ap(
             if ns >= n:
                 return
             next_slot = ns
+    elif catch_up_active and next_slot < n and (now_local - fire_times[next_slot]) > max_late:
+        state["next_slot"] = n
+        persist_row.autopost_json = json.dumps(ap, ensure_ascii=False)
+        await session.commit()
+        return
 
     slot_time = fire_times[next_slot]
     slot_ready = slot_time <= now_local
@@ -594,6 +612,7 @@ async def _autopost_process_one_loaded_ap(
 
     state["next_slot"] = next_slot + 1
     state["rot_i"] = rot_i + 1
+    state.pop("run_catch_up_until", None)
     persist_row.autopost_json = json.dumps(ap, ensure_ascii=False)
 
     target.status = "sending"

@@ -780,8 +780,18 @@ async def finalize_autopost_json_for_owner(
         raise ValueError("autopost: неверный формат")
     if str(ap.get("runState") or "").lower() == "stopped":
         ap.pop("_state", None)
-    elif str(ap.get("runState") or "").lower() == "running" and prev_run_state == "stopped":
-        ap["_state"] = {}
+    elif str(ap.get("runState") or "").lower() == "running" and prev_run_state in ("stopped", "paused"):
+        from datetime import datetime, timezone
+
+        catch_marker = datetime.now(timezone.utc).isoformat()
+        if prev_run_state == "stopped":
+            ap["_state"] = {"run_catch_up_until": catch_marker}
+        elif prev_state and isinstance(prev_state, dict):
+            st_resume = sanitize_autopost_state(prev_state)
+            st_resume["run_catch_up_until"] = catch_marker
+            ap["_state"] = st_resume
+        else:
+            ap["_state"] = {"run_catch_up_until": catch_marker}
     elif prev_state:
         ap["_state"] = sanitize_autopost_state(prev_state)
     raw_g = ap.get("group_chat_ids")

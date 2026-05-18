@@ -2427,6 +2427,7 @@ export default {
       status_draft: 'Draft',
       status_sending: 'Sending',
       status_sent: 'Sent',
+      status_partial: 'Partial',
       status_failed: 'Failed',
     },
     partner_help: {
@@ -2560,6 +2561,7 @@ export default {
         ' {tokens} ✨ will be charged (chats in selection: {n}; audience size does not multiply price).',
       send_progress_note:
         'A started send keeps running on the server; you can close the progress overlay when you want.',
+      status_partial: 'Partial',
     },
     autopost: {
       status_running: 'Running',

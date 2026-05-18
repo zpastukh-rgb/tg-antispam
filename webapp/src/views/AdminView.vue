@@ -722,6 +722,15 @@ function bcRecentWhenLabel(item) {
 
 function bcRecentStatusLabel(item) {
   const st = String(item?.status || '').toLowerCase()
+  const sentAt = String(item?.sent_at || '').trim()
+  const okN = Number(item?.recipient_ok || 0)
+  const failN = Number(item?.recipient_fail || 0)
+  const hadRun = !!sentAt && (okN > 0 || failN > 0)
+  if (st === 'draft' && hadRun) {
+    if (failN > 0 && okN <= 0) return bcStatusLabel('failed')
+    if (failN > 0 && okN > 0) return tt('admin.broadcast_stats.status_partial')
+    return bcStatusLabel('sent')
+  }
   if (st === 'sent' || st === 'sending' || st === 'failed' || st === 'draft') return bcStatusLabel(st)
   return tt('admin.broadcast_send.status_launch')
 }

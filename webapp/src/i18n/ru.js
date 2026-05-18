@@ -2437,6 +2437,7 @@ export default {
       status_draft: 'Черновик',
       status_sending: 'Отправляется',
       status_sent: 'Отправлено',
+      status_partial: 'Частично',
       status_failed: 'Ошибка',
     },
     partner_help: {
@@ -2562,6 +2563,7 @@ export default {
         ' Будет списано {tokens} ✨ (чатов в выборе: {n}; размер аудитории не умножает цену).',
       send_progress_note:
         'Запущенная отправка на сервере не останавливается, но прогресс можно скрыть, закрыв оверлей.',
+      status_partial: 'Частично',
     },
     autopost: {
       status_running: 'Запущена',
