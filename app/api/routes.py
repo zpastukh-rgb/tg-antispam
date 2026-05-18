@@ -10008,6 +10008,156 @@ def _broadcast_stats_ctr_fields(result: dict) -> dict:
     return {"stats_ctr_percent": round(float(pct), 4), "stats_ctr_mode": "reach"}
 
 
+def _broadcast_stats_bucket_counts(
+    ok: int,
+    fail: int,
+    *,
+    source_target: str,
+    wanted_target: str,
+) -> tuple[dict[str, int], dict[str, int]]:
+    """Разнести ok/fail по вкладкам bots/groups с учётом last_target и фильтра API."""
+    ok_i = max(0, int(ok or 0))
+    fail_i = max(0, int(fail or 0))
+    wt = str(wanted_target or "").strip().lower()
+    st = str(source_target or "").strip().lower()
+
+    def _pack(bo: int, bf: int, go: int, gf: int) -> tuple[dict[str, int], dict[str, int]]:
+        return (
+            {"ok": bo, "fail": bf, "total": bo + bf},
+            {"ok": go, "fail": gf, "total": go + gf},
+        )
+
+    if wt in {"group", "groups"}:
+        if st in {"user", "users", "bot", "bots"}:
+            return _pack(0, 0, 0, 0)
+        return _pack(0, 0, ok_i, fail_i)
+    if wt in {"bot", "bots", "user", "users"}:
+        if st in {"group", "groups"}:
+            return _pack(0, 0, 0, 0)
+        return _pack(ok_i, fail_i, 0, 0)
+    if st in {"group", "groups"}:
+        return _pack(0, 0, ok_i, fail_i)
+    if st in {"user", "users", "bot", "bots"}:
+        return _pack(ok_i, fail_i, 0, 0)
+    if st == "all":
+        return _pack(0, 0, ok_i, fail_i)
+    return _pack(0, 0, ok_i, fail_i)
+
+
+def _broadcast_stats_pick_active_batch(batches: list[dict[str, Any]], requested: str) -> str:
+    req = str(requested or "").strip()
+    if req and req not in {"__single__", "__live__"}:
+        return req
+    for b in batches:
+        bid = str(b.get("batch_id") or "")
+        if bid.startswith("run:"):
+            total = int(b.get("total") or 0)
+            ok_n = int(b.get("ok") or 0)
+            fail_n = int(b.get("fail") or 0)
+            if total > 0 or ok_n > 0 or fail_n > 0:
+                return bid
+    for b in batches:
+        total = int(b.get("total") or 0)
+        if total > 0:
+            return str(b.get("batch_id") or "")
+    return str(batches[0].get("batch_id") or "") if batches else ""
+
+
+async def _broadcast_stats_counts_from_delivery(
+    session: AsyncSession,
+    *,
+    bid: int,
+    target_where: list[Any],
+) -> tuple[dict[str, int], dict[str, int]]:
+    bots_ok = bots_fail = groups_ok = groups_fail = 0
+    q = await session.execute(
+        select(
+            AdminBroadcastDelivery.target_kind,
+            AdminBroadcastDelivery.ok,
+            func.count(AdminBroadcastDelivery.id),
+        )
+        .where(AdminBroadcastDelivery.broadcast_id == int(bid), *target_where)
+        .group_by(AdminBroadcastDelivery.target_kind, AdminBroadcastDelivery.ok)
+    )
+    for kind, ok, cnt in q.all():
+        c = int(cnt or 0)
+        kind_s = str(kind or "").strip().lower()
+        if kind_s in {"group", "groups"}:
+            if bool(ok):
+                groups_ok += c
+            else:
+                groups_fail += c
+        else:
+            if bool(ok):
+                bots_ok += c
+            else:
+                bots_fail += c
+    return (
+        {"ok": bots_ok, "fail": bots_fail, "total": bots_ok + bots_fail},
+        {"ok": groups_ok, "fail": groups_fail, "total": groups_ok + groups_fail},
+    )
+
+
+async def _broadcast_stats_resolve_fallback_counts(
+    session: AsyncSession,
+    *,
+    bid: int,
+    row: AdminBroadcast,
+    wanted_target: str,
+    run_target_filter: list[Any],
+    has_delivery: bool,
+    target_where: list[Any],
+) -> tuple[dict[str, int], dict[str, int], int, int]:
+    """Сводка для legacy/live: delivery → сумма runs → поля черновика."""
+    if has_delivery:
+        bots, groups = await _broadcast_stats_counts_from_delivery(
+            session, bid=int(bid), target_where=target_where
+        )
+        if int(bots.get("total") or 0) + int(groups.get("total") or 0) > 0:
+            aud_q = await session.execute(
+                select(
+                    func.coalesce(func.max(AdminBroadcastRun.audience_total), 0),
+                    func.coalesce(func.max(AdminBroadcastRun.audience_ok), 0),
+                ).where(AdminBroadcastRun.broadcast_id == int(bid))
+            )
+            aud_t, aud_ok = aud_q.one()
+            return bots, groups, int(aud_t or 0), int(aud_ok or 0)
+
+    run_filters = [AdminBroadcastRun.broadcast_id == int(bid), *run_target_filter]
+    run_sum = await session.execute(
+        select(
+            func.coalesce(func.sum(AdminBroadcastRun.recipient_ok), 0),
+            func.coalesce(func.sum(AdminBroadcastRun.recipient_fail), 0),
+            func.coalesce(func.max(AdminBroadcastRun.audience_total), 0),
+            func.coalesce(func.max(AdminBroadcastRun.audience_ok), 0),
+        ).where(*run_filters)
+    )
+    rok, rfail, aud_t, aud_ok = run_sum.one()
+    rok_i = int(rok or 0)
+    rfail_i = int(rfail or 0)
+    if rok_i + rfail_i > 0:
+        kind_q = await session.execute(
+            select(AdminBroadcastRun.target_kind)
+            .where(*run_filters)
+            .order_by(AdminBroadcastRun.created_at.desc())
+            .limit(1)
+        )
+        st = str(kind_q.scalar_one_or_none() or getattr(row, "last_target", None) or "groups")
+        bots, groups = _broadcast_stats_bucket_counts(
+            rok_i, rfail_i, source_target=st, wanted_target=wanted_target
+        )
+        return bots, groups, int(aud_t or 0), int(aud_ok or 0)
+
+    st = str(getattr(row, "last_target", None) or "groups")
+    bots, groups = _broadcast_stats_bucket_counts(
+        int(row.recipient_ok or 0),
+        int(row.recipient_fail or 0),
+        source_target=st,
+        wanted_target=wanted_target,
+    )
+    return bots, groups, int(aud_t or 0), int(aud_ok or 0)
+
+
 async def _admin_broadcast_send_history(session: AsyncSession, broadcast_id: int) -> list[dict[str, Any]]:
     """Хронология отправок: время и группы из admin_broadcast_delivery (по batch_id)."""
     bid = int(broadcast_id or 0)
@@ -10378,7 +10528,7 @@ async def api_admin_broadcasts_stats(
                 "is_live": True,
             }
         )
-    active_batch = (batch_id or "").strip() or (batches[0]["batch_id"] if batches else "")
+    active_batch = _broadcast_stats_pick_active_batch(batches, (batch_id or "").strip())
 
     from_dt: datetime | None = None
     to_dt: datetime | None = None
@@ -10448,31 +10598,30 @@ async def api_admin_broadcasts_stats(
         return _attach_broadcast_send_history(x)
 
     if active_batch.startswith("legacy:"):
-        if wanted_target and not _target_matches_wanted(row_last_target):
-            bots_ok = bots_fail = groups_ok = groups_fail = 0
-        elif wanted_target in {"group", "groups"}:
-            bots_ok = 0
-            bots_fail = 0
-            groups_ok = int(row.recipient_ok or 0)
-            groups_fail = int(row.recipient_fail or 0)
-        else:
-            bots_ok = int(row.recipient_ok or 0)
-            bots_fail = int(row.recipient_fail or 0)
-            groups_ok = 0
-            groups_fail = 0
+        bots_d, groups_d, aud_t_fb, aud_ok_fb = await _broadcast_stats_resolve_fallback_counts(
+            session,
+            bid=int(broadcast_id),
+            row=row,
+            wanted_target=wanted_target,
+            run_target_filter=run_target_filter,
+            has_delivery=has_delivery,
+            target_where=target_where,
+        )
+        bots_ok, bots_fail = int(bots_d["ok"]), int(bots_d["fail"])
+        groups_ok, groups_fail = int(groups_d["ok"]), int(groups_d["fail"])
         result = {
             "broadcast_id": int(broadcast_id),
             "active_batch_id": active_batch,
             "batches": batches,
-            "bots": {"ok": bots_ok, "fail": bots_fail, "total": bots_ok + bots_fail},
-            "groups": {"ok": groups_ok, "fail": groups_fail, "total": groups_ok + groups_fail},
+            "bots": bots_d,
+            "groups": groups_d,
             "overall": {
                 "ok": bots_ok + groups_ok,
                 "fail": bots_fail + groups_fail,
                 "total": bots_ok + groups_ok + bots_fail + groups_fail,
             },
-            "audience_total": int(latest_audience_total or 0),
-            "audience_ok": int(latest_audience_ok or 0),
+            "audience_total": int(aud_t_fb or latest_audience_total or 0),
+            "audience_ok": int(aud_ok_fb or latest_audience_ok or 0),
             "real_clicks": int(real_clicks_users),
             "real_transitions": int(real_clicks_groups),
             "real_clicks_total": int(real_clicks_total),
@@ -10483,8 +10632,8 @@ async def api_admin_broadcasts_stats(
             **click_extras,
         }
         result.update(_broadcast_stats_ctr_fields(result))
-        _log.warning(
-            "broadcast stats legacy/live: id=%s target=%s batch=%s from_ts=%s to_ts=%s history_count=%s bots=%s groups=%s connected_groups_total=%s",
+        _log.info(
+            "broadcast stats legacy: id=%s target=%s batch=%s from_ts=%s to_ts=%s history_count=%s bots=%s groups=%s connected_groups_total=%s",
             int(broadcast_id),
             wanted_target or "auto",
             active_batch,
@@ -10497,31 +10646,30 @@ async def api_admin_broadcasts_stats(
         )
         return _attach_broadcast_send_history(result)
     if active_batch == "__live__":
-        if wanted_target and not _target_matches_wanted(row_last_target):
-            bots_ok = bots_fail = groups_ok = groups_fail = 0
-        elif wanted_target in {"group", "groups"}:
-            bots_ok = 0
-            bots_fail = 0
-            groups_ok = int(row.recipient_ok or 0)
-            groups_fail = int(row.recipient_fail or 0)
-        else:
-            bots_ok = int(row.recipient_ok or 0)
-            bots_fail = int(row.recipient_fail or 0)
-            groups_ok = 0
-            groups_fail = 0
+        bots_d, groups_d, aud_t_fb, aud_ok_fb = await _broadcast_stats_resolve_fallback_counts(
+            session,
+            bid=int(broadcast_id),
+            row=row,
+            wanted_target=wanted_target,
+            run_target_filter=run_target_filter,
+            has_delivery=has_delivery,
+            target_where=target_where,
+        )
+        bots_ok, bots_fail = int(bots_d["ok"]), int(bots_d["fail"])
+        groups_ok, groups_fail = int(groups_d["ok"]), int(groups_d["fail"])
         result = {
             "broadcast_id": int(broadcast_id),
             "active_batch_id": active_batch,
             "batches": batches,
-            "bots": {"ok": bots_ok, "fail": bots_fail, "total": bots_ok + bots_fail},
-            "groups": {"ok": groups_ok, "fail": groups_fail, "total": groups_ok + groups_fail},
+            "bots": bots_d,
+            "groups": groups_d,
             "overall": {
                 "ok": bots_ok + groups_ok,
                 "fail": bots_fail + groups_fail,
                 "total": bots_ok + groups_ok + bots_fail + groups_fail,
             },
-            "audience_total": int(latest_audience_total or 0),
-            "audience_ok": int(latest_audience_ok or 0),
+            "audience_total": int(aud_t_fb or latest_audience_total or 0),
+            "audience_ok": int(aud_ok_fb or latest_audience_ok or 0),
             "real_clicks": int(real_clicks_users),
             "real_transitions": int(real_clicks_groups),
             "real_clicks_total": int(real_clicks_total),
@@ -10532,8 +10680,8 @@ async def api_admin_broadcasts_stats(
             **click_extras,
         }
         result.update(_broadcast_stats_ctr_fields(result))
-        _log.warning(
-            "broadcast stats no-delivery: id=%s target=%s batch=%s from_ts=%s to_ts=%s history_count=%s bots=%s groups=%s connected_groups_total=%s",
+        _log.info(
+            "broadcast stats live: id=%s target=%s batch=%s from_ts=%s to_ts=%s history_count=%s bots=%s groups=%s connected_groups_total=%s",
             int(broadcast_id),
             wanted_target or "auto",
             active_batch,
@@ -10547,31 +10695,30 @@ async def api_admin_broadcasts_stats(
         return _attach_broadcast_send_history(result)
 
     if not has_delivery:
-        if wanted_target and not _target_matches_wanted(row_last_target):
-            bots_ok = bots_fail = groups_ok = groups_fail = 0
-        elif wanted_target in {"group", "groups"}:
-            bots_ok = 0
-            bots_fail = 0
-            groups_ok = int(row.recipient_ok or 0)
-            groups_fail = int(row.recipient_fail or 0)
-        else:
-            bots_ok = int(row.recipient_ok or 0)
-            bots_fail = int(row.recipient_fail or 0)
-            groups_ok = 0
-            groups_fail = 0
+        bots_d, groups_d, aud_t_fb, aud_ok_fb = await _broadcast_stats_resolve_fallback_counts(
+            session,
+            bid=int(broadcast_id),
+            row=row,
+            wanted_target=wanted_target,
+            run_target_filter=run_target_filter,
+            has_delivery=False,
+            target_where=target_where,
+        )
+        bots_ok, bots_fail = int(bots_d["ok"]), int(bots_d["fail"])
+        groups_ok, groups_fail = int(groups_d["ok"]), int(groups_d["fail"])
         nd = {
             "broadcast_id": int(broadcast_id),
             "active_batch_id": active_batch,
             "batches": batches,
-            "bots": {"ok": bots_ok, "fail": bots_fail, "total": bots_ok + bots_fail},
-            "groups": {"ok": groups_ok, "fail": groups_fail, "total": groups_ok + groups_fail},
+            "bots": bots_d,
+            "groups": groups_d,
             "overall": {
                 "ok": bots_ok + groups_ok,
                 "fail": bots_fail + groups_fail,
                 "total": bots_ok + groups_ok + bots_fail + groups_fail,
             },
-            "audience_total": int(latest_audience_total or 0),
-            "audience_ok": int(latest_audience_ok or 0),
+            "audience_total": int(aud_t_fb or latest_audience_total or 0),
+            "audience_ok": int(aud_ok_fb or latest_audience_ok or 0),
             "real_clicks": int(real_clicks_users),
             "real_transitions": int(real_clicks_groups),
             "real_clicks_total": int(real_clicks_total),
@@ -10703,8 +10850,28 @@ async def api_admin_broadcasts_stats(
         "connected_bots_total": connected_bots_total,
         **click_extras,
     }
+    if int(result["overall"]["total"] or 0) == 0:
+        fb_bots, fb_groups, aud_t_fb, aud_ok_fb = await _broadcast_stats_resolve_fallback_counts(
+            session,
+            bid=int(broadcast_id),
+            row=row,
+            wanted_target=wanted_target,
+            run_target_filter=run_target_filter,
+            has_delivery=has_delivery,
+            target_where=target_where,
+        )
+        if int(fb_bots.get("total") or 0) + int(fb_groups.get("total") or 0) > 0:
+            result["bots"] = fb_bots
+            result["groups"] = fb_groups
+            bo = int(fb_bots["ok"]) + int(fb_groups["ok"])
+            bf = int(fb_bots["fail"]) + int(fb_groups["fail"])
+            result["overall"] = {"ok": bo, "fail": bf, "total": bo + bf}
+            if int(aud_t_fb or 0) > 0:
+                result["audience_total"] = int(aud_t_fb)
+            if int(aud_ok_fb or 0) > 0:
+                result["audience_ok"] = int(aud_ok_fb)
     result.update(_broadcast_stats_ctr_fields(result))
-    _log.warning(
+    _log.info(
         "broadcast stats: id=%s target=%s batch=%s from_ts=%s to_ts=%s history_count=%s bots=%s groups=%s per_groups=%s errors=%s connected_groups_total=%s",
         int(broadcast_id),
         wanted_target or "auto",

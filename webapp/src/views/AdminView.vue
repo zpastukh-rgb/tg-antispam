@@ -764,9 +764,12 @@ function bcBroadcastStatsTargetKindForSendFlow() {
   return 'bots'
 }
 
-/** Из списка: без target_kind — чтобы не сужать доставки до «ботов» для групповых рассылок. */
+/** Из списка: для Premium/рассылок — вкладка «группы», иначе общая сводка. */
 function bcBroadcastStatsTargetKindForRecentModal() {
-  return isBroadcastShellLite.value ? 'groups' : ''
+  if (isBroadcastShellLite.value || isPremiumCabinet.value || isDelegatedFreeBroadcastCabinet.value) {
+    return 'groups'
+  }
+  return ''
 }
 
 function bcApplyRecentStatsSnapshot(r) {
