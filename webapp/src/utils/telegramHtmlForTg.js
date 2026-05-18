@@ -1,4 +1,58 @@
 /**
+ * Переводит сохранённую строку Telegram HTML в innerHTML редактора:
+ * переносы строк в тексте → `<br>` (внутри `<pre>` не трогаем).
+ * Без этого `\n` между тегами не даёт отдельную строку в contenteditable.
+ * @param {string} stored
+ * @returns {string}
+ */
+export function telegramHtmlToEditorInnerHtml(stored) {
+  const raw = String(stored || '')
+  if (!raw.trim()) return ''
+  const host = document.createElement('div')
+  host.innerHTML = raw
+  const tw = document.createTreeWalker(host, NodeFilter.SHOW_TEXT, null)
+  const textNodes = []
+  let node = tw.nextNode()
+  while (node) {
+    textNodes.push(node)
+    node = tw.nextNode()
+  }
+  for (const tn of textNodes) {
+    let el = tn.parentElement
+    let inPre = false
+    while (el && el !== host) {
+      const tag = String(el.tagName || '').toLowerCase()
+      if (tag === 'pre') {
+        inPre = true
+        break
+      }
+      el = el.parentElement
+    }
+    if (inPre) continue
+    const t = tn.textContent || ''
+    if (!t.includes('\n')) continue
+    const parts = t.split('\n')
+    const frag = document.createDocumentFragment()
+    parts.forEach((part, idx) => {
+      frag.appendChild(document.createTextNode(part))
+      if (idx < parts.length - 1) frag.appendChild(document.createElement('br'))
+    })
+    tn.parentNode?.replaceChild(frag, tn)
+  }
+  // В contenteditable кастомный тег <tg-spoiler> часто не получает ожидаемых стилей; в редакторе рассылок используется span[data-spoiler].
+  const spoilers = host.querySelectorAll('tg-spoiler')
+  for (let i = spoilers.length - 1; i >= 0; i -= 1) {
+    const node = spoilers.item(i)
+    if (!node?.parentNode) continue
+    const span = document.createElement('span')
+    span.setAttribute('data-spoiler', '1')
+    while (node.firstChild) span.appendChild(node.firstChild)
+    node.parentNode.replaceChild(span, node)
+  }
+  return host.innerHTML
+}
+
+/**
  * DOM → подмножество Telegram HTML (как в редакторе рассылок).
  * @param {string} raw
  * @returns {string}

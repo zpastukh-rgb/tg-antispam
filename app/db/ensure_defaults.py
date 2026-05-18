@@ -1192,6 +1192,7 @@ async def ensure_admin_broadcasts_schema(engine: AsyncEngine) -> None:
         "ALTER TABLE admin_broadcasts ADD COLUMN IF NOT EXISTS media_original_name VARCHAR(255)",
         "ALTER TABLE admin_broadcasts ADD COLUMN IF NOT EXISTS last_target VARCHAR(16)",
         "ALTER TABLE admin_broadcasts ADD COLUMN IF NOT EXISTS autopost_json TEXT",
+        "ALTER TABLE admin_broadcasts ADD COLUMN IF NOT EXISTS cabinet_draft_scope VARCHAR(16)",
         """
         CREATE TABLE IF NOT EXISTS admin_broadcast_media (
             id SERIAL PRIMARY KEY,
@@ -1247,6 +1248,18 @@ async def ensure_admin_broadcasts_schema(engine: AsyncEngine) -> None:
         # migrations/020: аудитория и реальные клики по ссылкам
         "ALTER TABLE admin_broadcast_runs ADD COLUMN IF NOT EXISTS audience_total INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE admin_broadcast_runs ADD COLUMN IF NOT EXISTS audience_ok INTEGER NOT NULL DEFAULT 0",
+        """
+        CREATE TABLE IF NOT EXISTS admin_broadcast_sent_messages (
+            id SERIAL PRIMARY KEY,
+            broadcast_id INTEGER NOT NULL REFERENCES admin_broadcasts(id) ON DELETE CASCADE,
+            chat_id BIGINT NOT NULL,
+            message_id BIGINT NOT NULL,
+            target_kind VARCHAR(16) NOT NULL DEFAULT 'group',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+        """,
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_admin_broadcast_sent_messages_chat_msg ON admin_broadcast_sent_messages (chat_id, message_id)",
+        "CREATE INDEX IF NOT EXISTS ix_admin_broadcast_sent_messages_broadcast_id ON admin_broadcast_sent_messages (broadcast_id)",
         """
         CREATE TABLE IF NOT EXISTS admin_broadcast_clicks (
             id SERIAL PRIMARY KEY,
@@ -1433,6 +1446,8 @@ async def ensure_rules_channel_posts_filter_columns(engine: AsyncEngine) -> None
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_mention_emails BOOLEAN DEFAULT FALSE",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_mention_mass_enabled BOOLEAN DEFAULT FALSE",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_mention_mass_threshold INTEGER DEFAULT 5",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS mention_trusted_bots_json TEXT",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS media_trusted_users_json TEXT",
         # Гранулярные тогглы по типу кнопок (см. models.ChatRule.filter_button_*).
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_button_url BOOLEAN DEFAULT FALSE",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_button_callback BOOLEAN DEFAULT FALSE",
@@ -1469,6 +1484,7 @@ async def ensure_rules_welcome_columns(engine: AsyncEngine) -> None:
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS welcome_text TEXT",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS welcome_buttons_json TEXT",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS welcome_photo_path VARCHAR(512)",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS welcome_photo_file_id VARCHAR(512)",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS welcome_max_per_min INTEGER DEFAULT 0",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS welcome_silent_on_raid BOOLEAN DEFAULT FALSE",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS welcome_raid_threshold INTEGER DEFAULT 8",
@@ -1749,7 +1765,7 @@ async def ensure_chat_spike_alerts_schema(engine: AsyncEngine) -> None:
 async def ensure_rules_spam_spike_columns(engine: AsyncEngine) -> None:
     """Настройки всплеска спама на уровне rules (порог/окно/уведомление делегата)."""
     stmts = (
-        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS spam_spike_enabled BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS spam_spike_enabled BOOLEAN DEFAULT FALSE",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS spam_spike_min_deletes INTEGER DEFAULT 15",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS spam_spike_window_minutes INTEGER DEFAULT 35",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS spam_spike_notify_managers BOOLEAN DEFAULT TRUE",
@@ -1760,6 +1776,7 @@ async def ensure_rules_spam_spike_columns(engine: AsyncEngine) -> None:
                 await conn.execute(text(sql))
             # Нормализуем дефолт колонки для уже существующих БД.
             await conn.execute(text("ALTER TABLE rules ALTER COLUMN spam_spike_min_deletes SET DEFAULT 15"))
+            await conn.execute(text("ALTER TABLE rules ALTER COLUMN spam_spike_enabled SET DEFAULT FALSE"))
             # Подстраховка для старых пустых/некорректных значений.
             await conn.execute(
                 text(

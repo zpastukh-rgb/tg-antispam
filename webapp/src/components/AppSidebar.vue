@@ -17,7 +17,7 @@ const route = useRoute()
 const router = useRouter()
 const { dashboardSection, setDashboardSection } = useDashboardSection()
 
-const logoSrc = `${import.meta.env.BASE_URL}logo.png`
+const brandBadgeSrc = `${import.meta.env.BASE_URL}panel-brand-badge.png`
 
 const isActive = (item) => {
   if (item.section) {
@@ -64,22 +64,16 @@ function onNavClick(item) {
       style="box-shadow: inset 1px 0 0 rgba(255,255,255,0.06)"
     >
       <nav class="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto overscroll-contain p-3 pb-8">
-        <div
-          class="mb-4 flex flex-col gap-2 rounded-2xl bg-gradient-to-b from-white/[0.12] to-white/[0.04] px-3 py-4 shadow-inner backdrop-blur-xl dark:from-white/[0.08] dark:to-white/[0.02]"
-        >
+        <div class="mb-3 w-full shrink-0">
           <img
-            :src="logoSrc"
-            alt="AntiSpam Guard"
-            width="160"
-            height="120"
+            :src="brandBadgeSrc"
+            alt=""
             draggable="false"
-            class="mx-auto h-14 w-auto max-w-full object-contain drop-shadow-[0_0_12px_rgba(143,212,26,0.35)]"
+            class="pointer-events-none block h-auto w-full max-w-none select-none object-contain object-center drop-shadow-[0_12px_32px_-8px_rgba(132,225,62,0.22)]"
+            width="918"
+            height="319"
             @dragstart.prevent
           />
-          <div class="min-w-0 border-t border-white/15 pt-3 text-center leading-tight">
-            <p class="text-[11px] font-semibold uppercase tracking-[0.14em] text-lime-400/95">{{ t('nav.panel') }}</p>
-            <p class="mt-0.5 text-sm font-bold text-white">AntiSpam Guard</p>
-          </div>
         </div>
         <button
           v-for="item in navItems"

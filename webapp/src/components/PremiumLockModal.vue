@@ -10,13 +10,13 @@
     >
       <div
         v-if="lock.isOpen.value"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147484000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.72);padding:16px"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147484000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.55);padding:16px"
         class="backdrop-blur-md"
         role="presentation"
         @click.self="lock.closeLock()"
       >
         <div
-          class="relative w-full max-w-sm overflow-hidden rounded-[22px] bg-gradient-to-b from-zinc-900 to-black p-5 shadow-[0_24px_72px_-20px_rgba(0,0,0,0.9)] ring-1 ring-amber-400/25"
+          class="relative w-full max-w-sm overflow-hidden rounded-[22px] border border-white/[0.12] bg-[#0b0f18]/78 p-5 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.88)] ring-1 ring-white/[0.08] backdrop-blur-2xl backdrop-saturate-150 select-none"
           role="dialog"
           aria-modal="true"
           aria-labelledby="premium-lock-title"
@@ -37,7 +37,7 @@
                 class="text-[17px] font-bold leading-tight text-white"
               >{{ t(lock.titleKey.value || 'premium_lock.title') }}</h2>
               <p class="mt-1 text-[13px] leading-snug text-white/65">
-                {{ t(lock.descriptionKey.value || 'premium_lock.feature_desc.generic') }}
+                {{ t(lock.descriptionKey.value || 'premium_lock.feature_desc_short.generic') }}
               </p>
             </div>
             <button

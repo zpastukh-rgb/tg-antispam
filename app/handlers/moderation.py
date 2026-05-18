@@ -730,7 +730,7 @@ class Verdict:
     should_act: bool
     reason: str
     details: str
-    action: str  # delete|mute|ban|observe
+    action: str  # delete|mute|kick|ban|observe
     mute_minutes: int = 0
     log_it: bool = True
     log_extra: str = ""
@@ -814,12 +814,16 @@ async def _reputation_target_user_id(session, message: Message) -> int | None:
 
 def _normalize_action_mode(raw: str | None) -> str:
     """
-    Нормализует режим наказания из БД/UI к delete|mute|ban|observe.
+    Нормализует режим наказания из БД/UI к delete|mute|kick|ban|observe.
     Защищает от нестандартных строк вроде "мут", "mute + delete", "бан".
     """
     v = normalize(str(raw or ""))
+    parts = v.split()
+    first = parts[0] if parts else ""
     if "observe" in v or "замеч" in v or "наблюд" in v or "log_only" in v or "logonly" in v.replace(" ", ""):
         return "observe"
+    if first == "kick" or "кик" in v:
+        return "kick"
     if "ban" in v or "бан" in v:
         return "ban"
     if "mute" in v or "мут" in v:
@@ -1397,6 +1401,94 @@ async def _classify_username(uname: str, bot) -> str:
         return "user"
 
 
+_MENTION_TRUSTED_BOT_UNAME_RE = re.compile(r"^[A-Za-z0-9_]{5,32}$")
+_MEDIA_TRUSTED_USER_ID_RE = re.compile(r"^\d{1,20}$")
+
+
+def parse_media_trusted_from_rule(rule) -> tuple[set[int], set[str]]:
+    """Список из media_trusted_users_json: числовые id и username (нижний регистр)."""
+    raw = getattr(rule, "media_trusted_users_json", None)
+    if raw is None or str(raw).strip() == "":
+        return set(), set()
+    try:
+        arr = json.loads(str(raw))
+        if not isinstance(arr, list):
+            return set(), set()
+        ids: set[int] = set()
+        names: set[str] = set()
+        for x in arr:
+            s = str(x or "").strip().lstrip("@")
+            if not s:
+                continue
+            if _MEDIA_TRUSTED_USER_ID_RE.match(s):
+                try:
+                    ids.add(int(s))
+                except (TypeError, ValueError):
+                    continue
+            elif _MENTION_TRUSTED_BOT_UNAME_RE.match(s):
+                names.add(s.lower())
+        return ids, names
+    except Exception:
+        return set(), set()
+
+
+def is_user_media_trusted(user, rule) -> bool:
+    """Отправитель в списке доверенных для медиа или сам бот продукта (@BOT_USERNAME)."""
+    if not user:
+        return False
+    uname = str(getattr(user, "username", "") or "").strip().lstrip("@").lower()
+    if uname and uname == product_bot_username_norm():
+        return True
+    uid = int(getattr(user, "id", 0) or 0)
+    ids, names = parse_media_trusted_from_rule(rule)
+    if uid > 0 and uid in ids:
+        return True
+    if uname and uname in names:
+        return True
+    return False
+
+
+def _norm_tg_username(s: str) -> str:
+    x = str(s or "").strip()
+    if x.startswith("@"):
+        x = x[1:]
+    return x.lower()
+
+
+def product_bot_username_norm() -> str:
+    """Нижний регистр @username продукта (AntiSpam Guard); по умолчанию GuardAntiSpam_Bot."""
+    u = (os.getenv("BOT_USERNAME") or os.getenv("TELEGRAM_BOT_USERNAME") or "GuardAntiSpam_Bot").strip().lstrip("@")
+    return u.lower() if u else "guardantisapm_bot"
+
+
+def parse_mention_trusted_bots_from_rule(rule) -> set[str]:
+    raw = getattr(rule, "mention_trusted_bots_json", None)
+    if raw is None or str(raw).strip() == "":
+        return set()
+    try:
+        arr = json.loads(str(raw))
+        if not isinstance(arr, list):
+            return set()
+        out: set[str] = set()
+        for x in arr:
+            s = str(x or "").strip().lstrip("@")
+            if s and _MENTION_TRUSTED_BOT_UNAME_RE.match(s):
+                out.add(s.lower())
+        return out
+    except Exception:
+        return set()
+
+
+def is_bot_mention_exempt_from_filter(username_raw: str, rule) -> bool:
+    """True если упоминание бота не блокируем при включённом filter_mention_bots (свой бот + список доверенных)."""
+    n = _norm_tg_username(username_raw)
+    if not n or not _MENTION_TRUSTED_BOT_UNAME_RE.match(n):
+        return False
+    if n == product_bot_username_norm():
+        return True
+    return n in parse_mention_trusted_bots_from_rule(rule)
+
+
 def any_granular_mention_enabled(rule) -> bool:
     """Хотя бы один гранулярный тоггл упоминаний включён."""
     return bool(
@@ -1473,6 +1565,8 @@ async def matched_mention_kind(
                 uname = _slice_utf16(src_text, off, ln)
                 kind = await _classify_username(uname, bot)
                 if kind == "bot" and _flag("filter_mention_bots"):
+                    if is_bot_mention_exempt_from_filter(uname, rule):
+                        continue
                     return "bots"
                 if kind == "channel" and _flag("filter_mention_channels"):
                     return "channels"
@@ -1482,6 +1576,9 @@ async def matched_mention_kind(
                 # Премиум-юзеры без юзернейма (или явное text_mention).
                 u = getattr(e, "user", None)
                 if u and bool(getattr(u, "is_bot", False)) and _flag("filter_mention_bots"):
+                    un = str(getattr(u, "username", "") or "")
+                    if is_bot_mention_exempt_from_filter(un, rule):
+                        continue
                     return "bots"
                 if _flag("filter_mention_text_mention"):
                     return "text_mention"
@@ -1665,6 +1762,32 @@ def any_granular_channel_post_free_tier(rule) -> bool:
         or getattr(rule, "filter_channel_post_groups", False)
         or getattr(rule, "filter_channel_post_anon_admin", False)
     )
+
+
+def coerce_orphan_legacy_filters(rule) -> bool:
+    """
+    Снимает «осиротевший» legacy (forbid / все @), когда все гранулярные тогглы выключены.
+
+    В новой модалке «всё выкл» = разрешено; старые filter_media_mode=forbid и
+    filter_mentions=True без гранул иначе продолжают резать сообщения и показывают
+    «запрещено» на плитке при пустой модалке.
+    """
+    changed = False
+    if bool(getattr(rule, "filter_mentions", False)) and not any_granular_mention_enabled(rule):
+        rule.filter_mentions = False
+        changed = True
+    _media_mode = str(getattr(rule, "filter_media_mode", "allow") or "allow").strip().lower()
+    if _media_mode in ("forbid", "captcha") and not any_granular_media_enabled(rule):
+        rule.filter_media_mode = "allow"
+        changed = True
+    if bool(getattr(rule, "filter_channel_posts_enabled", False)) and not any_granular_channel_post_enabled(rule):
+        rule.filter_channel_posts_enabled = False
+        changed = True
+    _btn_mode = str(getattr(rule, "filter_buttons_mode", "allow") or "allow").strip().lower()
+    if _btn_mode in ("forbid", "captcha") and not any_granular_button_enabled(rule):
+        rule.filter_buttons_mode = "allow"
+        changed = True
+    return changed
 
 
 def matched_channel_post_kind(
@@ -2239,6 +2362,11 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
         await session.refresh(rule)  # свежие данные из БД (настройки из Mini App)
     except Exception:
         pass
+    if coerce_orphan_legacy_filters(rule):
+        try:
+            await session.commit()
+        except Exception:
+            pass
     owner_premium_features = await chat_owner_has_miniapp_premium(session, chat_id)
 
     # главный выключатель антиспама: если ВЫКЛ — не фильтруем
@@ -2357,7 +2485,7 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
         _links_mode = "forbid"
     # Legacy filter_links + filter_links_mode из Mini App (при «разрешить ссылки» filter_links=False).
     filter_links = _bool_or_default(getattr(rule, "filter_links", True), True)
-    filter_mentions = bool(getattr(rule, "filter_mentions", True))
+    filter_mentions = bool(getattr(rule, "filter_mentions", False))
     _media_mode_raw = getattr(rule, "filter_media_mode", "allow") or "allow"
     _media_mode = str(_media_mode_raw).strip().lower()
     _buttons_mode = getattr(rule, "filter_buttons_mode", "allow")
@@ -2687,11 +2815,14 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     # Иначе — legacy filter_media_mode (allow|forbid|captcha): так FREE и старые чаты
     # без открытой модалки сохраняют «режем всё медиа», пока пользователь не уйдёт в гранулы с Premium.
     # -------------------------------------------------
+    _media_trusted_skip = bool(user and is_user_media_trusted(user, rule))
     _granular_media_applies = (owner_premium_features and any_granular_media_enabled(rule)) or (
         (not owner_premium_features) and any_granular_media_free_tier(rule)
     )
     if _granular_media_applies:
-        _granular_kind = matched_media_kind(message, rule, owner_premium_features=owner_premium_features)
+        _granular_kind = None
+        if not _media_trusted_skip:
+            _granular_kind = matched_media_kind(message, rule, owner_premium_features=owner_premium_features)
         if _granular_kind:
             media_action = action
             _kind_human = {
@@ -2719,7 +2850,11 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
             )
         # granular модель уже включена, но это сообщение ни под один гранулярный тип не попало —
         # не смешиваем с legacy bulk filter_media_mode.
-    elif _media_mode in ("forbid", "captcha") and has_media(message):
+    elif (
+        (not _media_trusted_skip)
+        and _media_mode in ("forbid", "captcha")
+        and has_media(message)
+    ):
         media_action = action
         fm_captcha = bool(getattr(rule, "filter_media_captcha_enabled", False)) and _media_mode == "captcha"
         out_action = "delete" if fm_captcha else media_action
@@ -2831,7 +2966,7 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
 
 
 # =========================================================
-# Actions (delete / mute / ban)
+# Actions (delete / mute / kick / ban)
 # =========================================================
 async def _delete_message_with_thread(message: Message) -> None:
     """deleteMessage: в Bot API только chat_id + message_id (message_id однозначен в чате, в т.ч. в форумах)."""
@@ -2919,6 +3054,46 @@ async def _try_ban(message: Message) -> bool:
         await record_moderation_restrict_failed(message=message, action="ban", exc=e)
         return False
 
+
+async def _try_kick(message: Message) -> bool:
+    """Исключить из чата без постоянного бана: ban → сразу unban (можно зайти по ссылке снова)."""
+    sender_chat = getattr(message, "sender_chat", None)
+    if sender_chat and not message.from_user:
+        scid = int(getattr(sender_chat, "id", 0) or 0)
+        if scid == 0:
+            return False
+        try:
+            await message.bot.ban_chat_sender_chat(message.chat.id, scid)
+            await message.bot.unban_chat_sender_chat(message.chat.id, scid)
+            return True
+        except (TelegramBadRequest, TelegramForbiddenError) as e:
+            await record_moderation_restrict_failed(
+                message=message, action="kick_sender_chat", exc=e, target_telegram_id=None
+            )
+            return False
+        except Exception as e:
+            await record_moderation_restrict_failed(
+                message=message, action="kick_sender_chat", exc=e, target_telegram_id=None
+            )
+            return False
+    fu = getattr(message, "from_user", None)
+    if not fu:
+        return False
+    uid = int(getattr(fu, "id", 0) or 0)
+    if uid <= 0:
+        return False
+    try:
+        await message.bot.ban_chat_member(message.chat.id, uid)
+        await message.bot.unban_chat_member(message.chat.id, uid)
+        return True
+    except (TelegramBadRequest, TelegramForbiddenError) as e:
+        await record_moderation_restrict_failed(message=message, action="kick", exc=e)
+        return False
+    except Exception as e:
+        await record_moderation_restrict_failed(message=message, action="kick", exc=e)
+        return False
+
+
 async def apply_action(message: Message, v: Verdict, *, locale: str) -> Tuple[bool, str, bool]:
     """
     returns: (ok_action, action_label_for_log, deleted_ok)
@@ -2950,6 +3125,10 @@ async def apply_action(message: Message, v: Verdict, *, locale: str) -> Tuple[bo
         mute_lbl = t(loc, "guard.log.action_mute_day") if mm == 1440 else t(loc, "guard.log.action_mute_min", mm=mm)
         return ok, mute_lbl, deleted_ok
 
+    if v.action == "kick":
+        ok = await _try_kick(message)
+        return ok, t(loc, "guard.log.action_kick"), deleted_ok
+
     if v.action == "ban":
         ok = await _try_ban(message)
         return ok, t(loc, "guard.log.action_ban"), deleted_ok
@@ -2970,6 +3149,8 @@ def log_keyboard(action: str, chat_id: int, user_id: int, locale: str):
 
     if action == "ban":
         b.button(text=t(loc, "guard.log.btn_unban"), callback_data=f"log:unban:{chat_id}:{user_id}")
+
+    # После kick пользователь не в бане — кнопка разбана не нужна.
 
     if action == "mute":
         b.button(text=t(loc, "guard.log.btn_unmute"), callback_data=f"log:unmute:{chat_id}:{user_id}")
@@ -3045,7 +3226,7 @@ async def send_log(
     if not deleted_ok and v.action != "observe":
         extra_parts.append(t(loc, "guard.log.extra_delete_failed"))
 
-    if v.action in ("mute", "ban") and not ok_action:
+    if v.action in ("mute", "kick", "ban") and not ok_action:
         extra_parts.append(t(loc, "guard.log.extra_punish_failed"))
 
     if v.action == "observe":
@@ -3173,7 +3354,7 @@ def _moderation_punishment_landed(v: Verdict, deleted_ok: bool, ok_action: bool)
         return False
     if a == "delete":
         return bool(deleted_ok)
-    if a in ("mute", "ban"):
+    if a in ("mute", "kick", "ban"):
         return bool(ok_action)
     return False
 
@@ -3291,85 +3472,58 @@ async def _maybe_autosend_group_rules_on_moderation(
                 getattr(v, "action", None),
             )
             return
-        on_t = bool(getattr(rule, "rules_group_event_on_trigger", False))
-        on_p = bool(getattr(rule, "rules_group_event_on_punish", False))
-        if not on_t and not on_p:
+        # Одна логика: считаем только успешные удаления сообщения (deleted_ok).
+        # Тоггл rules_group_event_on_trigger — «вкл автоотправку»; N — rules_group_event_trigger_every_n.
+        on = bool(getattr(rule, "rules_group_event_on_trigger", False))
+        if not on:
             logger.debug(
-                "group_rules_autosend_skip chat=%s reason=both_event_flags_off action=%s",
+                "group_rules_autosend_skip chat=%s reason=autosend_off action=%s",
                 chat_id,
                 getattr(v, "action", None),
             )
             return
-        n_t = max(1, min(500, int(getattr(rule, "rules_group_event_trigger_every_n", 1) or 1)))
-        n_p = max(1, min(500, int(getattr(rule, "rules_group_event_punish_every_n", 1) or 1)))
-        acc_t = int(getattr(rule, "rules_group_event_trigger_acc", 0) or 0)
-        acc_p = int(getattr(rule, "rules_group_event_punish_acc", 0) or 0)
-        old_t, old_p = acc_t, acc_p
-        punish_ok = _moderation_punishment_landed(v, deleted_ok, ok_action)
-        t_hit = False
-        if on_t:
-            acc_t += 1
-            if acc_t >= n_t:
-                t_hit = True
-        p_hit = False
-        if on_p and punish_ok:
-            acc_p += 1
-            if acc_p >= n_p:
-                p_hit = True
-        if not t_hit and not p_hit:
-            rule.rules_group_event_trigger_acc = max(0, acc_t)
-            rule.rules_group_event_punish_acc = max(0, acc_p)
+        n = max(1, min(500, int(getattr(rule, "rules_group_event_trigger_every_n", 1) or 1)))
+        acc = int(getattr(rule, "rules_group_event_trigger_acc", 0) or 0)
+        old_acc = acc
+        if not deleted_ok:
             logger.debug(
-                "group_rules_autosend_wait chat=%s action=%s deleted_ok=%s ok_action=%s punish_ok=%s "
-                "acc_trigger=%s/%s acc_punish=%s/%s on_trigger=%s on_punish=%s",
+                "group_rules_autosend_skip chat=%s reason=no_delete action=%s acc=%s/%s",
                 chat_id,
                 getattr(v, "action", None),
-                bool(deleted_ok),
-                bool(ok_action),
-                bool(punish_ok),
-                acc_t,
-                n_t,
-                acc_p,
-                n_p,
-                on_t,
-                on_p,
+                acc,
+                n,
+            )
+            return
+        acc += 1
+        if acc < n:
+            rule.rules_group_event_trigger_acc = max(0, acc)
+            logger.debug(
+                "group_rules_autosend_wait chat=%s action=%s acc_delete=%s/%s",
+                chat_id,
+                getattr(v, "action", None),
+                acc,
+                n,
             )
             return
         logger.info(
-            "group_rules_autosend_attempt chat=%s action=%s deleted_ok=%s ok_action=%s punish_ok=%s "
-            "t_hit=%s p_hit=%s acc_before_trigger=%s acc_before_punish=%s",
+            "group_rules_autosend_attempt chat=%s action=%s acc_delete=%s/%s",
             chat_id,
             getattr(v, "action", None),
-            bool(deleted_ok),
-            bool(ok_action),
-            bool(punish_ok),
-            t_hit,
-            p_hit,
-            old_t,
-            old_p,
+            old_acc + 1,
+            n,
         )
         ok_send = await _try_send_group_rules_autopost(bot, chat_id, rule)
         if ok_send:
-            if t_hit:
-                acc_t = 0
-            if p_hit:
-                acc_p = 0
-            logger.info(
-                "group_rules_autosend_ok chat=%s trigger_hit=%s punish_hit=%s",
-                chat_id,
-                t_hit,
-                p_hit,
-            )
+            acc = 0
+            logger.info("group_rules_autosend_ok chat=%s", chat_id)
         else:
-            acc_t, acc_p = old_t, old_p
+            acc = old_acc
             logger.warning(
-                "group_rules_autosend_send_failed chat=%s counters_reverted acc_trigger=%s acc_punish=%s",
+                "group_rules_autosend_send_failed chat=%s counter_reverted acc=%s",
                 chat_id,
-                old_t,
-                old_p,
+                old_acc,
             )
-        rule.rules_group_event_trigger_acc = max(0, acc_t)
-        rule.rules_group_event_punish_acc = max(0, acc_p)
+        rule.rules_group_event_trigger_acc = max(0, acc)
     except Exception as e:
         logger.warning("group_rules_autosend_state chat=%s err=%s", chat_id, e)
 
@@ -3458,25 +3612,20 @@ async def pipeline(message: Message, *, edited: bool = False) -> None:
             ).scalar_one_or_none()
             if rule_gr is None:
                 rule_gr = await get_rule(session, message.chat.id)
-            if bool(getattr(rule_gr, "rules_group_enabled", False)) and (
-                bool(getattr(rule_gr, "rules_group_event_on_trigger", False))
-                or bool(getattr(rule_gr, "rules_group_event_on_punish", False))
+            if bool(getattr(rule_gr, "rules_group_enabled", False)) and bool(
+                getattr(rule_gr, "rules_group_event_on_trigger", False)
             ):
                 logger.debug(
                     "group_rules_autosend_after_act chat=%s action=%s deleted_ok=%s ok_action=%s "
-                    "text_len=%s on_trigger=%s on_punish=%s every_n_trigger=%s every_n_punish=%s "
-                    "acc_trigger=%s acc_punish=%s",
+                    "text_len=%s on_autosend=%s every_n_deletes=%s acc_delete=%s",
                     int(message.chat.id),
                     getattr(v, "action", None),
                     bool(deleted_ok),
                     bool(ok_action),
                     len(str(getattr(rule_gr, "rules_group_text", "") or "").strip()),
                     bool(getattr(rule_gr, "rules_group_event_on_trigger", False)),
-                    bool(getattr(rule_gr, "rules_group_event_on_punish", False)),
                     int(getattr(rule_gr, "rules_group_event_trigger_every_n", 1) or 1),
-                    int(getattr(rule_gr, "rules_group_event_punish_every_n", 1) or 1),
                     int(getattr(rule_gr, "rules_group_event_trigger_acc", 0) or 0),
-                    int(getattr(rule_gr, "rules_group_event_punish_acc", 0) or 0),
                 )
             await _maybe_autosend_group_rules_on_moderation(
                 message.bot,
@@ -3499,7 +3648,11 @@ async def pipeline(message: Message, *, edited: bool = False) -> None:
                     source_message=message,
                 )
                 # Реакция без ожидания фонового цикла: после удаления сразу проверяем всплеск.
-                if str(v.action or "").lower() in ("delete", "mute", "ban"):
+                if (
+                    bool(getattr(rule, "spam_spike_enabled", False))
+                    and await chat_owner_has_miniapp_premium(session, int(message.chat.id))
+                    and str(v.action or "").lower() in ("delete", "mute", "kick", "ban")
+                ):
                     try:
                         now_utc = datetime.now(timezone.utc)
                         burst_window_min = max(
@@ -3518,7 +3671,7 @@ async def pipeline(message: Message, *, edited: bool = False) -> None:
                                 ModerationLog.chat_id == chat_id_i,
                                 ModerationLog.created_at >= since_utc,
                                 ModerationLog.reason.in_(list(SPAM_MODERATION_REASONS)),
-                                func.lower(ModerationLog.action).in_(("delete", "mute", "ban")),
+                                func.lower(ModerationLog.action).in_(("delete", "mute", "kick", "ban")),
                             )
                         )
                         streak_count = int(cnt_q.scalar() or 0)
@@ -3833,20 +3986,24 @@ async def on_chat_member(event: ChatMemberUpdated):
                                 .replace("{chat_title}", html.escape(chat_title_raw, quote=False))
                             )
                             kb = _welcome_keyboard_from_json(getattr(rule, "welcome_buttons_json", None))
+                            photo_fid = str(getattr(rule, "welcome_photo_file_id", "") or "").strip()
                             photo_rel = str(getattr(rule, "welcome_photo_path", "") or "").strip()
-                            if photo_rel:
+                            photo_src = None
+                            if photo_fid:
+                                photo_src = photo_fid
+                            elif photo_rel:
                                 fp = (_welcome_media_root() / photo_rel).resolve()
                                 root = _welcome_media_root().resolve()
                                 if (root in fp.parents or fp == root) and fp.exists() and fp.is_file():
-                                    await bot.send_photo(
-                                        chat_id,
-                                        FSInputFile(str(fp)),
-                                        caption=txt[:1024],
-                                        parse_mode="HTML",
-                                        reply_markup=kb,
-                                    )
-                                else:
-                                    await bot.send_message(chat_id, txt[:4000], parse_mode="HTML", reply_markup=kb)
+                                    photo_src = FSInputFile(str(fp))
+                            if photo_src:
+                                await bot.send_photo(
+                                    chat_id,
+                                    photo_src,
+                                    caption=txt[:1024],
+                                    parse_mode="HTML",
+                                    reply_markup=kb,
+                                )
                             else:
                                 await bot.send_message(chat_id, txt[:4000], parse_mode="HTML", reply_markup=kb)
                     else:

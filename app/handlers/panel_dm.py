@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -39,13 +40,16 @@ from app.services.group_connect_actor import resolve_guard_connect_actor_for_gro
 from app.services.user_service import (
     get_or_create_user,
     can_add_chat,
-    TARIFF_CHAT_LIMITS,
     effective_chat_limit,
+    effective_channel_limit,
+    effective_group_limit,
     ensure_user_chat_limit_synced_for_tariff,
 )
-from app.api.service import apply_promo_code, count_chat_ids_by_kind, get_activity_summary_chat_ids, get_managed_chats
+from app.api.service import apply_promo_code, count_chat_ids_by_kind, get_activity_summary_chat_ids, get_managed_chats, miniapp_actor_has_global_antispam_access
 from app.services.admin_roles import is_full_admin_user
+from app.services.chat_owner_premium import chat_owner_has_miniapp_premium
 from app.services.user_locale import get_user_language, lang_from_update
+from app.services.referral_partner_dashboard import referral_partner_level_dashboard, referral_partner_ui_max_levels
 from app.i18n import t as i18n_t
 from app.texts.guardian_billing import PREMIUM_PLANS
 
@@ -120,6 +124,92 @@ def _cache_get(user_id: int) -> Optional[int]:
 def _cache_clear(user_id: int) -> None:
     """Сброс кэша панели (чтобы /panel всегда показывал главный экран)."""
     PANEL_MSG_CACHE.pop(user_id, None)
+
+
+#
+# Reply-клавиатура (быстрые действия): подписи на языке пользователя → отдельные хендлеры (не литералы /команд в тексте кнопок).
+#
+
+_DM_QUICK_KB_LAYOUT_VER = 3  # bump: не удалять служебное сообщение — иначе reply-клава пропадает в ряде клиентов
+_DM_QUICK_KB_APPLIED_VER: Dict[int, int] = {}
+
+
+def _quick_reply_kb_label_set(leaf_key: str) -> frozenset[str]:
+    key = f"panel.reply_kb.{leaf_key}"
+    return frozenset(i18n_t(lng, key) for lng in ("ru", "en"))
+
+
+_DM_REPLY_LABEL_OPEN_MENU = _quick_reply_kb_label_set("quick_open_menu")
+_DM_REPLY_LABEL_CHANGE_LANG = _quick_reply_kb_label_set("quick_change_lang")
+_DM_REPLY_LABEL_SUPPORT_TIP = _quick_reply_kb_label_set("quick_support_tip")
+
+
+def dm_quick_reply_kb_clear(user_id: int) -> None:
+    """Разрешить снова прислать reply-клаву (язык/смена раскладки)."""
+    _DM_QUICK_KB_APPLIED_VER.pop(int(user_id), None)
+
+
+async def dm_reply_keyboard_removed_send(bot, user_id: int) -> None:
+    dm_quick_reply_kb_clear(int(user_id))
+    try:
+        await bot.send_message(int(user_id), "\u2063", reply_markup=ReplyKeyboardRemove())
+    except Exception:
+        pass
+
+
+def reply_kb_dm_quick_commands(lang: str = "ru") -> ReplyKeyboardMarkup:
+    lk = lambda key: i18n_t(lang, f"panel.reply_kb.{key}")
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=lk("quick_open_menu"))],
+            [
+                KeyboardButton(text=lk("quick_change_lang")),
+                KeyboardButton(text=lk("quick_support_tip")),
+            ],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        selective=False,
+    )
+
+
+async def ensure_dm_quick_reply_keyboard(bot, user_id: int, *, silent: bool = True, force_refresh: bool = False) -> None:
+    """Отправить reply-клавиатуру быстрых действий; служебное сообщение не удаляем (см. комментарий ниже)."""
+    uid = int(user_id)
+    if (
+        not force_refresh
+        and int(_DM_QUICK_KB_APPLIED_VER.get(uid, 0)) >= _DM_QUICK_KB_LAYOUT_VER
+    ):
+        return
+    try:
+        lang = await _user_lang(uid)
+        kwargs = dict(
+            chat_id=uid,
+            text="\u2063",
+            reply_markup=reply_kb_dm_quick_commands(lang),
+        )
+        if silent:
+            kwargs["disable_notification"] = True
+        await bot.send_message(**kwargs)
+        _DM_QUICK_KB_APPLIED_VER[uid] = _DM_QUICK_KB_LAYOUT_VER
+        # Не удаляем это сообщение: в Telegram Desktop / Web при deleteMessage клавиатура,
+        # заданная этим сообщением, часто пропадает вместе с ним (пустая подложка под полем ввода).
+        # Текст «\u2063» в большинстве клиентов не отображается как заметный пузырь.
+    except Exception:
+        logger.debug("ensure_dm_quick_reply_keyboard failed uid=%s", uid, exc_info=True)
+
+
+# Один активный апдейт панели на пользователя: два параллельных /start не должны успеть дважды
+# отправить сообщение между _cache_get (промах) и _cache_set после send_message.
+_PANEL_EDIT_GUARD: Dict[int, asyncio.Lock] = {}
+
+
+def _panel_edit_guard_for(user_id: int) -> asyncio.Lock:
+    lk = _PANEL_EDIT_GUARD.get(user_id)
+    if lk is None:
+        lk = asyncio.Lock()
+        _PANEL_EDIT_GUARD[user_id] = lk
+    return lk
 
 
 # =========================================================
@@ -317,6 +407,8 @@ def _human_mode(mode: str, lang: str = "ru") -> str:
     mode = (mode or "delete").lower()
     if mode == "ban":
         return i18n_t(lang, "panel.action.ban")
+    if mode == "kick":
+        return i18n_t(lang, "panel.action.kick")
     if mode == "mute":
         return i18n_t(lang, "panel.action.mute")
     if mode == "observe":
@@ -329,6 +421,8 @@ def _next_mode(mode: str) -> str:
     if mode == "delete":
         return "mute"
     if mode == "mute":
+        return "kick"
+    if mode == "kick":
         return "ban"
     if mode == "ban":
         return "observe"
@@ -451,21 +545,12 @@ async def _get_or_create_rule(session, chat_id: int) -> Rule:
 
 
 async def _edit_panel(bot, user_id: int, text: str, kb: InlineKeyboardMarkup) -> None:
-    msg_id = _cache_get(user_id)
-    if msg_id:
-        try:
-            await bot.edit_message_text(
-                text=text,
-                chat_id=user_id,
-                message_id=msg_id,
-                parse_mode="Markdown",
-                reply_markup=kb,
-            )
-            return
-        except Exception:
+    async with _panel_edit_guard_for(int(user_id)):
+        msg_id = _cache_get(user_id)
+        if msg_id:
             try:
-                await bot.edit_message_caption(
-                    caption=text,
+                await bot.edit_message_text(
+                    text=text,
                     chat_id=user_id,
                     message_id=msg_id,
                     parse_mode="Markdown",
@@ -473,10 +558,20 @@ async def _edit_panel(bot, user_id: int, text: str, kb: InlineKeyboardMarkup) ->
                 )
                 return
             except Exception:
-                pass
+                try:
+                    await bot.edit_message_caption(
+                        caption=text,
+                        chat_id=user_id,
+                        message_id=msg_id,
+                        parse_mode="Markdown",
+                        reply_markup=kb,
+                    )
+                    return
+                except Exception:
+                    pass
 
-    m = await bot.send_message(user_id, text, parse_mode="Markdown", reply_markup=kb)
-    _cache_set(user_id, m.message_id)
+        m = await bot.send_message(user_id, text, parse_mode="Markdown", reply_markup=kb)
+        _cache_set(user_id, m.message_id)
 
 
 async def _edit_or_send(cb: CallbackQuery, text: str, kb: InlineKeyboardMarkup) -> None:
@@ -512,6 +607,97 @@ def _kb_back_to_main(lang: str = "ru") -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
+def _fmt_dm_compact_num(v: float) -> str:
+    x = float(v or 0.0)
+    if abs(x - round(x)) < 1e-9:
+        return str(int(round(x)))
+    s = f"{x:.2f}".rstrip("0").rstrip(".")
+    return s
+
+
+def _render_referral_partner_breakdown(lang: str, tier_dash: dict, bonus_balance_str: str, *, max_partner_level: int) -> str:
+    net = tier_dash.get("partner_network") or {}
+    stats = tier_dash.get("partner_level_stats") or []
+    lines: list[str] = []
+
+    ml = max(1, min(3, int(max_partner_level or 1)))
+    lines.append(i18n_t(lang, "panel.referral.partner.network_head"))
+    if ml == 1:
+        lines.append(i18n_t(lang, "panel.referral.partner.net_l1_solo", n=int(net.get("l1") or 0)))
+        lines.append(i18n_t(lang, "panel.referral.partner.net_total_direct", n=int(net.get("l1") or 0)))
+        lines.append("")
+        lines.append(i18n_t(lang, "panel.referral.partner.network_levels_premium_hint"))
+    else:
+        lines.append(i18n_t(lang, "panel.referral.partner.net_l1", n=int(net.get("l1") or 0)))
+        lines.append(i18n_t(lang, "panel.referral.partner.net_l2", n=int(net.get("l2") or 0)))
+        lines.append(i18n_t(lang, "panel.referral.partner.net_l3", n=int(net.get("l3") or 0)))
+        lines.append(i18n_t(lang, "panel.referral.partner.net_total", n=int(net.get("total") or 0)))
+
+    stats = [row for row in stats if int(row.get("level") or 0) <= ml]
+
+    lines.append("")
+    lines.append(i18n_t(lang, "panel.referral.partner.confirmed_head"))
+    tot_ctok = 0.0
+    for row in stats:
+        c = row.get("confirmed") or {}
+        pay = int(c.get("payments") or 0)
+        rub = float(c.get("sales_rub") or 0.0)
+        tok = float(c.get("reward_tokens") or 0.0)
+        tot_ctok += tok
+        lines.append(
+            i18n_t(
+                lang,
+                "panel.referral.partner.comm_row",
+                l=int(row.get("level") or 0),
+                pct=int(row.get("percent") or 0),
+                pay=pay,
+                rub=_fmt_dm_compact_num(rub) + " ₽",
+                tok=_fmt_dm_compact_num(tok),
+            )
+        )
+    lines.append(i18n_t(lang, "panel.referral.partner.confirmed_total", tok=_fmt_dm_compact_num(round(tot_ctok, 2))))
+
+    lines.append("")
+    lines.append(i18n_t(lang, "panel.referral.partner.pending_head"))
+    tot_pp = 0.0
+    tot_prub = 0.0
+    tot_ptok = 0.0
+    for row in stats:
+        p = row.get("pending") or {}
+        pay = int(p.get("payments") or 0)
+        rub = float(p.get("sales_rub") or 0.0)
+        tok = float(p.get("reward_tokens") or 0.0)
+        tot_pp += float(pay)
+        tot_prub += rub
+        tot_ptok += tok
+        lines.append(
+            i18n_t(
+                lang,
+                "panel.referral.partner.comm_row",
+                l=int(row.get("level") or 0),
+                pct=int(row.get("percent") or 0),
+                pay=pay,
+                rub=_fmt_dm_compact_num(rub) + " ₽",
+                tok=_fmt_dm_compact_num(tok),
+            )
+        )
+    lines.append(
+        i18n_t(
+            lang,
+            "panel.referral.partner.pending_total",
+            pay=int(round(tot_pp)),
+            rub=_fmt_dm_compact_num(round(tot_prub, 2)) + " ₽",
+            tok=_fmt_dm_compact_num(round(tot_ptok, 2)),
+        )
+    )
+
+    lines.append("")
+    lines.append(i18n_t(lang, "panel.referral.partner.avail_head"))
+    lines.append(i18n_t(lang, "panel.referral.partner.avail_row", bonus=bonus_balance_str))
+
+    return "\n".join(lines)
+
+
 async def _build_referral_screen(bot, tg_user_id: int, from_user) -> tuple[str, InlineKeyboardMarkup, str | None]:
     me = await bot.get_me()
     username = (me.username or "").strip()
@@ -533,8 +719,10 @@ async def _build_referral_screen(bot, tg_user_id: int, from_user) -> tuple[str, 
         paid = int(getattr(user, "ref_paid_count", 0) or 0)
         aurum_balance = float(getattr(user, "aurum_credits", 0.0) or 0.0)
         bonus_balance = float(getattr(user, "bonus_credits", 0.0) or 0.0)
+        tier_dash = await referral_partner_level_dashboard(session, user, int(tg_user_id))
         sub_until = getattr(user, "subscription_until", None)
         now = datetime.now(timezone.utc)
+        partner_max_lv = referral_partner_ui_max_levels(user, now)
         days_left = 0
         if sub_until:
             if sub_until.tzinfo is None:
@@ -557,6 +745,9 @@ async def _build_referral_screen(bot, tg_user_id: int, from_user) -> tuple[str, 
     active_until = sub_until.strftime("%d.%m.%Y %H:%M") if sub_until else "—"
     aurum_balance_str = str(int(aurum_balance)) if aurum_balance == int(aurum_balance) else f"{aurum_balance:.2f}"
     bonus_balance_str = str(int(bonus_balance)) if bonus_balance == int(bonus_balance) else f"{bonus_balance:.2f}"
+    partner_breakdown = _render_referral_partner_breakdown(
+        lang, tier_dash, bonus_balance_str, max_partner_level=partner_max_lv
+    )
     txt = i18n_t(
         lang,
         "panel.referral.body",
@@ -565,6 +756,7 @@ async def _build_referral_screen(bot, tg_user_id: int, from_user) -> tuple[str, 
         active_until=active_until,
         aurum=aurum_balance_str,
         bonus=bonus_balance_str,
+        partner_breakdown=partner_breakdown,
         ref_link=ref_link,
         invited=invited,
         paid=paid,
@@ -585,8 +777,14 @@ async def _build_referral_screen(bot, tg_user_id: int, from_user) -> tuple[str, 
     kb.button(text=i18n_t(lang, "panel.kb.back"), callback_data=CB_MAIN)
     kb.adjust(1)
 
-    banner_path = str((Path(__file__).resolve().parent.parent.parent / "static" / "referral_banner.jpg"))
-    if not Path(banner_path).exists():
+    _static_dir = Path(__file__).resolve().parent.parent.parent / "static"
+    _banner_png = _static_dir / "referral_banner.png"
+    _banner_jpg = _static_dir / "referral_banner.jpg"
+    if _banner_png.is_file():
+        banner_path = str(_banner_png)
+    elif _banner_jpg.is_file():
+        banner_path = str(_banner_jpg)
+    else:
         banner_path = None
     return txt, kb.as_markup(), banner_path
 
@@ -959,8 +1157,9 @@ async def render_main(bot, user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
         await ensure_user_chat_limit_synced_for_tariff(session, user)
         await session.refresh(user)
         summary_ids = await get_activity_summary_chat_ids(session, user_id)
-        groups_in_dashboard_scope, _ch_sc = await count_chat_ids_by_kind(session, summary_ids)
-        chat_limit_disp = effective_chat_limit(user, user_id)
+        groups_in_dashboard_scope, channels_in_dashboard_scope = await count_chat_ids_by_kind(session, summary_ids)
+        groups_limit_disp = effective_group_limit(user, user_id)
+        channels_limit_disp = effective_channel_limit(user, user_id)
         tariff_key = (user.tariff or "free").lower()
         is_premium = tariff_key in ("premium", "pro", "business")
         tariff_label = "PREMIUM" if is_premium else "FREE"
@@ -974,8 +1173,10 @@ async def render_main(bot, user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
             lang,
             "panel.main.body",
             tariff_label=tariff_label,
-            chats_count=groups_in_dashboard_scope,
-            chat_limit=chat_limit_disp,
+            groups_count=groups_in_dashboard_scope,
+            groups_limit=groups_limit_disp,
+            channels_count=channels_in_dashboard_scope,
+            channels_limit=channels_limit_disp,
             sub_until=sub_until,
             aurum=aurum_credits_str,
             bonus=bonus_credits_str,
@@ -1358,12 +1559,14 @@ async def render_chat_manage(bot, user_id: int) -> Tuple[str, InlineKeyboardMark
 # SHOW PANEL
 # =========================================================
 
-async def show_panel(bot, user_id: int) -> None:
+async def show_panel(bot, user_id: int, *, send_quick_reply_keyboard: bool = True) -> None:
     import logging
     logger = logging.getLogger(__name__)
     try:
         text, kb = await render_main(bot, user_id)
         await _edit_panel(bot, user_id, text, kb)
+        if send_quick_reply_keyboard:
+            await ensure_dm_quick_reply_keyboard(bot, user_id)
     except Exception as e:
         logger.exception("show_panel error: %s", e)
         try:
@@ -1609,10 +1812,15 @@ async def cmd_addantispam_group(message: Message):
         if not await user_can_access_chat(session, message.from_user.id, message.chat.id):
             await message.reply(i18n_t(lang, f"{ag}.not_linked"))
             return
+        if not await chat_owner_has_miniapp_premium(session, message.chat.id):
+            return
+        cht = message.chat
+        cht_title = (getattr(cht, "title", None) or "").strip().replace("«", '"').replace("»", '"')[:220]
+        group_reason = f"из группы «{cht_title}»" if cht_title else f"из группы {getattr(cht, 'id', 0)}"
         added = await add_to_global_antispam(
             session,
             target.id,
-            reason=f"из группы {message.chat.id}",
+            reason=group_reason,
             display_name=disp,
             username=un,
         )
@@ -1734,21 +1942,28 @@ async def cb_ref(cb: CallbackQuery):
     await _edit_or_send(cb, txt, kb)
 
 
+async def _send_dm_guard_lang_prompt(message: Message) -> None:
+    """RU/EN — инлайн-кнопки выбора языка (общий код для /guard_lang и reply-клавы «Язык»)."""
+    lang = await lang_from_update(message)
+    kb = InlineKeyboardBuilder()
+    kb.button(text=i18n_t(lang, "bot.lang_cmd.btn_ru"), callback_data="p:lang:set:ru")
+    kb.button(text=i18n_t(lang, "bot.lang_cmd.btn_en"), callback_data="p:lang:set:en")
+    kb.adjust(2)
+    await message.answer(i18n_t(lang, "bot.lang_cmd.prompt"), reply_markup=kb.as_markup())
+
+
+async def _send_dm_guard_tip(message: Message) -> None:
+    lang = await _user_lang(message.from_user.id) if message.from_user else "ru"
+    await message.answer(i18n_t(lang, "panel.guard_tip"))
+
+
 @router.message(Command("guard_lang"))
 async def cmd_guard_lang(message: Message):
     if message.chat.type != "private":
         lang = await _user_lang(message.from_user.id) if message.from_user else "ru"
         await message.answer(_cmd_private_only(lang))
         return
-    from app.i18n import t
-    from app.services.user_locale import lang_from_update
-
-    lang = await lang_from_update(message)
-    kb = InlineKeyboardBuilder()
-    kb.button(text=t(lang, "bot.lang_cmd.btn_ru"), callback_data="p:lang:set:ru")
-    kb.button(text=t(lang, "bot.lang_cmd.btn_en"), callback_data="p:lang:set:en")
-    kb.adjust(2)
-    await message.answer(t(lang, "bot.lang_cmd.prompt"), reply_markup=kb.as_markup())
+    await _send_dm_guard_lang_prompt(message)
 
 
 @router.callback_query(F.data.startswith("p:lang:set:"))
@@ -1765,14 +1980,19 @@ async def cb_guard_lang_set(cb: CallbackQuery):
         await set_user_language(user_id, code)
     except Exception:
         pass
+    toast = t(code, "bot.lang_cmd.saved")
     try:
-        await cb.message.edit_text(t(code, "bot.lang_cmd.saved"))
+        await cb.message.edit_text(toast)
     except Exception:
         try:
-            await cb.message.answer(t(code, "bot.lang_cmd.saved"))
+            await cb.message.answer(toast)
         except Exception:
             pass
-    await cb.answer(t(code, "bot.lang_cmd.saved"))
+    await cb.answer(toast)
+    # Обновить подписи reply-клавы + главное сообщение с инлайн после смены языка (иначе остаётся старый текст/клавиатура).
+    dm_quick_reply_kb_clear(user_id)
+    _cache_clear(user_id)
+    await show_panel(cb.bot, user_id)
 
 
 @router.message(Command("guard_tip"))
@@ -1781,8 +2001,30 @@ async def cmd_guard_tip(message: Message):
         lang = await _user_lang(message.from_user.id) if message.from_user else "ru"
         await message.answer(_cmd_private_only(lang))
         return
-    lang = await _user_lang(message.from_user.id) if message.from_user else "ru"
-    await message.answer(i18n_t(lang, "panel.guard_tip"))
+    await _send_dm_guard_tip(message)
+
+
+@router.message(F.text.in_(_DM_REPLY_LABEL_OPEN_MENU), F.chat.type == "private")
+async def dm_reply_quick_open_menu(message: Message):
+    """Reply «Главное меню» → то же, что явный перезход к инлайн-панели (/panel без спама литералов в клавиатуре)."""
+    if not message.from_user:
+        return
+    _cache_clear(message.from_user.id)
+    await show_panel(message.bot, message.from_user.id)
+
+
+@router.message(F.text.in_(_DM_REPLY_LABEL_CHANGE_LANG), F.chat.type == "private")
+async def dm_reply_quick_change_lang(message: Message):
+    if not message.from_user:
+        return
+    await _send_dm_guard_lang_prompt(message)
+
+
+@router.message(F.text.in_(_DM_REPLY_LABEL_SUPPORT_TIP), F.chat.type == "private")
+async def dm_reply_quick_support_tip(message: Message):
+    if not message.from_user:
+        return
+    await _send_dm_guard_tip(message)
 
 
 @router.callback_query(F.data == "p:ref_access")
@@ -1851,7 +2093,8 @@ async def cb_noop(cb: CallbackQuery):
 @router.callback_query(F.data == CB_MAIN)
 async def cb_main(cb: CallbackQuery):
     await cb.answer()
-    text, kb = await render_main(cb.bot, cb.from_user.id)
+    uid = int(cb.from_user.id)
+    text, kb = await render_main(cb.bot, uid)
     has_referral_media = bool(
         getattr(cb.message, "photo", None)
         or getattr(cb.message, "video", None)
@@ -1860,13 +2103,15 @@ async def cb_main(cb: CallbackQuery):
     )
     if has_referral_media:
         new_msg = await cb.message.answer(text, parse_mode="Markdown", reply_markup=kb)
-        _cache_set(cb.from_user.id, new_msg.message_id)
+        _cache_set(uid, new_msg.message_id)
         try:
             await cb.message.delete()
         except Exception:
             pass
+        await ensure_dm_quick_reply_keyboard(cb.bot, uid)
         return
     await _edit_or_send(cb, text, kb)
+    await ensure_dm_quick_reply_keyboard(cb.bot, uid)
 
 
 async def _render_protection_screen(bot, user_id: int, chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
@@ -2498,7 +2743,6 @@ async def cb_clean_deleted(cb: CallbackQuery):
 @router.callback_query(F.data == CB_GLOBAL_ANTISPAM)
 async def cb_global_antispam(cb: CallbackQuery):
     """Экран антиспам базы: переключатель использования в чате + список + добавить."""
-    await cb.answer()
     chat_id = await _get_selected_or_alert(cb)
     if not chat_id:
         return
@@ -2506,6 +2750,12 @@ async def cb_global_antispam(cb: CallbackQuery):
     ga = "panel.global_antispam"
     from app.services.global_antispam import list_global_antispam_for_api
     async with await get_session() as session:
+        if not await miniapp_actor_has_global_antispam_access(session, int(cb.from_user.id)):
+            await cb.answer(i18n_t(lang, "panel.global_antispam.premium_required"), show_alert=True)
+            return
+        if not await chat_owner_has_miniapp_premium(session, int(chat_id)):
+            await cb.answer(i18n_t(lang, "panel.global_antispam.owner_premium_required"), show_alert=True)
+            return
         rule = await _get_or_create_rule(session, chat_id)
         use_db = bool(getattr(rule, "use_global_antispam_db", False))
         items = await list_global_antispam_for_api(session, limit=30)
@@ -2515,7 +2765,7 @@ async def cb_global_antispam(cb: CallbackQuery):
         lines = []
         for i, row in enumerate(items[:15], 1):
             label = (row.get("display_label") or str(row.get("user_id", "")))[:48]
-            reason = (row.get("reason") or "").strip() or "—"
+            reason = (row.get("reason_display") or row.get("reason") or "").strip() or "—"
             lines.append(i18n_t(lang, f"{ga}.list_line", i=i, label=label, reason=reason[:36]))
         txt += "\n\n" + "\n".join(lines)
     b = InlineKeyboardBuilder()
@@ -2527,16 +2777,23 @@ async def cb_global_antispam(cb: CallbackQuery):
     b.button(text=i18n_t(lang, "panel.kb.back"), callback_data=CB_BACK_TO_CHAT)
     b.adjust(1)
     await _edit_or_send(cb, txt, b.as_markup())
+    await cb.answer()
 
 
 @router.callback_query(F.data == CB_GLOBAL_ANTISPAM_TOGGLE)
 async def cb_global_antispam_toggle(cb: CallbackQuery):
     """Вкл/выкл использование глобальной антиспам базы в выбранном чате."""
-    await cb.answer()
     chat_id = await _get_selected_or_alert(cb)
     if not chat_id:
         return
+    lang = await _user_lang(cb.from_user.id)
     async with await get_session() as session:
+        if not await miniapp_actor_has_global_antispam_access(session, int(cb.from_user.id)):
+            await cb.answer(i18n_t(lang, "panel.global_antispam.premium_required"), show_alert=True)
+            return
+        if not await chat_owner_has_miniapp_premium(session, int(chat_id)):
+            await cb.answer(i18n_t(lang, "panel.global_antispam.owner_premium_required"), show_alert=True)
+            return
         rule = await _get_or_create_rule(session, chat_id)
         rule.use_global_antispam_db = not getattr(rule, "use_global_antispam_db", False)
         await session.commit()
@@ -2546,9 +2803,19 @@ async def cb_global_antispam_toggle(cb: CallbackQuery):
 @router.callback_query(F.data == CB_GLOBAL_ANTISPAM_ADD)
 async def cb_global_antispam_add(cb: CallbackQuery):
     """Запросить ввод user_id для добавления в антиспам базу."""
+    chat_id = await _get_selected_or_alert(cb)
+    if not chat_id:
+        return
+    lang = await _user_lang(cb.from_user.id)
+    async with await get_session() as session:
+        if not await miniapp_actor_has_global_antispam_access(session, int(cb.from_user.id)):
+            await cb.answer(i18n_t(lang, "panel.global_antispam.premium_required"), show_alert=True)
+            return
+        if not await chat_owner_has_miniapp_premium(session, int(chat_id)):
+            await cb.answer(i18n_t(lang, "panel.global_antispam.owner_premium_required"), show_alert=True)
+            return
     await cb.answer()
     _pending_antispam_add[cb.from_user.id] = True
-    lang = await _user_lang(cb.from_user.id)
     await cb.message.answer(
         i18n_t(lang, "panel.global_antispam.add_prompt"),
         parse_mode="Markdown",
@@ -3186,7 +3453,7 @@ async def cb_connect_reports(cb: CallbackQuery):
         me = await cb.bot.get_me()
         username = me.username or "bot"
         pick_url = f"https://t.me/{username}?startgroup=reportschat_{protected_chat_id}"
-        await cb.bot.send_message(cb.from_user.id, "\u2063", reply_markup=ReplyKeyboardRemove())
+        await dm_reply_keyboard_removed_send(cb.bot, cb.from_user.id)
         kb = InlineKeyboardBuilder()
         kb.button(text=i18n_t(lang, f"{rf}.btn_pick"), url=pick_url)
         kb.adjust(1)
@@ -3221,7 +3488,7 @@ async def cb_pick_reports_chat(cb: CallbackQuery):
         me = await cb.bot.get_me()
         username = me.username or "bot"
         pick_url = f"https://t.me/{username}?startgroup=reportschat_{protected_chat_id}"
-        await cb.bot.send_message(cb.from_user.id, "\u2063", reply_markup=ReplyKeyboardRemove())
+        await dm_reply_keyboard_removed_send(cb.bot, cb.from_user.id)
         kb = InlineKeyboardBuilder()
         kb.button(text=i18n_t(lang, f"{rf}.btn_pick_new"), url=pick_url)
         kb.adjust(1)
@@ -3627,6 +3894,15 @@ async def on_private_text_antispam_add(message: Message):
 
     uid = int(text)
     async with await get_session() as session:
+        sel_chat = await _get_selected_chat(session, message.from_user.id)
+        if not sel_chat or not await miniapp_actor_has_global_antispam_access(session, int(message.from_user.id)):
+            _pending_antispam_add.pop(message.from_user.id, None)
+            await message.answer(i18n_t(lang, "panel.global_antispam.premium_required"))
+            return
+        if not await chat_owner_has_miniapp_premium(session, int(sel_chat)):
+            _pending_antispam_add.pop(message.from_user.id, None)
+            await message.answer(i18n_t(lang, "panel.global_antispam.owner_premium_required"))
+            return
         added = await add_to_global_antispam(session, uid, reason=None)
         if added:
             info = await tg_get_chat(uid)
@@ -3656,6 +3932,7 @@ async def on_chat_shared(message: Message):
     if request_id == REPORTS_REQUEST_ID:
         protected_chat_id = _pending_reports_for.pop(user_id, None)
         if not protected_chat_id:
+            dm_quick_reply_kb_clear(user_id)
             await message.answer(
                 i18n_t(actor_lang, f"{rf}.session_expired"),
                 reply_markup=ReplyKeyboardRemove(),
@@ -3705,6 +3982,7 @@ async def on_chat_shared(message: Message):
             )
         except Exception:
             pass
+        dm_quick_reply_kb_clear(user_id)
         await message.answer(
             i18n_t(actor_lang, f"{rf}.connected_dm"),
             reply_markup=ReplyKeyboardRemove(),
@@ -3721,6 +3999,7 @@ async def on_chat_shared(message: Message):
     try:
         chat = await bot.get_chat(chat_id)
         if chat.type not in ("group", "supergroup"):
+            dm_quick_reply_kb_clear(actor_id)
             await message.answer(
                 i18n_t(actor_lang, f"{cv}.groups_only_dm"),
                 reply_markup=ReplyKeyboardRemove(),
@@ -3728,6 +4007,7 @@ async def on_chat_shared(message: Message):
             return
         member = await bot.get_chat_member(chat_id, actor_id)
         if member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
+            dm_quick_reply_kb_clear(actor_id)
             await message.answer(
                 i18n_t(actor_lang, f"{cv}.admin_only"),
                 reply_markup=ReplyKeyboardRemove(),
@@ -3736,18 +4016,21 @@ async def on_chat_shared(message: Message):
         me = await bot.get_me()
         bot_member = await bot.get_chat_member(chat_id, me.id)
         if bot_member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
+            dm_quick_reply_kb_clear(actor_id)
             await message.answer(
                 i18n_t(actor_lang, f"{cv}.bot_need_admin"),
                 reply_markup=ReplyKeyboardRemove(),
             )
             return
         if not getattr(bot_member, "can_delete_messages", False):
+            dm_quick_reply_kb_clear(actor_id)
             await message.answer(
                 i18n_t(actor_lang, f"{cv}.bot_need_delete"),
                 reply_markup=ReplyKeyboardRemove(),
             )
             return
     except Exception:
+        dm_quick_reply_kb_clear(actor_id)
         await message.answer(
             i18n_t(actor_lang, f"{cv}.verify_fail"),
             reply_markup=ReplyKeyboardRemove(),
@@ -3763,6 +4046,7 @@ async def on_chat_shared(message: Message):
             await get_or_create_user(session, owner_id, username=owner_un, first_name=owner_fn)
             can_add, current_count, limit = await can_add_chat(session, owner_id)
             if not can_add:
+                dm_quick_reply_kb_clear(actor_id)
                 await message.answer(
                     i18n_t(actor_lang, "panel.connect.limit", current=current_count, limit=limit),
                     reply_markup=ReplyKeyboardRemove(),
@@ -3785,6 +4069,7 @@ async def on_chat_shared(message: Message):
                     if (not bool(chat_row.is_active)) and await telegram_user_is_chat_creator(bot, chat_id, owner_id):
                         chat_row.owner_user_id = int(owner_id)
                     else:
+                        dm_quick_reply_kb_clear(actor_id)
                         await message.answer(
                             i18n_t(actor_lang, "panel.connect.owner_conflict"),
                             reply_markup=ReplyKeyboardRemove(),
@@ -3814,11 +4099,13 @@ async def on_chat_shared(message: Message):
 
             await _set_selected_chat(session, owner_id, chat_id)
             await session.commit()
+        dm_quick_reply_kb_clear(actor_id)
         await message.answer(
             i18n_t(actor_lang, "panel.connect.connected_user_msg"),
             reply_markup=ReplyKeyboardRemove(),
         )
     except Exception:
+        dm_quick_reply_kb_clear(actor_id)
         await message.answer(
             i18n_t(actor_lang, "panel.connect.db_error_dm"),
             reply_markup=ReplyKeyboardRemove(),

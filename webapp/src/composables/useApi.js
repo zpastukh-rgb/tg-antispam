@@ -1,6 +1,75 @@
-import { ref, computed } from 'vue'
-import { api, getInitData } from '../api/client'
+import { ref } from 'vue'
+import { api, getApiBaseUrl, getInitData } from '../api/client'
 import { getLocale } from '../i18n/index.js'
+import { guardLog, guardWarn } from '../utils/guardDebugLog.js'
+
+/**
+ * initData в Telegram WebApp не реактивен: нельзя оборачивать getInitData() в computed —
+ * первое вычисление (часто до готовности WebView) залипает false, и запросы/модалки не стартуют.
+ * Держим один ref на весь фронт и коротко поллим, пока не появится подпись или не выйдем по таймауту.
+ */
+const hasInitData = ref(!!getInitData())
+
+let initDataPollExhaustedLogged = false
+
+function syncHasInitDataFromWindow() {
+  const prev = hasInitData.value
+  const next = !!getInitData()
+  if (hasInitData.value !== next) {
+    hasInitData.value = next
+    if (!prev && next) {
+      guardLog('useApi:initData', 'initData became available (requests can authenticate)')
+    }
+    if (prev && !next) {
+      guardWarn('useApi:initData', 'initData cleared — session may have reset', {})
+    }
+  }
+  try {
+    if (typeof window !== 'undefined') {
+      const raw = getInitData()
+      window.__GUARD_INIT_DATA_DIAG__ = {
+        hasFlag: hasInitData.value,
+        /** Есть ли непустая строка подписи прямо сейчас (источник тот же, что у fetch). */
+        liveLen: typeof raw === 'string' ? raw.length : 0,
+        apiBaseLen: String(getApiBaseUrl() || '').length,
+      }
+    }
+  } catch {
+    //
+  }
+  return next
+}
+
+/** Принудительно перечитать initData (например перед запросом в тот же тик, когда WebApp только дописал поле). */
+export function syncInitDataState() {
+  return syncHasInitDataFromWindow()
+}
+
+if (typeof window !== 'undefined') {
+  syncHasInitDataFromWindow()
+  requestAnimationFrame(() => {
+    syncHasInitDataFromWindow()
+    queueMicrotask(syncHasInitDataFromWindow)
+  })
+  let ticks = 0
+  const pollMs = 50
+  const maxTicks = 80
+  const id = window.setInterval(() => {
+    syncHasInitDataFromWindow()
+    ticks += 1
+    if (hasInitData.value || ticks >= maxTicks) {
+      window.clearInterval(id)
+      if (!hasInitData.value && ticks >= maxTicks && !initDataPollExhaustedLogged) {
+        initDataPollExhaustedLogged = true
+        guardWarn(
+          'useApi:initData',
+          `still no initData after ~${Math.round((maxTicks * pollMs) / 1000)}s poll (requests may 401 — open panel from Telegram, not external browser)`,
+          { telegramWebApp: typeof window.Telegram?.WebApp?.initData === 'string' ? 'present' : 'missing' },
+        )
+      }
+    }
+  }, pollMs)
+}
 
 /** Сообщения об ошибках с бэка — локализованные (RU/EN). */
 export function messageFromApiError(e) {
@@ -25,8 +94,18 @@ export function messageFromApiError(e) {
     )
   if (looksLikeNetwork) {
     return isEn
-      ? 'Request to the API failed (network, CORS or API URL). Check the frontend env vars and CORS.'
-      : 'Запрос к API не прошёл (сеть, CORS или адрес API). Проверьте конфигурацию фронтенда и CORS.'
+      ? (
+          'Request to the API failed (network, CORS, or wrong API URL). Check: ' +
+          '1) Frontend service env: VITE_API_BASE_URL (or GUARD_API_BASE_URL) = full https://… to the API; ' +
+          '2) In Telegram WebView console: window.__GUARD_API_BASE_EFFECTIVE__ matches that URL; ' +
+          '3) API allows CORS (e.g. CORS_ORIGINS=* or your Mini App origin).'
+        )
+      : (
+          'Запрос к API не прошёл (сеть, CORS или адрес API). Проверьте: ' +
+          '1) у сервиса фронта в Railway задан VITE_API_BASE_URL (или GUARD_API_BASE_URL) = полный https://… API; ' +
+          '2) в консоли: window.__GUARD_API_BASE_EFFECTIVE__ и window.__GUARD_INIT_DATA_DIAG__ — база должна совпасть с API, liveLen > 0 если сессия Mini App есть; ' +
+          '3) у API CORS_ORIGINS=* или домен Mini App.'
+        )
   }
   if (detail === 'Chat not found' || (status === 404 && String(detail).toLowerCase().includes('chat'))) {
     return isEn
@@ -40,8 +119,15 @@ export function messageFromApiError(e) {
   }
   if (status === 401 && (String(detail).toLowerCase().includes('init') || String(detail).toLowerCase().includes('telegram'))) {
     return isEn
-      ? 'Mini App session is not verified. Close the panel and open it again via the “Menu” button in the bot chat.'
-      : 'Сессия Mini App не подтверждена. Закройте панель и откройте снова через кнопку «Меню» в чате с ботом.'
+      ? (
+          'Mini App session is not verified. Close the panel and reopen it via the Menu button inside the bot chat (not from an external browser). ' +
+          'If window.__GUARD_INIT_DATA_DIAG__.liveLen is 0, Telegram did not inject initData.'
+        )
+      : (
+          'Сессия Mini App не подтверждена. Закройте панель и откройте снова через кнопку «Меню» в чате с ботом (не из внешнего браузера). ' +
+          'Если в консоли window.__GUARD_INIT_DATA_DIAG__.liveLen === 0, Telegram не передал подпись. ' +
+          'Если открываете через другого бота — аккаунт должен совпадать с ботом этого API.'
+        )
   }
   if (status === 401 && String(detail).toLowerCase().includes('session terminated')) {
     return isEn
@@ -79,8 +165,6 @@ export function useApi() {
       throw e
     }
   }
-
-  const hasInitData = computed(() => !!getInitData())
 
   return {
     api,

@@ -479,8 +479,12 @@ export const api = {
   adminBroadcasts: (scope = 'mine') =>
     api.get(`/api/admin/broadcasts?scope=${encodeURIComponent(scope === 'all' ? 'all' : 'mine')}`),
   /** scope: mine | all — группы этого бота для рассылки (не «вся админка чатов»). */
-  adminBroadcastGroups: (scope = 'mine') =>
-    api.get(`/api/admin/broadcast/groups?scope=${encodeURIComponent(scope)}`),
+  adminBroadcastGroups: (scope = 'mine', opts = {}) => {
+    const sc = scope === 'all' ? 'all' : 'mine'
+    const qs = new URLSearchParams({ scope: sc })
+    if (opts.includeInactive || opts.include_inactive) qs.set('include_inactive', '1')
+    return api.get(`/api/admin/broadcast/groups?${qs.toString()}`)
+  },
   adminBroadcastChannels: (scope = 'mine') =>
     api.get(`/api/admin/broadcast/channels?scope=${encodeURIComponent(scope === 'all' ? 'all' : 'mine')}`),
   adminBroadcast: (id) => api.get(`/api/admin/broadcasts/${id}`),
@@ -497,6 +501,11 @@ export const api = {
     api.get(
       `/api/admin/broadcasts/${encodeURIComponent(String(id))}/autopost-stats?days=${encodeURIComponent(String(Math.min(30, Math.max(1, Number(days) || 7))))}`,
     ),
+  /** Запуски рассылок за «сегодня» по IANA TZ (ручные + автопост) — суммарно по кабинету. */
+  adminBroadcastRunsToday: (ianaTz) => {
+    const tz = encodeURIComponent(String(ianaTz || 'Europe/Moscow').slice(0, 80))
+    return api.get(`/api/admin/broadcasts/today-send-runs?tz=${tz}`)
+  },
   adminBroadcastCreate: (body) => api.post('/api/admin/broadcasts', body),
   adminBroadcastPatch: (id, body) => api.patch(`/api/admin/broadcasts/${id}`, body),
   adminBroadcastDelete: (id) => api.delete(`/api/admin/broadcasts/${id}`),
@@ -513,7 +522,7 @@ export const api = {
   adminAutopostCampaignDelete: (id) => api.delete(`/api/admin/autopost-campaigns/${id}`),
   adminAutopostCampaignAutopostStats: (id, days = 7) =>
     api.get(
-      `/api/admin/autopost-campaigns/${encodeURIComponent(String(id))}/autopost-stats?days=${encodeURIComponent(String(Math.min(30, Math.max(1, Number(days) || 7))))}`,
+      `/api/admin/autopost-campaigns/${encodeURIComponent(String(id))}/autopost-stats?days=${encodeURIComponent(String(Math.min(365, Math.max(1, Number(days) || 7))))}`,
     ),
   billingTokenPacks: () => api.get('/api/billing/token-packs'),
   /** Владелец: кто платит AURUM за рассылки делегата — owner | delegate | delegate_first */

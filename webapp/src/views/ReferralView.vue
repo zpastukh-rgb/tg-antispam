@@ -17,7 +17,7 @@ const referral = ref(null)
 const showInfoModal = ref(false)
 const movingBonus = ref(false)
 
-const referralBanner = `${import.meta.env.BASE_URL}referral_banner.jpg`
+const referralBanner = `${import.meta.env.BASE_URL}referral_banner.png`
 
 const activeUntilLabel = computed(() => formatDateTimeRu(referral.value?.active_until))
 const bonusCreditsLabel = computed(() => {

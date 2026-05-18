@@ -82,27 +82,8 @@ export function runMentionsChain(ctx) {
     }
   }
 
-  // Тихая миграция: legacy «все @» снимаем при открытии, если ещё нет ни одной гранулы.
-  const anyGranular = MENTION_FILTER_KINDS.some((k) => !!ctx.rule[k.field])
-    || !!ctx.rule.filter_mention_mass_enabled
-  if (!!ctx.rule.filter_mentions && !anyGranular) {
-    guardFilterChain('Protection', 'mentionsChainPure:legacy_reset', { from: true })
-    try {
-      const p = ctx?.onUpdateRule?.({ filter_mentions: false })
-      if (p && typeof p.then === 'function') {
-        p.catch((err) => guardFilterChain('Protection', 'mentionsChainPure:legacy_reset_error', errToObj(err)))
-      }
-      ctx.rule.filter_mentions = false
-    } catch (err) {
-      guardFilterChain('Protection', 'mentionsChainPure:legacy_reset_throw', errToObj(err))
-    }
-  }
-
   const titleText = safeT('protection.ui.mentions_modal_title', '💬 Упоминания')
-  let hintText = safeT('protection.ui.mentions_modal_hint', 'Выбери что считать упоминанием. Каждый переключатель работает независимо.')
-  if (!ownerHasPremium) {
-    hintText = safeT('protection.ui.mentions_modal_hint_free', hintText)
-  }
+  const hintText = ''
   const massEnabledText = safeT('protection.ui.mention_mass_enabled', 'Массовые упоминания')
   const massThresholdText = safeT('protection.ui.mention_mass_threshold', 'Порог')
 
@@ -154,8 +135,19 @@ export function runMentionsChain(ctx) {
     if (ctx.rule[field] === value) return
     const prev = ctx.rule[field]
     ctx.rule[field] = value
+    const patch = { [field]: value }
+    // При включении гранулы снимаем legacy «все @», иначе в БД останутся оба режима.
+    if (
+      value
+      && field !== 'filter_mentions'
+      && isGranularMentionField(field)
+      && !!ctx.rule.filter_mentions
+    ) {
+      ctx.rule.filter_mentions = false
+      patch.filter_mentions = false
+    }
     try {
-      const p = ctx?.onUpdateRule?.({ [field]: value })
+      const p = ctx?.onUpdateRule?.(patch)
       if (p && typeof p.then === 'function') {
         p.catch((err) => {
           ctx.rule[field] = prev
@@ -165,6 +157,26 @@ export function runMentionsChain(ctx) {
     } catch (err) {
       ctx.rule[field] = prev
       guardFilterChain('Protection', 'mentionsChainPure:patchThrow', { field, ...errToObj(err) })
+    }
+  }
+
+  function patchTrustedBots(nextArr) {
+    const clean = Array.isArray(nextArr)
+      ? nextArr.map((x) => String(x ?? '').trim().replace(/^@+/, '')).filter(Boolean)
+      : []
+    const prev = ctx.rule.mention_trusted_bots
+    ctx.rule.mention_trusted_bots = [...clean]
+    try {
+      const p = ctx?.onUpdateRule?.({ mention_trusted_bots: clean })
+      if (p && typeof p.then === 'function') {
+        p.catch((err) => {
+          ctx.rule.mention_trusted_bots = prev
+          guardFilterChain('Protection', 'mentionsChainPure:trustedBotsError', errToObj(err))
+        })
+      }
+    } catch (err) {
+      ctx.rule.mention_trusted_bots = prev
+      guardFilterChain('Protection', 'mentionsChainPure:trustedBotsThrow', errToObj(err))
     }
   }
 
@@ -186,6 +198,17 @@ export function runMentionsChain(ctx) {
       kinds,
       values,
       mass,
+      mentionTrustedBots: Array.isArray(ctx.rule.mention_trusted_bots) ? ctx.rule.mention_trusted_bots : [],
+      trustedBotsTitleText: safeT('protection.ui.mention_trusted_bots_title', 'Доверенные боты'),
+      trustedBotsHintText: safeT(
+        'protection.ui.mention_trusted_bots_hint',
+        '@GuardAntiSpam_Bot можно упоминать всегда. Добавьте сюда других ботов (без @).',
+      ),
+      trustedBotsPlaceholderText: safeT('protection.ui.mention_trusted_bots_placeholder', 'ИмяБота'),
+      trustedBotsAddText: safeT('common.add', 'Добавить'),
+      onMentionTrustedBotsChange: (next) => {
+        patchTrustedBots(next)
+      },
       onToggleKind: (field, next) => {
         guardFilterChain('Protection', 'mentionsChainPure:toggleKind', { field, next })
         patchField(field, !!next)

@@ -84,6 +84,7 @@ from app.db.models import Base
 from app.handlers.health import router as health_router
 from app.handlers.start import router as start_router
 from app.handlers.broadcast_clicks import router as broadcast_clicks_router
+from app.handlers.broadcast_reactions import router as broadcast_reactions_router
 from app.handlers.onboarding import router as onboarding_router
 from app.handlers.panel_dm import router as panel_router
 from app.handlers.log_setup import router as log_setup_router
@@ -156,9 +157,6 @@ async def _guardian_bot_error_journal(event: ErrorEvent) -> None:
 # ТЗ: Меню команд Telegram (синяя кнопка) — только основные команды
 BOT_COMMANDS = [
     BotCommand(command="start", description="Начать работу с ботом"),
-    BotCommand(command="panel", description="Открыть панель Guard"),
-    BotCommand(command="guard_help", description="Инструкция Guard"),
-    BotCommand(command="guard_ref", description="Реферальная программа"),
     BotCommand(command="guard_lang", description="Смена языка"),
     BotCommand(command="guard_tip", description="Поддержать проект"),
     BotCommand(command="karma", description="Моя карма в группе"),
@@ -433,6 +431,7 @@ async def main() -> None:
     dp.include_router(health_router)
     dp.include_router(start_router)
     dp.include_router(broadcast_clicks_router)
+    dp.include_router(broadcast_reactions_router)
     dp.include_router(onboarding_router)
     # dp.include_router(first_message_captcha_router)  # капча на паузе
     dp.include_router(log_setup_router)

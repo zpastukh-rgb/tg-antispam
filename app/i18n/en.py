@@ -548,6 +548,7 @@ MESSAGES: dict[str, dict] = {
             "action_delete": "🧹 Delete",
             "action_mute_day": "🔇 Mute 1 day",
             "action_mute_min": "🔇 Mute {mm} min",
+            "action_kick": "👢 Kicked (can rejoin)",
             "action_ban": "⛔ Ban",
             "action_unknown": "⚠️ Unknown action",
             "reason": {
@@ -945,6 +946,7 @@ MESSAGES: dict[str, dict] = {
     "punishments": {
         "delete": "Delete",
         "mute": "Mute",
+        "kick": "Kick",
         "ban": "Ban",
         "observe": "Observe",
     },
@@ -953,22 +955,18 @@ MESSAGES: dict[str, dict] = {
             "body": (
                 "Hi 👋\n\n"
                 "😈 I am [AntiSpam Guard](https://t.me/GuardAntiSpam_Bot)\n\n"
-                "I keep your chats clean: cutting spam, scams and noise.\n\n"
                 "*My job* — keep moderation of comments and groups under control.\n"
-                "*Advanced features* are unlocked with a subscription paid in ⚡ tokens.\n\n"
+                "*Advanced features* unlock with a subscription ⚡\n\n"
                 "I instantly remove *spam* and shady links\n"
                 "Block users with *spammy nicknames*\n"
-                "Stop *flood and boost* before they ruin the chat\n\n"
-                "All of this is configurable in the app via the buttons below 👇\n\n"
-                "📋 Full guide is inside the app under the ℹ️ icon\n"
-                "🌍 Change bot language `/guard_lang`\n"
-                "🤝 Send a tip `/guard_tip`\n\n"
+                "Stop *flood and boost* before they ruin the chat — and more.\n\n"
                 "Plan: *{tariff_label}*\n"
-                "Groups in protection: *{chats_count} / {chat_limit}*\n"
+                "Groups in protection: *{groups_count} / {groups_limit}*\n"
+                "Channels in protection: *{channels_count} / {channels_limit}*\n"
                 "Subscription until: *{sub_until}*\n"
                 "AURUM ✨ *{aurum}*\n"
                 "Partner tokens *{bonus}* ⚡\n\n"
-                "Open your chats with the button below 👇🏻"
+                "Everything is easy to set up in the app via the buttons below 👇🏻"
             ),
         },
         "kb": {
@@ -985,7 +983,13 @@ MESSAGES: dict[str, dict] = {
             "change_chat": "🔄 Switch chat",
             "cancel": "✖️ Cancel",
         },
-        "reply_kb": {"pick_group": "📋 Choose a group", "pick_reports_chat": "📋 Choose reports chat"},
+        "reply_kb": {
+            "pick_group": "📋 Choose a group",
+            "pick_reports_chat": "📋 Choose reports chat",
+            "quick_open_menu": "⚙️ Main menu",
+            "quick_change_lang": "🌍 Language",
+            "quick_support_tip": "🤝 Support the bot",
+        },
         "cmd": {
             "private_only": "This command only works in a private chat with the bot.",
             "panel_dm_only": "😈 Panel only in DMs. Send */panel*.",
@@ -1021,6 +1025,7 @@ MESSAGES: dict[str, dict] = {
         "alert_pick_chat_first": "Pick a chat first 😈",
         "action": {
             "ban": "🚫 Kick out",
+            "kick": "👢 Kick",
             "mute": "🔇 Mute",
             "observe": "👁 Watch",
             "delete": "🧹 Sweep",
@@ -1109,14 +1114,31 @@ MESSAGES: dict[str, dict] = {
                 "├ Days left: *{days_left}*\n"
                 "└ Active until: *{active_until}*\n\n"
                 "Balance:\n"
-                "├ AURUM (broadcasts/AI): *{aurum}* ✨\n"
-                "└ Partner tokens: *{bonus}* ⚡\n\n"
+                "└ AURUM (broadcasts / AI): *{aurum}* ✨\n\n"
+                "{partner_breakdown}\n\n"
                 "Your partner link:\n"
                 "└ `{ref_link}`\n\n"
                 "⬆️ Tap to copy and share with friends! 🎁\n\n"
                 "Invited users:\n"
                 "└ Total: *{invited}*, Paying: *{paid}*"
             ),
+            "partner": {
+                "network_head": "👥 *Your network*",
+                "net_l1_solo": "└ L1 (direct invites): *{n}*",
+                "net_total_direct": "└ Partner rewards count direct invites only: *{n}* users",
+                "network_levels_premium_hint": "_Network levels 2–3 and commissions from those tiers unlock with Premium._",
+                "net_l1": "├ L1 (direct invites): *{n}*",
+                "net_l2": "├ L2 (invites by your referrals): *{n}*",
+                "net_l3": "├ L3 (third level): *{n}*",
+                "net_total": "└ Network total: *{n}* people",
+                "confirmed_head": "💰 *Confirmed rewards*",
+                "pending_head": "⏳ *Awaiting confirmation*",
+                "avail_head": "💎 *Available to use*",
+                "avail_row": "└ *{bonus}* ⚡",
+                "comm_row": "├ L{l} · {pct}% · {pay} payments · {rub} → *{tok}* ⚡",
+                "confirmed_total": "└ Total: *{tok}* ⚡",
+                "pending_total": "└ Pending summary: *{pay}* payments · *{rub}* → *{tok}* ⚡",
+            },
             "kb_program": "⚙️ Program details",
             "kb_access_terms": "⚙️ Access terms",
             "kb_bonus_to_aurum": "✨ Partner → AURUM",
@@ -1249,6 +1271,8 @@ MESSAGES: dict[str, dict] = {
                 "Or in a group: reply to the user’s message and send /addantispam — the bot will add the replied author.\n"
                 "Cancel: /cancel"
             ),
+            "premium_required": "Anti-spam database management is Premium-only.",
+            "owner_premium_required": "This chat’s owner needs Premium for the anti-spam database.",
         },
         "profanity_dm": {
             "body": (

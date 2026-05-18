@@ -21,9 +21,11 @@ const _descriptionKey = ref(null)// i18n-ключ описания модалк�
 const _meSnapshot = ref(null)    // me на момент открытия модалки (для CTA-логики)
 
 function openLock(opts = {}) {
-  _feature.value = opts.feature || 'generic'
+  const feat = opts.feature || 'generic'
+  _feature.value = feat
   _titleKey.value = opts.titleKey || 'premium_lock.title'
-  _descriptionKey.value = opts.descriptionKey || `premium_lock.feature_desc.${opts.feature || 'generic'}`
+  // Короткая одна строка под заголовком; длинный pitch — в биллинге, не здесь.
+  _descriptionKey.value = opts.descriptionKey || `premium_lock.feature_desc_short.${feat}`
   _meSnapshot.value = opts.me || null
   _open.value = true
 }

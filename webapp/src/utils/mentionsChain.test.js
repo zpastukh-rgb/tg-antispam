@@ -71,7 +71,7 @@ describe('mentionsChain (granular)', () => {
     expect(onUpdateRule).toHaveBeenCalledWith({ filter_mention_mass_threshold: 7 })
   })
 
-  it('legacy filter_mentions=true без гранул → тихий сброс и на Free', () => {
+  it('legacy filter_mentions=true без гранул — при открытии НЕ сбрасывается (модерация legacy)', () => {
     const onUpdateRule = vi.fn(() => Promise.resolve())
     const rule = makeRule({ filter_mentions: true })
     runMentionsChain({
@@ -81,8 +81,8 @@ describe('mentionsChain (granular)', () => {
       ownerHasPremium: false,
       onPremiumLock: () => {},
     })
-    expect(onUpdateRule).toHaveBeenCalledWith({ filter_mentions: false })
-    expect(rule.filter_mentions).toBe(false)
+    expect(onUpdateRule).not.toHaveBeenCalled()
+    expect(rule.filter_mentions).toBe(true)
   })
 
   it('на Free первый переключатель — users (без legacy-блока)', () => {
@@ -149,12 +149,17 @@ describe('mentionsChain (granular)', () => {
     expect(onUpdateRule).not.toHaveBeenCalled()
   })
 
-  it('legacy filter_mentions=true и все гранулы false → тихий сброс legacy (Premium-путь)', () => {
+  it('legacy filter_mentions=true — сброс только при включении гранулы', () => {
     const onUpdateRule = vi.fn(() => Promise.resolve())
     const rule = makeRule({ filter_mentions: true })
     runMentionsChain({ rule, t, onUpdateRule })
-    // Должен сразу запатчить filter_mentions=false.
-    expect(onUpdateRule).toHaveBeenCalledWith({ filter_mentions: false })
+    expect(onUpdateRule).not.toHaveBeenCalled()
+    const switches = document.querySelectorAll('[role="switch"]')
+    switches[0].click()
+    expect(onUpdateRule).toHaveBeenCalledWith({
+      filter_mention_users: true,
+      filter_mentions: false,
+    })
     expect(rule.filter_mentions).toBe(false)
   })
 
@@ -173,7 +178,7 @@ describe('mentionsChain (granular)', () => {
 
   it('бросающий t для одного ключа не валит цепочку — fallback-текст', () => {
     const throwingT = (key) => {
-      if (key === 'protection.ui.mentions_modal_hint') throw new SyntaxError('Invalid linked format')
+      if (key === 'protection.ui.mentions_modal_title') throw new SyntaxError('Invalid linked format')
       return i18n[key] ?? ''
     }
     runMentionsChain({ rule: makeRule(), t: throwingT, onUpdateRule: () => {} })

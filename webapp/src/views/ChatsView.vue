@@ -3,7 +3,7 @@ import { ref, onMounted, onUnmounted, watch, computed, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useApi, messageFromApiError } from '../composables/useApi'
-import { guardLog, guardWarn } from '../utils/guardDebugLog'
+import { guardFilterChain, guardLog, guardWarn } from '../utils/guardDebugLog'
 import { useCabinetMode } from '../composables/useCabinetMode'
 import { useToast } from '../composables/useToast'
 import ChannelPostRulesModal from '../components/ChannelPostRulesModal.vue'
@@ -264,6 +264,21 @@ function delegatedCan(chat, key) {
   if (perms == null) return true
   return !!perms[key]
 }
+
+/** Короткая строка прав делегата под карточкой (ключи совпадают с delegated_permissions на API). */
+const DELEGATED_PERM_KEYS = ['protection', 'broadcast', 'first_post_settings', 'reports']
+
+function delegatedPermissionsLine(chat) {
+  if (!chat || !isDelegatedCabinetChat(chat)) return ''
+  const perms = chat.delegated_permissions
+  if (perms == null) return t('chats.delegate_access_legacy')
+  const labels = []
+  for (const k of DELEGATED_PERM_KEYS) {
+    if (perms[k]) labels.push(t(`chats.perms.${k}`))
+  }
+  if (!labels.length) return t('chats.delegate_access_none')
+  return labels.join(' · ')
+}
 const isPremium = ref(false)
 /** Для проверки PIN при отключении чата */
 const viewerTelegramId = ref(0)
@@ -327,6 +342,13 @@ async function openChannelPostRules(chat) {
   channelPostRulesDiscussionId.value = did
   channelPostRulesChannelId.value = Number(chat.id || 0)
   channelPostRulesChannelTitle.value = String(chat.title || '').trim() || t('chats.labels.channel')
+  guardFilterChain('ChannelRules', 'openChannelPostRules:modal_open', {
+    channelId: Number(chat.id || 0),
+    discussionChatId: did,
+    delegatedCabinetChat: !!isDelegatedCabinetChat(chat),
+    cabinetDelegatedQuery: delegatedChatsOnly.value,
+    channelTitleLen: channelPostRulesChannelTitle.value.length,
+  })
   channelPostRulesOpen.value = true
 }
 
@@ -341,7 +363,8 @@ const chatsInfoModalOpen = computed(
     !!managersModalChat.value ||
     auditModalOpen.value ||
     addManagerPermsOpen.value ||
-    !!removeManagerConfirm.value,
+    !!removeManagerConfirm.value ||
+    channelPostRulesOpen.value,
 )
 
 watch(
@@ -520,11 +543,11 @@ function goToReports(chatId) {
     const row = (chats.value || []).find((c) => Number(c.id) === Number(chatId))
     setCabinetMode(isDelegatedCabinetChat(row) ? 'delegated' : 'owner')
     selectChat(chatId).catch(() => {})
-    router.push({ path: '/admin', query: { tab: 'overview', open: 'stats_reports', chat_id: String(chatId) } })
+    router.push({ path: '/reports', query: { chat_id: String(chatId) } })
     return
   }
   setCabinetMode('owner')
-  router.push({ path: '/admin', query: { tab: 'overview', open: 'stats_reports' } })
+  router.push({ path: '/reports' })
 }
 
 function onChatActivationPremiumClick() {
@@ -597,6 +620,55 @@ function sortChatsByAvailability(arr) {
 function isChannelRow(c) {
   return String(c?.chat_kind || 'group').toLowerCase() === 'channel'
 }
+
+const DISMISS_DISCUSSION_IDS_KEY = 'guard.dismissDiscussBanner.ids'
+
+function loadDismissedDiscussionChannelIds() {
+  try {
+    const raw = localStorage.getItem(DISMISS_DISCUSSION_IDS_KEY)
+    const arr = raw ? JSON.parse(raw) : []
+    return new Set((Array.isArray(arr) ? arr : []).map(Number).filter((x) => x !== 0))
+  } catch {
+    return new Set()
+  }
+}
+
+const dismissedDiscussionChannelIds = ref(loadDismissedDiscussionChannelIds())
+
+function dismissDiscussionBanner(channelId) {
+  const cid = Number(channelId || 0)
+  if (!cid) return
+  const next = new Set(dismissedDiscussionChannelIds.value)
+  next.add(cid)
+  dismissedDiscussionChannelIds.value = next
+  try {
+    localStorage.setItem(DISMISS_DISCUSSION_IDS_KEY, JSON.stringify([...next]))
+  } catch {
+    //
+  }
+}
+
+const discussionConnectAlerts = computed(() => {
+  const list = chats.value || []
+  const dismissed = dismissedDiscussionChannelIds.value
+  const byId = new Map(list.map((c) => [Number(c.id), c]))
+  const out = []
+  for (const c of list) {
+    if (!isChannelRow(c)) continue
+    const cid = Number(c.id || 0)
+    if (!cid || dismissed.has(cid)) continue
+    if (isDelegatedCabinetChat(c) && !delegatedCan(c, 'first_post_settings')) continue
+    const did = Number(c.linked_discussion_chat_id || 0)
+    if (!did) continue
+    if (c.discussion_chat_connected || byId.has(did)) continue
+    out.push({
+      channelId: cid,
+      channelTitle: String(c.title || '').trim() || String(cid),
+      discussionTitle: String(c.linked_discussion_title || '').trim() || String(did),
+    })
+  }
+  return out
+})
 
 /** Порядок: «Все» — делегаты → свои каналы → свои группы; «Мой» — каналы → группы; «Доступы» — группы → каналы делегата. */
 const orderedDisplayRows = computed(() => {
@@ -1099,6 +1171,37 @@ function openChannelBroadcast(chat) {
     </div>
 
     <div v-else class="-mx-4 space-y-3 px-4 pb-10 md:-mx-6 md:px-6">
+      <div
+        v-for="row in discussionConnectAlerts"
+        :key="`disc-prompt-${row.channelId}`"
+        class="rounded-xl border border-emerald-400/35 bg-emerald-950/40 px-3 py-3 text-[12px] text-emerald-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] ring-1 ring-emerald-500/15"
+      >
+        <p class="font-semibold text-emerald-100">{{ t('chats.discussion_banner_title') }}</p>
+        <p class="mt-1 leading-snug text-emerald-50/95">
+          {{
+            t('chats.discussion_banner_body', {
+              channel: row.channelTitle,
+              discussion: row.discussionTitle,
+            })
+          }}
+        </p>
+        <div class="mt-3 flex flex-wrap gap-2">
+          <button
+            type="button"
+            class="guard-green-soft rounded-lg px-3 py-2 text-xs font-bold text-slate-900"
+            @click="router.push({ path: '/connect', query: { kind: 'group' } })"
+          >
+            {{ t('chats.discussion_banner_cta') }}
+          </button>
+          <button
+            type="button"
+            class="rounded-lg border border-white/15 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:bg-white/10"
+            @click="dismissDiscussionBanner(row.channelId)"
+          >
+            {{ t('chats.discussion_banner_dismiss') }}
+          </button>
+        </div>
+      </div>
       <div class="rounded-xl border border-white/[0.08] bg-black/30 px-2.5 py-2 backdrop-blur-md">
         <div v-if="!delegatedChatsOnly" class="mb-1.5 flex flex-wrap gap-1">
           <button type="button" class="rounded-lg px-2 py-1 text-[11px] font-semibold"
@@ -1280,6 +1383,10 @@ function openChannelBroadcast(chat) {
                   {{ isChannelRow(chat) ? t('chats.labels.connected') : t('chats.labels.active') }}
                 </p>
                 <p v-else class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-400">{{ t('chats.labels.inactive') }}</p>
+                <p v-if="delegatedPermissionsLine(chat)" class="mt-1 text-[10px] leading-snug text-violet-200/95">
+                  <span class="font-semibold text-violet-100">{{ t('chats.delegate_access_label') }}</span>
+                  {{ delegatedPermissionsLine(chat) }}
+                </p>
               </div>
               <button
                 v-if="!chat.locked_by_limit"
@@ -2145,6 +2252,8 @@ function openChannelBroadcast(chat) {
           <button class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-white/10" @click="showDelegatedInfoModal = false">✕</button>
         </div>
         <p class="text-xs text-slate-300">{{ t('chats.help_violet_adm.body') }}</p>
+        <p class="mt-3 text-[11px] font-semibold text-violet-200">{{ t('chats.help_violet_adm.perms_title') }}</p>
+        <p class="mt-1 text-[11px] leading-relaxed text-slate-400">{{ t('chats.help_violet_adm.perms_body') }}</p>
       </div>
     </div>
     </GuardTeleport>

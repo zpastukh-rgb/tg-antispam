@@ -135,6 +135,24 @@ async def get_managed_chats(session: AsyncSession, user_id: int) -> list[Chat]:
     return list(res.scalars().all())
 
 
+async def miniapp_actor_has_global_antispam_access(session: AsyncSession, telegram_user_id: int) -> bool:
+    """Mini App или панель: глобальная антиспам-база — только при Premium у себя или владельца делегированного чата."""
+    from app.services.chat_owner_premium import chat_owner_has_miniapp_premium, user_effective_miniapp_premium
+
+    uid = int(telegram_user_id or 0)
+    if uid <= 0:
+        return False
+    me = (
+        await session.execute(select(User).where(User.telegram_id == uid).limit(1))
+    ).scalar_one_or_none()
+    if user_effective_miniapp_premium(me):
+        return True
+    for chat_row in await get_managed_chats(session, uid):
+        if await chat_owner_has_miniapp_premium(session, int(chat_row.id)):
+            return True
+    return False
+
+
 async def get_accessible_chats_any_active(session: AsyncSession, user_id: int) -> list[Chat]:
     """Те же чаты, что и у get_managed_chats, но включая is_active=False (пауза в списке без отключения правил)."""
     manager_sub = select(ChatManager.chat_id).where(ChatManager.user_id == user_id)

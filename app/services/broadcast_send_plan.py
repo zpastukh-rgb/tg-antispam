@@ -18,6 +18,8 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
+from datetime import datetime, timezone
+
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,11 +40,21 @@ class BroadcastBillingPlan:
 
 def _chat_is_group_destination():
     """Группы/супергруппы для рассылки (не каналы). NULL chat_kind считаем группой."""
-    return or_(Chat.chat_kind.is_(None), Chat.chat_kind == "group")
+    return or_(Chat.chat_kind.is_(None), Chat.chat_kind.in_(("group", "supergroup")))
 
 
 def _chat_is_group_or_channel_destination():
-    return or_(Chat.chat_kind.is_(None), Chat.chat_kind.in_(("group", "channel")))
+    return or_(Chat.chat_kind.is_(None), Chat.chat_kind.in_(("group", "supergroup", "channel")))
+
+
+def _delegated_broadcast_chat_ids_stmt(viewer_telegram_id: int, *, now_utc: datetime | None = None):
+    """Чаты через ChatManager только с правом рассылки и без протухшего TTL."""
+    now = now_utc or datetime.now(timezone.utc)
+    return select(ChatManager.chat_id).where(
+        ChatManager.user_id == int(viewer_telegram_id),
+        ChatManager.can_broadcast.is_(True),  # noqa: E712
+        or_(ChatManager.expires_at.is_(None), ChatManager.expires_at > now),
+    )
 
 
 # Верхняя отсечка за один запуск/слот (защита от ошибочного «выбрать всё»).
@@ -75,32 +87,27 @@ async def resolve_broadcast_target_chat_ids(
         return []
     target_chat_ids: list[int] = []
     if body_chat_ids:
-        target_chat_ids = [int(x) for x in body_chat_ids if int(x) < 0]
+        target_chat_ids = sorted({int(x) for x in body_chat_ids if int(x) < 0})
         if not target_chat_ids:
             return []
+        # Явный выбор в Mini App (в т.ч. «на паузе» в списке) — не отбрасываем по is_active.
+        base_filters = [
+            Chat.is_log_chat.is_(False),
+            Chat.id < 0,
+            Chat.id.in_(target_chat_ids),
+            _chat_is_group_or_channel_destination(),
+        ]
         if allow_all_groups:
+            q = select(Chat.id).where(*base_filters)
+            allowed = {int(x[0]) for x in (await session.execute(q)).all()}
+        else:
+            deleg = _delegated_broadcast_chat_ids_stmt(viewer_telegram_id)
             q = select(Chat.id).where(
-                Chat.is_active.is_(True),
-                Chat.is_log_chat.is_(False),
-                Chat.id < 0,
-                Chat.id.in_(target_chat_ids),
-                _chat_is_group_or_channel_destination(),
+                *base_filters,
+                or_(Chat.owner_user_id == int(viewer_telegram_id), Chat.id.in_(deleg)),
             )
             allowed = {int(x[0]) for x in (await session.execute(q)).all()}
-            target_chat_ids = [x for x in target_chat_ids if int(x) in allowed]
-        else:
-            sub = select(ChatManager.chat_id).where(ChatManager.user_id == int(viewer_telegram_id)).subquery()
-            own_q = await session.execute(
-                select(Chat.id).where(
-                    Chat.is_active.is_(True),
-                    Chat.is_log_chat.is_(False),
-                    Chat.id < 0,
-                    or_(Chat.owner_user_id == int(viewer_telegram_id), Chat.id.in_(select(sub.c.chat_id))),
-                    _chat_is_group_or_channel_destination(),
-                )
-            )
-            own_ids = {int(x[0]) for x in own_q.all()}
-            target_chat_ids = [x for x in target_chat_ids if int(x) in own_ids]
+        target_chat_ids = [x for x in target_chat_ids if int(x) in allowed]
     else:
         if allow_all_groups:
             res = await session.execute(
@@ -113,13 +120,13 @@ async def resolve_broadcast_target_chat_ids(
             )
             target_chat_ids = [int(x[0]) for x in res.all()]
         else:
-            sub = select(ChatManager.chat_id).where(ChatManager.user_id == int(viewer_telegram_id)).subquery()
+            deleg = _delegated_broadcast_chat_ids_stmt(viewer_telegram_id)
             own_q = await session.execute(
                 select(Chat.id).where(
                     Chat.is_active.is_(True),
                     Chat.is_log_chat.is_(False),
                     Chat.id < 0,
-                    or_(Chat.owner_user_id == int(viewer_telegram_id), Chat.id.in_(select(sub.c.chat_id))),
+                    or_(Chat.owner_user_id == int(viewer_telegram_id), Chat.id.in_(deleg)),
                     _chat_is_group_destination(),
                 )
             )

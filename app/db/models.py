@@ -28,6 +28,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 class ActionMode(str, enum.Enum):
     delete = "delete"
     mute = "mute"
+    kick = "kick"
     ban = "ban"
     observe = "observe"
 
@@ -333,6 +334,8 @@ class Rule(Base):
     # Массовые упоминания: ≥ N упоминаний (mention + text_mention) в одном сообщении
     filter_mention_mass_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     filter_mention_mass_threshold: Mapped[int] = mapped_column(Integer, default=5)
+    # JSON-массив строк: @username ботов, упоминания которых не блокируются при filter_mention_bots.
+    mention_trusted_bots_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # режим наказания
     action_mode: Mapped[str] = mapped_column(
@@ -394,6 +397,8 @@ class Rule(Base):
     filter_media_custom_emoji: Mapped[bool] = mapped_column(Boolean, default=False)
     # plain_emoji — обычные Unicode-эмодзи в тексте/подписи (без entity). Регексом по диапазонам символов.
     filter_media_plain_emoji: Mapped[bool] = mapped_column(Boolean, default=False)
+    # JSON-массив строк: numeric Telegram user id и/или username (без @, lower) — медиа этих отправителей не режем гранулярным фильтром.
+    media_trusted_users_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     filter_buttons_mode: Mapped[str] = mapped_column(String(16), default="allow")
     # Гранулярные тогглы по типу кнопок (как у медиа и упоминаний).
     # Если включён хотя бы один — фильтр работает ТОЛЬКО по нему.
@@ -423,7 +428,7 @@ class Rule(Base):
     antinakrutka_action: Mapped[str] = mapped_column(String(32), default="alert")  # alert | alert_restrict
     antinakrutka_restrict_minutes: Mapped[int] = mapped_column(Integer, default=30)
     # Всплеск спама: подсветка «чат под угрозой» + уведомления владельцу/делегату.
-    spam_spike_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    spam_spike_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     spam_spike_min_deletes: Mapped[int] = mapped_column(Integer, default=15)
     spam_spike_window_minutes: Mapped[int] = mapped_column(Integer, default=35)
     spam_spike_notify_managers: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -483,6 +488,7 @@ class Rule(Base):
     welcome_buttons_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Локальный путь до фото приветствия.
     welcome_photo_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    welcome_photo_file_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
     # Лимит приветствий: не чаще N сообщений в минуту (0 = без лимита).
     welcome_max_per_min: Mapped[int] = mapped_column(Integer, default=0)
     # Тихий режим при рейде: не отправлять приветствия при массовом входе.
@@ -1219,6 +1225,8 @@ class AdminBroadcast(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     autopost_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Черновик только для мастера автокампаний vs обычные черновики одноразовых рассылок (oneshot).
+    cabinet_draft_scope: Mapped[str | None] = mapped_column(String(16), nullable=True)
     media_items: Mapped[list["AdminBroadcastMedia"]] = relationship(
         back_populates="broadcast",
         cascade="all, delete-orphan",
@@ -1267,6 +1275,20 @@ class AdminBroadcastRun(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     run_source: Mapped[str | None] = mapped_column(String(16), nullable=True)  # manual | autopost
+
+
+class AdminBroadcastSentMessage(Base):
+    """Сообщения рассылки в чатах — для сопоставления emoji-реакций с broadcast_id."""
+
+    __tablename__ = "admin_broadcast_sent_messages"
+    __table_args__ = (UniqueConstraint("chat_id", "message_id", name="ux_admin_broadcast_sent_messages_chat_msg"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    broadcast_id: Mapped[int] = mapped_column(Integer, ForeignKey("admin_broadcasts.id", ondelete="CASCADE"), index=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    message_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    target_kind: Mapped[str] = mapped_column(String(16), default="group", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
 class AdminBroadcastClick(Base):

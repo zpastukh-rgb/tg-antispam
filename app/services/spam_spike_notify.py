@@ -145,6 +145,8 @@ async def trigger_spam_spike_for_chat(
     # Отбрасывать нужно только нулевой/пустой id.
     if cid == 0:
         return
+    if not await chat_owner_has_miniapp_premium(session, cid):
+        return
     bucket = _utc_bucket_key(now)
     await session.execute(delete(ChatSpikeAlert).where(ChatSpikeAlert.expires_at < now))
     await session.commit()
@@ -389,6 +391,8 @@ async def run_spam_spike_owner_manager_alerts(bot, session: AsyncSession, now: d
         chat_row, rule = row[0], row[1]
         chat_id = int(getattr(chat_row, "id", 0) or 0)
         if chat_id <= 0:
+            continue
+        if not await chat_owner_has_miniapp_premium(session, chat_id):
             continue
         window_min = max(5, min(180, int(getattr(rule, "spam_spike_window_minutes", 35) or 35)))
         min_deletes = max(2, min(50, int(getattr(rule, "spam_spike_min_deletes", 15) or 15)))

@@ -11,7 +11,7 @@ const emit = defineEmits(['update:modelValue', 'submit', 'cancel'])
 <template>
   <div
     v-if="open"
-    style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/72 px-4 backdrop-blur-md"
+    style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/72 px-4 backdrop-blur-md"
     role="presentation"
     @click.self="emit('cancel')"
   >

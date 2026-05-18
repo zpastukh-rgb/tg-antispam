@@ -9,7 +9,7 @@ import os
 import re
 import uuid
 from datetime import date
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from pathlib import Path
 from tempfile import gettempdir
 from typing import Any
@@ -38,12 +38,16 @@ from app.db.models import (
     User,
     ChatManager,
 )
+from app.services.broadcast_send_plan import _delegated_broadcast_chat_ids_stmt
 
 log = logging.getLogger(__name__)
 
 _MAX_UPLOAD_BYTES = int(os.getenv("BROADCAST_MAX_UPLOAD_MB", "50")) * 1024 * 1024
 _SEND_DELAY_SEC = float(os.getenv("BROADCAST_SEND_DELAY_SEC", "0.005"))
 _PROGRESS_COMMIT_EVERY = int(os.getenv("BROADCAST_PROGRESS_COMMIT_EVERY", "10"))
+
+_BROADCAST_MEDIA_CAPTION_HTML_MAX = 1024
+_BROADCAST_BODY_HTML_MAX = 4096
 
 
 def broadcast_upload_root() -> Path:
@@ -189,6 +193,36 @@ def broadcast_url_tracking_configured() -> bool:
     return bool(_broadcast_click_track_base())
 
 
+# tg:/mailto:/tel: и t.me — без редиректа: в Telegram кнопка открывает целевой URL, а не /api/public/broadcast/click.
+_BROADCAST_SKIP_TRACK_HOSTS = frozenset({"t.me", "telegram.me", "telegram.dog"})
+_BROADCAST_SKIP_OPEN_URL_SCHEMES = frozenset({"tg", "mailto", "tel"})
+
+
+def broadcast_click_tracking_skipped_url(url: str) -> bool:
+    """True — передать URL в Telegram как есть (deep link или веб telegram)."""
+    src = str(url or "").strip()
+    if not src:
+        return True
+    low = src.split(":", 1)[0].lower()
+    if low in _BROADCAST_SKIP_OPEN_URL_SCHEMES:
+        return True
+    if not (src.startswith("http://") or src.startswith("https://")):
+        return True
+    try:
+        host = (urlparse(src).hostname or "").lower().split("@")[-1]
+    except Exception:
+        return False
+    if not host:
+        return False
+    if host in _BROADCAST_SKIP_TRACK_HOSTS:
+        return True
+    if host.endswith(".t.me"):
+        return True
+    if host.endswith(".telegram.org") or host == "telegram.org":
+        return True
+    return False
+
+
 def _wrap_tracked_url(
     url: str,
     *,
@@ -198,6 +232,8 @@ def _wrap_tracked_url(
 ) -> str:
     src = str(url or "").strip()
     if not src:
+        return src
+    if broadcast_click_tracking_skipped_url(src):
         return src
     if not (src.startswith("http://") or src.startswith("https://")):
         return src
@@ -359,7 +395,7 @@ async def _send_single_media(
     caption: str | None = None,
     parse_mode: str | None = None,
     reply_markup: InlineKeyboardMarkup | None = None,
-) -> None:
+) -> int:
     kind = str(media.get("kind") or "photo")
     def _source():
         fid = media.get("file_id")
@@ -367,21 +403,22 @@ async def _send_single_media(
             return fid
         return BufferedInputFile(media["bytes"], filename=media.get("name") or "file.bin")
 
-    async def _do_send(cap: str | None, pm: str | None, rm: InlineKeyboardMarkup | None):
+    async def _do_send(cap: str | None, pm: str | None, rm: InlineKeyboardMarkup | None) -> int:
         source = _source()
         if kind == "photo":
-            await bot.send_photo(chat_id, source, caption=cap, parse_mode=pm if cap else None, reply_markup=rm)
-            return
+            msg = await bot.send_photo(chat_id, source, caption=cap, parse_mode=pm if cap else None, reply_markup=rm)
+            return int(getattr(msg, "message_id", 0) or 0)
         if kind == "video":
-            await bot.send_video(chat_id, source, caption=cap, parse_mode=pm if cap else None, reply_markup=rm)
-            return
+            msg = await bot.send_video(chat_id, source, caption=cap, parse_mode=pm if cap else None, reply_markup=rm)
+            return int(getattr(msg, "message_id", 0) or 0)
         if kind == "audio":
-            await bot.send_audio(chat_id, source, caption=cap, parse_mode=pm if cap else None, reply_markup=rm)
-            return
+            msg = await bot.send_audio(chat_id, source, caption=cap, parse_mode=pm if cap else None, reply_markup=rm)
+            return int(getattr(msg, "message_id", 0) or 0)
         if kind == "animation":
-            await bot.send_animation(chat_id, source, caption=cap, parse_mode=pm if cap else None, reply_markup=rm)
-            return
-        await bot.send_document(chat_id, source, caption=cap, parse_mode=pm if cap else None, reply_markup=rm)
+            msg = await bot.send_animation(chat_id, source, caption=cap, parse_mode=pm if cap else None, reply_markup=rm)
+            return int(getattr(msg, "message_id", 0) or 0)
+        msg = await bot.send_document(chat_id, source, caption=cap, parse_mode=pm if cap else None, reply_markup=rm)
+        return int(getattr(msg, "message_id", 0) or 0)
 
     # Поэтапная деградация: с кнопками+rich -> с кнопками+plain -> без кнопок+plain -> без всего.
     if caption:
@@ -397,8 +434,8 @@ async def _send_single_media(
     last_error: Exception | None = None
     for cap_i, pm_i, rm_i in attempts:
         try:
-            await _do_send(cap_i, pm_i, rm_i)
-            return
+            mid = await _do_send(cap_i, pm_i, rm_i)
+            return int(mid or 0)
         except Exception as e:
             last_error = e
             continue
@@ -414,7 +451,7 @@ async def _send_text_with_fallback(
     *,
     parse_mode: str | None,
     reply_markup: InlineKeyboardMarkup | None,
-) -> None:
+) -> int:
     plain = re.sub(r"<[^>]+>", "", str(text or "")).strip()[:4096]
     attempts: list[tuple[str, str | None, InlineKeyboardMarkup | None]] = [
         (text, parse_mode, reply_markup),
@@ -424,14 +461,36 @@ async def _send_text_with_fallback(
     last_error: Exception | None = None
     for txt, pm, rm in attempts:
         try:
-            await bot.send_message(chat_id, txt, parse_mode=pm, reply_markup=rm)
-            return
+            msg = await bot.send_message(chat_id, txt, parse_mode=pm, reply_markup=rm)
+            return int(getattr(msg, "message_id", 0) or 0)
         except Exception as e:
             last_error = e
             continue
     if last_error:
         raise last_error
     raise RuntimeError("send text failed")
+
+
+async def _send_broadcast_remainder_after_media(
+    bot: Bot,
+    chat_id: int,
+    *,
+    remainder: str,
+    parse_mode: str | None,
+) -> None:
+    """Остаток HTML после префикса подписи к медиа — отдельными сообщениями до 4096 символов."""
+    tail = remainder or ""
+    if not str(tail).strip():
+        return
+    pos = 0
+    n = len(tail)
+    chunk = _BROADCAST_BODY_HTML_MAX
+    while pos < n:
+        part = tail[pos : pos + chunk]
+        pos += chunk
+        if not part.strip():
+            continue
+        await _send_text_with_fallback(bot, chat_id, part, parse_mode=parse_mode, reply_markup=None)
 
 
 async def _send_media_album_or_fallback(
@@ -442,7 +501,7 @@ async def _send_media_album_or_fallback(
     caption: str | None,
     parse_mode: str | None,
     reply_markup: InlineKeyboardMarkup | None,
-) -> None:
+) -> int:
     """
     Отправка 2+ медиа с инлайн-кнопками у первого сообщения:
     - первое медиа: caption + inline keyboard;
@@ -451,12 +510,12 @@ async def _send_media_album_or_fallback(
     fallback на отправку по одному в исходном порядке.
     """
     if not media_items:
-        return
+        return 0
 
     first_item = media_items[0]
     rest_items = media_items[1:]
     try:
-        await _send_single_media(
+        primary_mid = await _send_single_media(
             bot,
             chat_id,
             first_item,
@@ -465,20 +524,22 @@ async def _send_media_album_or_fallback(
             reply_markup=reply_markup,
         )
         if not rest_items:
-            return
+            return int(primary_mid or 0)
         for group in _chunks(rest_items, 10):
             media_group = []
             for m in group:
                 media_group.append(_input_media_item(m, caption=None, parse_mode=None))
             await bot.send_media_group(chat_id, media=media_group)
+        return int(primary_mid or 0)
     except Exception as e:
         log.warning("broadcast send_media_group fallback chat=%s: %s", chat_id, e)
         sent_caption = False
+        primary_mid = 0
         for idx, m in enumerate(media_items):
             cap_i = caption if (not sent_caption and idx == 0) else None
             parse_i = parse_mode if cap_i else None
             rm_i = reply_markup if idx == 0 else None
-            await _send_single_media(
+            mid_i = await _send_single_media(
                 bot,
                 chat_id,
                 m,
@@ -486,9 +547,11 @@ async def _send_media_album_or_fallback(
                 parse_mode=parse_i,
                 reply_markup=rm_i,
             )
+            if not primary_mid:
+                primary_mid = int(mid_i or 0)
             if cap_i:
                 sent_caption = True
-        return
+        return int(primary_mid or 0)
 
 
 def sanitize_autopost_state(raw: Any) -> dict[str, Any]:
@@ -546,6 +609,9 @@ def normalize_autopost_payload(raw: Any) -> dict[str, Any] | None:
     posts = max(1, min(288, posts))
     ws = str(raw.get("windowStart") or "10:00").strip()[:8] or "10:00"
     we = str(raw.get("windowEnd") or "21:00").strip()[:8] or "21:00"
+    # Время первого поста в день старта (startDate); sendTime из клиента = алиас.
+    fp_raw = str(raw.get("firstPostTime") or raw.get("sendTime") or "").strip()[:8]
+    first_post_time = fp_raw if fp_raw else ws
     spread = raw.get("spreadInWindow")
     spread_b = True if spread is None else bool(spread)
     g_ids: list[int] = []
@@ -603,13 +669,68 @@ def normalize_autopost_payload(raw: Any) -> dict[str, Any] | None:
             _ = date(int(y), int(m), int(d))
         except Exception:
             start_date = ""
-    return {
+    end_date = str(raw.get("endDate") or "").strip()[:10]
+    if end_date:
+        try:
+            y2, m2, d2 = end_date.split("-")
+            _ = date(int(y2), int(m2), int(d2))
+        except Exception:
+            end_date = ""
+        if start_date and end_date:
+            try:
+                sy, sm, sd = start_date.split("-")
+                ey, em, ed = end_date.split("-")
+                if date(int(ey), int(em), int(ed)) < date(int(sy), int(sm), int(sd)):
+                    end_date = ""
+            except Exception:
+                end_date = ""
+
+    send_windows_out: list[dict[str, Any]] = []
+    sw_raw = raw.get("sendWindows")
+    if isinstance(sw_raw, list):
+        for item in sw_raw[:24]:
+            if not isinstance(item, dict):
+                continue
+            wsi = str(item.get("windowStart") or ws).strip()[:8] or ws
+            wei = str(item.get("windowEnd") or we).strip()[:8] or we
+            try:
+                pi = int(item.get("posts") or posts)
+            except (TypeError, ValueError):
+                pi = posts
+            pi = max(1, min(288, pi))
+            send_windows_out.append({"windowStart": wsi, "windowEnd": wei, "posts": pi})
+
+    if len(send_windows_out) == 1:
+        s0 = send_windows_out[0]
+        ws = str(s0.get("windowStart") or ws)[:8] or ws
+        we = str(s0.get("windowEnd") or we)[:8] or we
+        posts = max(1, min(288, int(s0.get("posts") or posts)))
+        send_windows_out = []
+    elif len(send_windows_out) >= 2:
+        for _guard in range(50000):
+            total_sw = sum(int(s["posts"]) for s in send_windows_out)
+            if total_sw <= 288:
+                break
+            reduced_any = False
+            for idx in range(len(send_windows_out) - 1, -1, -1):
+                if send_windows_out[idx]["posts"] > 1:
+                    send_windows_out[idx]["posts"] -= 1
+                    reduced_any = True
+                    break
+            if not reduced_any:
+                break
+        posts = sum(int(s["posts"]) for s in send_windows_out)
+        ws = str(send_windows_out[0]["windowStart"])[:8] or ws
+        we = str(send_windows_out[0]["windowEnd"])[:8] or we
+
+    result: dict[str, Any] = {
         "runState": rs,
         "scheduleMode": mode,
         "weekdays": weekdays,
         "postsPerDay": posts,
         "windowStart": ws,
         "windowEnd": we,
+        "firstPostTime": first_post_time,
         "timezone": tz_use,
         "spreadInWindow": spread_b,
         "autopost_target": tgt,
@@ -623,7 +744,12 @@ def normalize_autopost_payload(raw: Any) -> dict[str, Any] | None:
         "broadcast_ids": [] if use_all_b else b_ids,
         # Локальная дата старта в timezone кампании (YYYY-MM-DD). Пусто = старт сразу.
         "startDate": start_date,
+        # Дата окончания (YYYY-MM-DD) включительно. Пусто = без ограничения по дате.
+        "endDate": end_date,
     }
+    if len(send_windows_out) >= 2:
+        result["sendWindows"] = send_windows_out
+    return result
 
 
 async def finalize_autopost_json_for_owner(
@@ -658,20 +784,38 @@ async def finalize_autopost_json_for_owner(
         ap["_state"] = {}
     elif prev_state:
         ap["_state"] = sanitize_autopost_state(prev_state)
+    raw_g = ap.get("group_chat_ids")
+    raw_ch = ap.get("channel_chat_ids")
     ap["group_chat_ids"] = await filter_group_chat_ids_for_broadcast(
         session,
         owner_telegram_id,
         allow_all_groups=allow_scope_all_for_owner,
-        raw_ids=ap.get("group_chat_ids"),
+        raw_ids=raw_g,
         dest_kind="group",
     )
     ap["channel_chat_ids"] = await filter_group_chat_ids_for_broadcast(
         session,
         owner_telegram_id,
         allow_all_groups=allow_scope_all_for_owner,
-        raw_ids=ap.get("channel_chat_ids"),
+        raw_ids=raw_ch,
         dest_kind="channel",
     )
+    try:
+        rg = len([int(x) for x in (raw_g or []) if int(x) < 0])
+        rc = len([int(x) for x in (raw_ch or []) if int(x) < 0])
+        sg = len(ap.get("group_chat_ids") or [])
+        sc = len(ap.get("channel_chat_ids") or [])
+        if rg > sg or rc > sc:
+            log.warning(
+                "autopost recipients filtered owner=%s groups %s→%s channels %s→%s",
+                int(owner_telegram_id),
+                rg,
+                sg,
+                rc,
+                sc,
+            )
+    except Exception:
+        pass
     use_all_b, b_ids = await filter_autopost_broadcast_refs(
         session,
         owner_telegram_id,
@@ -707,9 +851,9 @@ async def filter_autopost_broadcast_refs(
         q = q.where(AdminBroadcast.admin_telegram_id == int(viewer_telegram_id))
     res = await session.execute(q)
     ok = sorted({int(x[0]) for x in res.all()})
-    if int(current_broadcast_id) not in ok:
-        ok.append(int(current_broadcast_id))
-    return False, sorted(set(ok))
+    if not ok and int(current_broadcast_id or 0) > 0:
+        return False, [int(current_broadcast_id)]
+    return False, ok
 
 
 async def filter_group_chat_ids_for_broadcast(
@@ -728,20 +872,19 @@ async def filter_group_chat_ids_for_broadcast(
         return []
     kind = (dest_kind or "any").strip().lower()
     if kind == "group":
-        kind_clause = or_(Chat.chat_kind.is_(None), Chat.chat_kind == "group")
+        kind_clause = or_(Chat.chat_kind.is_(None), Chat.chat_kind.in_(("group", "supergroup")))
     elif kind == "channel":
         kind_clause = Chat.chat_kind == "channel"
     else:
-        kind_clause = or_(Chat.chat_kind.is_(None), Chat.chat_kind.in_(("group", "channel")))
+        kind_clause = or_(Chat.chat_kind.is_(None), Chat.chat_kind.in_(("group", "supergroup", "channel")))
     q = select(Chat.id).where(
-        Chat.is_active.is_(True),
         Chat.is_log_chat.is_(False),
         Chat.id.in_(cleaned),
         kind_clause,
     )
     if not allow_all_groups:
-        sub = select(ChatManager.chat_id).where(ChatManager.user_id == int(viewer_telegram_id)).subquery()
-        q = q.where(or_(Chat.owner_user_id == int(viewer_telegram_id), Chat.id.in_(select(sub.c.chat_id))))
+        deleg = _delegated_broadcast_chat_ids_stmt(viewer_telegram_id)
+        q = q.where(or_(Chat.owner_user_id == int(viewer_telegram_id), Chat.id.in_(deleg)))
     res = await session.execute(q)
     ok = {int(x[0]) for x in res.all()}
     return sorted(ok & set(cleaned))
@@ -784,17 +927,19 @@ def broadcast_row_to_dict(row: AdminBroadcast) -> dict[str, Any]:
         "media_kind": row.media_kind or "none",
         "media_original_name": row.media_original_name or "",
         "media_items": media_items,
-        "has_media_file": bool(row.media_local_name),
+        "has_media_file": bool(row.media_local_name) or bool(media_items),
         "telegram_file_id": bool(row.telegram_file_id),
         "status": row.status,
         "admin_telegram_id": int(row.admin_telegram_id),
         "recipient_total": int(row.recipient_total or 0),
         "recipient_ok": int(row.recipient_ok or 0),
         "recipient_fail": int(row.recipient_fail or 0),
+        "last_target": str(getattr(row, "last_target", None) or "").strip().lower() or None,
         "error_message": row.error_message,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "sent_at": row.sent_at.isoformat() if row.sent_at else None,
         "autopost": autopost,
+        "cabinet_draft_scope": str(getattr(row, "cabinet_draft_scope", None) or "") or None,
     }
 
 
@@ -951,6 +1096,7 @@ async def run_broadcast_job(
     run_source: str = "manual",
 ) -> None:
     from app.db.session import get_session
+    from app.services.broadcast_reactions import register_broadcast_sent_message
 
     token = (os.getenv("BOT_TOKEN") or "").strip()
     if not token:
@@ -1007,11 +1153,31 @@ async def run_broadcast_job(
                             await session.commit()
                             fid = new_fid
                 prepared_media.append({"kind": mk, "file_id": fid, "bytes": raw_bytes, "name": raw_name})
+            has_media_intent = bool(media_rows) or (
+                (row.media_kind or "none").lower() != "none"
+                and bool(str(row.media_local_name or "").strip() or str(row.telegram_file_id or "").strip())
+            )
+            if has_media_intent and not prepared_media:
+                log.error(
+                    "broadcast id=%s: media configured but files unavailable — aborting send (no text-only fallback)",
+                    int(row.id),
+                )
+                row.status = "failed"
+                row.error_message = "media_unavailable"
+                row.sent_at = datetime_now()
+                await session.commit()
+                return
+
             pm = parse_mode_or_none(row.parse_mode)
             kb = keyboard_markup_from_json(row.keyboard_json)
             text = row.body_text or ""
-            text_msg = _truncate(text, 4096)
-            cap = _truncate(text, 1024) if prepared_media else None
+            text_msg = _truncate(text, _BROADCAST_BODY_HTML_MAX)
+            cap: str | None = None
+            media_remainder = ""
+            if prepared_media:
+                cap_html = text[:_BROADCAST_MEDIA_CAPTION_HTML_MAX]
+                cap = cap_html if str(cap_html).strip() else None
+                media_remainder = text[_BROADCAST_MEDIA_CAPTION_HTML_MAX:]
 
             recipients: list[tuple[int, str]] = []
             target_mode = (target or "users").strip().lower()
@@ -1029,7 +1195,7 @@ async def run_broadcast_job(
                             Chat.is_active.is_(True),
                             Chat.is_log_chat.is_(False),
                             Chat.id < 0,
-                            or_(Chat.chat_kind.is_(None), Chat.chat_kind == "group"),
+                            or_(Chat.chat_kind.is_(None), Chat.chat_kind.in_(("group", "supergroup"))),
                         )
                     )
                     recipients.extend((int(x[0]), "group") for x in res_chats.all())
@@ -1121,6 +1287,10 @@ async def run_broadcast_job(
                         params,
                     )
                 except Exception as ie:
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        pass
                     delivery_enabled = False
                     log.warning("broadcast delivery logging disabled (schema mismatch): %s", ie)
             processed = 0
@@ -1141,8 +1311,9 @@ async def run_broadcast_job(
                         except Exception:
                             target_audience = 1
                     audience_total += int(target_audience)
+                    sent_message_id = 0
                     if not prepared_media:
-                        await _send_text_with_fallback(
+                        sent_message_id = await _send_text_with_fallback(
                             bot,
                             tid,
                             text_msg,
@@ -1153,7 +1324,7 @@ async def run_broadcast_job(
                         # 1 media -> keep keyboard on media message.
                         if len(prepared_media) == 1:
                             m = prepared_media[0]
-                            await _send_single_media(
+                            sent_message_id = await _send_single_media(
                                 bot,
                                 tid,
                                 m,
@@ -1162,7 +1333,7 @@ async def run_broadcast_job(
                                 reply_markup=kb_target,
                             )
                         else:
-                            await _send_media_album_or_fallback(
+                            sent_message_id = await _send_media_album_or_fallback(
                                 bot,
                                 tid,
                                 prepared_media,
@@ -1170,6 +1341,21 @@ async def run_broadcast_job(
                                 parse_mode=pm if cap else None,
                                 reply_markup=kb_target,
                             )
+                        if media_remainder.strip():
+                            await _send_broadcast_remainder_after_media(
+                                bot,
+                                tid,
+                                remainder=media_remainder,
+                                parse_mode=pm,
+                            )
+                    if sent_message_id > 0:
+                        await register_broadcast_sent_message(
+                            session,
+                            broadcast_id=int(row.id),
+                            chat_id=int(tid),
+                            message_id=int(sent_message_id),
+                            target_kind=str(target_kind),
+                        )
                     ok += 1
                     audience_ok += int(target_audience)
                     await _insert_delivery(True, None, int(tid))
@@ -1177,46 +1363,83 @@ async def run_broadcast_job(
                     fail += 1
                     if not first_fail:
                         first_fail = str(e)
-                    if fail <= 3:
-                        log.debug("broadcast skip user %s: %s", tid, e)
+                    if fail <= 10:
+                        log.warning(
+                            "broadcast delivery failed: id=%s chat=%s kind=%s err=%s",
+                            int(row.id),
+                            int(tid),
+                            target_kind,
+                            e,
+                        )
                     await _insert_delivery(False, str(e), int(tid))
                 processed += 1
                 if processed % commit_every == 0:
-                    row_prog = await session.get(AdminBroadcast, int(broadcast_id))
-                    if row_prog:
-                        row_prog.recipient_ok = ok
-                        row_prog.recipient_fail = fail
-                        session.add(row_prog)
-                    await session.commit()
+                    try:
+                        row_prog = await session.get(AdminBroadcast, int(broadcast_id))
+                        if row_prog:
+                            row_prog.recipient_ok = ok
+                            row_prog.recipient_fail = fail
+                            session.add(row_prog)
+                        await session.commit()
+                    except Exception as pe:
+                        try:
+                            await session.rollback()
+                        except Exception:
+                            pass
+                        log.warning("broadcast progress commit failed id=%s: %s", int(broadcast_id), pe)
                 if _SEND_DELAY_SEC > 0:
                     await asyncio.sleep(_SEND_DELAY_SEC)
 
             row2 = await session.get(AdminBroadcast, int(broadcast_id))
             if row2:
+                sent_now = datetime_now()
                 row2.recipient_ok = ok
                 row2.recipient_fail = fail
                 if keep_draft_after:
                     row2.status = "draft"
-                    row2.sent_at = datetime_now()
+                    row2.sent_at = sent_now
                     row2.error_message = (first_fail or "")[:2000] if fail else None
                 else:
                     row2.status = "sent"
-                    row2.sent_at = datetime_now()
+                    row2.sent_at = sent_now
                     row2.error_message = (first_fail or "")[:2000] if fail else None
-                session.add(
-                    AdminBroadcastRun(
-                        broadcast_id=int(row2.id),
-                        target_kind=target_mode,
-                        recipient_total=int(len(recipients)),
-                        recipient_ok=int(ok),
-                        recipient_fail=int(fail),
-                        audience_total=int(audience_total),
-                        audience_ok=int(audience_ok),
-                        sent_at=datetime_now(),
-                        run_source=str(run_source or "manual")[:16],
-                    )
+                run_row = AdminBroadcastRun(
+                    broadcast_id=int(row2.id),
+                    target_kind=target_mode,
+                    recipient_total=int(len(recipients)),
+                    recipient_ok=int(ok),
+                    recipient_fail=int(fail),
+                    audience_total=int(audience_total),
+                    audience_ok=int(audience_ok),
+                    sent_at=sent_now,
+                    run_source=str(run_source or "manual")[:16],
                 )
-                await session.commit()
+                try:
+                    session.add(run_row)
+                    await session.commit()
+                except Exception as fin_err:
+                    log.warning(
+                        "broadcast finalize commit failed id=%s (retry without run row): %s",
+                        int(broadcast_id),
+                        fin_err,
+                    )
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        pass
+                    row3 = await session.get(AdminBroadcast, int(broadcast_id))
+                    if row3:
+                        row3.recipient_ok = ok
+                        row3.recipient_fail = fail
+                        if keep_draft_after:
+                            row3.status = "draft"
+                            row3.sent_at = sent_now
+                            row3.error_message = (first_fail or "")[:2000] if fail else None
+                        else:
+                            row3.status = "sent"
+                            row3.sent_at = sent_now
+                            row3.error_message = (first_fail or "")[:2000] if fail else None
+                        await session.commit()
                 log.warning(
                     "broadcast completed: id=%s target=%s ok=%s fail=%s keep_draft=%s",
                     int(broadcast_id),

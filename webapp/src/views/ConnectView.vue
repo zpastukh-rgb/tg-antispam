@@ -181,6 +181,9 @@ async function clearAllPendingChats() {
         <p v-else class="mt-2 text-xs leading-relaxed text-slate-300">
           {{ isEn ? 'Connect a channel to run autopost / broadcasts, see channel analytics separately and manage delegate rights per channel. If the channel has a discussion group, stats will be linked to the discussion group.' : 'Подключите канал, чтобы запускать автопост/рассылки, видеть аналитику канала отдельно и управлять правами делегатов по каналу. Если у канала есть обсуждение, статистика будет связана с группой обсуждения.' }}
         </p>
+        <p v-if="!isGroupKind" class="mt-2 text-[11px] leading-relaxed text-emerald-200/90">
+          {{ t('connect.channel_discussion_rules_hint') }}
+        </p>
         <p class="mt-2 text-[11px] leading-relaxed text-slate-500">
           {{ isEn ? 'If the chat is missing from the Telegram list — add the bot as admin and open the picker again.' : 'Если объекта нет в списке Telegram — добавьте бота в администраторы и снова откройте выбор.' }}
         </p>

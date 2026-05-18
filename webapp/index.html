@@ -11,6 +11,14 @@
     <!-- Опционально: полный https:// URL API, если нельзя задать VITE_API_BASE_URL при сборке (редко). -->
     <meta name="guard-api-base" content="" />
     <link rel="icon" type="image/png" href="/logo.png" />
+    <!-- Первый экран главной + нижний таббар: без «пустых» иконок и мигающих баннеров -->
+    <link rel="preload" as="image" href="/hero-home/hero-channels-discussions.png" fetchpriority="high" />
+    <link rel="preload" as="image" href="/hero-home/hero-broadcast-autopost.png" />
+    <link rel="preload" as="image" href="/hero-home/hero-reports-analytics.png" />
+    <link rel="preload" as="image" href="/hero-home/hero-rich-content.png" />
+    <link rel="preload" as="image" href="/hero-home/hero-casino-spam-filter.png" />
+    <link rel="preload" as="image" href="/icons/partner-handshake.png" />
+    <link rel="preload" as="image" href="/icons/support-headset.png" />
     <title>AntiSpam Guard — Панель</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />

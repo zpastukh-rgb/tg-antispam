@@ -6,6 +6,7 @@
     </linearGradient>
   </defs>
   <rect width="960" height="540" fill="url(#bgp)"/>
-  <text x="480" y="268" fill="#fcd34d" text-anchor="middle" font-family="system-ui,sans-serif" font-size="34" font-weight="700">Premium 70I8B0</text>
-  <text x="480" y="312" fill="#fbbf2488" text-anchor="middle" font-family="system-ui,sans-serif" font-size="18">0<5=8B5 D09; hero-home/premium.svg</text>
+  <text x="480" y="248" fill="#e5e5e5" text-anchor="middle" font-family="system-ui,sans-serif" font-size="28" font-weight="700">AntiSpam Guard</text>
+  <text x="480" y="298" fill="#a3e635" text-anchor="middle" font-family="system-ui,sans-serif" font-size="38" font-weight="800">Premium</text>
+  <text x="480" y="352" fill="#d4d4d8" text-anchor="middle" font-family="system-ui,sans-serif" font-size="19">Расширенная защита чатов и каналов</text>
 </svg>

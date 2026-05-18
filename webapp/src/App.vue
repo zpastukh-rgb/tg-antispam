@@ -101,6 +101,17 @@ function closeSidebar() {
 const subscriptionScreenActive = computed(
   () => route.name === 'Dashboard' && dashboardSection.value === 'subscription',
 )
+
+/**
+ * Главная: «Аккаунт», «Тарифы» (billing), «Подписка» —
+ * та же оболочка (скролл в main + overscroll), чтобы жест по карусели тарифов
+ * не съедал вертикаль и не превращался в смахивание WebView Telegram.
+ */
+const lockDashboardAccountViewport = computed(() => {
+  if (route.name !== 'Dashboard') return false
+  const s = String(dashboardSection.value || 'account')
+  return s === 'account' || s === 'billing' || s === 'subscription'
+})
 /** Скрыть cyan/violet ADM в шапке на экране статуса подписки (главная или вкладка в /admin). */
 const suppressAdmBadges = computed(
   () =>
@@ -116,7 +127,14 @@ function onSubscriptionBackFromHeader() {
 </script>
 
 <template>
-  <div class="relative min-h-[100dvh] min-h-screen">
+  <div
+    class="relative min-h-[100dvh] min-h-screen"
+    :class="
+      lockDashboardAccountViewport
+        ? 'h-[100dvh] max-h-[100dvh] overflow-hidden overscroll-none'
+        : ''
+    "
+  >
     <div
       v-if="showAppShellBackground"
       aria-hidden="true"
@@ -128,7 +146,14 @@ function onSubscriptionBackFromHeader() {
       aria-hidden="true"
       class="pointer-events-none fixed inset-0 z-[1] bg-gradient-to-b from-black/30 via-black/18 to-black/42"
     />
-    <div class="relative z-10 flex min-h-[100dvh] min-h-screen flex-col bg-transparent">
+    <div
+      class="relative z-10 flex flex-col bg-transparent"
+      :class="
+        lockDashboardAccountViewport
+          ? 'h-full min-h-0 overflow-hidden'
+          : 'min-h-[100dvh] min-h-screen'
+      "
+    >
       <div
         v-if="showApiConfigWarning"
         class="border-b border-rose-500/40 bg-rose-950/90 px-3 py-2 text-center text-[11px] font-semibold leading-snug text-rose-100"
@@ -147,13 +172,19 @@ function onSubscriptionBackFromHeader() {
       <AppSidebar :open="sidebarOpen" @close="closeSidebar" />
       <main
         class="min-h-0 flex-1 scroll-pb-[calc(7.35rem+env(safe-area-inset-bottom,0px))] bg-transparent pb-[calc(7.35rem+env(safe-area-inset-bottom,0px))] md:pb-40 md:pl-64"
+        :class="
+          lockDashboardAccountViewport
+            ? 'overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]'
+            : ''
+        "
       >
         <div
-          :class="
+          :class="[
             mainContentCompactTop
               ? 'px-4 pb-4 pt-0 md:px-6 md:pb-6 md:pt-1'
-              : 'p-4 md:p-6'
-          "
+              : 'p-4 md:p-6',
+            lockDashboardAccountViewport ? 'min-h-0 flex-1' : '',
+          ]"
         >
           <router-view />
         </div>

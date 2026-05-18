@@ -4,13 +4,46 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import GlobalAntispamUser
+from app.db.models import Chat, GlobalAntispamUser
 
 logger = logging.getLogger(__name__)
+
+# Старый формат причины: «из группы -1001234567890» — подменяем id на название из chats.title.
+_LEGACY_REASON_FROM_GROUP_ID = re.compile(r"^из группы\s+(-?\d+)\s*$", re.IGNORECASE)
+
+
+async def _attach_reason_display(session: AsyncSession, items: list[dict]) -> None:
+    """Добавляет reason_display для UI: для legacy-строк подставляет имя группы из БД."""
+    ids: set[int] = set()
+    for it in items:
+        r = (it.get("reason") or "").strip()
+        m = _LEGACY_REASON_FROM_GROUP_ID.match(r)
+        if m:
+            ids.add(int(m.group(1)))
+    titles: dict[int, str] = {}
+    if ids:
+        try:
+            res = await session.execute(select(Chat.id, Chat.title).where(Chat.id.in_(ids)))
+            for row in res.all():
+                cid, t = int(row[0]), (row[1] or "").strip()
+                if t:
+                    titles[cid] = t
+        except Exception as e:
+            logger.debug("antispam reason_display chat lookup: %s", e)
+    for it in items:
+        r = (it.get("reason") or "").strip()
+        m = _LEGACY_REASON_FROM_GROUP_ID.match(r)
+        if m:
+            cid = int(m.group(1))
+            title = titles.get(cid)
+            it["reason_display"] = f"из группы «{title}»" if title else f"из группы (id {cid})"
+        else:
+            it["reason_display"] = r
 
 
 def antispam_display_label(user_id: int, display_name: str | None, username: str | None) -> str:
@@ -135,4 +168,5 @@ async def list_global_antispam_for_api(session: AsyncSession, limit: int = 500) 
             (it.get("display_name") or "").strip() or None,
             (it.get("username") or "").strip() or None,
         )
+    await _attach_reason_display(session, items)
     return items

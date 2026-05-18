@@ -48,6 +48,9 @@ RU: dict[str, str] = {
     "rules_telegram_send_failed": "Не удалось отправить правила в Telegram",
     "trusted_domain_invalid": "Некорректная запись. Примеры: vk.com, youtube.com, t.me/your_channel",
     "trusted_domain_limit": "Лимит доверенных ссылок для этого чата: {max_d}. С Premium у владельца — до 100.",
+    "whitelist_trusted_premium_only": (
+        "Доверенные ссылки, пользователи и каналы‑отправители доступны только при Premium у владельца чата."
+    ),
     "trusted_domain_duplicate": "Домен уже в списке",
     "trusted_user_resolve_failed": (
         "Не удалось распознать пользователя. Укажите Telegram ID или @username (пользователь должен хотя бы раз запустить Guard)."
@@ -235,6 +238,9 @@ EN: dict[str, str] = {
     "rules_telegram_send_failed": "Could not send rules to Telegram",
     "trusted_domain_invalid": "Invalid entry. Examples: vk.com, youtube.com, t.me/your_channel",
     "trusted_domain_limit": "Trusted link limit for this chat: {max_d}. With Premium on the owner — up to 100.",
+    "whitelist_trusted_premium_only": (
+        "Trusted links, users, and trusted sender channels are only available when the chat owner has Premium."
+    ),
     "trusted_domain_duplicate": "Domain already in the list",
     "trusted_user_resolve_failed": (
         "Could not resolve user. Provide Telegram ID or @username (they must have started Guard at least once)."

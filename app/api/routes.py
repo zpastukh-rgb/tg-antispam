@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import io
 import secrets
 import asyncio
@@ -13,7 +14,7 @@ import smtplib
 from pathlib import Path
 from uuid import uuid4
 from collections import defaultdict
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from email.message import EmailMessage
 from time import perf_counter
 
@@ -22,7 +23,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTT
 from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from aiogram import Bot
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, BufferedInputFile
-from typing import Any
+from typing import Any, Sequence
 
 from sqlalchemy import select, func, delete, text, case, or_, literal_column
 from sqlalchemy.exc import IntegrityError
@@ -134,6 +135,8 @@ from app.services.global_antispam import remove_from_global_antispam
 from app.services.spam_spike_notify import SPAM_MODERATION_REASONS
 from app.services.chat_cleanup import clean_deleted_accounts
 from app.services.credit_policy import REFERRAL_LEVEL_RATES, PARTNER_TOKEN_RUB_RATE
+from app.services.referral_partner_dashboard import referral_partner_level_dashboard, referral_partner_ui_max_levels
+from app.services.broadcast_send_plan import _delegated_broadcast_chat_ids_stmt
 from app.services.admin_roles import is_full_admin_user as _is_full_admin_user
 from app.services.chat_limit_enforcer import enforce_owner_active_chat_limit
 from app.services.chat_owner_premium import chat_owner_has_miniapp_premium
@@ -1144,6 +1147,32 @@ def _rule_to_dict(rule: Rule, stopwords_count: int = 0, *, chat_owner_premium: b
                 rules_group_autopost_times = [str(x) for x in parsed if str(x or "").strip()]
     except Exception:
         rules_group_autopost_times = []
+    mention_trusted_bots: list[str] = []
+    try:
+        raw_mtb = getattr(rule, "mention_trusted_bots_json", None)
+        if raw_mtb:
+            parsed_m = json.loads(str(raw_mtb))
+            if isinstance(parsed_m, list):
+                mention_trusted_bots = [
+                    str(x).strip().lstrip("@")
+                    for x in parsed_m
+                    if str(x or "").strip()
+                ][:50]
+    except Exception:
+        mention_trusted_bots = []
+    media_trusted_users: list[str] = []
+    try:
+        raw_mtu = getattr(rule, "media_trusted_users_json", None)
+        if raw_mtu:
+            parsed_u = json.loads(str(raw_mtu))
+            if isinstance(parsed_u, list):
+                media_trusted_users = [
+                    str(x).strip().lstrip("@")
+                    for x in parsed_u
+                    if str(x or "").strip()
+                ][:50]
+    except Exception:
+        media_trusted_users = []
     out = {
         "chat_id": rule.chat_id,
         "filter_links": getattr(rule, "filter_links", True),
@@ -1169,6 +1198,8 @@ def _rule_to_dict(rule: Rule, stopwords_count: int = 0, *, chat_owner_premium: b
         "filter_mention_emails": bool(getattr(rule, "filter_mention_emails", False)),
         "filter_mention_mass_enabled": bool(getattr(rule, "filter_mention_mass_enabled", False)),
         "filter_mention_mass_threshold": int(getattr(rule, "filter_mention_mass_threshold", 5) or 5),
+        "mention_trusted_bots": mention_trusted_bots,
+        "media_trusted_users": media_trusted_users,
         "filter_buttons_mode": getattr(rule, "filter_buttons_mode", "allow"),
         "filter_button_url": bool(getattr(rule, "filter_button_url", False)),
         "filter_button_callback": bool(getattr(rule, "filter_button_callback", False)),
@@ -1233,7 +1264,7 @@ def _rule_to_dict(rule: Rule, stopwords_count: int = 0, *, chat_owner_premium: b
         "antinakrutka_window_minutes": int(getattr(rule, "antinakrutka_window_minutes", 5) or 5),
         "antinakrutka_action": str(getattr(rule, "antinakrutka_action", "alert") or "alert"),
         "antinakrutka_restrict_minutes": int(getattr(rule, "antinakrutka_restrict_minutes", 30) or 30),
-        "spam_spike_enabled": bool(getattr(rule, "spam_spike_enabled", True)),
+        "spam_spike_enabled": bool(getattr(rule, "spam_spike_enabled", False)),
         "spam_spike_min_deletes": int(getattr(rule, "spam_spike_min_deletes", 15) or 15),
         "spam_spike_window_minutes": int(getattr(rule, "spam_spike_window_minutes", 35) or 35),
         "spam_spike_notify_managers": bool(getattr(rule, "spam_spike_notify_managers", True)),
@@ -1905,7 +1936,7 @@ async def api_chats(
     session: AsyncSession = Depends(get_db),
 ):
     """Список подключённых чатов."""
-    from app.services.telegram_bot_api import refresh_chat_from_telegram
+    from app.services.telegram_bot_api import refresh_chat_from_telegram, tg_get_chat
     await _touch_user_presence(session, user_id)
 
     user = await get_or_create_user(session, int(user_id))
@@ -2134,6 +2165,83 @@ async def api_chats(
             await session.commit()
         except Exception:
             await session.rollback()
+
+    linked_discussion_ids: set[int] = set()
+    for p in chat_payloads:
+        lid = p.get("linked_discussion_chat_id")
+        if lid is None:
+            continue
+        try:
+            linked_discussion_ids.add(int(lid))
+        except (TypeError, ValueError):
+            pass
+    discussion_existing_ids: set[int] = set()
+    if linked_discussion_ids:
+        res_disc = await session.execute(
+            select(Chat.id).where(Chat.id.in_(linked_discussion_ids), Chat.is_log_chat == False)  # noqa: E712
+        )
+        discussion_existing_ids = {int(r[0]) for r in res_disc.all()}
+    for p in chat_payloads:
+        lid = p.get("linked_discussion_chat_id")
+        connected = False
+        if lid is not None:
+            try:
+                connected = int(lid) in discussion_existing_ids
+            except (TypeError, ValueError):
+                connected = False
+        p["discussion_chat_connected"] = connected
+
+    def _discussion_title_needs_telegram(raw: object, lid_int: int) -> bool:
+        lt = (str(raw or "")).strip()
+        if not lt:
+            return True
+        try:
+            if lt == str(int(lid_int)):
+                return True
+        except (TypeError, ValueError):
+            pass
+        return bool(re.fullmatch(r"-?\d+", lt))
+
+    titles_to_fetch: set[int] = set()
+    for p in chat_payloads:
+        if str(p.get("chat_kind") or "").strip().lower() != "channel":
+            continue
+        lid = p.get("linked_discussion_chat_id")
+        if lid is None:
+            continue
+        try:
+            lid_int = int(lid)
+        except (TypeError, ValueError):
+            continue
+        if _discussion_title_needs_telegram(p.get("linked_discussion_title"), lid_int):
+            titles_to_fetch.add(lid_int)
+    remote_discussion_titles: dict[int, str] = {}
+    for lid_int in sorted(titles_to_fetch):
+        try:
+            info_lc = await tg_get_chat(int(lid_int))
+            if not info_lc:
+                continue
+            title = (info_lc.get("title") or "").strip()
+            if not title:
+                un = (info_lc.get("username") or "").strip()
+                title = un or str(lid_int)
+            remote_discussion_titles[int(lid_int)] = str(title or "")[:255]
+        except Exception:
+            continue
+    if remote_discussion_titles:
+        for p in chat_payloads:
+            if str(p.get("chat_kind") or "").strip().lower() != "channel":
+                continue
+            lid = p.get("linked_discussion_chat_id")
+            if lid is None:
+                continue
+            try:
+                lid_int = int(lid)
+            except (TypeError, ValueError):
+                continue
+            t_fix = remote_discussion_titles.get(lid_int)
+            if t_fix:
+                p["linked_discussion_title"] = t_fix
 
     return {
         "chats": chat_payloads,
@@ -2955,7 +3063,7 @@ _LINK_FILTER_MODES = frozenset(
 
 
 async def _whitelist_limits_for_chat(session: AsyncSession, chat: Chat) -> tuple[int, int]:
-    """Лимиты доверенных доменов / пользователей по тарифу владельца чата."""
+    """Лимиты доверенных доменов / пользователей по тарифу владельца чата (только Premium)."""
     now = datetime.now(timezone.utc)
     tid = int(getattr(chat, "owner_user_id", 0) or 0)
     owner = None
@@ -2963,7 +3071,7 @@ async def _whitelist_limits_for_chat(session: AsyncSession, chat: Chat) -> tuple
         owner = (await session.execute(select(User).where(User.telegram_id == tid).limit(1))).scalar_one_or_none()
     if owner and _is_user_premium_now(owner, now):
         return 100, 100
-    return 5, 50
+    return 0, 0
 
 
 async def _link_blacklist_max_for_chat(session: AsyncSession, chat: Chat) -> int:
@@ -3074,6 +3182,11 @@ _PREMIUM_PATCH_DENY_KEYS_FREE: frozenset[str] = _PREMIUM_RULE_FIELDS | frozenset
     "antinakrutka_restrict_minutes",
     "join_captcha_kind",
     "filter_media_captcha_kind",
+    # Всплеск удалений: только Premium у владельца чата
+    "spam_spike_enabled",
+    "spam_spike_min_deletes",
+    "spam_spike_window_minutes",
+    "spam_spike_notify_managers",
 })
 
 
@@ -3124,6 +3237,7 @@ def _mask_rule_public_dict_non_premium(d: dict) -> None:
         d["antinakrutka_action"] = "alert"
     d["auto_reports_enabled"] = False
     d["use_global_antispam_db"] = False
+    d["spam_spike_enabled"] = False
     d["filter_politics_enabled"] = False
     d["filter_religion_enabled"] = False
     d["filter_religion_promo_only"] = False
@@ -3192,7 +3306,7 @@ async def api_chat(
     chat = await session.get(Chat, int(chat_id))
     if not chat:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
-    from app.services.telegram_bot_api import refresh_chat_from_telegram, refresh_chat_title_in_db
+    from app.services.telegram_bot_api import refresh_chat_from_telegram, refresh_chat_title_in_db, tg_get_chat
 
     snap_main: dict | None = None
     if int(refresh_telegram or 0) == 1:
@@ -3221,6 +3335,11 @@ async def api_chat(
             rule.guardian_periodic_interval_hours = 24
             rule_changed = True
     if rule_changed:
+        await session.commit()
+        await session.refresh(rule)
+    from app.handlers.moderation import coerce_orphan_legacy_filters
+
+    if coerce_orphan_legacy_filters(rule):
         await session.commit()
         await session.refresh(rule)
     stopwords_list = await list_stopwords(session, int(chat_id))
@@ -3258,6 +3377,17 @@ async def api_chat(
             lr = await session.get(Chat, int(linked_discussion_chat_id))
             if lr:
                 linked_discussion_title = (lr.title or "").strip() or str(linked_discussion_chat_id)
+            else:
+                try:
+                    info_lc = await tg_get_chat(int(linked_discussion_chat_id))
+                    if info_lc:
+                        lt = (info_lc.get("title") or "").strip()
+                        if not lt:
+                            un = (info_lc.get("username") or "").strip()
+                            lt = un or ""
+                        linked_discussion_title = (lt or str(linked_discussion_chat_id))[:255]
+                except Exception:
+                    linked_discussion_title = None
     return {
         "id": chat.id,
         "title": (chat.title or "").strip() or str(chat.id),
@@ -3367,18 +3497,36 @@ async def api_chat_welcome_photo_upload(
     data = await file.read()
     if not data:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("empty_file"))
-    if len(data) > 8 * 1024 * 1024:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("file_too_big_8mb"))
-    suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in (".jpg", ".jpeg", ".png", ".webp"):
-        suffix = ".jpg"
+    if len(data) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("file_too_big_20mb"))
+    normalized = _normalize_rules_photo_bytes(data)
+    if len(normalized) > 9 * 1024 * 1024:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("image_too_heavy_after_process"))
     folder = _welcome_media_root() / str(int(chat_id))
     folder.mkdir(parents=True, exist_ok=True)
     old_rel = str(getattr(rule, "welcome_photo_path", "") or "").strip()
-    new_name = f"{uuid4().hex}{suffix}"
+    new_name = f"{uuid4().hex}.jpg"
     new_path = folder / new_name
-    new_path.write_bytes(data)
-    rule.welcome_photo_path = f"{int(chat_id)}/{new_name}"
+    new_path.write_bytes(normalized)
+    new_rel = f"{int(chat_id)}/{new_name}"
+    rule.welcome_photo_path = new_rel
+    rule.welcome_photo_file_id = None
+    try:
+        storage_raw = (os.getenv("BROADCAST_STORAGE_CHAT_ID") or "").strip()
+        token = (os.getenv("BOT_TOKEN") or "").strip()
+        storage_id = int(storage_raw) if storage_raw else 0
+        if token and storage_id:
+            bot = Bot(token=token)
+            try:
+                msg = await bot.send_photo(chat_id=storage_id, photo=BufferedInputFile(normalized, filename=new_name))
+                ph = getattr(msg, "photo", None) or []
+                file_id = str(getattr(ph[-1], "file_id", "") or "").strip() if ph else ""
+                if file_id:
+                    rule.welcome_photo_file_id = file_id
+            finally:
+                await bot.session.close()
+    except Exception as e:
+        log.warning("welcome_photo_storage_file_id_failed chat=%s err=%s", int(chat_id), e)
     await session.commit()
     if old_rel:
         try:
@@ -3405,6 +3553,7 @@ async def api_chat_welcome_photo_delete(
     rule = await get_or_create_rule(session, int(chat_id))
     rel = str(getattr(rule, "welcome_photo_path", "") or "").strip()
     rule.welcome_photo_path = None
+    rule.welcome_photo_file_id = None
     await session.commit()
     if rel:
         try:
@@ -3457,8 +3606,8 @@ async def api_chat_rules_photo_upload(
     if mode not in ("group", "channel"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("rules_target_group_or_channel"))
     chat_row_p = await session.get(Chat, int(chat_id))
-    if not chat_row_p or not await _is_chat_owner_premium(session, chat_row_p):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("premium_required"))
+    if not chat_row_p:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     rule = await get_or_create_rule(session, int(chat_id))
     ctype = str(getattr(file, "content_type", "") or "").lower()
     if not ctype.startswith("image/"):
@@ -3534,8 +3683,8 @@ async def api_chat_rules_photo_delete(
     if mode not in ("group", "channel"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("rules_target_group_or_channel"))
     chat_row_p = await session.get(Chat, int(chat_id))
-    if not chat_row_p or not await _is_chat_owner_premium(session, chat_row_p):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("premium_required"))
+    if not chat_row_p:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
     rule = await get_or_create_rule(session, int(chat_id))
     rel = str(getattr(rule, "rules_group_photo_path" if mode == "group" else "rules_channel_photo_path", "") or "").strip()
     if mode == "group":
@@ -3684,7 +3833,8 @@ async def api_chat_channel_rule_drafts_set(
         """
     )
     res = await session.execute(sel, {"uid": int(user_id), "cid": int(chat_id)})
-    merged_by_id: dict[str, dict] = {}
+    # Серверное состояние по id (для разрешения конфликтов по updatedAt между устройствами).
+    server_by_id: dict[str, dict] = {}
     for r in res.mappings().all():
         try:
             btns = json.loads(str(r.get("buttons_json") or "[]"))
@@ -3705,14 +3855,21 @@ async def api_chat_channel_rule_drafts_set(
             "updatedAt": int(r.get("updated_at_ms") or 0),
         }
         if d["id"]:
-            merged_by_id[d["id"]] = d
+            server_by_id[d["id"]] = d
+    # Важно: набор черновиков задаёт клиентский список `incoming`. Иначе удаление на клиенте
+    # не доходит до БД — старый код объединял union(server, incoming) и «воскрешал» строки.
+    merged_by_id: dict[str, dict] = {}
     for d in incoming:
         did = str(d.get("id") or "")
         if not did:
             continue
-        prev = merged_by_id.get(did)
-        if not prev or int(d.get("updatedAt") or 0) >= int(prev.get("updatedAt") or 0):
+        prev = server_by_id.get(did)
+        if not prev:
             merged_by_id[did] = d
+        elif int(d.get("updatedAt") or 0) >= int(prev.get("updatedAt") or 0):
+            merged_by_id[did] = d
+        else:
+            merged_by_id[did] = prev
     merged = sorted(merged_by_id.values(), key=lambda x: int(x.get("updatedAt") or 0), reverse=True)[:20]
     # Only one active draft is allowed (newest active wins).
     first_active_seen = False
@@ -3754,7 +3911,7 @@ async def api_chat_channel_rule_drafts_set(
             },
         )
     await session.commit()
-    return {"ok": True, "count": len(merged), "merge": "updatedAt-wins", "drafts": merged}
+    return {"ok": True, "count": len(merged), "merge": "incoming-list-updatedAt-wins", "drafts": merged}
 
 
 # ---------- POST /api/chat/:id/clean-deleted ----------
@@ -3989,12 +4146,12 @@ async def api_chat_rule(
             v = 35
         rule.spam_spike_window_minutes = max(5, min(720, v))
     am = str(getattr(rule, "action_mode", "") or "").lower()
-    if am not in ("delete", "mute", "ban", "observe"):
+    if am not in ("delete", "mute", "kick", "ban", "observe"):
         rule.action_mode = "delete"
     if "filter_links" in body and "filter_links_mode" not in body and hasattr(rule, "filter_links_mode"):
         rule.filter_links_mode = "forbid" if rule.filter_links else "allow"
     if "filter_channel_posts_action" in body and hasattr(rule, "filter_channel_posts_action"):
-        sca = str(getattr(rule, "filter_channel_posts_action", "delete") or "delete").strip().lower()
+        sca = str(body.get("filter_channel_posts_action") or getattr(rule, "filter_channel_posts_action", "delete") or "delete").strip().lower()
         rule.filter_channel_posts_action = sca if sca in ("delete", "ban") else "delete"
     # ВАЖНО: переход с legacy filter_media_mode на гранулярные тогглы.
     # Если в запросе пришёл хотя бы один filter_media_* и при этом filter_media_mode явно не задан —
@@ -4111,6 +4268,50 @@ async def api_chat_rule(
                 if clean_btns:
                     clean_rows.append(clean_btns)
         rule.welcome_buttons_json = json.dumps(clean_rows, ensure_ascii=False)
+    if "mention_trusted_bots" in body and hasattr(rule, "mention_trusted_bots_json"):
+        wb = body.get("mention_trusted_bots")
+        clean_mtb: list[str] = []
+        seen_low: set[str] = set()
+        _btuname = re.compile(r"^[A-Za-z0-9_]{5,32}$")
+        if isinstance(wb, list):
+            for item in wb:
+                s = str(item or "").strip().lstrip("@")
+                if not s or not _btuname.match(s):
+                    continue
+                low = s.lower()
+                if low in seen_low:
+                    continue
+                seen_low.add(low)
+                clean_mtb.append(s)
+                if len(clean_mtb) >= 50:
+                    break
+        rule.mention_trusted_bots_json = json.dumps(clean_mtb, ensure_ascii=False) if clean_mtb else None
+    if "media_trusted_users" in body and hasattr(rule, "media_trusted_users_json"):
+        mtu = body.get("media_trusted_users")
+        clean_mtu: list[str] = []
+        seen_mtu: set[str] = set()
+        _media_tid = re.compile(r"^\d{1,20}$")
+        _media_tun = re.compile(r"^[A-Za-z0-9_]{5,32}$")
+        if isinstance(mtu, list):
+            for item in mtu:
+                s = str(item or "").strip().lstrip("@")
+                if not s:
+                    continue
+                if _media_tid.match(s):
+                    key = f"id:{s}"
+                    val = s
+                elif _media_tun.match(s):
+                    key = f"u:{s.lower()}"
+                    val = s.lower()
+                else:
+                    continue
+                if key in seen_mtu:
+                    continue
+                seen_mtu.add(key)
+                clean_mtu.append(val)
+                if len(clean_mtu) >= 50:
+                    break
+        rule.media_trusted_users_json = json.dumps(clean_mtu, ensure_ascii=False) if clean_mtu else None
     if "rules_channel_text" in body and hasattr(rule, "rules_channel_text"):
         txt = str(body.get("rules_channel_text") or "")
         rule.rules_channel_text = txt[:4000]
@@ -4255,6 +4456,7 @@ async def api_chat_rule(
         rule.use_global_antispam_db = False
         rule.auto_reports_enabled = False
         rule.spam_spike_notify_managers = False
+        rule.spam_spike_enabled = False
         for _fname in _PREMIUM_RULE_FIELDS_EXTRA_DICTS:
             if hasattr(rule, _fname):
                 setattr(rule, _fname, False)
@@ -4273,6 +4475,9 @@ async def api_chat_rule(
             action_kind="rule_patched",
             meta={"changed": _changed_keys[:30]},
         )
+    from app.handlers.moderation import coerce_orphan_legacy_filters
+
+    coerce_orphan_legacy_filters(rule)
     await session.commit()
     await session.refresh(rule)
     stopwords_count = await count_stopwords(session, int(chat_id))
@@ -4420,12 +4625,11 @@ async def api_chat_rules_send_now(
         text = str(getattr(rule, "rules_channel_text", "") or "").strip()
         if not text:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("rules_comments_text_empty"))
-        if thread_id <= 0:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("message_thread_required"))
         markup = _rules_reply_markup_from_json(getattr(rule, "rules_channel_buttons_json", None))
         rel = str(getattr(rule, "rules_channel_photo_path", "") or "").strip()
         fid = str(getattr(rule, "rules_channel_photo_file_id", "") or "").strip()
-        sent = await _send_with_optional_photo(int(chat_id), text, markup, rel, fid, message_thread_id=int(thread_id))
+        tid_kw = int(thread_id) if thread_id > 0 else None
+        sent = await _send_with_optional_photo(int(chat_id), text, markup, rel, fid, message_thread_id=tid_kw)
     if not sent:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=err_detail("rules_telegram_send_failed"))
     message_id = int((sent or {}).get("message_id") or 0)
@@ -4674,6 +4878,12 @@ async def api_whitelist_domain_add(
     chat = await session.get(Chat, int(chat_id))
     if not chat:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
+    max_d, _max_u = await _whitelist_limits_for_chat(session, chat)
+    if max_d <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=err_detail("whitelist_trusted_premium_only"),
+        )
     raw_in = str(body.get("domain") or "")
     domain = normalize_trusted_link_pattern(raw_in)
     if not domain or not is_valid_trusted_pattern(raw_in):
@@ -4681,7 +4891,6 @@ async def api_whitelist_domain_add(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=err_detail("trusted_domain_invalid"),
         )
-    max_d, _max_u = await _whitelist_limits_for_chat(session, chat)
     cnt_q = await session.execute(select(func.count()).select_from(WhitelistDomain).where(WhitelistDomain.chat_id == int(chat_id)))
     if int(cnt_q.scalar_one() or 0) >= max_d:
         raise HTTPException(
@@ -4735,6 +4944,12 @@ async def api_whitelist_user_add(
     chat = await session.get(Chat, int(chat_id))
     if not chat:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
+    _max_d, max_u = await _whitelist_limits_for_chat(session, chat)
+    if max_u <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=err_detail("whitelist_trusted_premium_only"),
+        )
     raw_ref = body.get("user_ref")
     if raw_ref is None:
         raw_ref = body.get("user_id")
@@ -4765,7 +4980,6 @@ async def api_whitelist_user_add(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=err_detail("trusted_user_resolve_failed"),
         )
-    _max_d, max_u = await _whitelist_limits_for_chat(session, chat)
     cnt_q = await session.execute(select(func.count()).select_from(WhitelistUser).where(WhitelistUser.chat_id == int(chat_id)))
     if int(cnt_q.scalar_one() or 0) >= max_u:
         raise HTTPException(
@@ -4816,6 +5030,14 @@ async def api_whitelist_sender_chat_add(
     ok = await user_can_access_chat(session, user_id, int(chat_id))
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
+    chat = await session.get(Chat, int(chat_id))
+    if not chat:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
+    if not await _is_chat_owner_premium(session, chat):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=err_detail("whitelist_trusted_premium_only"),
+        )
     raw_ref = str(body.get("channel") or body.get("username") or "").strip().lstrip("@").lower()
     if not raw_ref:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("channel_username_required"))
@@ -4953,11 +5175,12 @@ async def api_connect_activate_pending(
     Активировать чаты из pending, где бот уже администратор.
     Полезно, если Telegram не прислал/пропустил событие my_chat_member.
     """
-    from app.services.telegram_bot_api import tg_bot_is_admin_in_chat
+    from app.services.telegram_bot_api import refresh_chat_from_telegram, tg_bot_is_admin_in_chat
 
     pending = await get_pending_chats(session, user_id)
     connected = 0
     skipped = 0
+    activated_rows: list = []
     for c in pending:
         cid = int(c.id)
         try:
@@ -4966,10 +5189,19 @@ async def api_connect_activate_pending(
                 continue
             c.is_active = True
             await get_or_create_rule(session, cid)
+            activated_rows.append(c)
             connected += 1
         except Exception:
             skipped += 1
     await session.commit()
+    # Подтянуть linked_chat_id канала из Telegram — нужно для подсказки «подключите обсуждение» в UI.
+    for row in activated_rows:
+        try:
+            kind = str(getattr(row, "chat_kind", "") or "").strip().lower()
+            if kind == "channel":
+                await refresh_chat_from_telegram(session, int(row.id))
+        except Exception:
+            pass
     return {"ok": True, "connected": connected, "skipped": skipped}
 
 @router.post("/connect/pending/cleanup")
@@ -5092,129 +5324,6 @@ async def api_billing_token_packs():
     return {"items": items}
 
 
-def _reward_rub_to_partner_tokens(reward_rub: float) -> float:
-    return round(float(reward_rub or 0.0) / float(PARTNER_TOKEN_RUB_RATE), 2)
-
-
-async def _referral_partner_dashboard_network(session: AsyncSession, viewer_tg_id: int) -> dict[str, Any]:
-    """Размер деревьев: кого пригласили вы (L1), их приглашённые (L2), следующий слой (L3)."""
-    l1_rows = (
-        await session.execute(
-            select(User.telegram_id).where(User.referred_by_tg_id == int(viewer_tg_id)),
-        )
-    ).all()
-    l1_ids = sorted({int(r[0]) for r in l1_rows if r[0]})
-
-    if not l1_ids:
-        l2_ids: list[int] = []
-    else:
-        l2_rows = (
-            await session.execute(
-                select(User.telegram_id).where(User.referred_by_tg_id.in_(l1_ids)),
-            )
-        ).all()
-        l2_ids = sorted({int(r[0]) for r in l2_rows if r[0]})
-
-    if not l2_ids:
-        l3_ids: list[int] = []
-    else:
-        l3_rows = (
-            await session.execute(
-                select(User.telegram_id).where(User.referred_by_tg_id.in_(l2_ids)),
-            )
-        ).all()
-        l3_ids = sorted({int(r[0]) for r in l3_rows if r[0]})
-
-    n1 = len(l1_ids)
-    n2 = len(l2_ids)
-    n3 = len(l3_ids)
-    return {"l1": n1, "l2": n2, "l3": n3, "total": n1 + n2 + n3}
-
-
-async def _referral_partner_level_dashboard(session: AsyncSession, owner: User, viewer_tg_id: int) -> dict[str, Any]:
-    """Агрегаты PartnerCommission по уровням (ожидание / подтверждено к использованию) + сеть."""
-    pct_by_level = {lvl: int(round(rate * 100)) for lvl, rate in REFERRAL_LEVEL_RATES}
-    default_rows = [
-        {
-            "level": lv,
-            "percent": int(pct_by_level.get(lv, 0)),
-            "pending": {"payments": 0, "sales_rub": 0.0, "reward_tokens": 0.0},
-            "confirmed": {"payments": 0, "sales_rub": 0.0, "reward_tokens": 0.0},
-        }
-        for lv in (1, 2, 3)
-    ]
-    partner_level_stats = default_rows
-
-    try:
-        net = await _referral_partner_dashboard_network(session, viewer_tg_id)
-    except Exception:
-        net = {"l1": 0, "l2": 0, "l3": 0, "total": 0}
-
-    try:
-        buckets: defaultdict[int, dict[str, dict[str, float | int]]] = defaultdict(
-            lambda: {
-                "pending": {"payments": 0, "sales_rub": 0.0, "reward_rub": 0.0},
-                "confirmed": {"payments": 0, "sales_rub": 0.0, "reward_rub": 0.0},
-            },
-        )
-        q = await session.execute(
-            select(
-                PartnerCommission.level,
-                PartnerCommission.status,
-                func.count(PartnerCommission.id),
-                func.coalesce(func.sum(PartnerCommission.sales_amount_rub), 0.0),
-                func.coalesce(func.sum(PartnerCommission.reward_amount_rub), 0.0),
-            ).where(
-                PartnerCommission.owner_user_id == int(owner.id),
-                PartnerCommission.level.in_((1, 2, 3)),
-                PartnerCommission.status.in_(("pending", "available", "paid")),
-            ).group_by(
-                PartnerCommission.level,
-                PartnerCommission.status,
-            ),
-        )
-        for level_raw, stat, cnt, sales_sum, rew_sum in q.all():
-            lv = int(level_raw or 0)
-            if lv not in (1, 2, 3):
-                continue
-            blk = buckets[lv]
-            if stat == "pending":
-                tgt = blk["pending"]
-            elif stat in ("available", "paid"):
-                tgt = blk["confirmed"]
-            else:
-                continue
-            tgt["payments"] = int(tgt["payments"]) + int(cnt or 0)
-            tgt["sales_rub"] = float(tgt["sales_rub"]) + float(sales_sum or 0.0)
-            tgt["reward_rub"] = float(tgt["reward_rub"]) + float(rew_sum or 0.0)
-
-        partner_level_stats = []
-        for lv in (1, 2, 3):
-            blk = buckets[lv]
-            pnd = blk["pending"]
-            cfd = blk["confirmed"]
-            partner_level_stats.append(
-                {
-                    "level": lv,
-                    "percent": int(pct_by_level.get(lv, 0)),
-                    "pending": {
-                        "payments": int(pnd["payments"]),
-                        "sales_rub": round(float(pnd["sales_rub"]), 2),
-                        "reward_tokens": _reward_rub_to_partner_tokens(float(pnd["reward_rub"])),
-                    },
-                    "confirmed": {
-                        "payments": int(cfd["payments"]),
-                        "sales_rub": round(float(cfd["sales_rub"]), 2),
-                        "reward_tokens": _reward_rub_to_partner_tokens(float(cfd["reward_rub"])),
-                    },
-                },
-            )
-    except Exception:
-        partner_level_stats = default_rows
-
-    return {"partner_network": net, "partner_level_stats": partner_level_stats}
-
-
 async def _referral_move_all_bonus_to_aurum(session: AsyncSession, user_id: int) -> dict:
     """Перевод всех партнёрских токенов в AURUM (единый счёт для рассылок)."""
     user = await get_or_create_user(session, user_id)
@@ -5269,7 +5378,12 @@ async def api_referral(
         if last_months
         else i18n_t(loc, "api.ui.referral_access_no_period")
     )
-    tier_dash = await _referral_partner_level_dashboard(session, user, user_id)
+    tier_dash = await referral_partner_level_dashboard(session, user, user_id)
+    partner_max_lv = referral_partner_ui_max_levels(user, now)
+    level_rates = [{"level": int(l), "percent": int(r * 100)} for l, r in REFERRAL_LEVEL_RATES if int(l) <= partner_max_lv]
+    tier_out = dict(tier_dash)
+    rows = tier_out.get("partner_level_stats") or []
+    tier_out["partner_level_stats"] = [r for r in rows if int(r.get("level") or 0) <= partner_max_lv]
     return {
         "access_label": access_label,
         "days_left": int(days_left),
@@ -5282,8 +5396,9 @@ async def api_referral(
         "start_count": starts,
         "share_count": shares,
         "paid_count": paid,
-        "level_rates": [{"level": int(l), "percent": int(r * 100)} for l, r in REFERRAL_LEVEL_RATES],
-        **tier_dash,
+        "partner_ui_max_levels": int(partner_max_lv),
+        "level_rates": level_rates,
+        **tier_out,
     }
 
 
@@ -6166,9 +6281,23 @@ async def api_admin_chats(
     return {"items": items}
 
 
+def _dedupe_admin_broadcast_rows(items: list[dict]) -> list[dict]:
+    """На всякий случай убираем дубликаты одного chat_id (не должно встречаться в норме)."""
+    seen: set[int] = set()
+    out: list[dict] = []
+    for it in items:
+        cid = int(it.get("chat_id") or 0)
+        if not cid or cid in seen:
+            continue
+        seen.add(cid)
+        out.append(it)
+    return out
+
+
 @router.get("/admin/broadcast/groups")
 async def api_admin_broadcast_groups(
     scope: str = "mine",
+    include_inactive: bool = Query(False),
     user_id: int = Depends(require_init_data),
     session: AsyncSession = Depends(get_db),
 ):
@@ -6176,6 +6305,7 @@ async def api_admin_broadcast_groups(
     Группы (supergroup/group) этого бота для рассылки/автопоста.
     scope=mine — только чаты, где владелец = текущий пользователь Telegram.
     scope=all — все активные группы в БД этого бота (только для полных прав админа).
+    include_inactive=1 — в т.ч. чаты на паузе в списке (is_active=false), только для этого выборщика рассылки.
     """
     user, _full = await _require_broadcast_access(session, int(user_id))
     sc = (scope or "mine").strip().lower()
@@ -6188,19 +6318,22 @@ async def api_admin_broadcast_groups(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=err_detail("scope_all_chats_forbidden"),
         )
+    active_filter = tuple()
+    if not bool(include_inactive):
+        active_filter = (Chat.is_active == True,)  # noqa: E712
     q = (
         select(Chat)
         .where(
-            Chat.is_active == True,  # noqa: E712
+            *active_filter,
             Chat.is_log_chat == False,  # noqa: E712
             Chat.id < 0,
-            or_(Chat.chat_kind.is_(None), Chat.chat_kind == "group"),
+            or_(Chat.chat_kind.is_(None), Chat.chat_kind.in_(("group", "supergroup"))),
         )
         .order_by(Chat.title.asc().nulls_last(), Chat.id.desc())
     )
     if sc == "mine":
-        sub = select(ChatManager.chat_id).where(ChatManager.user_id == int(user_id)).subquery()
-        q = q.where(or_(Chat.owner_user_id == int(user_id), Chat.id.in_(select(sub.c.chat_id))))
+        deleg = _delegated_broadcast_chat_ids_stmt(int(user_id))
+        q = q.where(or_(Chat.owner_user_id == int(user_id), Chat.id.in_(deleg)))
     rows = (await session.execute(q)).scalars().all()
     owner_ids = list({int(r.owner_user_id) for r in rows if getattr(r, "owner_user_id", None)})
     owners_map: dict[int, User] = {}
@@ -6219,10 +6352,12 @@ async def api_admin_broadcast_groups(
                 "username": str(getattr(c, "username", "") or ""),
                 "owner_telegram_id": owner_tg,
                 "owner_username": str(getattr(owner, "username", "") or "") if owner else "",
+                "is_paused": not bool(getattr(c, "is_active", True)),
             }
         )
+    items_u = _dedupe_admin_broadcast_rows(items)
     return {
-        "items": items,
+        "items": items_u,
         "scope": sc,
         "can_scope_all": _broadcast_viewer_can_scope_all(user),
     }
@@ -6257,8 +6392,8 @@ async def api_admin_broadcast_channels(
         .order_by(Chat.title.asc().nulls_last(), Chat.id.desc())
     )
     if sc == "mine":
-        sub = select(ChatManager.chat_id).where(ChatManager.user_id == int(user_id)).subquery()
-        q = q.where(or_(Chat.owner_user_id == int(user_id), Chat.id.in_(select(sub.c.chat_id))))
+        deleg = _delegated_broadcast_chat_ids_stmt(int(user_id))
+        q = q.where(or_(Chat.owner_user_id == int(user_id), Chat.id.in_(deleg)))
     rows = (await session.execute(q)).scalars().all()
     owner_ids = list({int(r.owner_user_id) for r in rows if getattr(r, "owner_user_id", None)})
     owners_map: dict[int, User] = {}
@@ -6279,8 +6414,9 @@ async def api_admin_broadcast_channels(
                 "owner_username": str(getattr(owner, "username", "") or "") if owner else "",
             }
         )
+    items_u = _dedupe_admin_broadcast_rows(items)
     return {
-        "items": items,
+        "items": items_u,
         "scope": sc,
         "can_scope_all": _broadcast_viewer_can_scope_all(user),
     }
@@ -7302,7 +7438,7 @@ async def api_activity_summary(
             cnt = int(row[1] or 0)
             if "observe" in action:
                 observed += cnt
-            elif "ban" in action:
+            elif "ban" in action or action == "kick":
                 banned += cnt
             elif "mute" in action or "restrict" in action:
                 muted += cnt
@@ -7338,7 +7474,7 @@ async def api_activity_summary(
             cnt = int(row[1] or 0)
             if "observe" in action:
                 observed_y += cnt
-            elif "ban" in action:
+            elif "ban" in action or action == "kick":
                 banned_y += cnt
             elif "mute" in action or "restrict" in action:
                 muted_y += cnt
@@ -8956,7 +9092,11 @@ async def api_global_antispam_list(
     session: AsyncSession = Depends(get_db),
 ):
     """Список пользователей в глобальной антиспам базе (общая для бота)."""
+    from app.api.service import miniapp_actor_has_global_antispam_access
     from app.services.global_antispam import list_global_antispam_for_api
+
+    if not await miniapp_actor_has_global_antispam_access(session, int(user_id)):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("premium_only"))
     items = await list_global_antispam_for_api(session, limit=500)
     return {"items": items}
 
@@ -8969,9 +9109,12 @@ async def api_global_antispam_add(
     session: AsyncSession = Depends(get_db),
 ):
     """Добавить user_id в глобальную антиспам базу. Body: { "user_id": number, "reason": "optional" }."""
+    from app.api.service import miniapp_actor_has_global_antispam_access
     from app.services.global_antispam import add_to_global_antispam, update_antispam_user_profile
     from app.services.telegram_bot_api import private_chat_profile, tg_get_chat
 
+    if not await miniapp_actor_has_global_antispam_access(session, int(user_id)):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("premium_only"))
     uid = body.get("user_id")
     if uid is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("user_id_required"))
@@ -8993,7 +9136,11 @@ async def api_global_antispam_remove(
     session: AsyncSession = Depends(get_db),
 ):
     """Удалить target_uid из глобальной антиспам базы."""
+    from app.api.service import miniapp_actor_has_global_antispam_access
     from app.services.global_antispam import remove_from_global_antispam
+
+    if not await miniapp_actor_has_global_antispam_access(session, int(user_id)):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("premium_only"))
     removed = await remove_from_global_antispam(session, target_uid)
     return {"removed": removed}
 
@@ -9425,6 +9572,48 @@ async def api_admin_broadcasts_list(
     return {"items": items, "scope": effective}
 
 
+@router.get("/admin/broadcasts/today-send-runs")
+async def api_admin_broadcasts_today_send_runs(
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+    tz: str = Query("Europe/Moscow", max_length=80),
+):
+    """Число запусков рассылок (manual + autopost) владельца за текущий календарный день по локальному TZ — виджет «Сколько отправлено сегодня»."""
+    from zoneinfo import ZoneInfo
+
+    await _require_broadcast_access(session, int(user_id))
+    tz_name = (tz or "").strip()[:80] or "Europe/Moscow"
+    try:
+        zi = ZoneInfo(tz_name)
+    except Exception:
+        zi = ZoneInfo("Europe/Moscow")
+        tz_name = "Europe/Moscow"
+    now_local = datetime.now(zi)
+    local_day = now_local.date()
+    day_start_local = datetime(local_day.year, local_day.month, local_day.day, 0, 0, 0, tzinfo=zi)
+    day_end_local = day_start_local + timedelta(days=1)
+    t0 = day_start_local.astimezone(timezone.utc)
+    t1 = day_end_local.astimezone(timezone.utc)
+    event_dt = func.coalesce(AdminBroadcastRun.sent_at, AdminBroadcastRun.created_at)
+    q = (
+        select(func.count())
+        .select_from(AdminBroadcastRun)
+        .join(AdminBroadcast, AdminBroadcastRun.broadcast_id == AdminBroadcast.id)
+        .where(
+            AdminBroadcast.admin_telegram_id == int(user_id),
+            event_dt >= t0,
+            event_dt < t1,
+        )
+    )
+    cnt = await session.scalar(q)
+    n = int(cnt or 0)
+    return {
+        "timezone": tz_name,
+        "local_date": local_day.isoformat(),
+        "runs_today": n,
+    }
+
+
 @router.get("/admin/broadcasts/{broadcast_id}")
 async def api_admin_broadcasts_get(
     broadcast_id: int,
@@ -9499,12 +9688,165 @@ def _split_broadcast_click_rows(rows: list[tuple[Any, Any]]) -> tuple[int, int]:
     return users, groups
 
 
+def _empty_per_send_engagement() -> dict[str, Any]:
+    return {
+        "link_total": 0,
+        "callback_total": 0,
+        "reaction_total": 0,
+        "link_items": [],
+        "callback_items": [],
+    }
+
+
+def _utc_from_iso_maybe(val: Any) -> datetime | None:
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _ensure_utc_dt(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+async def _enrich_broadcast_send_history_engagement(session: AsyncSession, broadcast_id: int, items: list[dict[str, Any]]) -> None:
+    """Добавляет per_send_engagement (клики по окну между соседними отправками)."""
+    bid = int(broadcast_id or 0)
+    if bid <= 0 or not items:
+        return
+    utc_now = _ensure_utc_dt(datetime.now(timezone.utc))
+    keyed: list[tuple[datetime, dict[str, Any]]] = []
+
+    for it in items:
+        t0 = _utc_from_iso_maybe(it.get("started_at")) or _utc_from_iso_maybe(it.get("ended_at"))
+        if t0 is None:
+            it["per_send_engagement"] = _empty_per_send_engagement()
+            continue
+        keyed.append((t0, it))
+
+    keyed.sort(key=lambda row: row[0])
+    for i, (t0, it) in enumerate(keyed):
+        if i + 1 < len(keyed):
+            t1 = keyed[i + 1][0]
+        else:
+            t1 = utc_now + timedelta(seconds=2)
+        if t1 <= t0:
+            t1 = t0 + timedelta(microseconds=1)
+        em = await _admin_broadcast_click_breakdown(session, bid=bid, since=t0, until=t1)
+        it["per_send_engagement"] = {
+            "link_total": int(em["link_total"]),
+            "callback_total": int(em["callback_total"]),
+            "reaction_total": int(em["reaction_total"]),
+            "link_items": list(em.get("link_items") or [])[:12],
+            "callback_items": list(em.get("callback_items") or [])[:12],
+        }
+
+
+def _aggregate_engagement_click_window(
+    raw: Sequence[tuple[int, datetime | None, str | None, str | None]],
+    *,
+    broadcast_id: int,
+    t0_inclusive: datetime,
+    t1_exclusive: datetime,
+    item_cap: int = 24,
+) -> dict[str, Any]:
+    """Считает клики по сырым строкам AdminBroadcastClick в полуинтервале [t0, t1)."""
+    bid_w = int(broadcast_id)
+    t0i = _ensure_utc_dt(t0_inclusive)
+    t1e = _ensure_utc_dt(t1_exclusive)
+    link_map: dict[str, dict[str, Any]] = {}
+    callback_map: dict[str, dict[str, Any]] = {}
+    link_total = callback_total = reaction_total = 0
+
+    for bid_raw, cat, raw_url, kind in raw:
+        if int(bid_raw) != bid_w or cat is None:
+            continue
+        ca = _ensure_utc_dt(cat)
+        if ca < t0i or ca >= t1e:
+            continue
+        url_s = str(raw_url or "").strip()
+        ks = str(kind or "").strip().lower()
+        is_grp = ks in {"group", "groups", "channel", "channels"}
+
+        if url_s.startswith("http://") or url_s.startswith("https://"):
+            link_total += 1
+            row = link_map.get(url_s)
+            if row is None:
+                row = {"key": url_s, "title": url_s, "users": 0, "groups": 0, "total": 0}
+                link_map[url_s] = row
+            c = 1
+            if is_grp:
+                row["groups"] += c
+            else:
+                row["users"] += c
+            row["total"] += c
+        elif url_s.startswith("callback:"):
+            callback_total += 1
+            val = url_s
+            parts = val.split(":", 2)
+            btn_idx = -1
+            if len(parts) >= 2:
+                try:
+                    btn_idx = int(parts[1])
+                except Exception:
+                    btn_idx = -1
+            inner = parts[2] if len(parts) >= 3 else ""
+            title = _t_api_ui("broadcast_click_button_n", n=btn_idx + 1) if btn_idx >= 0 else _t_api_ui("broadcast_click_button")
+            if inner:
+                title = f"{title} · {inner[:96]}"
+            row = callback_map.get(val)
+            if row is None:
+                row = {"key": val, "title": title, "users": 0, "groups": 0, "total": 0}
+                callback_map[val] = row
+            c = 1
+            if is_grp:
+                row["groups"] += c
+            else:
+                row["users"] += c
+            row["total"] += c
+        elif url_s.startswith("reaction:"):
+            reaction_total += 1
+
+    link_items = sorted(link_map.values(), key=lambda x: int(x.get("total", 0)), reverse=True)[: int(item_cap)]
+    callback_items = sorted(callback_map.values(), key=lambda x: int(x.get("total", 0)), reverse=True)[: int(item_cap)]
+    return {
+        "link_total": int(link_total),
+        "callback_total": int(callback_total),
+        "reaction_total": int(reaction_total),
+        "link_items": link_items,
+        "callback_items": callback_items,
+    }
+
+
+def _autopost_run_event_time(r: AdminBroadcastRun) -> datetime | None:
+    sat = getattr(r, "sent_at", None)
+    cat = getattr(r, "created_at", None)
+    ts = sat or cat
+    if ts is None:
+        return None
+    try:
+        return _ensure_utc_dt(ts)
+    except Exception:
+        return None
+
+
 async def _admin_broadcast_click_breakdown(
     session: AsyncSession,
     *,
     bid: int | None = None,
     bids: list[int] | None = None,
     since: datetime | None = None,
+    until: datetime | None = None,
 ) -> dict[str, Any]:
     if bid is not None:
         flt: list[Any] = [AdminBroadcastClick.broadcast_id == int(bid)]
@@ -9521,12 +9863,17 @@ async def _admin_broadcast_click_breakdown(
                 "callback_users": 0,
                 "callback_groups": 0,
                 "callback_total": 0,
+                "reaction_users": 0,
+                "reaction_groups": 0,
+                "reaction_total": 0,
                 "link_items": [],
                 "callback_items": [],
             }
         flt = [AdminBroadcastClick.broadcast_id.in_(bl)]
     if since is not None:
         flt = [*flt, AdminBroadcastClick.created_at >= since]
+    if until is not None:
+        flt = [*flt, AdminBroadcastClick.created_at < until]
 
     all_q = await session.execute(
         select(AdminBroadcastClick.target_kind, func.count(AdminBroadcastClick.id))
@@ -9541,6 +9888,11 @@ async def _admin_broadcast_click_breakdown(
     cb_q = await session.execute(
         select(AdminBroadcastClick.target_kind, func.count(AdminBroadcastClick.id))
         .where(*flt, _BROADCAST_CALLBACK_CLICK_FILTER)
+        .group_by(AdminBroadcastClick.target_kind)
+    )
+    reaction_q = await session.execute(
+        select(AdminBroadcastClick.target_kind, func.count(AdminBroadcastClick.id))
+        .where(*flt, AdminBroadcastClick.url.like("reaction:%"))
         .group_by(AdminBroadcastClick.target_kind)
     )
     link_items_q = await session.execute(
@@ -9564,6 +9916,7 @@ async def _admin_broadcast_click_breakdown(
     u_all, g_all = _split_broadcast_click_rows(list(all_q.all()))
     u_ln, g_ln = _split_broadcast_click_rows(list(link_q.all()))
     u_cb, g_cb = _split_broadcast_click_rows(list(cb_q.all()))
+    u_rx, g_rx = _split_broadcast_click_rows(list(reaction_q.all()))
     link_map: dict[str, dict[str, Any]] = {}
     for raw_url, kind, cnt in link_items_q.all():
         url = str(raw_url or "").strip()
@@ -9623,9 +9976,170 @@ async def _admin_broadcast_click_breakdown(
         "callback_users": u_cb,
         "callback_groups": g_cb,
         "callback_total": u_cb + g_cb,
+        "reaction_users": u_rx,
+        "reaction_groups": g_rx,
+        "reaction_total": u_rx + g_rx,
         "link_items": link_items,
         "callback_items": callback_items,
     }
+
+
+def _broadcast_stats_ctr_fields(result: dict) -> dict:
+    """Единый CTR для ответа /stats (как в Mini App): переходы / доставки, иначе охват по базе."""
+    overall = result.get("overall") or {}
+    recipient_msgs = max(0, int(overall.get("ok") or 0))
+    aud = max(0, int(result.get("audience_ok") or 0))
+    # Для групп audience_ok может быть суммой member_count по чату — для CTR «по отправкам» берём успешные доставки (получатель = чат/ЛС).
+    delivered = recipient_msgs if recipient_msgs > 0 else aud
+    clk = max(0, int(result.get("real_clicks_total") or 0))
+    cg = int(result.get("connected_groups_total") or 0)
+    cb = int(result.get("connected_bots_total") or 0)
+    base = max(1, cg + cb)
+    rt = result.get("real_clicks_total", None)
+    use_interactions = rt is not None and isinstance(rt, (int, float)) and float(rt) >= 0
+    if use_interactions:
+        if delivered > 0:
+            pct = 100.0 * float(clk) / float(delivered)
+            pct = min(100.0, max(0.0, pct))
+            return {"stats_ctr_percent": round(float(pct), 4), "stats_ctr_mode": "interactions"}
+        return {"stats_ctr_percent": None, "stats_ctr_mode": "interactions"}
+    pct = 100.0 * float(delivered) / float(base)
+    pct = min(100.0, max(0.0, pct))
+    return {"stats_ctr_percent": round(float(pct), 4), "stats_ctr_mode": "reach"}
+
+
+async def _admin_broadcast_send_history(session: AsyncSession, broadcast_id: int) -> list[dict[str, Any]]:
+    """Хронология отправок: время и группы из admin_broadcast_delivery (по batch_id)."""
+    bid = int(broadcast_id or 0)
+    if bid <= 0:
+        return []
+    out: list[dict[str, Any]] = []
+    bq = await session.execute(
+        select(
+            AdminBroadcastDelivery.batch_id,
+            func.min(AdminBroadcastDelivery.created_at),
+            func.max(AdminBroadcastDelivery.created_at),
+        )
+        .where(
+            AdminBroadcastDelivery.broadcast_id == bid,
+            AdminBroadcastDelivery.batch_id != "",
+        )
+        .group_by(AdminBroadcastDelivery.batch_id)
+        .order_by(func.max(AdminBroadcastDelivery.created_at).desc())
+        .limit(40)
+    )
+    batch_rows = bq.all()
+    for batch_id, started_at, ended_at in batch_rows:
+        if not batch_id:
+            continue
+        gq = await session.execute(
+            select(
+                AdminBroadcastDelivery.target_id,
+                func.sum(case((AdminBroadcastDelivery.ok.is_(True), 1), else_=0)),
+                func.sum(case((AdminBroadcastDelivery.ok.is_(False), 1), else_=0)),
+            )
+            .where(
+                AdminBroadcastDelivery.broadcast_id == bid,
+                AdminBroadcastDelivery.batch_id == str(batch_id),
+                AdminBroadcastDelivery.target_kind.in_(("group", "groups")),
+            )
+            .group_by(AdminBroadcastDelivery.target_id)
+        )
+        g_rows = gq.all()
+        gids = [int(r[0] or 0) for r in g_rows if int(r[0] or 0)]
+        titles: dict[int, str] = {}
+        if gids:
+            cq = await session.execute(select(Chat.id, Chat.title).where(Chat.id.in_(gids)))
+            for cid, title in cq.all():
+                titles[int(cid)] = str(title or "")
+        groups_out: list[dict[str, Any]] = []
+        for tid, okc, badc in g_rows:
+            gid = int(tid or 0)
+            if not gid:
+                continue
+            groups_out.append(
+                {
+                    "chat_id": gid,
+                    "title": titles.get(gid, "") or str(gid),
+                    "ok": int(okc or 0),
+                    "fail": int(badc or 0),
+                }
+            )
+        bots_q = await session.execute(
+            select(
+                func.count(AdminBroadcastDelivery.id),
+                func.sum(case((AdminBroadcastDelivery.ok.is_(True), 1), else_=0)),
+                func.sum(case((AdminBroadcastDelivery.ok.is_(False), 1), else_=0)),
+            ).where(
+                AdminBroadcastDelivery.broadcast_id == bid,
+                AdminBroadcastDelivery.batch_id == str(batch_id),
+                AdminBroadcastDelivery.target_kind.in_(("user", "users", "bot", "bots")),
+            )
+        )
+        bot_row = bots_q.one()
+        bot_total = int(bot_row[0] or 0)
+        bot_ok = int(bot_row[1] or 0)
+        bot_fail = int(bot_row[2] or 0)
+        out.append(
+            {
+                "batch_id": str(batch_id),
+                "started_at": started_at.isoformat() if started_at else None,
+                "ended_at": ended_at.isoformat() if ended_at else None,
+                "groups": groups_out,
+                "bots": {"total": bot_total, "ok": bot_ok, "fail": bot_fail},
+            }
+        )
+
+    if out:
+        return out
+
+    rq = await session.execute(
+        select(
+            AdminBroadcastRun.sent_at,
+            AdminBroadcastRun.created_at,
+            AdminBroadcastRun.target_kind,
+            AdminBroadcastRun.recipient_ok,
+            AdminBroadcastRun.recipient_fail,
+        )
+        .where(AdminBroadcastRun.broadcast_id == bid)
+        .order_by(
+            AdminBroadcastRun.sent_at.desc().nullslast(),
+            AdminBroadcastRun.created_at.desc(),
+        )
+        .limit(25)
+    )
+    for rsent, rcreated, tkind, rok, rfail in rq.all():
+        ts = rsent or rcreated
+        out.append(
+            {
+                "batch_id": "run",
+                "started_at": ts.isoformat() if ts else None,
+                "ended_at": ts.isoformat() if ts else None,
+                "target_kind": str(tkind or ""),
+                "recipient_ok": int(rok or 0),
+                "recipient_fail": int(rfail or 0),
+                "groups": [],
+                "bots": {"total": 0, "ok": 0, "fail": 0},
+            }
+        )
+    if out:
+        return out
+
+    brow = await session.get(AdminBroadcast, bid)
+    if brow and getattr(brow, "sent_at", None):
+        st = brow.sent_at
+        out.append(
+            {
+                "batch_id": "legacy_broadcast",
+                "started_at": st.isoformat() if st else None,
+                "ended_at": st.isoformat() if st else None,
+                "recipient_ok": int(getattr(brow, "recipient_ok", 0) or 0),
+                "recipient_fail": int(getattr(brow, "recipient_fail", 0) or 0),
+                "groups": [],
+                "bots": {"total": 0, "ok": 0, "fail": 0},
+            }
+        )
+    return out
 
 
 @router.get("/admin/broadcasts/{broadcast_id}/stats")
@@ -9654,6 +10168,13 @@ async def api_admin_broadcasts_stats(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("resource_not_found"))
     if not full and int(getattr(row, "admin_telegram_id", 0) or 0) != int(user_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("no_access_to_post"))
+    send_history_payload = await _admin_broadcast_send_history(session, int(broadcast_id))
+    await _enrich_broadcast_send_history_engagement(session, int(broadcast_id), send_history_payload)
+
+    def _attach_broadcast_send_history(stats_dict: dict) -> dict:
+        stats_dict["send_history"] = send_history_payload
+        return stats_dict
+
     gtotal_q = await session.execute(
         select(func.count(Chat.id)).where(
             Chat.is_active.is_(True),
@@ -9681,6 +10202,7 @@ async def api_admin_broadcasts_stats(
         "real_callback_clicks": int(click_metrics["callback_users"]),
         "real_callback_transitions": int(click_metrics["callback_groups"]),
         "real_callback_clicks_total": int(click_metrics["callback_total"]),
+        "real_reactions_total": int(click_metrics["reaction_total"]),
         "real_link_items": click_metrics.get("link_items") or [],
         "real_callback_items": click_metrics.get("callback_items") or [],
         "broadcast_url_tracking_configured": bool(tracking_cfg),
@@ -9904,7 +10426,7 @@ async def api_admin_broadcasts_stats(
             bots_ok = int(rok)
             bots_fail = int(rfail)
             groups_ok = groups_fail = 0
-        return {
+        x = {
             "broadcast_id": int(broadcast_id),
             "active_batch_id": active_batch,
             "batches": batches,
@@ -9922,6 +10444,8 @@ async def api_admin_broadcasts_stats(
             "connected_bots_total": connected_bots_total,
             **click_extras,
         }
+        x.update(_broadcast_stats_ctr_fields(x))
+        return _attach_broadcast_send_history(x)
 
     if active_batch.startswith("legacy:"):
         if wanted_target and not _target_matches_wanted(row_last_target):
@@ -9958,6 +10482,7 @@ async def api_admin_broadcasts_stats(
             "connected_bots_total": connected_bots_total,
             **click_extras,
         }
+        result.update(_broadcast_stats_ctr_fields(result))
         _log.warning(
             "broadcast stats legacy/live: id=%s target=%s batch=%s from_ts=%s to_ts=%s history_count=%s bots=%s groups=%s connected_groups_total=%s",
             int(broadcast_id),
@@ -9970,7 +10495,7 @@ async def api_admin_broadcasts_stats(
             result["groups"],
             connected_groups_total,
         )
-        return result
+        return _attach_broadcast_send_history(result)
     if active_batch == "__live__":
         if wanted_target and not _target_matches_wanted(row_last_target):
             bots_ok = bots_fail = groups_ok = groups_fail = 0
@@ -10006,6 +10531,7 @@ async def api_admin_broadcasts_stats(
             "connected_bots_total": connected_bots_total,
             **click_extras,
         }
+        result.update(_broadcast_stats_ctr_fields(result))
         _log.warning(
             "broadcast stats no-delivery: id=%s target=%s batch=%s from_ts=%s to_ts=%s history_count=%s bots=%s groups=%s connected_groups_total=%s",
             int(broadcast_id),
@@ -10018,7 +10544,7 @@ async def api_admin_broadcasts_stats(
             result["groups"],
             connected_groups_total,
         )
-        return result
+        return _attach_broadcast_send_history(result)
 
     if not has_delivery:
         if wanted_target and not _target_matches_wanted(row_last_target):
@@ -10033,7 +10559,7 @@ async def api_admin_broadcasts_stats(
             bots_fail = int(row.recipient_fail or 0)
             groups_ok = 0
             groups_fail = 0
-        return {
+        nd = {
             "broadcast_id": int(broadcast_id),
             "active_batch_id": active_batch,
             "batches": batches,
@@ -10055,6 +10581,8 @@ async def api_admin_broadcasts_stats(
             "connected_bots_total": connected_bots_total,
             **click_extras,
         }
+        nd.update(_broadcast_stats_ctr_fields(nd))
+        return _attach_broadcast_send_history(nd)
 
     q = await session.execute(
         select(
@@ -10175,6 +10703,7 @@ async def api_admin_broadcasts_stats(
         "connected_bots_total": connected_bots_total,
         **click_extras,
     }
+    result.update(_broadcast_stats_ctr_fields(result))
     _log.warning(
         "broadcast stats: id=%s target=%s batch=%s from_ts=%s to_ts=%s history_count=%s bots=%s groups=%s per_groups=%s errors=%s connected_groups_total=%s",
         int(broadcast_id),
@@ -10189,7 +10718,7 @@ async def api_admin_broadcasts_stats(
         len(errors),
         connected_groups_total,
     )
-    return result
+    return _attach_broadcast_send_history(result)
 
 
 @router.get("/admin/broadcasts/{broadcast_id}/autopost-stats")
@@ -10273,14 +10802,23 @@ async def api_admin_broadcasts_autopost_stats(
 
     posts_per_day = int(ap_dict.get("postsPerDay") or 0) if ap_dict else 0
 
+    bid_seen_draft = sorted({int(r.broadcast_id) for r in autopost_rows})
+    titles_bm_draft: dict[int, str] = {}
+    if bid_seen_draft:
+        bq_d = await session.execute(select(AdminBroadcast.id, AdminBroadcast.title).where(AdminBroadcast.id.in_(bid_seen_draft)))
+        for bid_x, ttl in bq_d.all():
+            titles_bm_draft[int(bid_x)] = str(ttl or "")
+
     runs_payload: list[dict] = []
     for r in autopost_rows[:80]:
         cat = getattr(r, "created_at", None)
         sat = getattr(r, "sent_at", None)
+        bid_r = int(r.broadcast_id)
         runs_payload.append(
             {
                 "id": int(r.id),
-                "broadcast_id": int(r.broadcast_id),
+                "broadcast_id": bid_r,
+                "broadcast_title": titles_bm_draft.get(bid_r, ""),
                 "target_kind": str(r.target_kind or ""),
                 "recipient_total": int(r.recipient_total or 0),
                 "recipient_ok": int(r.recipient_ok or 0),
@@ -10330,6 +10868,7 @@ def _autopost_campaign_public(row: AutopostCampaign) -> dict:
 async def api_admin_autopost_campaigns_list(
     user_id: int = Depends(require_init_data),
     session: AsyncSession = Depends(get_db),
+    ctr_days: int = Query(7, ge=0, le=30),
 ):
     await _require_broadcast_access(session, int(user_id))
     res = await session.execute(
@@ -10338,7 +10877,20 @@ async def api_admin_autopost_campaigns_list(
         .order_by(AutopostCampaign.id.desc())
     )
     rows = list(res.scalars().all())
-    return {"items": [_autopost_campaign_public(r) for r in rows]}
+    items = [_autopost_campaign_public(r) for r in rows]
+    if ctr_days > 0 and rows:
+        period = int(ctr_days)
+        for it, r in zip(items, rows):
+            try:
+                st = await _autopost_campaign_stats_payload(session, r, period)
+                g = st.get("groups") or {}
+                it["ctr"] = float(g.get("ctr") or 0)
+                it["stats_ctr_percent"] = st.get("stats_ctr_percent")
+                it["stats_ctr_mode"] = st.get("stats_ctr_mode")
+                it["stats_ctr_period_days"] = period
+            except Exception:
+                _log.exception("autopost campaign list ctr: id=%s", getattr(r, "id", 0))
+    return {"items": items}
 
 
 @router.post("/admin/autopost-campaigns")
@@ -10435,9 +10987,56 @@ async def api_admin_autopost_campaigns_patch(
             except ValueError as e:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
             row.autopost_json = json.dumps(ap, ensure_ascii=False)
+            bids_ap = ap.get("broadcast_ids") if isinstance(ap.get("broadcast_ids"), list) else []
+            if (
+                not bool(ap.get("use_all_broadcasts"))
+                and isinstance(bids_ap, list)
+                and bids_ap
+                and int(bids_ap[0] or 0) > 0
+            ):
+                try:
+                    row.anchor_broadcast_id = int(bids_ap[0])
+                except (TypeError, ValueError):
+                    pass
     await session.commit()
     await session.refresh(row)
     return _autopost_campaign_public(row)
+
+
+async def _stop_autopost_json_on_broadcast(session: AsyncSession, broadcast_id: int, owner_id: int) -> None:
+    """После удаления кампании якорный черновик с runState=running иначе продолжит слать сам по autopost_loop."""
+    from app.services.admin_broadcast import normalize_autopost_payload, sanitize_autopost_state
+
+    bid = int(broadcast_id or 0)
+    if not bid:
+        return
+    ab = await session.get(AdminBroadcast, bid)
+    if not ab or int(getattr(ab, "admin_telegram_id", 0) or 0) != int(owner_id):
+        return
+    raw_ap = (ab.autopost_json or "").strip()
+    if not raw_ap:
+        return
+    try:
+        parsed = json.loads(raw_ap)
+    except Exception:
+        ab.autopost_json = None
+        session.add(ab)
+        return
+    if not isinstance(parsed, dict):
+        ab.autopost_json = None
+        session.add(ab)
+        return
+    clean = {k: v for k, v in parsed.items() if k != "_state"}
+    ap = normalize_autopost_payload(clean) or clean
+    if isinstance(ap, dict):
+        ap["runState"] = "stopped"
+        ab.autopost_json = json.dumps(
+            {**ap, "_state": sanitize_autopost_state(parsed.get("_state"))},
+            ensure_ascii=False,
+        )
+    else:
+        ab.autopost_json = None
+    session.add(ab)
 
 
 @router.delete("/admin/autopost-campaigns/{campaign_id}")
@@ -10452,6 +11051,10 @@ async def api_admin_autopost_campaigns_delete(
     if not row or int(getattr(row, "admin_telegram_id", 0) or 0) != int(user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("resource_not_found"))
     raw = (row.autopost_json or "").strip()
+    bids_to_stop: set[int] = set()
+    anchor_bid = int(getattr(row, "anchor_broadcast_id", 0) or 0)
+    if anchor_bid > 0:
+        bids_to_stop.add(anchor_bid)
     if raw:
         try:
             parsed = json.loads(raw)
@@ -10463,28 +11066,81 @@ async def api_admin_autopost_campaigns_delete(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail=err_detail("stop_autopost_first"),
                     )
+                if ap:
+                    for x in ap.get("broadcast_ids") or []:
+                        xi = int(x or 0)
+                        if xi > 0:
+                            bids_to_stop.add(xi)
         except HTTPException:
             raise
         except Exception:
             pass
+    for bid in bids_to_stop:
+        await _stop_autopost_json_on_broadcast(session, bid, int(user_id))
     await session.delete(row)
     await session.commit()
     return {"ok": True}
 
 
-@router.get("/admin/autopost-campaigns/{campaign_id}/autopost-stats")
-async def api_admin_autopost_campaigns_autopost_stats(
-    campaign_id: int,
-    days: int = Query(1, ge=1, le=30),
-    user_id: int = Depends(require_init_data),
-    session: AsyncSession = Depends(get_db),
-):
-    from app.services.admin_broadcast import normalize_autopost_payload
+def _autopost_run_local_date(dt, tz) -> date | None:
+    """Дата в таймзоне кампании для naive-UTC из БД."""
+    from zoneinfo import ZoneInfo
 
-    row = await session.get(AutopostCampaign, int(campaign_id))
-    if not row or int(getattr(row, "admin_telegram_id", 0) or 0) != int(user_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("resource_not_found"))
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    if isinstance(tz, str):
+        try:
+            tz = ZoneInfo(tz)
+        except Exception:
+            tz = ZoneInfo("Europe/Moscow")
+    return dt.astimezone(tz).date()
 
+
+def _planned_autopost_slots_for_calendar_day(ap_dict: dict, local_day: date) -> int:
+    """Сколько слотов (постов) запланировано на календарный день — как очередь автопоста для этого дня."""
+    try:
+        n = int(ap_dict.get("postsPerDay") or 1)
+    except (TypeError, ValueError):
+        n = 1
+    n = max(1, min(288, n))
+    wd_list = ap_dict.get("weekdays") or []
+    try:
+        wd_set = {int(x) for x in wd_list}
+    except (TypeError, ValueError):
+        wd_set = set()
+    if int(local_day.weekday()) not in wd_set:
+        return 0
+    start_raw = str(ap_dict.get("startDate") or "").strip()
+    if start_raw:
+        try:
+            sy, sm, sd = start_raw.split("-")
+            start_d = date(int(sy), int(sm), int(sd))
+        except Exception:
+            start_d = None
+        else:
+            if start_d and local_day < start_d:
+                return 0
+    end_raw = str(ap_dict.get("endDate") or "").strip()
+    if end_raw:
+        try:
+            ey, em, ed = end_raw.split("-")
+            end_d = date(int(ey), int(em), int(ed))
+        except Exception:
+            end_d = None
+        else:
+            if end_d and local_day > end_d:
+                return 0
+    return n
+
+
+async def _autopost_campaign_stats_payload(session: AsyncSession, row: AutopostCampaign, days: int) -> dict:
+    """Показатели автокампании за период (тот же расчёт, что GET .../autopost-stats)."""
+    from app.services.admin_broadcast import broadcast_url_tracking_configured, normalize_autopost_payload
+    from zoneinfo import ZoneInfo
+
+    campaign_id = int(row.id)
     ap_dict: dict | None = None
     raw_ap = getattr(row, "autopost_json", None) or ""
     if raw_ap:
@@ -10527,6 +11183,25 @@ async def api_admin_autopost_campaigns_autopost_stats(
         runs = list(rq.scalars().all())
     autopost_rows = [r for r in runs if str(getattr(r, "run_source", None) or "") == "autopost"]
 
+    tz_name = str(ap_dict.get("timezone") or "Europe/Moscow") if ap_dict else "Europe/Moscow"
+    try:
+        camp_tz = ZoneInfo(tz_name)
+    except Exception:
+        camp_tz = ZoneInfo("Europe/Moscow")
+    today_local = datetime.now(camp_tz).date()
+    post_slots_planned_today = (
+        _planned_autopost_slots_for_calendar_day(ap_dict, today_local) if ap_dict else 0
+    )
+    post_slots_sent_today = 0
+    post_slots_with_fail_today = 0
+    for r in autopost_rows:
+        cat = getattr(r, "created_at", None)
+        if _autopost_run_local_date(cat, camp_tz) != today_local:
+            continue
+        post_slots_sent_today += 1
+        if int(getattr(r, "recipient_fail", 0) or 0) > 0:
+            post_slots_with_fail_today += 1
+
     def _is_bot_kind(tk: str) -> bool:
         t = (tk or "").lower()
         return t in {"user", "users", "bot", "bots"}
@@ -10553,14 +11228,23 @@ async def api_admin_autopost_campaigns_autopost_stats(
 
     posts_per_day = int(ap_dict.get("postsPerDay") or 0) if ap_dict else 0
 
+    bid_seen = sorted({int(r.broadcast_id) for r in autopost_rows})
+    titles_bm: dict[int, str] = {}
+    if bid_seen:
+        bq = await session.execute(select(AdminBroadcast.id, AdminBroadcast.title).where(AdminBroadcast.id.in_(bid_seen)))
+        for bid_x, ttl in bq.all():
+            titles_bm[int(bid_x)] = str(ttl or "")
+
     runs_payload: list[dict] = []
     for r in autopost_rows[:80]:
         cat = getattr(r, "created_at", None)
         sat = getattr(r, "sent_at", None)
+        bid_r = int(r.broadcast_id)
         runs_payload.append(
             {
                 "id": int(r.id),
-                "broadcast_id": int(r.broadcast_id),
+                "broadcast_id": bid_r,
+                "broadcast_title": titles_bm.get(bid_r, ""),
                 "target_kind": str(r.target_kind or ""),
                 "recipient_total": int(r.recipient_total or 0),
                 "recipient_ok": int(r.recipient_ok or 0),
@@ -10570,7 +11254,61 @@ async def api_admin_autopost_campaigns_autopost_stats(
             }
         )
 
-    from app.services.admin_broadcast import broadcast_url_tracking_configured
+    raw_clk_rows: list[tuple[int, datetime | None, str | None, str | None]] = []
+    if rotation_ids:
+        cq_clk = await session.execute(
+            select(
+                AdminBroadcastClick.broadcast_id,
+                AdminBroadcastClick.created_at,
+                AdminBroadcastClick.url,
+                AdminBroadcastClick.target_kind,
+            ).where(
+                AdminBroadcastClick.broadcast_id.in_(rotation_ids),
+                AdminBroadcastClick.created_at >= since,
+            )
+        )
+        raw_clk_rows = [(int(a), b, str(c or ""), str(d or "")) for a, b, c, d in cq_clk.all()]
+
+    utc_now_run = datetime.now(timezone.utc)
+    run_windows: dict[int, tuple[datetime, datetime]] = {}
+    by_brun: dict[int, list] = defaultdict(list)
+    for r in autopost_rows:
+        by_brun[int(r.broadcast_id)].append(r)
+    for lst in by_brun.values():
+        lst.sort(
+            key=lambda row: (_autopost_run_event_time(row) or datetime.min.replace(tzinfo=timezone.utc)),
+        )
+    for lst in by_brun.values():
+        for i, r_w in enumerate(lst):
+            t0 = _autopost_run_event_time(r_w)
+            if t0 is None:
+                continue
+            if i + 1 < len(lst):
+                tn = _autopost_run_event_time(lst[i + 1])
+                if tn is None:
+                    t1 = _ensure_utc_dt(utc_now_run) + timedelta(seconds=2)
+                else:
+                    t1 = tn
+            else:
+                t1 = _ensure_utc_dt(utc_now_run) + timedelta(seconds=2)
+            if t1 <= t0:
+                t1 = t0 + timedelta(microseconds=1)
+            run_windows[int(r_w.id)] = (t0, t1)
+
+    for pl in runs_payload:
+        rwid = int(pl.get("id") or 0)
+        bid_pl = int(pl.get("broadcast_id") or 0)
+        win = run_windows.get(rwid)
+        if not win or bid_pl <= 0:
+            pl["per_send_engagement"] = _empty_per_send_engagement()
+            continue
+        t0w, t1w = win
+        pl["per_send_engagement"] = _aggregate_engagement_click_window(
+            raw_clk_rows,
+            broadcast_id=bid_pl,
+            t0_inclusive=t0w,
+            t1_exclusive=t1w,
+        )
 
     cm = await _admin_broadcast_click_breakdown(session, bids=rotation_ids, since=since)
     clk_users = int(cm["users"])
@@ -10584,6 +11322,7 @@ async def api_admin_autopost_campaigns_autopost_stats(
         "real_callback_clicks": int(cm["callback_users"]),
         "real_callback_transitions": int(cm["callback_groups"]),
         "real_callback_clicks_total": int(cm["callback_total"]),
+        "real_reactions_total": int(cm["reaction_total"]),
         "real_link_items": cm.get("link_items") or [],
         "real_callback_items": cm.get("callback_items") or [],
         "broadcast_url_tracking_configured": bool(track_ok),
@@ -10597,6 +11336,9 @@ async def api_admin_autopost_campaigns_autopost_stats(
         "rotation_broadcast_ids": rotation_ids,
         "posts_per_day_config": posts_per_day,
         "autopost_slots_recorded": len(autopost_rows),
+        "post_slots_planned_today": int(post_slots_planned_today),
+        "post_slots_sent_today": int(post_slots_sent_today),
+        "post_slots_with_fail_today": int(post_slots_with_fail_today),
         "bots": {"recipient_ok": bots_ok, "recipient_fail": bots_fail, "recipient_total": bot_rec_total},
         "groups": {
             "recipient_ok": groups_ok,
@@ -10610,8 +11352,23 @@ async def api_admin_autopost_campaigns_autopost_stats(
         "real_transitions": int(clk_groups),
         "real_clicks_total": int(total_clk),
         "runs": runs_payload,
+        "stats_ctr_percent": round(float(ctr), 4) if delivered_total > 0 else None,
+        "stats_ctr_mode": "interactions",
         **ap_click_extras,
     }
+
+
+@router.get("/admin/autopost-campaigns/{campaign_id}/autopost-stats")
+async def api_admin_autopost_campaigns_autopost_stats(
+    campaign_id: int,
+    days: int = Query(1, ge=1, le=365),
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    row = await session.get(AutopostCampaign, int(campaign_id))
+    if not row or int(getattr(row, "admin_telegram_id", 0) or 0) != int(user_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("resource_not_found"))
+    return await _autopost_campaign_stats_payload(session, row, int(days))
 
 
 @router.post("/admin/broadcasts")
@@ -10627,6 +11384,8 @@ async def api_admin_broadcasts_create(
     body_text = str(body.get("body_text") or "")
     pm = parse_mode_or_none(body.get("parse_mode"))
     kbd = normalize_keyboard_rows(body.get("keyboard_rows"))
+    scope_raw = str(body.get("cabinet_draft_scope") or "").strip().lower()
+    cabinet_scope = scope_raw if scope_raw in ("oneshot", "autopost") else None
     row = AdminBroadcast(
         title=title,
         body_text=body_text,
@@ -10635,6 +11394,7 @@ async def api_admin_broadcasts_create(
         media_kind="none",
         admin_telegram_id=int(user_id),
         status="draft",
+        cabinet_draft_scope=cabinet_scope,
     )
     session.add(row)
     await session.commit()
@@ -10695,6 +11455,10 @@ async def api_admin_broadcasts_patch(
             except ValueError as e:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
             row.autopost_json = json.dumps(ap, ensure_ascii=False)
+
+    if "cabinet_draft_scope" in body:
+        s = str(body.get("cabinet_draft_scope") or "").strip().lower()
+        row.cabinet_draft_scope = s if s in ("oneshot", "autopost") else None
 
     if "title" in body:
         row.title = str(body.get("title") or "")[:255]
@@ -10914,7 +11678,8 @@ async def api_admin_broadcasts_delete(
     row = await session.get(AdminBroadcast, int(broadcast_id))
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("resource_not_found"))
-    if not full and int(getattr(row, "admin_telegram_id", 0) or 0) != int(user_id):
+    # Только владелец черновика — даже у сервисной «полной» админки, чтобы не затрагивать чужие кампании и посты.
+    if int(getattr(row, "admin_telegram_id", 0) or 0) != int(user_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("no_access_to_post"))
     if (row.status or "") == "sending":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("cannot_delete_during_active_send"))
@@ -11015,10 +11780,21 @@ async def api_admin_broadcasts_quote(
     partner_bonus = float(getattr(viewer, "bonus_credits", 0.0) or 0.0)
     spendable = round(payer_au, 2)
     can_afford = bool(full or int(cost_tokens) <= 0 or plan.can_afford)
+    req_n = len(body_chat_ids) if body_chat_ids else 0
+    res_n = len(target_chat_ids)
+    if req_n > res_n:
+        _log.warning(
+            "broadcast quote: requested %s chats, resolved %s (viewer=%s)",
+            req_n,
+            res_n,
+            int(user_id),
+        )
     return {
         "target": target,
         "n_users": int(n_users),
         "n_groups": int(n_groups),
+        "requested_chat_ids": int(req_n),
+        "resolved_chat_ids": [int(x) for x in target_chat_ids],
         "cost_tokens": int(cost_tokens),
         "broadcast_charge_applies": not full,
         "aurum_credits": aurum,
@@ -11103,12 +11879,22 @@ async def api_admin_broadcasts_send(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=err_detail("invalid_group_chat_ids"),
             )
+        req_n = len(body_chat_ids)
+        res_n = len(target_chat_ids)
+        if req_n > res_n:
+            _log.warning(
+                "broadcast send: id=%s requested %s chats, resolved %s (viewer=%s)",
+                int(broadcast_id),
+                req_n,
+                res_n,
+                int(user_id),
+            )
         _log.warning(
             "broadcast send groups filter: id=%s target=%s allow_all=%s selected=%s",
             int(broadcast_id),
             target,
             allow_all_groups,
-            len(target_chat_ids),
+            res_n,
         )
         if target == "groups" and not target_chat_ids:
             raise HTTPException(
@@ -11204,6 +11990,8 @@ async def api_admin_broadcasts_send(
         "id": int(broadcast_id),
         "target": target,
         "chat_ids_count": len(target_chat_ids),
+        "requested_chat_ids": len(body_chat_ids) if body_chat_ids else 0,
+        "resolved_chat_ids": [int(x) for x in target_chat_ids],
         "cost_tokens": int(cost_tokens),
         "spent_aurum": float(spent_aurum),
         "spent_bonus": float(spent_aurum),

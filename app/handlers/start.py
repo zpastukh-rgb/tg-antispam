@@ -10,8 +10,8 @@ from collections import OrderedDict
 from sqlalchemy import select, func, delete
 
 from aiogram import Router, F
-from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove
+from aiogram.filters import Command, CommandStart, BaseFilter
+from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.texts.bot_intro import START_INTRO_TEXT
@@ -71,6 +71,15 @@ def _is_expired_preview_command(text: str | None) -> bool:
     if "@" in lowered:
         lowered = lowered.split("@", 1)[0]
     return lowered == EXPIRED_PREVIEW_CMD
+
+
+class _ReminderPreviewDmFilter(BaseFilter):
+    """Только TRIAL / EXPIRED preview — чтобы не блокировать любой текст в личке (panel reply-клавиатура и т.п.)."""
+
+    async def __call__(self, message: Message) -> bool:
+        txt = getattr(message, "text", None) or ""
+        return _is_trial_preview_command(txt) or _is_expired_preview_command(txt)
+
 
 # =========================================================
 # CALLBACK KEYS
@@ -660,23 +669,23 @@ async def cmd_start(message: Message):
     if not message.from_user:
         return
 
-    dm_lang = await _get_user_lang(
-        int(message.from_user.id),
-        fallback_tg_language_code=getattr(message.from_user, "language_code", None),
-    )
-
     args = (message.text or "").strip().split()
     plain_start_only = len(args) == 1 and bool(
         re.match(r"^/start(?:@[A-Za-z0-9_]+)?$", (args[0] or "").strip(), re.I)
     )
-    # Дедуп только голого /start: повтор за 5 с не должен «молчать» — обновляем панель.
+    # До любых await: маркировка повторного голого /start и лёгкое обновление панели (см. lock в panel_dm._edit_panel).
     if plain_start_only and _should_skip_duplicate_start(message.from_user.id):
         try:
             from app.handlers.panel_dm import show_panel
-            await show_panel(message.bot, message.from_user.id)
+            await show_panel(message.bot, message.from_user.id, send_quick_reply_keyboard=True)
         except Exception:
             pass
         return
+
+    dm_lang = await _get_user_lang(
+        int(message.from_user.id),
+        fallback_tg_language_code=getattr(message.from_user, "language_code", None),
+    )
     # Deep link «принять права делегата чата»:
     # t.me/<bot>?start=admin_invite_<token>. См. ChatManagerInvite.token.
     if len(args) >= 2 and (args[1] or "").lower().startswith("admin_invite_"):
@@ -779,7 +788,7 @@ async def cmd_start(message: Message):
                     me = await message.bot.get_me()
                     username = me.username or "bot"
                     pick_url = f"https://t.me/{username}?startgroup=reportschat_{selected}"
-                    await message.answer("\u2063", reply_markup=ReplyKeyboardRemove())
+                    await panel_dm.dm_reply_keyboard_removed_send(message.bot, uid)
                     kb = InlineKeyboardBuilder()
                     kb.button(text=_i18n_t(dm_lang, "bot.start.reports_pick_btn"), url=pick_url)
                     kb.adjust(1)
@@ -841,9 +850,15 @@ async def cmd_start(message: Message):
         await _send_welcome_banner_if_any(message.bot, message.chat.id)
     try:
         from app.handlers.panel_dm import show_panel
-        await show_panel(message.bot, message.from_user.id)
+        await show_panel(message.bot, message.from_user.id, send_quick_reply_keyboard=True)
     except Exception:
         await _edit_or_send(message, await _start_text_for(message), start_kb(dm_lang))
+        try:
+            from app.handlers.panel_dm import ensure_dm_quick_reply_keyboard
+
+            await ensure_dm_quick_reply_keyboard(message.bot, message.from_user.id)
+        except Exception:
+            pass
     if connected_shared_cabinets > 0:
         try:
             from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -955,13 +970,10 @@ async def cb_panel(cb: CallbackQuery):
             pass
 
 
-@router.message(F.chat.type == "private", F.text)
+@router.message(F.chat.type == "private", _ReminderPreviewDmFilter())
 async def cmd_preview_commands(message: Message):
     """Служебные предпросмотры уведомлений: trial/expired."""
     is_trial = _is_trial_preview_command(message.text)
-    is_expired = _is_expired_preview_command(message.text)
-    if not is_trial and not is_expired:
-        return
     if not message.from_user:
         return
     try:

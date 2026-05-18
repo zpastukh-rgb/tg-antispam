@@ -33,6 +33,17 @@ function errToObj(e) {
   return { name: e.name ?? null, message: e.message ?? null, stack: typeof e.stack === 'string' ? e.stack.slice(0, 500) : null }
 }
 
+/** Валидация telegram username для списка доверенных ботов */
+const TG_BOT_UNAME_RE = /^[A-Za-z0-9_]{5,32}$/
+
+export function normalizeMentionTrustedBotInput(raw) {
+  const s = String(raw ?? '')
+    .trim()
+    .replace(/^@+/, '')
+  if (!TG_BOT_UNAME_RE.test(s)) return null
+  return s
+}
+
 function removeExistingRoot() {
   try {
     const old = document.getElementById(ROOT_ID)
@@ -139,7 +150,7 @@ export function buildMentionsGranularModalElement(opts) {
     'align-items:center',
     'justify-content:center',
     'background:rgba(0,0,0,0.78)',
-    'padding:16px',
+    'padding:20px',
     'box-sizing:border-box',
     'pointer-events:auto',
   ].join(';')
@@ -148,7 +159,7 @@ export function buildMentionsGranularModalElement(opts) {
   panel.setAttribute('data-guard-protection-filter-modal-panel', '')
   panel.style.cssText = [
     'width:100%',
-    'max-width:28rem',
+    'max-width:24rem',
     'max-height:90vh',
     'overflow-y:auto',
     'background:#101013',
@@ -175,9 +186,10 @@ export function buildMentionsGranularModalElement(opts) {
   head.appendChild(title)
   head.appendChild(closeBtn)
 
+  const hintTextTrim = String(opts?.hintText || '').trim()
   const hint = document.createElement('p')
   hint.style.cssText = 'margin:0 0 12px;font-size:12px;color:#a1a1aa;line-height:1.45'
-  hint.textContent = String(opts?.hintText || '')
+  hint.textContent = hintTextTrim
 
   const ownerHasPremium = opts?.ownerHasPremium !== false
 
@@ -188,6 +200,176 @@ export function buildMentionsGranularModalElement(opts) {
 
   const kindToggles = {}
   for (const k of (opts?.kinds || [])) {
+    if (k.key === 'bots') {
+      const li = document.createElement('li')
+      li.style.cssText = 'list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px'
+
+      const rowIsPremiumOnly = !!k.requiresPremium
+      const rowLocked = rowIsPremiumOnly && !ownerHasPremium
+      const baseRowStyle = [
+        'display:flex',
+        'align-items:center',
+        'justify-content:space-between',
+        'gap:12px',
+        'padding:10px 12px',
+        'border-radius:12px',
+      ]
+      const row = document.createElement('div')
+      if (rowLocked) {
+        row.style.cssText = [
+          ...baseRowStyle,
+          'border:1px solid rgba(234,179,8,0.38)',
+          'box-shadow:inset 0 0 0 1px rgba(250,204,21,0.12)',
+          'background:rgba(250,204,21,0.05)',
+        ].join(';')
+      } else {
+        row.style.cssText = [
+          ...baseRowStyle,
+          'border:1px solid rgba(255,255,255,0.06)',
+          'background:rgba(255,255,255,0.025)',
+        ].join(';')
+      }
+      const left = document.createElement('div')
+      left.style.cssText = 'display:flex;align-items:center;gap:10px;min-width:0;flex:1'
+      const icon = document.createElement('span')
+      icon.style.cssText = 'font-size:18px;line-height:1'
+      icon.textContent = String(k.icon || '•')
+      const lbl = document.createElement('span')
+      lbl.style.cssText =
+        'font-size:13px;font-weight:500;color:#ffffff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
+      lbl.textContent = String(k.label || k.key)
+      left.appendChild(icon)
+      left.appendChild(lbl)
+
+      const initialOn = !!(opts?.values?.[k.field])
+      const rowLockOpts = rowLocked && onPremiumLockFn ? { locked: true, onLockedTap: onPremiumLockFn } : null
+
+      const trustedWrap = document.createElement('div')
+      trustedWrap.style.cssText = [
+        'display:' + (initialOn ? 'flex' : 'none'),
+        'flex-direction:column',
+        'gap:8px',
+        'padding:10px 12px',
+        'border-radius:12px',
+        'border:1px solid rgba(255,255,255,0.08)',
+        'background:rgba(0,0,0,0.22)',
+      ].join(';')
+
+      const titleTb = document.createElement('p')
+      titleTb.style.cssText = 'margin:0;font-size:12px;font-weight:600;color:#e5e7eb'
+      titleTb.textContent = String(opts?.trustedBotsTitleText || '')
+
+      const hintTb = document.createElement('p')
+      hintTb.style.cssText = 'margin:0;font-size:11px;color:#9ca3af;line-height:1.45'
+      hintTb.textContent = String(opts?.trustedBotsHintText || '')
+
+      const chips = document.createElement('div')
+      chips.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;align-items:center'
+
+      let trustedArr = (Array.isArray(opts?.mentionTrustedBots) ? opts.mentionTrustedBots : [])
+        .map((x) => String(x ?? '').trim().replace(/^@+/, ''))
+        .filter((x) => TG_BOT_UNAME_RE.test(x))
+      {
+        const seen = new Set()
+        trustedArr = trustedArr.filter((x) => {
+          const low = x.toLowerCase()
+          if (seen.has(low)) return false
+          seen.add(low)
+          return true
+        })
+      }
+
+      const syncList = (next) => {
+        try {
+          opts?.onMentionTrustedBotsChange?.(next)
+        } catch (e) {
+          guardFilterChain('MentionsGranularVanilla', 'trustedBots:change_throw', errToObj(e))
+        }
+      }
+
+      const renderChips = () => {
+        chips.replaceChildren()
+        for (const name of trustedArr) {
+          const chip = document.createElement('span')
+          chip.style.cssText =
+            'display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.06);font-size:11px;color:#e5e7eb'
+          const lab = document.createElement('span')
+          lab.textContent = `@${name}`
+          const xb = document.createElement('button')
+          xb.type = 'button'
+          xb.setAttribute('aria-label', 'remove')
+          xb.style.cssText =
+            'border:0;padding:0;background:transparent;color:#f87171;cursor:pointer;font-size:14px;line-height:1'
+          xb.textContent = '×'
+          xb.addEventListener('click', () => {
+            const next = trustedArr.filter((n) => n.toLowerCase() !== name.toLowerCase())
+            trustedArr = next
+            renderChips()
+            syncList(next)
+          })
+          chip.appendChild(lab)
+          chip.appendChild(xb)
+          chips.appendChild(chip)
+        }
+      }
+      renderChips()
+
+      const addRow = document.createElement('div')
+      addRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;align-items:center'
+      const inp = document.createElement('input')
+      inp.type = 'text'
+      inp.autocomplete = 'off'
+      inp.placeholder = String(opts?.trustedBotsPlaceholderText || '@username')
+      inp.style.cssText =
+        'flex:1;min-width:140px;padding:8px 10px;border-radius:10px;border:1px solid rgba(255,255,255,0.12);background:rgba(0,0,0,0.35);color:#e5e7eb;font-size:13px'
+      const addBtn = document.createElement('button')
+      addBtn.type = 'button'
+      addBtn.textContent = String(opts?.trustedBotsAddText || 'OK')
+      addBtn.style.cssText =
+        'padding:8px 12px;border-radius:10px;border:1px solid rgba(16,185,129,0.45);background:rgba(16,185,129,0.22);color:#d1fae5;font-size:12px;font-weight:600;cursor:pointer'
+      addBtn.addEventListener('click', () => {
+        const v = normalizeMentionTrustedBotInput(inp.value)
+        if (!v) return
+        if (trustedArr.some((n) => n.toLowerCase() === v.toLowerCase())) {
+          inp.value = ''
+          return
+        }
+        if (trustedArr.length >= 50) return
+        inp.value = ''
+        trustedArr = [...trustedArr, v]
+        renderChips()
+        syncList(trustedArr)
+      })
+
+      addRow.appendChild(inp)
+      addRow.appendChild(addBtn)
+
+      trustedWrap.appendChild(titleTb)
+      trustedWrap.appendChild(hintTb)
+      trustedWrap.appendChild(chips)
+      trustedWrap.appendChild(addRow)
+
+      const toggle = buildIosToggle(
+        initialOn,
+        (next) => {
+          try {
+            trustedWrap.style.display = next ? 'flex' : 'none'
+            opts?.onToggleKind?.(k.field, next)
+          } catch (e) {
+            guardFilterChain('MentionsGranularVanilla', 'toggleKind:throw', { field: k.field, ...errToObj(e) })
+          }
+        },
+        rowLockOpts,
+      )
+      kindToggles[k.field] = toggle
+      row.appendChild(left)
+      row.appendChild(toggle.wrap)
+      li.appendChild(row)
+      li.appendChild(trustedWrap)
+      list.appendChild(li)
+      continue
+    }
+
     const li = document.createElement('li')
     const rowIsPremiumOnly = !!k.requiresPremium
     const rowLocked = rowIsPremiumOnly && !ownerHasPremium
@@ -225,8 +407,7 @@ export function buildMentionsGranularModalElement(opts) {
     left.appendChild(lbl)
 
     const initialOn = !!(opts?.values?.[k.field])
-    const rowLockOpts =
-      rowLocked && onPremiumLockFn ? { locked: true, onLockedTap: onPremiumLockFn } : null
+    const rowLockOpts = rowLocked && onPremiumLockFn ? { locked: true, onLockedTap: onPremiumLockFn } : null
     const toggle = buildIosToggle(
       initialOn,
       (next) => {
@@ -327,7 +508,7 @@ export function buildMentionsGranularModalElement(opts) {
   massCard.appendChild(sliderRow)
 
   panel.appendChild(head)
-  panel.appendChild(hint)
+  if (hintTextTrim) panel.appendChild(hint)
   panel.appendChild(list)
   panel.appendChild(massCard)
   root.appendChild(panel)

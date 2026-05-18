@@ -161,12 +161,16 @@ function goManageChats() {
   <div class="relative w-full min-w-0 max-w-full pb-1 pt-0 text-slate-100">
     <div class="pb-1 pl-0 pr-2 pt-0 md:pb-1.5 md:pr-2.5">
       <div class="flex items-start gap-0">
-        <div class="relative mt-1 -ml-3 flex h-28 w-28 shrink-0 items-center justify-center self-start md:-ml-3.5">
+        <div
+          class="relative -mt-0.5 -ml-3 flex h-28 w-28 shrink-0 items-center justify-center self-start md:-ml-3.5"
+          :class="!tariffIsPremium ? 'overflow-hidden' : ''"
+        >
           <img
             :src="dashboardAvatarSrc"
             alt=""
             draggable="false"
             class="block h-28 w-28 max-h-[7rem] max-w-[7rem] object-contain object-top"
+            :class="!tariffIsPremium ? 'origin-top scale-[1.07]' : ''"
             @dragstart.prevent
           >
         </div>
@@ -221,28 +225,37 @@ function goManageChats() {
           </div>
 
           <div class="mt-2 w-full min-w-0 sm:mt-2.5">
-            <div class="flex w-full min-w-0 items-stretch justify-between divide-x divide-white/[0.07]">
+            <div class="relative isolate px-2 py-2.5 sm:px-3 sm:py-3">
+              <div
+                aria-hidden="true"
+                class="pointer-events-none absolute inset-0 rounded-xl bg-black/40 backdrop-blur-[7px]"
+                style="
+                  -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 12%, #000 88%, transparent 100%);
+                  mask-image: linear-gradient(90deg, transparent 0%, #000 12%, #000 88%, transparent 100%);
+                "
+              />
+              <div class="relative flex w-full min-w-0 items-stretch justify-between divide-x divide-white/[0.09]">
               <div class="flex min-w-0 flex-1 flex-col items-center px-1.5 text-center sm:px-2">
-                <p class="w-full text-[8px] font-semibold uppercase tracking-wide text-white/45">{{ t('cabinet_stats.hero.col_deleted') }}</p>
-                <p class="mt-0.5 w-full text-[15px] font-extrabold tabular-nums leading-none text-white sm:text-[16px]">
+                <p class="w-full text-[9px] font-semibold uppercase tracking-wide text-white sm:text-[10px]">{{ t('cabinet_stats.hero.col_deleted') }}</p>
+                <p class="mt-0.5 w-full text-[16px] font-extrabold tabular-nums leading-none text-white sm:text-[17px]">
                   {{ activitySummary?.today?.deleted ?? 0 }}
                 </p>
-                <p class="mt-0.5 w-full text-[9px] font-medium leading-tight text-lime-400/95">{{ t('cabinet_stats.hero.col_messages') }}</p>
+                <p class="mt-0.5 w-full text-[10px] font-medium leading-tight text-lime-400/95 sm:text-[11px]">{{ t('cabinet_stats.hero.col_messages') }}</p>
               </div>
               <div class="flex min-w-0 flex-1 flex-col items-center px-1.5 text-center sm:px-2">
-                <p class="w-full text-[8px] font-semibold uppercase tracking-wide text-white/45">{{ t('cabinet_stats.hero.col_saved') }}</p>
-                <p class="mt-0.5 w-full whitespace-nowrap text-center text-[12px] font-extrabold tabular-nums leading-none text-white sm:text-[13px]">
+                <p class="w-full text-[9px] font-semibold uppercase tracking-wide text-white sm:text-[10px]">{{ t('cabinet_stats.hero.col_saved') }}</p>
+                <p class="mt-0.5 w-full whitespace-nowrap text-center text-[13px] font-extrabold tabular-nums leading-none text-white sm:text-[14px]">
                   ~ {{ fmtRubInt(dashboardEstimatedSavedRub) }} ₽
                 </p>
-                <p class="mt-0.5 w-full text-[9px] font-medium leading-tight text-lime-400/95">{{ t('cabinet_stats.hero.col_for_admins') }}</p>
+                <p class="mt-0.5 w-full text-[10px] font-medium leading-tight text-lime-400/95 sm:text-[11px]">{{ t('cabinet_stats.hero.col_for_admins') }}</p>
               </div>
               <div class="flex min-w-0 flex-1 flex-col items-center px-1.5 text-center sm:px-2">
-                <p class="w-full whitespace-nowrap text-[8px] font-semibold uppercase leading-tight tracking-wide text-white/45">
+                <p class="w-full whitespace-nowrap text-[9px] font-semibold uppercase leading-tight tracking-wide text-white sm:text-[10px]">
                   {{ t('cabinet_stats.hero.col_level') }}
                 </p>
                 <div class="mt-0.5 flex w-full min-w-0 flex-col items-stretch gap-1">
                   <p
-                    class="text-center text-[13px] font-extrabold leading-tight sm:text-[14px]"
+                    class="text-center text-[14px] font-extrabold leading-tight sm:text-[15px]"
                     :class="dashboardProtectionLevelMeta.labelClass"
                   >
                     {{ dashboardProtectionLevelMeta.label }}
@@ -263,6 +276,7 @@ function goManageChats() {
                     />
                   </div>
                 </div>
+              </div>
               </div>
             </div>
           </div>

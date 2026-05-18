@@ -25,7 +25,16 @@ import {
   fetchChatRulesPhotoPreviewUrl,
   deleteChatRulesPhoto,
 } from '../api/client'
-import { normalizeHtmlForTelegram } from '../utils/telegramHtmlForTg'
+import { normalizeHtmlForTelegram, telegramHtmlToEditorInnerHtml } from '../utils/telegramHtmlForTg'
+import {
+  editorSplitBlockquoteAtCaret,
+  editorSoftBreakInsideBlockquote,
+  editorPlaceCaretAtEditableStart,
+  editorResetTypingExecCommands,
+  editorUnwrapRangeInsideContainer,
+  editorUnwrapElementFully,
+  editorApplyMonospaceFormat,
+} from '../utils/richEditorDom'
 import {
   isTwoFaPinRequiredForAction,
   verifyPinDigits,
@@ -61,6 +70,7 @@ const showStopwordsModal = ref(false)
 const showLinksFilterModal = ref(false)
 const showMentionsFilterModal = ref(false)
 const showMediaFilterModal = ref(false)
+const mediaTrustedDraft = ref('')
 const showButtonsFilterModal = ref(false)
 const showChannelPostsFilterModal = ref(false)
 onMounted(() => {
@@ -306,25 +316,6 @@ function openProtectionFilterModal(which, source) {
     return
   }
 
-  if (which === 'media') {
-    try {
-      resetLegacyMediaModeIfNeeded()
-    } catch {}
-  }
-  const canMigrateToGranular = canUsePremiumForCurrentChat.value
-  // При первом открытии тихий сброс legacy для кнопок и постов каналов — только если чат уже на Premium.
-  if (which === 'buttons' && canMigrateToGranular) {
-    try {
-      resetLegacyButtonsModeIfNeeded()
-    } catch {}
-  }
-  // Channel posts: то же самое для filter_channel_posts_enabled — переход на гранулярную модель.
-  if (which === 'channelPosts' && canMigrateToGranular) {
-    try {
-      resetLegacyChannelPostsIfNeeded()
-    } catch {}
-  }
-
   const flags = protectionFilterModalFlags(which)
 
   const emitLogs = () => {
@@ -463,18 +454,18 @@ const showNewbieInfoModal = ref(false)
 const showAntispamInfoModal = ref(false)
 const showAntispamListModal = ref(false)
 const showPublicAlertsHelpModal = ref(false)
-/** Модалка «Ограничения Free» при попытке открыть Premium-функции без подписки */
-const showFreeLimitsPremiumModal = ref(false)
 const showPublicAlertsStyleHelpModal = ref(false)
 const showPublicAlertsSettingsModal = ref(false)
 const showGuardianPeriodicHelpModal = ref(false)
 const showJoinCaptchaInfoModal = ref(false)
 const showJoinCaptchaSettingsModal = ref(false)
 const showFilterMediaCaptchaSettingsModal = ref(false)
+const joinCaptchaKindHintOpen = ref(null)
 const showSpamSpikeSettingsModal = ref(false)
 const showSpamSpikeInfoModal = ref(false)
 const showWelcomeSettingsModal = ref(false)
 const showPostRulesSettingsModal = ref(false)
+const showPostRulesAutosendModal = ref(false)
 const postRulesGroupInfoOpen = ref(false)
 const postRulesSendBusy = ref(false)
 const postRulesBusy = ref(false)
@@ -497,14 +488,30 @@ const postRulesGroupFullPreviewRow = ref(null)
 const showPostRulesGroupFullPreview = ref(false)
 const showPostRulesButtonsModal = ref(false)
 const postRulesLinkModalOpen = ref(false)
-const postRulesLinkUrl = ref('https://')
+const postRulesLinkUrlPath = ref('')
 const postRulesLinkRange = ref(null)
+const postRulesEmojiOpen = ref(false)
+const postRulesEmojiPickerReady = ref(false)
 const showWelcomeButtonsModal = ref(false)
 const welcomeBodyRef = ref(null)
 const welcomeBodyHtml = ref('')
-const welcomeFormatState = ref({ bold: false, italic: false, underline: false, strike: false, spoiler: false, link: false })
+const welcomeFormatState = ref({
+  bold: false,
+  italic: false,
+  underline: false,
+  strike: false,
+  spoiler: false,
+  link: false,
+  quote: false,
+  code: false,
+  pre: false,
+})
+const WELCOME_PLACEHOLDERS = Object.freeze(['{first_name}', '{full_name}', '{username}', '{chat_title}'])
+const welcomeActivePlaceholder = ref('')
+/** Кэш миниатюр приветствия по chatId — не тянем полный файл с сервера при каждом открытии модалки. */
+const welcomePhotoThumbByChatId = new Map()
 const welcomeLinkModalOpen = ref(false)
-const welcomeLinkUrl = ref('https://')
+const welcomeLinkUrlPath = ref('')
 const welcomeLinkRange = ref(null)
 const welcomeSavedRange = ref(null)
 const welcomeButtonRows = ref([[{ text: '', url: '', web_app_url: '', callback_data: '' }]])
@@ -513,7 +520,7 @@ const postRulesBodyRef = ref(null)
 const postRulesHistory = ref([])
 const postRulesHistoryIndex = ref(-1)
 const postRulesSavedRange = ref(null)
-const postRulesFormatState = ref({ bold: false, italic: false, underline: false, strike: false })
+const postRulesFormatState = ref({ bold: false, italic: false, underline: false, strike: false, quote: false, link: false })
 const welcomeHistory = ref([])
 const welcomeHistoryIndex = ref(-1)
 const chatsList = ref([])
@@ -833,13 +840,7 @@ onMounted(async () => {
     void loadReputationPanel()
     saveCurrentChatCache(data)
     void loadSpikeAlerts()
-    void fetchSilent(() => api.globalAntispamList())
-      .then((antispam) => {
-        antispamItems.value = antispam?.items || []
-      })
-      .catch(() => {
-        antispamItems.value = []
-      })
+    void hydrateGlobalAntispamList()
     guardLog('Protection', 'chat rule snapshot', {
       chatId: data?.id,
       public_alerts_enabled: data?.rule?.public_alerts_enabled,
@@ -895,6 +896,41 @@ onBeforeUnmount(() => {
   if (document?.body?.style) document.body.style.overflow = ''
 })
 
+function welcomeCaretSemanticFlags() {
+  const el = welcomeBodyRef.value
+  const sel = window.getSelection?.()
+  if (!el || !sel?.focusNode) {
+    return { quote: false, spoiler: false, link: false, code: false, pre: false }
+  }
+  if (!sel.rangeCount || !el.contains(sel.focusNode)) {
+    return { quote: false, spoiler: false, link: false, code: false, pre: false }
+  }
+  let n = sel.focusNode.nodeType === Node.TEXT_NODE ? sel.focusNode.parentElement : sel.focusNode
+  let quote = false
+  let spoiler = false
+  let link = false
+  let code = false
+  let pre = false
+  while (n && n !== el) {
+    if (n instanceof HTMLElement) {
+      const tag = String(n.tagName || '').toLowerCase()
+      if (tag === 'blockquote') quote = true
+      if (tag === 'span' && String(n.getAttribute('data-spoiler') || '') === '1') spoiler = true
+      if (tag === 'tg-spoiler') spoiler = true
+      if (tag === 'a') link = true
+      if (tag === 'pre') pre = true
+      if (tag === 'code') code = true
+    }
+    n = n.parentElement
+  }
+  if (pre) code = false
+  return { quote, spoiler, link, code, pre }
+}
+
+function welcomeFormatPresetClass(on) {
+  return on ? 'post-rules-tool-active' : ''
+}
+
 function onWelcomeEditorSelectionChange() {
   const sel = window.getSelection?.()
   if (!sel || !sel.rangeCount) return
@@ -903,17 +939,19 @@ function onWelcomeEditorSelectionChange() {
   if (!editor) return
   if (!editor.contains(range.startContainer)) return
   welcomeSavedRange.value = range.cloneRange()
-  const from = range.startContainer instanceof Element ? range.startContainer : range.startContainer?.parentElement
-  const spoilerEl = from?.closest?.('[data-spoiler="1"], tg-spoiler')
-  const linkEl = from?.closest?.('a')
+  const sem = welcomeCaretSemanticFlags()
   welcomeFormatState.value = {
     bold: !!document.queryCommandState('bold'),
     italic: !!document.queryCommandState('italic'),
     underline: !!document.queryCommandState('underline'),
     strike: !!document.queryCommandState('strikeThrough'),
-    spoiler: !!spoilerEl,
-    link: !!linkEl,
+    spoiler: sem.spoiler,
+    link: sem.link,
+    quote: sem.quote,
+    code: sem.code,
+    pre: sem.pre,
   }
+  welcomeUpdateActivePlaceholder()
 }
 
 watch(
@@ -1022,13 +1060,7 @@ async function retryProtectionChatPayload() {
     void loadReputationPanel()
     saveCurrentChatCache(data)
     void loadSpikeAlerts()
-    void fetchSilent(() => api.globalAntispamList())
-      .then((antispam) => {
-        antispamItems.value = antispam?.items || []
-      })
-      .catch(() => {
-        antispamItems.value = []
-      })
+    void hydrateGlobalAntispamList()
     if (spikeAlertsTimer) clearInterval(spikeAlertsTimer)
     spikeAlertsTimer = setInterval(loadSpikeAlerts, 30000)
   } catch (e) {
@@ -1134,6 +1166,7 @@ async function switchChat(chatId) {
     void loadReputationPanel()
     saveCurrentChatCache(data)
     void loadSpikeAlerts()
+    void hydrateGlobalAntispamList()
   } catch (e) {
     selectedChatId.value = prevId
     guardWarn('Protection', `switchChat(${chatId}) failed`, e)
@@ -1175,14 +1208,6 @@ function goToPremiumBilling() {
   void router.push({ path: '/', query: q })
 }
 
-function openFreeLimitsPremiumModal() {
-  showFreeLimitsPremiumModal.value = true
-}
-
-function closeFreeLimitsPremiumModal() {
-  showFreeLimitsPremiumModal.value = false
-}
-
 function openPremiumLock(feature, opts = {}) {
   openLock({ feature, me: lastMeSnapshot.value, ...opts })
 }
@@ -1217,60 +1242,89 @@ function onSpamSpikeNotifyManagersToggle() {
   updateRule({ spam_spike_notify_managers: !chat.value.rule.spam_spike_notify_managers })
 }
 
-/** Переход на лендинг тарифа, блок «Premium» */
-function onFreeLimitsModalLearnMore() {
-  showFreeLimitsPremiumModal.value = false
-  void router.push({ path: '/', query: { ...route.query, section: 'billing', scroll: 'pitch' } })
+function onSpamSpikeMasterToggleClick() {
+  if (!chat.value?.rule) return
+  if (premiumFeatureLocked.value) {
+    openPremiumLock('spam_spike')
+    return
+  }
+  updateRule({ spam_spike_enabled: !chat.value.rule.spam_spike_enabled })
 }
 
-function withPremiumForCurrentChatOrModal(fn) {
+function onSpamSpikeConfigureClick() {
+  if (premiumFeatureLocked.value) {
+    openPremiumLock('spam_spike')
+    return
+  }
+  showSpamSpikeSettingsModal.value = true
+}
+
+function onSpamSpikeMinDeletesPick(n) {
+  if (premiumFeatureLocked.value) {
+    openPremiumLock('spam_spike')
+    return
+  }
+  updateRule({ spam_spike_min_deletes: n })
+}
+
+function onSpamSpikeWindowPick(m) {
+  if (premiumFeatureLocked.value) {
+    openPremiumLock('spam_spike')
+    return
+  }
+  updateRule({ spam_spike_window_minutes: m })
+}
+
+function withPremiumForCurrentChatOrModal(fn, feature = 'protection_bundle') {
   if (canUsePremiumForCurrentChat.value) {
     fn?.()
     return true
   }
-  openFreeLimitsPremiumModal()
+  openPremiumLock(feature)
   return false
 }
 
 function onSilenceConfigureClick() {
-  withPremiumForCurrentChatOrModal(() => {
-    showSilencePickerModal.value = true
-  })
+  withPremiumForCurrentChatOrModal(
+    () => {
+      showSilencePickerModal.value = true
+    },
+    'protection_bundle',
+  )
 }
 
 function onAntinakrutkaOpenSettingsClick() {
-  withPremiumForCurrentChatOrModal(() => {
-    showAntinakrutkaSettingsModal.value = true
-  })
+  if (!canUsePremiumForCurrentChat.value) {
+    openPremiumLock('protection_bundle')
+    return
+  }
+  showAntinakrutkaSettingsModal.value = true
 }
 
 function onJoinCaptchaToggleClick() {
   withPremiumForCurrentChatOrModal(() =>
-    updateRule({ join_captcha_enabled: !chat.value.rule.join_captcha_enabled }),
-  )
+    updateRule({ join_captcha_enabled: !chat.value.rule.join_captcha_enabled }), 'captcha_kinds')
 }
 
 function onJoinCaptchaOpenSettingsClick() {
   withPremiumForCurrentChatOrModal(() => {
     showJoinCaptchaSettingsModal.value = true
-  })
+  }, 'captcha_kinds')
 }
 
 function onNewbieToggleClick() {
-  withPremiumForCurrentChatOrModal(() =>
-    updateRule({ newbie_enabled: !chat.value.rule.newbie_enabled }),
-  )
+  if (!chat.value?.rule) return
+  updateRule({ newbie_enabled: !chat.value.rule.newbie_enabled })
 }
 
 function onAntispamDbToggleClick() {
   withPremiumForCurrentChatOrModal(() =>
-    updateRule({ use_global_antispam_db: !chat.value.rule.use_global_antispam_db }),
-  )
+    updateRule({ use_global_antispam_db: !chat.value.rule.use_global_antispam_db }), 'global_antispam')
 }
 
 function onCopySettingsBarClick() {
   if (!canUsePremiumForCurrentChat.value && (chatsList.value || []).length > 1) {
-    openFreeLimitsPremiumModal()
+    openPremiumLock('generic')
     return
   }
   doCopySettings()
@@ -1278,12 +1332,11 @@ function onCopySettingsBarClick() {
 
 function onAntinakrutkaMainToggleClick() {
   withPremiumForCurrentChatOrModal(() =>
-    updateRule({ antinakrutka_enabled: !chat.value.rule.antinakrutka_enabled }),
-  )
+    updateRule({ antinakrutka_enabled: !chat.value.rule.antinakrutka_enabled }), 'protection_bundle')
 }
 
 function onSilencePresetPick(value) {
-  withPremiumForCurrentChatOrModal(() => updateRule({ silence_minutes: value }))
+  withPremiumForCurrentChatOrModal(() => updateRule({ silence_minutes: value }), 'protection_bundle')
 }
 
 function onGuardianIntervalPick(h) {
@@ -1297,7 +1350,7 @@ function onGuardianIntervalPick(h) {
 function onAntispamListButtonClick() {
   withPremiumForCurrentChatOrModal(() => {
     showAntispamListModal.value = true
-  })
+  }, 'global_antispam')
 }
 
 function pickerProtectionOn(c) {
@@ -1509,6 +1562,76 @@ function mediaRowCaptchaBtnClass() {
     : 'border border-white/[0.12] bg-zinc-800/75 text-zinc-500'
 }
 
+const MEDIA_TRUSTED_USERS_MAX = 50
+
+function normalizeMediaTrustedToken(raw) {
+  const s = String(raw || '').trim()
+  if (!s) return null
+  const x = s.replace(/^@+/u, '').trim()
+  if (!x) return null
+  if (/^\d{1,20}$/.test(x)) return x
+  if (/^[A-Za-z0-9_]{5,32}$/.test(x)) return x.toLowerCase()
+  return null
+}
+
+function mediaTrustedChipLabel(entry) {
+  const e = String(entry || '').trim()
+  if (/^\d+$/.test(e)) return e
+  return `@${e}`
+}
+
+async function addMediaTrustedUser() {
+  const token = normalizeMediaTrustedToken(mediaTrustedDraft.value)
+  if (!token || !chat.value?.rule) return
+  const prev = Array.isArray(chat.value.rule.media_trusted_users)
+    ? [...chat.value.rule.media_trusted_users]
+    : []
+  if (prev.length >= MEDIA_TRUSTED_USERS_MAX) return
+  const key = /^\d+$/.test(token) ? `id:${token}` : `u:${token.toLowerCase()}`
+  const existing = new Set(
+    prev.map((p) => {
+      const xs = String(p || '')
+        .trim()
+        .replace(/^@+/u, '')
+      if (/^\d+$/.test(xs)) return `id:${xs}`
+      return `u:${xs.toLowerCase()}`
+    }),
+  )
+  if (existing.has(key)) {
+    mediaTrustedDraft.value = ''
+    return
+  }
+  const next = [...prev, token]
+  chat.value.rule.media_trusted_users = next
+  mediaTrustedDraft.value = ''
+  try {
+    await updateRule({ media_trusted_users: next })
+  } catch (e) {
+    chat.value.rule.media_trusted_users = prev
+    try {
+      guardFilterChain('Protection', 'mediaTrusted:add:error', { name: e?.name, message: e?.message })
+    } catch {}
+  }
+}
+
+async function removeMediaTrustedUser(entry) {
+  if (!chat.value?.rule) return
+  const prev = Array.isArray(chat.value.rule.media_trusted_users)
+    ? [...chat.value.rule.media_trusted_users]
+    : []
+  const rm = String(entry || '').trim()
+  const next = prev.filter((x) => String(x) !== rm)
+  chat.value.rule.media_trusted_users = next
+  try {
+    await updateRule({ media_trusted_users: next })
+  } catch (e) {
+    chat.value.rule.media_trusted_users = prev
+    try {
+      guardFilterChain('Protection', 'mediaTrusted:remove:error', { name: e?.name, message: e?.message })
+    } catch {}
+  }
+}
+
 async function toggleMediaKind(field) {
   if (!chat.value?.rule || !field) return
   const kind = MEDIA_FILTER_KINDS.find((k) => k.field === field)
@@ -1538,21 +1661,6 @@ async function toggleMediaKind(field) {
       guardFilterChain('Protection', 'toggleMediaKind:error', { field, name: e?.name, message: e?.message })
     } catch {}
   }
-}
-
-// Тихо сбрасывает legacy filter_media_mode → 'allow' при первом открытии модалки.
-// Гранулярные тогглы стартуют как они есть в БД (по умолчанию все false → ничего не запрещено).
-// Идемпотентно: если режим уже 'allow', ничего не делает.
-function resetLegacyMediaModeIfNeeded() {
-  const rule = chat.value?.rule
-  if (!rule) return
-  const mode = String(rule.filter_media_mode || 'allow').toLowerCase()
-  if (mode === 'allow') return
-  rule.filter_media_mode = 'allow'
-  try { guardFilterChain('Protection', 'mediaMode:legacy_reset', { from: mode }) } catch {}
-  updateRule({ filter_media_mode: 'allow' }).catch((e) => {
-    try { guardFilterChain('Protection', 'mediaMode:legacy_reset_error', { name: e?.name, message: e?.message }) } catch {}
-  })
 }
 
 // Гранулярные тогглы по типу кнопок — порядок в массиве = порядок в UI.
@@ -1658,19 +1766,6 @@ function setButtonMassThreshold(value) {
   }, 300)
 }
 
-// Тихо сбрасывает legacy filter_buttons_mode → 'allow' при первом открытии модалки.
-function resetLegacyButtonsModeIfNeeded() {
-  const rule = chat.value?.rule
-  if (!rule) return
-  const mode = String(rule.filter_buttons_mode || 'allow').toLowerCase()
-  if (mode === 'allow') return
-  rule.filter_buttons_mode = 'allow'
-  try { guardFilterChain('Protection', 'buttonsMode:legacy_reset', { from: mode }) } catch {}
-  updateRule({ filter_buttons_mode: 'allow' }).catch((e) => {
-    try { guardFilterChain('Protection', 'buttonsMode:legacy_reset_error', { name: e?.name, message: e?.message }) } catch {}
-  })
-}
-
 // Гранулярные тогглы по типу sender_chat / forward (модалка «Сообщения от каналов»).
 const CHANNEL_POST_FILTER_KINDS = Object.freeze([
   { key: 'channels', field: 'filter_channel_post_channels', icon: '🔊' },
@@ -1721,19 +1816,6 @@ async function toggleChannelPostKind(field) {
       guardFilterChain('Protection', 'toggleChannelPostKind:error', { field, name: e?.name, message: e?.message })
     } catch {}
   }
-}
-
-// Тихо сбрасывает legacy filter_channel_posts_enabled=false при первом открытии модалки.
-// Гранулярные тогглы стартуют как они есть в БД (по умолчанию все false → ничего не запрещено).
-function resetLegacyChannelPostsIfNeeded() {
-  const rule = chat.value?.rule
-  if (!rule) return
-  if (!rule.filter_channel_posts_enabled) return
-  rule.filter_channel_posts_enabled = false
-  try { guardFilterChain('Protection', 'channelPosts:legacy_reset', {}) } catch {}
-  updateRule({ filter_channel_posts_enabled: false }).catch((e) => {
-    try { guardFilterChain('Protection', 'channelPosts:legacy_reset_error', { name: e?.name, message: e?.message }) } catch {}
-  })
 }
 
 const LEGACY_FILTER_MEDIA_MODES = Object.freeze(['allow', 'forbid', 'captcha'])
@@ -1798,6 +1880,8 @@ function hardDictSwitchClass(on) {
 function actionButtonClass(current, value) {
   if (current !== value) return protToggleOff
   if (value === 'ban') return 'bg-gradient-to-r from-rose-500 to-red-600 text-white shadow-[0_8px_20px_-10px_rgba(239,68,68,0.75)]'
+  if (value === 'kick')
+    return 'border-2 border-orange-400/70 bg-gradient-to-br from-orange-600 to-amber-700 text-white shadow-[0_8px_20px_-10px_rgba(234,88,12,0.7)] ring-1 ring-orange-300/35'
   if (value === 'mute') return 'bg-gradient-to-r from-amber-400 to-orange-500 text-slate-900 shadow-[0_8px_20px_-10px_rgba(249,115,22,0.75)]'
   if (value === 'observe') {
     return 'border-2 border-red-400/80 bg-gradient-to-br from-red-950/90 to-rose-900/80 text-red-100 shadow-[0_0_20px_-6px_rgba(248,113,113,0.55)] ring-1 ring-red-400/30'
@@ -1917,9 +2001,24 @@ async function removeReputationWord(word) {
   }
 }
 
+/** Глобальный список — только когда для текущего чата есть Premium-доступ; иначе пустой список (без «фантомной» счётчиков). */
+function hydrateGlobalAntispamList() {
+  antispamItems.value = []
+  if (!hasInitData.value || premiumFeatureLocked.value) return
+  void fetchSilent(() => api.globalAntispamList())
+    .then((antispam) => {
+      antispamItems.value = antispam?.items || []
+    })
+    .catch(() => {
+      antispamItems.value = []
+    })
+}
+
 async function loadAntispamList() {
   antispamLoading.value = true
   try {
+    antispamItems.value = []
+    if (!hasInitData.value || premiumFeatureLocked.value) return
     const data = await fetchSilent(() => api.globalAntispamList())
     antispamItems.value = data?.items || []
   } finally {
@@ -1931,6 +2030,10 @@ async function addAntispamUser() {
   const uid = (newAntispamUserId.value || '').trim()
   if (!uid || !/^\d+$/.test(uid)) {
     showToast(tt('protection.toasts.need_numeric_user_id'))
+    return
+  }
+  if (premiumFeatureLocked.value) {
+    openPremiumLock('global_antispam')
     return
   }
   antispamLoading.value = true
@@ -1945,6 +2048,10 @@ async function addAntispamUser() {
 }
 
 async function removeAntispamUser(userId) {
+  if (premiumFeatureLocked.value) {
+    openPremiumLock('global_antispam')
+    return
+  }
   antispamLoading.value = true
   try {
     await fetchSilent(() => api.globalAntispamRemove(userId))
@@ -1954,6 +2061,10 @@ async function removeAntispamUser(userId) {
     antispamLoading.value = false
   }
 }
+
+watch([selectedChatId, premiumFeatureLocked], () => {
+  hydrateGlobalAntispamList()
+})
 
 /** Запуск очистки прямо из API без выхода из Mini App. */
 async function openCleanDeleted() {
@@ -2154,7 +2265,7 @@ const postRulesEditingDraftName = computed(() => {
   return String(row?.name || '').trim()
 })
 
-const postRulesUnsavedBanner = computed(() => postRulesDraftNameDirty.value || postRulesServerDirty.value)
+const postRulesUnsavedBanner = computed(() => postRulesServerDirty.value)
 
 const postRulesGroupInlineButtonCount = computed(() => {
   let n = 0
@@ -2187,12 +2298,9 @@ function postRulesServerSignature() {
 const postRulesGroupDraftStatusLabel = computed(() =>
   postRulesServerDirty.value ? tt('protection.post_rules.draft_unsaved') : tt('protection.post_rules.draft_saved'),
 )
-const postRulesGroupEditingLabel = computed(() => {
-  const name = String(postRulesEditingDraftName.value || '').trim()
-  const tail = postRulesServerDirty.value ? tt('protection.post_rules.tail_unsaved') : tt('protection.post_rules.tail_saved')
-  if (name) return `${name} · ${tail}`
-  return tail
-})
+const postRulesGroupEditingLabel = computed(() =>
+  postRulesServerDirty.value ? tt('protection.post_rules.tail_unsaved') : tt('protection.post_rules.tail_saved'),
+)
 
 const postRulesServerBaseline = ref('')
 /** Снимок только текста / кнопок / превью фото — для кнопки «Сохранить черновик». */
@@ -2215,9 +2323,16 @@ function postRulesTouchServerDirty() {
   postRulesServerDirty.value = postRulesServerSignature() !== String(postRulesServerBaseline.value || '')
 }
 
-const postRulesGroupBodyPanelLocked = computed(
-  () => !String(postRulesActiveDraftId.value || '').trim(),
-)
+/** Редактор правил всегда доступен — черновики убраны, текст хранится в rules_group_* чата. */
+const postRulesGroupBodyPanelLocked = computed(() => false)
+
+const postRulesAutosendSummary = computed(() => {
+  if (!postRulesGroupForm.value.eventOnTrigger) {
+    return tt('protection.group_rules_ui.autosend_off')
+  }
+  const n = Math.max(1, Math.min(500, Number(postRulesGroupForm.value.eventTriggerEveryN || 1)))
+  return tt('protection.group_rules_ui.autosend_summary', { n })
+})
 
 const postRulesShowSaveDraftButton = computed(() => {
   if (!String(postRulesActiveDraftId.value || '').trim()) return false
@@ -2821,6 +2936,48 @@ function onPostRulesBodyInput() {
   postRulesTouchServerDirty()
 }
 
+function postRulesOnEditorKeydown(e) {
+  if (postRulesGroupBodyPanelLocked.value) return
+  if (e.key !== 'Enter' || e.isComposing) return
+  const el = postRulesBodyRef.value
+  if (!el || e.target !== el) return
+  if (e.shiftKey) {
+    if (editorSoftBreakInsideBlockquote(el)) {
+      e.preventDefault()
+      e.stopPropagation()
+      onPostRulesBodyInput()
+      requestAnimationFrame(() => {
+        editorResetTypingExecCommands(el, {})
+        postRulesUpdateFormatState()
+      })
+    }
+    return
+  }
+  if (editorSplitBlockquoteAtCaret(el, editorPlaceCaretAtEditableStart)) {
+    e.preventDefault()
+    e.stopPropagation()
+    onPostRulesBodyInput()
+    requestAnimationFrame(() => {
+      editorResetTypingExecCommands(el, {})
+      postRulesUpdateFormatState()
+    })
+    return
+  }
+  e.preventDefault()
+  try {
+    document.execCommand('insertLineBreak')
+  } catch {
+    document.execCommand('insertHTML', false, '<br>')
+  }
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      editorResetTypingExecCommands(el, {})
+      onPostRulesBodyInput()
+      postRulesUpdateFormatState()
+    })
+  })
+}
+
 function postRulesCanUndo() { return postRulesHistoryIndex.value > 0 }
 function postRulesCanRedo() { return postRulesHistoryIndex.value >= 0 && postRulesHistoryIndex.value < postRulesHistory.value.length - 1 }
 function postRulesUndo() {
@@ -2845,10 +3002,79 @@ function postRulesExec(cmd) {
   const el = postRulesBodyRef.value
   if (!el) return
   el.focus()
+  if (cmd === 'bold' || cmd === 'italic' || cmd === 'underline' || cmd === 'strikeThrough') {
+    try {
+      document.execCommand('styleWithCSS', false, false)
+    } catch {
+      //
+    }
+  }
   document.execCommand(cmd, false)
   onPostRulesBodyInput()
   postRulesUpdateFormatState()
 }
+
+function postRulesInsertHtmlAtCursor(html) {
+  const sel = window.getSelection?.()
+  const range = sel && sel.rangeCount ? sel.getRangeAt(0) : postRulesSavedRange.value
+  if (!range) return
+  range.deleteContents()
+  const temp = document.createElement('div')
+  temp.innerHTML = html
+  const frag = document.createDocumentFragment()
+  let node = null
+  while ((node = temp.firstChild)) frag.appendChild(node)
+  range.insertNode(frag)
+  range.collapse(false)
+  if (sel) {
+    sel.removeAllRanges()
+    sel.addRange(range)
+  }
+  postRulesSavedRange.value = range.cloneRange()
+  onPostRulesBodyInput()
+}
+
+function postRulesSelectedTextFromRange(range) {
+  if (!range) return ''
+  try {
+    return String(range.cloneContents().textContent || '')
+  } catch {
+    return ''
+  }
+}
+
+function postRulesWrapRange(range, htmlOpen, htmlClose) {
+  if (!range) return false
+  const text = postRulesSelectedTextFromRange(range)
+  if (!text.trim()) return false
+  const sel = window.getSelection?.()
+  if (sel) {
+    sel.removeAllRanges()
+    sel.addRange(range)
+  }
+  postRulesInsertHtmlAtCursor(`${htmlOpen}${text}${htmlClose}`)
+  return true
+}
+
+function postRulesCaretSemanticFlags() {
+  const el = postRulesBodyRef.value
+  const sel = window.getSelection?.()
+  if (!el || !sel?.focusNode) return { quote: false, link: false }
+  if (!sel.rangeCount || !el.contains(sel.focusNode)) return { quote: false, link: false }
+  let n = sel.focusNode.nodeType === Node.TEXT_NODE ? sel.focusNode.parentElement : sel.focusNode
+  let quote = false
+  let link = false
+  while (n && n !== el) {
+    if (n instanceof HTMLElement) {
+      const tag = String(n.tagName || '').toLowerCase()
+      if (tag === 'blockquote') quote = true
+      if (tag === 'a') link = true
+    }
+    n = n.parentElement
+  }
+  return { quote, link }
+}
+
 function postRulesUpdateFormatState() {
   const sel = window.getSelection?.()
   if (sel && sel.rangeCount) {
@@ -2858,28 +3084,117 @@ function postRulesUpdateFormatState() {
       postRulesSavedRange.value = r.cloneRange()
     }
   }
+  const sem = postRulesCaretSemanticFlags()
   postRulesFormatState.value = {
     bold: !!document.queryCommandState('bold'),
     italic: !!document.queryCommandState('italic'),
     underline: !!document.queryCommandState('underline'),
     strike: !!document.queryCommandState('strikeThrough'),
+    quote: sem.quote,
+    link: sem.link,
   }
 }
+
+function postRulesFormatBlockquote() {
+  const el = postRulesBodyRef.value
+  if (!el) return
+  el.focus()
+  const sel = window.getSelection?.()
+  const range = sel && sel.rangeCount ? sel.getRangeAt(0) : postRulesSavedRange.value
+  if (!range) {
+    showToast(tt('protection.alerts.select_quote'))
+    return
+  }
+  let n = range.commonAncestorContainer
+  if (n.nodeType === Node.TEXT_NODE) n = n.parentElement
+  const bq = n?.closest?.('blockquote')
+  if (bq && el.contains(bq)) {
+    if (range.collapsed) {
+      editorUnwrapElementFully(bq)
+    } else if (!postRulesSelectedTextFromRange(range).trim()) {
+      showToast(tt('protection.alerts.select_quote'))
+      return
+    } else if (!editorUnwrapRangeInsideContainer(bq, range)) {
+      showToast(tt('protection.alerts.select_quote'))
+      return
+    }
+    onPostRulesBodyInput()
+    postRulesUpdateFormatState()
+    return
+  }
+  if (!postRulesWrapRange(range, '<blockquote>', '</blockquote>')) {
+    showToast(tt('protection.alerts.select_quote'))
+    return
+  }
+  postRulesUpdateFormatState()
+}
+
+async function postRulesEnsureEmojiPicker() {
+  if (postRulesEmojiPickerReady.value) return
+  try {
+    await import('emoji-picker-element')
+    postRulesEmojiPickerReady.value = true
+  } catch {
+    //
+  }
+}
+
+async function postRulesToggleEmoji() {
+  if (!postRulesEmojiOpen.value) await postRulesEnsureEmojiPicker()
+  postRulesEmojiOpen.value = !postRulesEmojiOpen.value
+}
+
+function postRulesOnEmojiClick(ev) {
+  const unicode = ev?.detail?.unicode
+  if (!unicode) return
+  const el = postRulesBodyRef.value
+  if (!el) return
+  el.focus()
+  postRulesInsertHtmlAtCursor(unicode)
+}
+
+function postRulesLinkUrlFull() {
+  const raw = String(postRulesLinkUrlPath.value || '').trim()
+  if (!raw) return ''
+  const stripped = raw.replace(/^https?:\/\//i, '')
+  return stripped ? `https://${stripped}` : ''
+}
+
 function postRulesFormatLink() {
+  const el = postRulesBodyRef.value
+  if (!el) return
+  el.focus()
   const sel = window.getSelection?.()
   const range = sel && sel.rangeCount ? sel.getRangeAt(0).cloneRange() : postRulesSavedRange.value
+  let n = range?.commonAncestorContainer
+  if (n && n.nodeType === Node.TEXT_NODE) n = n.parentElement
+  const linkEl = n?.closest?.('a')
+  if (linkEl && el.contains(linkEl)) {
+    try {
+      const rg = document.createRange()
+      rg.selectNodeContents(linkEl)
+      sel?.removeAllRanges()
+      sel?.addRange(rg)
+      document.execCommand('unlink', false, null)
+    } catch {
+      //
+    }
+    onPostRulesBodyInput()
+    postRulesUpdateFormatState()
+    return
+  }
   const selectedText = String(range?.toString() || '').trim()
   if (!selectedText) {
     showToast(tt('protection.toasts.select_text_for_link'))
     return
   }
   postRulesLinkRange.value = range || null
-  postRulesLinkUrl.value = 'https://'
+  postRulesLinkUrlPath.value = ''
   postRulesLinkModalOpen.value = true
 }
 
 function postRulesApplyLinkModal() {
-  const url = String(postRulesLinkUrl.value || '').trim()
+  const url = postRulesLinkUrlFull()
   if (!url) return
   const el = postRulesBodyRef.value
   if (!el) return
@@ -2915,7 +3230,14 @@ function postRulesApplyLinkModal() {
   onPostRulesBodyInput()
   postRulesLinkModalOpen.value = false
   postRulesLinkRange.value = null
+  postRulesLinkUrlPath.value = ''
 }
+
+async function removePostRulesPhotoFromPreview() {
+  postRulesImagePreviewUrl.value = ''
+  await removePostRulesPhoto()
+}
+
 function postRulesClearFormatting() {
   const el = postRulesBodyRef.value
   if (!el) return
@@ -2934,6 +3256,7 @@ function welcomeAfterDomMutation() {
   welcomeSyncEditorHtml()
   welcomeForm.value.text = normalizeHtmlForTelegram(String(welcomeBodyRef.value?.innerHTML || ''))
   welcomeRecordHistory()
+  onWelcomeEditorSelectionChange()
 }
 
 function welcomeRecordHistory(force = false) {
@@ -3084,6 +3407,26 @@ function welcomeFormatSpoiler() {
   if (!el) return
   el.focus()
   const range = welcomeCurrentRange()
+  if (!range) {
+    window.alert(tt('protection.alerts.select_spoiler'))
+    return
+  }
+  let n = range.commonAncestorContainer
+  if (n.nodeType === Node.TEXT_NODE) n = n.parentElement
+  const spoiler = n?.closest?.('[data-spoiler="1"], tg-spoiler')
+  if (spoiler && el.contains(spoiler)) {
+    if (range.collapsed) {
+      editorUnwrapElementFully(spoiler)
+    } else if (!welcomeSelectedTextFromRange(range).trim()) {
+      window.alert(tt('protection.alerts.select_spoiler'))
+      return
+    } else if (!editorUnwrapRangeInsideContainer(spoiler, range)) {
+      window.alert(tt('protection.alerts.select_spoiler'))
+      return
+    }
+    welcomeAfterDomMutation()
+    return
+  }
   if (!welcomeWrapRange(range, '<span data-spoiler="1">', '</span>')) {
     window.alert(tt('protection.alerts.select_spoiler'))
     return
@@ -3094,13 +3437,54 @@ function welcomeFormatPre() {
   const el = welcomeBodyRef.value
   if (!el) return
   el.focus()
-  const sel = window.getSelection?.()
-  const text = sel?.toString() || ''
-  if (!text.trim()) {
+  const range = welcomeCurrentRange()
+  if (!range) {
     window.alert(tt('protection.alerts.select_pre'))
     return
   }
-  welcomeInsertHtmlAtCursor(`<pre>${text}</pre>`)
+  if (
+    !editorApplyMonospaceFormat(el, range, {
+      onEmpty: () => window.alert(tt('protection.alerts.select_pre')),
+    })
+  ) {
+    return
+  }
+  welcomeAfterDomMutation()
+}
+
+function welcomeOnEditorKeydown(e) {
+  const root = e.currentTarget
+  if (!(root instanceof HTMLElement)) return
+  if (e.key === 'Enter' && e.shiftKey && !e.isComposing) {
+    if (editorSoftBreakInsideBlockquote(root)) {
+      e.preventDefault()
+      e.stopPropagation()
+      welcomeAfterDomMutation()
+      requestAnimationFrame(() => {
+        editorResetTypingExecCommands(root, {})
+        onWelcomeEditorSelectionChange()
+      })
+    }
+    return
+  }
+  if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return
+  if (editorSplitBlockquoteAtCaret(root, editorPlaceCaretAtEditableStart)) {
+    e.preventDefault()
+    e.stopPropagation()
+    welcomeAfterDomMutation()
+    requestAnimationFrame(() => {
+      editorResetTypingExecCommands(root, {})
+      onWelcomeEditorSelectionChange()
+    })
+    return
+  }
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      editorResetTypingExecCommands(root, {})
+      welcomeAfterDomMutation()
+      onWelcomeEditorSelectionChange()
+    })
+  })
 }
 
 function welcomeFormatBlockquote() {
@@ -3112,6 +3496,24 @@ function welcomeFormatBlockquote() {
     window.alert(tt('protection.alerts.select_quote'))
     return
   }
+  const rUnwrap = sel.getRangeAt(0).cloneRange()
+  let nn = rUnwrap.commonAncestorContainer
+  if (nn.nodeType === Node.TEXT_NODE) nn = nn.parentElement
+  const bq0 = nn?.closest?.('blockquote')
+  if (bq0 && el.contains(bq0)) {
+    if (rUnwrap.collapsed) {
+      editorUnwrapElementFully(bq0)
+    } else if (!welcomeSelectedTextFromRange(rUnwrap).trim()) {
+      window.alert(tt('protection.alerts.select_quote'))
+      return
+    } else if (!editorUnwrapRangeInsideContainer(bq0, rUnwrap)) {
+      window.alert(tt('protection.alerts.select_quote'))
+      return
+    }
+    welcomeAfterDomMutation()
+    return
+  }
+
   const r0 = sel.getRangeAt(0)
   if (r0.collapsed) {
     window.alert(tt('protection.alerts.select_quote'))
@@ -3165,6 +3567,19 @@ function welcomeFormatCode() {
   const el = welcomeBodyRef.value
   if (!el) return
   el.focus()
+  const range = welcomeCurrentRange()
+  if (!range) {
+    window.alert(tt('protection.alerts.select_code'))
+    return
+  }
+  let n = range.commonAncestorContainer
+  if (n.nodeType === Node.TEXT_NODE) n = n.parentElement
+  const codeEl = n?.closest?.('code')
+  if (codeEl && el.contains(codeEl) && !codeEl.closest?.('pre')) {
+    editorUnwrapElementFully(codeEl)
+    welcomeAfterDomMutation()
+    return
+  }
   const sel = window.getSelection?.()
   const text = sel?.toString() || ''
   if (!text.trim()) {
@@ -3177,20 +3592,44 @@ function welcomeFormatCode() {
 function welcomeFormatLink() {
   const el = welcomeBodyRef.value
   if (!el) return
+  el.focus()
   const sel = window.getSelection?.()
   const range = sel && sel.rangeCount ? sel.getRangeAt(0).cloneRange() : welcomeSavedRange.value
+  let n = range?.commonAncestorContainer
+  if (n && n.nodeType === Node.TEXT_NODE) n = n.parentElement
+  const linkEl = n?.closest?.('a')
+  if (linkEl && el.contains(linkEl)) {
+    try {
+      const rg = document.createRange()
+      rg.selectNodeContents(linkEl)
+      sel?.removeAllRanges()
+      sel?.addRange(rg)
+      document.execCommand('unlink', false, null)
+    } catch {
+      //
+    }
+    welcomeAfterDomMutation()
+    return
+  }
   const selectedText = welcomeSelectedTextFromRange(range)
   if (!selectedText.trim()) {
     window.alert(tt('protection.alerts.select_link'))
     return
   }
   welcomeLinkRange.value = range || null
-  welcomeLinkUrl.value = 'https://'
+  welcomeLinkUrlPath.value = ''
   welcomeLinkModalOpen.value = true
 }
 
+function welcomeLinkUrlFull() {
+  const raw = String(welcomeLinkUrlPath.value || '').trim()
+  if (!raw) return ''
+  const stripped = raw.replace(/^https?:\/\//i, '')
+  return stripped ? `https://${stripped}` : ''
+}
+
 function welcomeApplyLinkModal() {
-  const href = String(welcomeLinkUrl.value || '').trim()
+  const href = welcomeLinkUrlFull()
   if (!href) return
   const el = welcomeBodyRef.value
   if (!el) return
@@ -3204,14 +3643,148 @@ function welcomeApplyLinkModal() {
   welcomeAfterDomMutation()
   welcomeLinkModalOpen.value = false
   welcomeLinkRange.value = null
+  welcomeLinkUrlPath.value = ''
+}
+
+function welcomePlaceholderChipClass(ph) {
+  return welcomeActivePlaceholder.value === ph ? 'post-rules-tool-active' : ''
+}
+
+function welcomeEditorPlainOffsets() {
+  const editor = welcomeBodyRef.value
+  const range = welcomeCurrentRange()
+  if (!editor || !range || !editor.contains(range.startContainer)) return null
+  const preStart = document.createRange()
+  preStart.selectNodeContents(editor)
+  preStart.setEnd(range.startContainer, range.startOffset)
+  const preEnd = document.createRange()
+  preEnd.selectNodeContents(editor)
+  preEnd.setEnd(range.endContainer, range.endOffset)
+  return {
+    start: preStart.toString().length,
+    end: preEnd.toString().length,
+    text: String(editor.innerText || ''),
+  }
+}
+
+function welcomePlaceholderAtRange(start, end, text) {
+  const t = String(text || '')
+  for (const ph of WELCOME_PLACEHOLDERS) {
+    let idx = 0
+    while ((idx = t.indexOf(ph, idx)) !== -1) {
+      const phEnd = idx + ph.length
+      if (start === end) {
+        if (start >= idx && start <= phEnd) return ph
+      } else if ((start === idx && end === phEnd) || (start >= idx && end <= phEnd)) {
+        return ph
+      }
+      idx += 1
+    }
+  }
+  return ''
+}
+
+function welcomeUpdateActivePlaceholder() {
+  const offsets = welcomeEditorPlainOffsets()
+  welcomeActivePlaceholder.value = offsets ? welcomePlaceholderAtRange(offsets.start, offsets.end, offsets.text) : ''
+}
+
+function welcomeDeletePlainTextRange(start, end) {
+  const editor = welcomeBodyRef.value
+  if (!editor) return false
+  const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT)
+  let charCount = 0
+  let startNode = null
+  let startOffset = 0
+  let endNode = null
+  let endOffset = 0
+  let node = null
+  while ((node = walker.nextNode())) {
+    const len = String(node.textContent || '').length
+    if (!startNode && charCount + len >= start) {
+      startNode = node
+      startOffset = Math.max(0, start - charCount)
+    }
+    if (!endNode && charCount + len >= end) {
+      endNode = node
+      endOffset = Math.max(0, end - charCount)
+      break
+    }
+    charCount += len
+  }
+  if (!startNode || !endNode) return false
+  const range = document.createRange()
+  range.setStart(startNode, startOffset)
+  range.setEnd(endNode, endOffset)
+  range.deleteContents()
+  const sel = window.getSelection?.()
+  sel?.removeAllRanges()
+  range.collapse(true)
+  sel?.addRange(range)
+  welcomeSavedRange.value = range.cloneRange()
+  return true
+}
+
+function welcomeRemovePlaceholderByKey(ph) {
+  const offsets = welcomeEditorPlainOffsets()
+  if (!offsets) return false
+  const { start, end, text } = offsets
+  let targetIdx = -1
+  let idx = 0
+  while ((idx = text.indexOf(ph, idx)) !== -1) {
+    const phEnd = idx + ph.length
+    if ((start === end && start >= idx && start <= phEnd) || (start === idx && end === phEnd) || (start >= idx && end <= phEnd)) {
+      targetIdx = idx
+      break
+    }
+    idx += 1
+  }
+  if (targetIdx < 0) return false
+  return welcomeDeletePlainTextRange(targetIdx, targetIdx + ph.length)
+}
+
+function welcomeRememberThumb(chatId, url) {
+  const id = Number(chatId || 0)
+  const u = String(url || '').trim()
+  if (!id || !u) return
+  const prev = welcomePhotoThumbByChatId.get(id)
+  if (prev && prev !== u) revokeBroadcastMediaPreviewUrl(prev)
+  welcomePhotoThumbByChatId.set(id, u)
+}
+
+function welcomeClearThumbCache(chatId) {
+  const id = Number(chatId || 0)
+  if (!id) return
+  const prev = welcomePhotoThumbByChatId.get(id)
+  if (prev) revokeBroadcastMediaPreviewUrl(prev)
+  welcomePhotoThumbByChatId.delete(id)
+}
+
+function welcomeApplyCachedThumb(chatId) {
+  const cached = welcomePhotoThumbByChatId.get(Number(chatId || 0))
+  if (!cached) return false
+  welcomePreviewUrl.value = cached
+  return true
 }
 
 function welcomeInsertPlain(chunk) {
   const el = welcomeBodyRef.value
   if (!el) return
+  const ph = String(chunk || '')
+  if (!ph) return
   el.focus()
-  document.execCommand('insertText', false, String(chunk || ''))
+  const offsets = welcomeEditorPlainOffsets()
+  const active = offsets ? welcomePlaceholderAtRange(offsets.start, offsets.end, offsets.text) : ''
+  if (welcomeActivePlaceholder.value === ph || active === ph) {
+    if (welcomeRemovePlaceholderByKey(ph)) {
+      welcomeAfterDomMutation()
+      welcomeUpdateActivePlaceholder()
+    }
+    return
+  }
+  document.execCommand('insertText', false, ph)
   welcomeAfterDomMutation()
+  welcomeUpdateActivePlaceholder()
 }
 
 function onWelcomeBodyInput() {
@@ -3220,11 +3793,14 @@ function onWelcomeBodyInput() {
 
 function onWelcomeBodyClick(ev) {
   const el = ev?.target
-  if (!(el instanceof HTMLElement)) return
-  const spoiler = el.closest('[data-spoiler="1"], tg-spoiler')
-  if (!spoiler) return
-  spoiler.classList.add('reveal')
-  window.setTimeout(() => spoiler.classList.remove('reveal'), 5000)
+  if (el instanceof HTMLElement) {
+    const spoiler = el.closest('[data-spoiler="1"], tg-spoiler')
+    if (spoiler) {
+      spoiler.classList.add('reveal')
+      window.setTimeout(() => spoiler.classList.remove('reveal'), 5000)
+    }
+  }
+  requestAnimationFrame(() => onWelcomeEditorSelectionChange())
 }
 
 function initWelcomeEditorDom() {
@@ -3232,7 +3808,7 @@ function initWelcomeEditorDom() {
   if (!el) return
   const raw = String(welcomeForm.value.text || '')
   if (/<\s*[a-z]/i.test(raw)) {
-    el.innerHTML = raw
+    el.innerHTML = telegramHtmlToEditorInnerHtml(raw)
   } else {
     el.innerHTML = ''
     el.textContent = raw
@@ -3384,19 +3960,26 @@ function openWelcomeSettings() {
     })
   })
   welcomeImagePreviewUrl.value = ''
-  if (welcomePreviewUrl.value) {
+  if (chat.value?.rule?.welcome_has_photo && chat.value?.id) {
+    const cid = chat.value.id
+    if (!welcomeApplyCachedThumb(cid)) {
+      welcomePhotoBusy.value = true
+      fetchChatWelcomePhotoPreviewUrl(cid)
+        .then((u) => {
+          welcomePreviewUrl.value = u
+          welcomeRememberThumb(cid, u)
+          nextTick(() => welcomeMarkSessionBaseline())
+        })
+        .catch(() => {
+          welcomePreviewUrl.value = ''
+        })
+        .finally(() => {
+          welcomePhotoBusy.value = false
+        })
+    }
+  } else if (welcomePreviewUrl.value) {
     revokeBroadcastMediaPreviewUrl(welcomePreviewUrl.value)
     welcomePreviewUrl.value = ''
-  }
-  if (chat.value?.rule?.welcome_has_photo && chat.value?.id) {
-    fetchChatWelcomePhotoPreviewUrl(chat.value.id)
-      .then((u) => {
-        welcomePreviewUrl.value = u
-        nextTick(() => welcomeMarkSessionBaseline())
-      })
-      .catch(() => {
-        welcomePreviewUrl.value = ''
-      })
   }
   nextTick(() => {
     try {
@@ -3412,15 +3995,23 @@ async function onWelcomePhotoPicked(event) {
   const file = event?.target?.files?.[0]
   event.target.value = ''
   if (!file || !chat.value?.id) return
+  const cid = chat.value.id
+  try {
+    const localUrl = URL.createObjectURL(file)
+    welcomePreviewUrl.value = localUrl
+    welcomeRememberThumb(cid, localUrl)
+  } catch {
+    welcomePreviewUrl.value = ''
+  }
   welcomePhotoBusy.value = true
   try {
-    await uploadChatWelcomePhoto(chat.value.id, file)
+    await uploadChatWelcomePhoto(cid, file)
     chat.value.rule.welcome_has_photo = true
-    if (welcomePreviewUrl.value) revokeBroadcastMediaPreviewUrl(welcomePreviewUrl.value)
-    welcomePreviewUrl.value = await fetchChatWelcomePhotoPreviewUrl(chat.value.id)
     welcomeMarkSessionBaseline()
     showToast(tt('protection.toasts.welcome_photo_ok'))
   } catch {
+    welcomeClearThumbCache(cid)
+    welcomePreviewUrl.value = ''
     showToast(error.value || tt('protection.toasts.welcome_photo_fail'))
   } finally {
     welcomePhotoBusy.value = false
@@ -3429,12 +4020,16 @@ async function onWelcomePhotoPicked(event) {
 
 async function removeWelcomePhoto() {
   if (!chat.value?.id) return
+  const cid = chat.value.id
   welcomePhotoBusy.value = true
   try {
-    await fetchSilent(() => api.deleteWelcomePhoto(chat.value.id))
+    if (chat.value.rule.welcome_has_photo) {
+      await fetchSilent(() => api.deleteWelcomePhoto(cid))
+    }
     chat.value.rule.welcome_has_photo = false
-    if (welcomePreviewUrl.value) revokeBroadcastMediaPreviewUrl(welcomePreviewUrl.value)
+    welcomeClearThumbCache(cid)
     welcomePreviewUrl.value = ''
+    welcomeImagePreviewUrl.value = ''
     welcomeMarkSessionBaseline()
     showToast(tt('protection.toasts.welcome_photo_removed'))
   } catch {
@@ -3442,6 +4037,10 @@ async function removeWelcomePhoto() {
   } finally {
     welcomePhotoBusy.value = false
   }
+}
+
+async function removeWelcomePhotoFromPreview() {
+  await removeWelcomePhoto()
 }
 
 async function persistWelcomeSettings(opts = {}) {
@@ -3470,7 +4069,11 @@ async function persistWelcomeSettings(opts = {}) {
         welcome_every_n_joins: everyN,
       }),
     )
+    const hadPhoto = !!chat.value.rule?.welcome_has_photo
     chat.value.rule = data.rule
+    if (hadPhoto && !chat.value.rule?.welcome_has_photo) {
+      chat.value.rule.welcome_has_photo = true
+    }
     welcomeMarkSessionBaseline()
     saveCurrentChatCache()
     if (!quietToast) showToast(tt('protection.toasts.welcome_saved'))
@@ -3506,50 +4109,26 @@ async function openPostRulesSettings() {
   if (!chat.value?.rule) return
   ensureChatRuleShape(chat.value)
   postRulesGroupInfoOpen.value = false
-  postRulesDraftNameDraft.value = ''
-  postRulesDraftNameEditId.value = ''
-  postRulesDraftNameDirty.value = false
   postRulesServerDirty.value = false
   postRulesShowSaved.value = false
-  await postRulesHydrateDraftsFromServer()
-  const cid = String(Number(chat.value?.id || 0) || 0)
-  const lastDraftId = postRulesGetLastActiveDraftIdForChat(cid)
-  const lastDraftRow =
-    lastDraftId && cid
-      ? (postRulesDrafts.value || []).find(
-          (x) =>
-            String(x?.id || '') === String(lastDraftId) &&
-            String(x?.chatId || '') === cid &&
-            String(x?.mode || 'group') === 'group',
-        )
-      : null
+  showPostRulesAutosendModal.value = false
   postRulesGroupForm.value = {
     enabled: !!chat.value.rule.rules_group_enabled,
     text: String(chat.value.rule.rules_group_text || ''),
     pinOnSend: !!chat.value.rule.rules_group_pin_on_send,
     deletePinNotice: !!chat.value.rule.rules_group_delete_pin_notice,
     eventOnTrigger: !!chat.value.rule.rules_group_event_on_trigger,
-    eventOnPunish: !!chat.value.rule.rules_group_event_on_punish,
+    eventOnPunish: false,
     eventTriggerEveryN: Math.max(1, Math.min(500, Number(chat.value.rule.rules_group_event_trigger_every_n || 1))),
-    eventPunishEveryN: Math.max(1, Math.min(500, Number(chat.value.rule.rules_group_event_punish_every_n || 1))),
+    eventPunishEveryN: 1,
   }
-  postRulesGroupRunActiveId.value = String(chat.value.rule?.rules_group_active_draft_id || '')
   postRulesGroupButtonRows.value = postRulesKeyboardRowsFromRule(chat.value.rule.rules_group_buttons || [])
-  postRulesActiveDraftId.value = ''
-  showPostRulesGroupSendModal.value = false
-  showPostRulesGroupFullPreview.value = false
-  postRulesGroupFullPreviewRow.value = null
   showPostRulesSettingsModal.value = true
   await nextTick()
   postRulesEditorLoadFromForm({ silent: true, flush: true })
   await loadPostRulesPhotoPreview()
   await nextTick()
-  if (lastDraftRow) {
-    await postRulesApplyDraft(lastDraftRow, { quiet: true })
-  } else {
-    postRulesMarkServerBaseline()
-    postRulesMarkDraftContentBaseline()
-  }
+  postRulesMarkServerBaseline()
 }
 
 function postRulesCurrentGroupTitle() {
@@ -3609,7 +4188,6 @@ async function savePostRulesSettings(opts = {}) {
   postRulesSaveBusy.value = true
   postRulesShowSaved.value = false
   const groupButtons = postRulesBuildKeyboardPayload(postRulesGroupButtonRows)
-  const activeDraftIdForRun = String(postRulesGroupRunActiveId.value || '').trim()
   try {
     await updateRule(
       {
@@ -3619,16 +4197,13 @@ async function savePostRulesSettings(opts = {}) {
         rules_group_pin_on_send: !!postRulesGroupForm.value.pinOnSend,
         rules_group_delete_pin_notice: !!postRulesGroupForm.value.deletePinNotice,
         rules_group_event_on_trigger: !!postRulesGroupForm.value.eventOnTrigger,
-        rules_group_event_on_punish: !!postRulesGroupForm.value.eventOnPunish,
+        rules_group_event_on_punish: false,
         rules_group_event_trigger_every_n: Math.max(
           1,
           Math.min(500, Number(postRulesGroupForm.value.eventTriggerEveryN || 1)),
         ),
-        rules_group_event_punish_every_n: Math.max(
-          1,
-          Math.min(500, Number(postRulesGroupForm.value.eventPunishEveryN || 1)),
-        ),
-        rules_group_active_draft_id: activeDraftIdForRun || null,
+        rules_group_event_punish_every_n: 1,
+        rules_group_active_draft_id: null,
       },
       { quietToast: true },
     )
@@ -3638,63 +4213,27 @@ async function savePostRulesSettings(opts = {}) {
     chat.value.rule.rules_group_pin_on_send = !!postRulesGroupForm.value.pinOnSend
     chat.value.rule.rules_group_delete_pin_notice = !!postRulesGroupForm.value.deletePinNotice
     chat.value.rule.rules_group_event_on_trigger = !!postRulesGroupForm.value.eventOnTrigger
-    chat.value.rule.rules_group_event_on_punish = !!postRulesGroupForm.value.eventOnPunish
+    chat.value.rule.rules_group_event_on_punish = false
     chat.value.rule.rules_group_event_trigger_every_n = Math.max(
       1,
       Math.min(500, Number(postRulesGroupForm.value.eventTriggerEveryN || 1)),
     )
-    chat.value.rule.rules_group_event_punish_every_n = Math.max(
-      1,
-      Math.min(500, Number(postRulesGroupForm.value.eventPunishEveryN || 1)),
-    )
-    chat.value.rule.rules_group_active_draft_id = activeDraftIdForRun
-    postRulesGroupRunActiveId.value = String(chat.value.rule?.rules_group_active_draft_id || activeDraftIdForRun || '')
-    const activeId = String(postRulesActiveDraftId.value || '')
-    if (activeId) {
-      const cid = postRulesDraftChatKey()
-      const modePhotoDataUrl = await postRulesPreviewToDataUrl('group')
-      const nextPayload = {
-        ...postRulesGroupForm.value,
-        buttons: groupButtons,
-        photoDataUrl: modePhotoDataUrl,
-      }
-      postRulesDrafts.value = (postRulesDrafts.value || []).map((x) => {
-        if (String(x?.id || '') !== activeId) return x
-        if (String(x?.chatId || '') !== cid) return x
-        return { ...x, savedAt: Date.now(), payload: nextPayload }
-      })
-      postRulesPersistDrafts()
-    }
+    chat.value.rule.rules_group_event_punish_every_n = 1
+    chat.value.rule.rules_group_active_draft_id = ''
     postRulesMarkServerBaseline()
-    postRulesMarkDraftContentBaseline()
     if (!skipResultToast) {
       postRulesFlashSaved()
       showToast(tt('protection.toasts.rules_saved'))
     }
     ensureChatRuleShape(chat.value)
-    postRulesClearLastDraftForChat(chat.value.id)
   } finally {
     postRulesSaveBusy.value = false
   }
 }
 
-async function postRulesAutoSaveLocalDraftOnCloseBody() {
-  if (!chat.value?.id) return
-  const dirty = postRulesServerDirty.value || postRulesDraftNameDirty.value
-  if (!dirty) return
-  try {
-    await postRulesSaveDraft({ silent: true })
-  } catch {
-    try {
-      postRulesLoadDrafts()
-    } catch {
-      postRulesDrafts.value = []
-    }
-  }
-}
-
 async function closePostRulesSettingsModal() {
   postRulesSyncFormTextFromEditor()
+  showPostRulesAutosendModal.value = false
   if (postRulesServerDirty.value) {
     try {
       await savePostRulesSettings()
@@ -3702,10 +4241,7 @@ async function closePostRulesSettingsModal() {
       showToast(error.value || tt('protection.toasts.rules_telegram_fail'))
       return
     }
-  } else {
-    await postRulesAutoSaveLocalDraftOnCloseBody()
   }
-  postRulesRememberLastDraftForChat()
   showPostRulesSettingsModal.value = false
 }
 
@@ -3758,16 +4294,18 @@ watch(showLinksFilterModal, (open) => {
 
 watch(showPostRulesSettingsModal, (open) => {
   if (!document?.body?.style) return
-  document.body.style.overflow = open ? 'hidden' : ''
+  document.body.style.overflow = open || showPostRulesAutosendModal.value ? 'hidden' : ''
   if (!open) {
     postRulesGroupInfoOpen.value = false
-    postRulesDraftNameEditId.value = ''
-    postRulesDraftNameDraft.value = ''
-    postRulesDraftNameDirty.value = false
     postRulesShowSaved.value = false
+    showPostRulesAutosendModal.value = false
     showPostRulesGroupSendModal.value = false
     showPostRulesGroupFullPreview.value = false
     postRulesGroupFullPreviewRow.value = null
+    postRulesLinkModalOpen.value = false
+    postRulesImagePreviewUrl.value = ''
+    postRulesEmojiOpen.value = false
+    postRulesLinkUrlPath.value = ''
   }
 })
 
@@ -3795,11 +4333,6 @@ async function postRulesDoGroupSendNow() {
 
 async function sendPostRulesNowGroup() {
   if (!chat.value?.id) return
-  if (postRulesDraftsForChat.value.length) {
-    postRulesGroupSendPickId.value = postRulesGroupDefaultSendPickId()
-    showPostRulesGroupSendModal.value = true
-    return
-  }
   return postRulesDoGroupSendNow()
 }
 
@@ -3932,6 +4465,10 @@ async function removeGlobalBadUrlPattern(pat) {
 }
 
 async function addWhitelistDomain() {
+  if (premiumFeatureLocked.value) {
+    openPremiumLock('whitelist_caps')
+    return
+  }
   const d = (newWhitelistDomain.value || '').trim()
   if (!d || !chat.value?.id || chat.value.noSelection) return
   whitelistLoading.value = true
@@ -3962,6 +4499,10 @@ async function removeWhitelistDomain(domain) {
 }
 
 async function addWhitelistUser() {
+  if (premiumFeatureLocked.value) {
+    openPremiumLock('whitelist_caps')
+    return
+  }
   const raw = (newWhitelistUserId.value || '').trim()
   if (!raw || !chat.value?.id || chat.value.noSelection) {
     showToast(tt('protection.toasts.need_tg_id_or_username'))
@@ -3995,6 +4536,10 @@ async function removeWhitelistUser(uid) {
 }
 
 async function addWhitelistSenderChat() {
+  if (premiumFeatureLocked.value) {
+    openPremiumLock('whitelist_caps')
+    return
+  }
   const raw = (newWhitelistSenderChat.value || '').trim()
   if (!raw || !chat.value?.id || chat.value.noSelection) {
     showToast(tt('protection.toasts.need_channel_username'))
@@ -4030,6 +4575,7 @@ async function removeWhitelistSenderChat(uname) {
 const actionOptions = computed(() => [
   { value: 'delete', label: tt('protection.ui.action_delete_label'), hint: tt('protection.ui.action_delete_hint') },
   { value: 'mute', label: tt('protection.ui.action_mute_label'), hint: tt('protection.ui.action_mute_hint') },
+  { value: 'kick', label: tt('protection.ui.action_kick_label'), hint: tt('protection.ui.action_kick_hint') },
   { value: 'ban', label: tt('protection.ui.action_ban_label'), hint: tt('protection.ui.action_ban_hint') },
   { value: 'observe', label: tt('protection.ui.action_observe_label'), hint: tt('protection.ui.action_observe_hint') },
 ])
@@ -4145,7 +4691,7 @@ async function toggleGuardianPeriodic(on) {
 async function applyAntinakrutkaPreset(preset) {
   if (!chat.value?.rule) return
   if (!canUsePremiumForCurrentChat.value) {
-    openFreeLimitsPremiumModal()
+    openPremiumLock('antinakrutka_restrict')
     return
   }
   await updateRule({
@@ -4282,23 +4828,25 @@ const protCardIndigo =
         </button>
       </div>
 
-      <!-- Модалка выбора чата снизу. z=2147483200 — выше sticky chat-bar (2147483100) и любых других модалок. -->
-      <GuardTeleport>
+      <!-- Модалка выбора чата: на всю ширину окна до safe-area снизу; отступ под табbar только во внутреннем скролле. -->
+      <GuardTeleport guard-to="body">
       <div
         v-if="showChatPicker"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483200;display:flex;align-items:flex-end;justify-content:center;background:rgba(0,0,0,0.7);padding:0 0 calc(5rem + env(safe-area-inset-bottom,0px)) 0"
-        @click="showChatPicker = false"
+        class="guard-fullsheet-sheet pointer-events-auto fixed left-0 right-0 top-11 z-[2147483200] flex max-h-none w-full max-w-none flex-col overflow-x-hidden overscroll-none md:top-12"
+        aria-modal="true"
+        role="dialog"
+        aria-labelledby="protection-chat-picker-title"
       >
         <div
-          class="flex h-[min(78vh,36rem)] w-full max-w-lg min-h-0 flex-col rounded-t-3xl border border-white/15 border-b-0 bg-gradient-to-b from-slate-900/95 via-slate-950/95 to-black/95 px-3 pb-4 pt-2 text-slate-100 shadow-[0_-20px_60px_-16px_rgba(0,0,0,0.9),inset_0_1px_0_rgba(255,255,255,0.12)] backdrop-blur-2xl ring-1 ring-white/10 md:mx-2 md:rounded-3xl md:border-b md:pb-3"
+          class="guard-protection-fullsheet-glass flex min-h-0 w-full flex-1 flex-col border-t border-white/[0.10] pb-0 pt-2 pl-[max(1.25rem,env(safe-area-inset-left))] pr-[max(1.25rem,env(safe-area-inset-right))] text-slate-100 sm:pl-[max(1.5rem,env(safe-area-inset-left))] sm:pr-[max(1.5rem,env(safe-area-inset-right))]"
           @click.stop
         >
-          <div class="mx-auto mb-2 h-1 w-12 shrink-0 rounded-full bg-white/30 md:hidden" aria-hidden="true" />
-          <div class="mb-2 flex shrink-0 items-center justify-between gap-2 border-b border-white/10 pb-2.5">
-            <p class="text-sm font-semibold tracking-wide text-white/95">{{ tt('protection.ui.chat_picker_title') }}</p>
+          <div class="mx-auto mb-2 h-1 w-12 shrink-0 rounded-full bg-white/35 md:hidden" aria-hidden="true" />
+          <div class="mb-2 flex shrink-0 items-center justify-between gap-2 border-b border-white/[0.08] pb-2.5">
+            <p id="protection-chat-picker-title" class="text-sm font-semibold tracking-wide text-white/[0.97]">{{ tt('protection.ui.chat_picker_title') }}</p>
             <button
               type="button"
-              class="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 transition hover:bg-white/10 hover:text-white"
+              class="rounded-lg border border-white/[0.12] bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:border-white/[0.18] hover:bg-white/[0.1] hover:text-white"
               @click="showChatPicker = false"
             >
               {{ tt('common.close') }}
@@ -4320,16 +4868,16 @@ const protCardIndigo =
             </div>
           </template>
           <template v-else-if="(chatsList || []).length > 0">
-            <div class="mb-2.5 shrink-0 rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2">
+            <div class="mb-2 shrink-0 rounded-xl border border-white/10 bg-white/[0.04] px-2.5 py-1.5">
               <p class="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">
                 {{ tt('protection.ui.picker_totals', { total: pickerTotalChats, active: pickerActiveChats }) }}
               </p>
             </div>
             <div
-              class="min-h-0 flex-1 space-y-1.5 overflow-y-auto overscroll-contain py-1 pr-0.5 touch-pan-y"
+              class="picker-chat-scroll flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto overscroll-contain touch-pan-y pb-[calc(7rem+env(safe-area-inset-bottom,0px))] pt-1"
               style="-webkit-overflow-scrolling: touch;"
             >
-              <div v-if="pickerDelegatedChats.length" class="space-y-1.5">
+              <div v-if="pickerDelegatedChats.length" class="flex flex-col gap-1">
                 <p class="px-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-violet-300">{{ tt('protection.ui.delegated') }}</p>
                 <button
                   v-for="c in pickerDelegatedChats"
@@ -4337,13 +4885,13 @@ const protCardIndigo =
                   type="button"
                   :class="[
                     Number(c.id) === Number(selectedChatId) && !c.locked_by_limit
-                      ? 'border-violet-200/90 bg-violet-500/45 text-white shadow-[0_0_32px_-8px_rgba(167,139,250,1)] ring-1 ring-violet-200/70'
+                      ? 'border-violet-200/85 bg-violet-500/40 text-white shadow-[0_0_18px_-8px_rgba(167,139,250,0.75)] ring-1 ring-violet-200/55'
                       : '',
                     c.locked_by_limit
                       ? 'border border-amber-300/35 bg-amber-900/20 text-amber-100'
                       : 'border border-violet-300/25 bg-violet-900/20 text-slate-100 hover:bg-violet-900/30',
                   ]"
-                  class="flex w-full items-center justify-between gap-2 rounded-2xl px-3 py-3 text-left text-sm backdrop-blur-xl transition"
+                  class="flex w-full items-center justify-between gap-2 rounded-xl px-2.5 py-2 text-left text-[13px] leading-snug backdrop-blur-md transition"
                   @click="switchChat(c.id)"
                 >
                   <span class="min-w-0 flex-1">
@@ -4385,7 +4933,7 @@ const protCardIndigo =
                   </div>
                 </button>
               </div>
-              <div v-if="pickerOwnChats.length" class="space-y-1.5 pt-1.5">
+              <div v-if="pickerOwnChats.length" class="flex flex-col gap-1 pt-1">
                 <p class="px-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-cyan-300">{{ tt('protection.ui.my_chats') }}</p>
                 <button
                   v-for="c in pickerOwnChats"
@@ -4393,13 +4941,13 @@ const protCardIndigo =
                   type="button"
                   :class="[
                     Number(c.id) === Number(selectedChatId) && !c.locked_by_limit
-                      ? 'border-emerald-200/90 bg-emerald-500/45 text-white shadow-[0_0_32px_-8px_rgba(16,185,129,1)] ring-1 ring-emerald-200/70'
+                      ? 'border-emerald-200/85 bg-emerald-500/40 text-white shadow-[0_0_18px_-8px_rgba(16,185,129,0.72)] ring-1 ring-emerald-200/55'
                       : '',
                     c.locked_by_limit
                       ? 'border border-amber-300/35 bg-amber-900/20 text-amber-100'
                       : 'border border-white/10 bg-white/[0.04] text-slate-100 hover:bg-white/[0.08]',
                   ]"
-                  class="flex w-full items-center justify-between gap-2 rounded-2xl px-3 py-3 text-left text-sm backdrop-blur-xl transition"
+                  class="flex w-full items-center justify-between gap-2 rounded-xl px-2.5 py-2 text-left text-[13px] leading-snug backdrop-blur-md transition"
                   @click="switchChat(c.id)"
                 >
                   <span class="min-w-0 flex-1">
@@ -4459,6 +5007,31 @@ const protCardIndigo =
         </div>
       </div>
       </GuardTeleport>
+
+    <GuardTeleport guard-to="body">
+      <div
+        v-if="postRulesImagePreviewUrl && showPostRulesSettingsModal"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483300;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.88);padding:16px"
+        class="flex items-center justify-center overscroll-none bg-black/85 p-4 backdrop-blur-sm"
+        role="dialog"
+        aria-modal="true"
+        @click.self="postRulesImagePreviewUrl = ''"
+      >
+        <div class="w-full max-w-2xl rounded-2xl border border-white/15 bg-zinc-950/95 p-3 shadow-2xl" @click.stop>
+          <div class="mb-2 flex items-center justify-end gap-2">
+            <button
+              type="button"
+              class="post-rules-tool-btn border-rose-400/30 bg-rose-500/15 px-3 py-1.5 text-[11px] font-semibold text-rose-100"
+              :disabled="postRulesBusy"
+              @click="removePostRulesPhotoFromPreview()"
+            >{{ tt('protection.welcome_modal.remove_photo') }}</button>
+            <button type="button" class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]" :aria-label="tt('protection.group_rules_ui.photo_full_close')" @click="postRulesImagePreviewUrl = ''">✕</button>
+          </div>
+          <img :src="postRulesImagePreviewUrl" alt="" class="max-h-[78vh] w-full rounded-lg object-contain" />
+        </div>
+      </div>
+    </GuardTeleport>
+
 
       <!-- Основное -->
       <section :class="[protCard, 'relative z-0']">
@@ -4521,7 +5094,7 @@ const protCardIndigo =
               class="group relative flex min-h-[4.75rem] touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-violet-500/15 to-fuchsia-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-violet-400/40 hover:shadow-md active:scale-[0.99]"
               @click="onMentionsTileClick"
             >
-              <span class="text-lg leading-none" aria-hidden="true">{{ '\uFF20' }}</span>
+              <span class="text-lg font-semibold leading-none tracking-tight" aria-hidden="true">@</span>
               <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_mentions') }}</span>
               <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ mentionsSummary }}</span>
             </button>
@@ -4950,7 +5523,7 @@ const protCardIndigo =
         <div class="space-y-3">
           <div>
             <p class="mb-1 text-xs text-slate-400">{{ tt('protection.ui.action_label') }}</p>
-            <div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <div class="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5">
               <button
                 v-for="opt in actionOptions"
                 :key="opt.value"
@@ -5108,17 +5681,17 @@ const protCardIndigo =
         </button>
       </section>
 
-      <div :class="protCardSub">
+      <div :class="[protCardSub, premiumSectionFrameClass]">
         <div class="flex items-start justify-between gap-2">
           <div class="min-w-0 flex-1">
             <div class="flex flex-wrap items-center gap-2">
               <p class="text-xs font-semibold uppercase tracking-wide text-slate-200">{{ tt('protection.ui.spam_spike_title') }}</p>
               <PremiumLockBadge
-                v-if="!chatOwnerHasPremium"
+                v-if="premiumFeatureLocked"
                 variant="pill"
                 size="xs"
                 interactive
-                @click="openPremiumLock('spam_spike_managers')"
+                @click="openPremiumLock('spam_spike')"
               />
             </div>
             <p class="mt-1 text-[11px] text-slate-300/90">
@@ -5137,19 +5710,19 @@ const protCardIndigo =
             i
           </button>
         </div>
-        <div class="mt-2 flex flex-wrap items-center gap-2">
+        <div :class="['mt-2 flex flex-wrap items-center gap-2', premiumControlRowClass]">
           <button
             type="button"
             :class="boolToggleClass(!!chat.rule.spam_spike_enabled)"
             class="rounded-xl px-3 py-1.5 text-xs font-semibold"
-            @click="updateRule({ spam_spike_enabled: !chat.rule.spam_spike_enabled })"
+            @click="onSpamSpikeMasterToggleClick"
           >
             {{ chat.rule.spam_spike_enabled ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}
           </button>
           <button
             type="button"
             class="rounded-xl border border-white/15 bg-white/10 px-3 py-1.5 text-xs font-semibold text-slate-100 hover:bg-white/15"
-            @click="showSpamSpikeSettingsModal = true"
+            @click="onSpamSpikeConfigureClick"
           >
             {{ tt('protection.ui.configure') }}
           </button>
@@ -5193,7 +5766,7 @@ const protCardIndigo =
       </section>
 
       <!-- Антинакрутка (Premium) -->
-      <section :class="[protCard, premiumSectionFrameClass]">
+      <section :class="[protCard, premiumSectionFrameClass, 'relative z-[55] isolate']">
         <div class="mb-3 flex items-center justify-between gap-2">
           <h2 class="text-xs font-medium text-slate-200">{{ tt('protection.ui.antinakrutka_title') }} <span v-if="premiumFeatureLocked" class="text-amber-300">🔒 Premium</span></h2>
           <button
@@ -5214,13 +5787,13 @@ const protCardIndigo =
         <button
           type="button"
           :class="[
-            'mt-2 rounded-xl px-3 py-1.5 text-xs font-semibold transition',
+            'pointer-events-auto relative z-[2] mt-2 touch-manipulation rounded-xl px-3 py-1.5 text-xs font-semibold transition',
             canUsePremiumForCurrentChat
               ? 'guard-green-soft font-bold text-slate-900 hover:brightness-105'
               : 'border border-white/15 bg-white/10 text-slate-100 hover:bg-white/15',
             premiumFeatureLocked && 'border-amber-400/30',
           ]"
-          @click="onAntinakrutkaOpenSettingsClick"
+          @click.stop="onAntinakrutkaOpenSettingsClick"
         >
           {{ tt('protection.ui.configure') }}
         </button>
@@ -5264,10 +5837,10 @@ const protCardIndigo =
         </div>
       </section>
 
-      <!-- Новички (Premium) -->
-      <section :class="[protCardIndigo, premiumSectionFrameClass]">
+      <!-- Новички -->
+      <section :class="protCardIndigo">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h2 class="text-xs font-medium text-slate-100">{{ tt('protection.ui.newbie_section_title') }} <span v-if="premiumFeatureLocked" class="text-amber-300">🔒 Premium</span></h2>
+          <h2 class="text-xs font-medium text-slate-100">{{ tt('protection.ui.newbie_section_title') }}</h2>
           <button
             type="button"
             class="prot-info-btn"
@@ -5277,7 +5850,7 @@ const protCardIndigo =
             i
           </button>
         </div>
-        <div :class="['space-y-3', premiumControlRowClass]">
+        <div class="space-y-3">
           <div class="flex items-center justify-between gap-2">
             <span class="text-xs text-slate-300">{{ tt('protection.ui.newbie_mode_label') }}</span>
             <button
@@ -5289,7 +5862,7 @@ const protCardIndigo =
               {{ chat.rule.newbie_enabled ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}
             </button>
           </div>
-          <div v-if="chat.rule.newbie_enabled && canUsePremiumForCurrentChat">
+          <div v-if="chat.rule.newbie_enabled">
             <p class="mb-1 text-xs text-slate-400">{{ tt('protection.ui.newbie_window_label') }}</p>
             <div class="flex flex-wrap gap-2">
               <button
@@ -5481,7 +6054,17 @@ const protCardIndigo =
         <div class="space-y-3">
           <div class="rounded-xl bg-white/[0.03] p-2.5">
             <div class="mb-2 flex items-center justify-between gap-2">
-              <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-200">{{ tt('protection.public_alerts_settings_modal.duty_messages') }}</p>
+              <div class="flex min-w-0 items-center gap-1.5">
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-200">{{ tt('protection.public_alerts_settings_modal.duty_messages') }}</p>
+                <button
+                  type="button"
+                  class="prot-info-btn prot-info-btn--ink shrink-0"
+                  :aria-label="tt('protection.ui.info_guardian_duty_messages_aria')"
+                  @click="showGuardianPeriodicHelpModal = true"
+                >
+                  i
+                </button>
+              </div>
               <button
                 type="button"
                 :class="boolToggleClass(!!chat.rule.guardian_periodic_enabled)"
@@ -5721,7 +6304,7 @@ const protCardIndigo =
                 type="button"
                 :class="Number(chat.rule.spam_spike_min_deletes) === p.n ? 'guard-green-soft text-slate-900' : 'bg-white/[0.08] text-slate-200 hover:bg-white/[0.12]'"
                 class="rounded-xl px-3 py-1.5 text-xs font-semibold"
-                @click="updateRule({ spam_spike_min_deletes: p.n })"
+                @click="onSpamSpikeMinDeletesPick(p.n)"
               >
                 {{ p.label }}
               </button>
@@ -5737,7 +6320,7 @@ const protCardIndigo =
                 type="button"
                 :class="Number(chat.rule.spam_spike_window_minutes) === p.m ? 'guard-green-soft text-slate-900' : 'bg-white/[0.08] text-slate-200 hover:bg-white/[0.12]'"
                 class="rounded-xl px-3 py-1.5 text-xs font-semibold"
-                @click="updateRule({ spam_spike_window_minutes: p.m })"
+                @click="onSpamSpikeWindowPick(p.m)"
               >
                 {{ p.label }}
               </button>
@@ -5774,7 +6357,7 @@ const protCardIndigo =
               type="button"
               :class="boolToggleClass(!!chat.rule.spam_spike_enabled)"
               class="rounded-xl px-3 py-1.5 text-xs font-semibold"
-              @click="updateRule({ spam_spike_enabled: !chat.rule.spam_spike_enabled })"
+              @click="onSpamSpikeMasterToggleClick"
             >
               {{ chat.rule.spam_spike_enabled ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}
             </button>
@@ -5869,9 +6452,11 @@ const protCardIndigo =
         </div>
       </div>
     </div>
+    <GuardTeleport guard-to="body">
+    <!-- Справка по дежурным сообщениям: выше модалки настроек (200000), как у публичных алертов -->
     <div
       v-if="showGuardianPeriodicHelpModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:205000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
       class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
       @click.self="showGuardianPeriodicHelpModal = false"
     >
@@ -5891,6 +6476,9 @@ const protCardIndigo =
           <p class="text-[11px] text-slate-500">
             {{ tt('protection.modals.guardian_periodic.p2') }}
           </p>
+          <p class="text-[11px] leading-snug text-slate-400">
+            {{ tt('protection.modals.guardian_periodic.p3') }}
+          </p>
           <div class="rounded-xl bg-white/[0.05] p-2.5 text-[11px] text-slate-200">
             <p class="mb-1 font-semibold text-emerald-200/95">{{ tt('protection.modals.guardian_periodic.examples_title') }}</p>
             <p v-for="(txt, idx) in guardianPeriodicExamples" :key="`gp-ex-${idx}`">• «{{ txt }}»</p>
@@ -5898,6 +6486,7 @@ const protCardIndigo =
         </div>
       </div>
     </div>
+    </GuardTeleport>
     <div
       v-if="showSilencePickerModal"
       style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
@@ -6192,43 +6781,43 @@ const protCardIndigo =
       </div>
     </div>
     </GuardTeleport>
-    <GuardTeleport>
+    <GuardTeleport guard-to="body">
       <div
         v-if="showStopwordsModal"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+        class="guard-fullsheet-sheet pointer-events-auto fixed left-0 right-0 top-11 z-[2147483210] flex max-h-none w-full max-w-none flex-col overflow-x-hidden overscroll-none md:top-12"
         role="dialog"
         aria-modal="true"
         aria-labelledby="stopwords-modal-title"
-        @click.self="showStopwordsModal = false"
       >
         <div
-          class="flex max-h-[min(78vh,36rem)] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-white/15 bg-gradient-to-b from-slate-900 to-slate-950 text-slate-100 shadow-[0_24px_80px_-20px_rgba(0,0,0,0.85)] ring-1 ring-cyan-500/20"
+          class="guard-protection-fullsheet-glass flex min-h-0 w-full flex-1 flex-col border-t border-white/[0.10] pb-0 pt-2 pl-[max(1.25rem,env(safe-area-inset-left))] pr-[max(1.25rem,env(safe-area-inset-right))] text-slate-100 sm:pl-[max(1.5rem,env(safe-area-inset-left))] sm:pr-[max(1.5rem,env(safe-area-inset-right))]"
           @click.stop
         >
-          <div class="flex shrink-0 items-start justify-between gap-3 border-b border-white/10 px-4 py-3">
+          <div class="mx-auto mb-2 h-1 w-12 shrink-0 rounded-full bg-white/35 md:hidden" aria-hidden="true" />
+          <div class="flex shrink-0 items-start justify-between gap-3 border-b border-white/[0.08] pb-3">
             <div>
-              <h3 id="stopwords-modal-title" class="text-sm font-semibold text-white">{{ tt('protection.ui.stopwords_modal_title') }}</h3>
+              <h3 id="stopwords-modal-title" class="text-sm font-semibold text-white/[0.97]">{{ tt('protection.ui.stopwords_modal_title') }}</h3>
               <p class="mt-0.5 text-[11px] text-slate-400">{{ tt('protection.ui.stopwords_modal_hint') }}</p>
             </div>
             <button
               type="button"
-              class="rounded-lg px-2.5 py-1 text-xs text-slate-400 hover:bg-white/10 hover:text-white"
+              class="rounded-lg border border-white/[0.12] bg-white/[0.06] px-2.5 py-1 text-xs text-slate-400 transition hover:border-white/[0.18] hover:bg-white/[0.1] hover:text-white"
               @click="showStopwordsModal = false"
             >
               ✕
             </button>
           </div>
-          <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3 [-webkit-overflow-scrolling:touch]">
+          <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain py-3 pb-[calc(7rem+env(safe-area-inset-bottom,0px))] [-webkit-overflow-scrolling:touch]">
             <ul v-if="(chat?.stopwords || []).length" class="space-y-1.5">
               <li
                 v-for="w in (chat?.stopwords || [])"
                 :key="`modal-${w}`"
-                class="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm"
+                class="flex items-center justify-between rounded-xl border border-white/[0.10] bg-white/[0.05] px-3 py-2 text-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"
               >
                 <span class="font-mono text-slate-100">{{ w }}</span>
                 <button
                   type="button"
-                  class="rounded-lg px-2 py-1 text-xs text-rose-300 hover:bg-rose-500/15"
+                  class="rounded-lg px-2 py-1 text-xs text-rose-300 transition hover:bg-rose-500/15"
                   :disabled="stopwordLoading"
                   :aria-label="tt('protection.ui.stopwords_row_remove')"
                   @click="removeStopword(w)"
@@ -6237,7 +6826,7 @@ const protCardIndigo =
                 </button>
               </li>
             </ul>
-            <p v-else class="py-8 text-center text-sm text-slate-500">{{ tt('protection.ui.stopwords_empty_modal') }}</p>
+            <p v-else class="py-10 text-center text-sm text-slate-500">{{ tt('protection.ui.stopwords_empty_modal') }}</p>
           </div>
         </div>
       </div>
@@ -6283,23 +6872,6 @@ const protCardIndigo =
 
     <GuardTeleport>
       <div
-        v-if="postRulesImagePreviewUrl"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/75 p-4 backdrop-blur-[2px]"
-        role="dialog"
-        aria-modal="true"
-        @click.self="postRulesImagePreviewUrl = ''"
-      >
-        <div class="w-full max-w-2xl rounded-2xl border border-white/15 bg-zinc-950/90 p-3 shadow-2xl" @click.stop>
-          <div class="mb-2 flex justify-end">
-            <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="postRulesImagePreviewUrl = ''">✕</button>
-          </div>
-          <img :src="postRulesImagePreviewUrl" alt="preview" class="max-h-[75vh] w-full rounded-lg object-contain" />
-        </div>
-      </div>
-    </GuardTeleport>
-
-    <GuardTeleport>
-      <div
         v-if="welcomeImagePreviewUrl && showWelcomeSettingsModal"
         style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
         class="flex items-center justify-center overscroll-none bg-black/80 p-4 backdrop-blur-sm"
@@ -6308,7 +6880,13 @@ const protCardIndigo =
         @click.self="welcomeImagePreviewUrl = ''"
       >
         <div class="w-full max-w-2xl rounded-2xl border border-white/[0.08] bg-[#101013] p-3 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]" @click.stop>
-          <div class="mb-2 flex justify-end">
+          <div class="mb-2 flex items-center justify-end gap-2">
+            <button
+              type="button"
+              class="post-rules-tool-btn border-rose-400/30 bg-rose-500/15 px-3 py-1.5 text-[11px] font-semibold text-rose-100"
+              :disabled="welcomePhotoBusy"
+              @click="removeWelcomePhotoFromPreview()"
+            >{{ tt('protection.welcome_modal.remove_photo') }}</button>
             <button type="button" class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]" @click="welcomeImagePreviewUrl = ''">✕</button>
           </div>
           <img :src="welcomeImagePreviewUrl" :alt="tt('protection.ui.welcome_photo_preview_alt')" class="max-h-[78vh] w-full rounded-lg object-contain" />
@@ -6327,12 +6905,13 @@ const protCardIndigo =
       @click.self="closeWelcomeSettingsModal()"
     >
         <div
-          class="welcome-settings-shell flex max-h-[min(90vh,48rem)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-[#101013] p-0 text-zinc-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]"
+          class="welcome-settings-shell flex max-h-[min(90vh,48rem)] w-full max-w-2xl flex-col overflow-hidden rounded-[1.35rem] border border-white/10 bg-gradient-to-b from-[#16161f] via-[#0e0e14] to-[#08080c] p-0 text-zinc-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)] ring-1 ring-primary-500/25 shadow-glow-lime"
           @click.stop
         >
-          <div class="flex items-center justify-between border-b border-white/[0.06] bg-[#0c0c0f] px-4 py-3">
-            <div class="flex items-center gap-2">
-              <h3 class="text-sm font-semibold text-white">{{ tt('protection.welcome_modal.title') }}</h3>
+          <div class="relative flex items-center justify-between gap-2 overflow-hidden border-b border-white/[0.08] px-4 py-3.5">
+            <div class="pointer-events-none absolute inset-0 bg-gradient-to-r from-primary-500/22 via-primary-400/8 to-transparent" aria-hidden="true" />
+            <div class="relative flex items-center gap-2">
+              <h3 class="text-[13px] font-bold uppercase tracking-[0.08em] text-white">{{ tt('protection.welcome_modal.title') }}</h3>
               <button
                 type="button"
                 class="prot-info-btn prot-info-btn--ink prot-info-btn--corner-sm"
@@ -6341,10 +6920,14 @@ const protCardIndigo =
                 @click="welcomeInfoModal = welcomeInfoModal === 'main' ? '' : 'main'"
               >i</button>
             </div>
-            <button type="button" class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-400 transition hover:bg-white/[0.1]" @click="closeWelcomeSettingsModal()">✕</button>
+            <button
+              type="button"
+              class="relative shrink-0 rounded-xl border border-white/10 bg-white/[0.07] px-2.5 py-1 text-xs text-slate-200 transition hover:bg-white/[0.12]"
+              @click="closeWelcomeSettingsModal()"
+            >✕</button>
           </div>
-          <div class="min-h-[min(38vh,14rem)] max-h-[min(78vh,42rem)] flex-1 space-y-3 overflow-y-auto px-3 py-3 sm:px-4">
-            <div class="glass-panel flex items-center justify-between gap-2 p-3">
+          <div class="min-h-[min(38vh,14rem)] max-h-[min(78vh,42rem)] flex-1 space-y-3 overflow-y-auto overscroll-contain p-3 sm:p-4">
+            <div class="welcome-panel flex items-center justify-between gap-2 p-3">
               <span class="text-xs text-slate-200">{{ tt('protection.welcome_modal.enable_label') }}</span>
               <button
                 type="button"
@@ -6361,9 +6944,9 @@ const protCardIndigo =
             >
               {{ tt('protection.welcome_modal.service_join_hint') }}
             </p>
-            <div class="glass-panel p-3">
+            <div class="welcome-panel p-3">
               <div class="mb-2 flex items-center justify-between gap-2">
-                <p class="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ tt('protection.welcome_modal.format_heading') }}</p>
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-primary-300/95">{{ tt('protection.welcome_modal.format_heading') }}</p>
                 <button
                   type="button"
                   class="prot-info-btn prot-info-btn--ink prot-info-btn--corner-sm"
@@ -6388,13 +6971,6 @@ const protCardIndigo =
                   <img :src="welcomePreviewUrl" alt="" class="h-full w-full object-cover" />
                 </button>
                 <button
-                  v-if="welcomePreviewUrl"
-                  type="button"
-                  class="post-rules-tool-btn border-rose-400/30 bg-rose-500/15 px-2 py-1 text-[10px] text-rose-100"
-                  :disabled="welcomePhotoBusy"
-                  @click="removeWelcomePhoto()"
-                >{{ tt('protection.welcome_modal.remove_photo') }}</button>
-                <button
                   type="button"
                   class="post-rules-tool-btn px-3 py-1.5 text-[11px] font-semibold"
                   @click="welcomeInfoModal = ''; showWelcomeButtonsModal = true"
@@ -6406,7 +6982,7 @@ const protCardIndigo =
                 <button
                   type="button"
                   class="post-rules-tool-btn font-semibold"
-                  :class="welcomeFormatState.bold ? 'border-white/35 bg-white/10' : ''"
+                  :class="welcomeFormatPresetClass(welcomeFormatState.bold)"
                   :title="tt('protection.welcome_modal.bold')"
                   @mousedown.prevent
                   @click="welcomeFormatBold"
@@ -6414,7 +6990,7 @@ const protCardIndigo =
                 <button
                   type="button"
                   class="post-rules-tool-btn italic font-semibold"
-                  :class="welcomeFormatState.italic ? 'border-white/35 bg-white/10' : ''"
+                  :class="welcomeFormatPresetClass(welcomeFormatState.italic)"
                   :title="tt('protection.welcome_modal.italic')"
                   @mousedown.prevent
                   @click="welcomeFormatItalic"
@@ -6422,7 +6998,7 @@ const protCardIndigo =
                 <button
                   type="button"
                   class="post-rules-tool-btn font-semibold underline"
-                  :class="welcomeFormatState.underline ? 'border-white/35 bg-white/10' : ''"
+                  :class="welcomeFormatPresetClass(welcomeFormatState.underline)"
                   :title="tt('protection.welcome_modal.underline')"
                   @mousedown.prevent
                   @click="welcomeFormatUnderline"
@@ -6430,20 +7006,20 @@ const protCardIndigo =
                 <button
                   type="button"
                   class="post-rules-tool-btn font-semibold line-through"
-                  :class="welcomeFormatState.strike ? 'border-white/35 bg-white/10' : ''"
+                  :class="welcomeFormatPresetClass(welcomeFormatState.strike)"
                   :title="tt('protection.welcome_modal.strike')"
                   @mousedown.prevent
                   @click="welcomeFormatStrike"
                 >{{ tt('protection.welcome_modal.format_strike_key') }}</button>
-                <button type="button" class="post-rules-tool-btn" :title="tt('protection.welcome_modal.spoiler')" @mousedown.prevent @click="welcomeFormatSpoiler">👁</button>
-                <button type="button" class="post-rules-tool-btn" :title="tt('protection.welcome_modal.code')" @mousedown.prevent @click="welcomeFormatCode">{{ tt('protection.welcome_modal.code') }}</button>
-                <button type="button" class="post-rules-tool-btn" :title="tt('protection.welcome_modal.pre')" @mousedown.prevent @click="welcomeFormatPre">PRE</button>
-                <button type="button" class="post-rules-tool-btn" :title="tt('protection.welcome_modal.quote')" @mousedown.prevent @click="welcomeFormatBlockquote">{{ tt('protection.welcome_modal.quote_btn') }}</button>
-                <button type="button" class="post-rules-tool-btn" :title="tt('protection.welcome_modal.link')" @mousedown.prevent @click="welcomeFormatLink">{{ tt('protection.welcome_modal.link_btn') }}</button>
-                <button type="button" class="post-rules-tool-btn" :title="tt('protection.welcome_modal.ph_first')" @mousedown.prevent @click="welcomeInsertPlain('{first_name}')">{first_name}</button>
-                <button type="button" class="post-rules-tool-btn" :title="tt('protection.welcome_modal.ph_full')" @mousedown.prevent @click="welcomeInsertPlain('{full_name}')">{full_name}</button>
-                <button type="button" class="post-rules-tool-btn" :title="tt('protection.welcome_modal.ph_user')" @mousedown.prevent @click="welcomeInsertPlain('{username}')">{username}</button>
-                <button type="button" class="post-rules-tool-btn" :title="tt('protection.welcome_modal.ph_chat')" @mousedown.prevent @click="welcomeInsertPlain('{chat_title}')">{chat_title}</button>
+                <button type="button" class="post-rules-tool-btn" :class="welcomeFormatPresetClass(welcomeFormatState.spoiler)" :title="tt('protection.welcome_modal.spoiler')" @mousedown.prevent @click="welcomeFormatSpoiler">👁</button>
+                <button type="button" class="post-rules-tool-btn" :class="welcomeFormatPresetClass(welcomeFormatState.code)" :title="tt('protection.welcome_modal.code')" @mousedown.prevent @click="welcomeFormatCode">{{ tt('protection.welcome_modal.code') }}</button>
+                <button type="button" class="post-rules-tool-btn" :class="welcomeFormatPresetClass(welcomeFormatState.pre)" :title="tt('protection.welcome_modal.pre')" @mousedown.prevent @click="welcomeFormatPre">PRE</button>
+                <button type="button" class="post-rules-tool-btn" :class="welcomeFormatPresetClass(welcomeFormatState.quote)" :title="tt('protection.welcome_modal.quote')" @mousedown.prevent @click="welcomeFormatBlockquote">{{ tt('protection.welcome_modal.quote_btn') }}</button>
+                <button type="button" class="post-rules-tool-btn" :class="welcomeFormatPresetClass(welcomeFormatState.link)" :title="tt('protection.welcome_modal.link')" @mousedown.prevent @click="welcomeFormatLink">{{ tt('protection.welcome_modal.link_btn') }}</button>
+                <button type="button" class="post-rules-tool-btn" :class="welcomePlaceholderChipClass('{first_name}')" :title="tt('protection.welcome_modal.ph_first')" @mousedown.prevent @click="welcomeInsertPlain('{first_name}')">{first_name}</button>
+                <button type="button" class="post-rules-tool-btn" :class="welcomePlaceholderChipClass('{full_name}')" :title="tt('protection.welcome_modal.ph_full')" @mousedown.prevent @click="welcomeInsertPlain('{full_name}')">{full_name}</button>
+                <button type="button" class="post-rules-tool-btn" :class="welcomePlaceholderChipClass('{username}')" :title="tt('protection.welcome_modal.ph_user')" @mousedown.prevent @click="welcomeInsertPlain('{username}')">{username}</button>
+                <button type="button" class="post-rules-tool-btn" :class="welcomePlaceholderChipClass('{chat_title}')" :title="tt('protection.welcome_modal.ph_chat')" @mousedown.prevent @click="welcomeInsertPlain('{chat_title}')">{chat_title}</button>
               </div>
               <p class="mb-1 text-[10px] font-medium uppercase tracking-wide text-zinc-500">{{ tt('protection.welcome_modal.welcome_text_label') }}</p>
               <div class="mb-1.5 flex flex-wrap gap-1.5">
@@ -6473,6 +7049,7 @@ const protCardIndigo =
                 :data-placeholder="tt('protection.welcome_modal.placeholder_example')"
                 @input="onWelcomeBodyInput"
                 @click="onWelcomeBodyClick"
+                @keydown="welcomeOnEditorKeydown"
                 @mouseup="onWelcomeEditorSelectionChange"
                 @keyup="onWelcomeEditorSelectionChange"
               />
@@ -6480,9 +7057,9 @@ const protCardIndigo =
                 {{ tt('protection.welcome_modal.placeholders_hint') }}
               </p>
             </div>
-            <div class="glass-panel p-3">
+            <div class="welcome-panel p-3">
               <div class="mb-2 flex items-center justify-between gap-2">
-                <p class="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ tt('protection.welcome_modal.rate_heading') }}</p>
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-primary-300/95">{{ tt('protection.welcome_modal.rate_heading') }}</p>
                 <button
                   type="button"
                   class="prot-info-btn prot-info-btn--ink prot-info-btn--corner-sm"
@@ -6498,22 +7075,18 @@ const protCardIndigo =
                 </div>
                 <div>
                   <p class="mb-1 text-[10px] text-zinc-500">{{ tt('protection.welcome_modal.extra_limit') }}</p>
-                  <div class="flex flex-wrap gap-1.5">
-                    <button
-                      v-for="n in [0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 30]"
-                      :key="`wel-rate-${n}`"
-                      type="button"
-                      class="rounded-lg px-2 py-1 text-[11px] font-semibold"
-                      :class="Number(welcomeForm.maxPerMin || 0) === n ? 'guard-green-soft text-slate-900' : protToggleOff"
-                      @click="welcomeForm.maxPerMin = n"
-                    >
-                      {{ n === 0 ? tt('protection.welcome_modal.no_limit') : tt('protection.welcome_modal.per_min', { n }) }}
-                    </button>
-                  </div>
+                  <input
+                    v-model.number="welcomeForm.maxPerMin"
+                    type="number"
+                    min="0"
+                    max="60"
+                    class="w-full rounded-lg border border-white/14 bg-white/[0.06] px-2 py-1.5 text-xs"
+                  />
+                  <p class="mt-1 text-[9px] leading-relaxed text-zinc-500">{{ tt('protection.welcome_modal.extra_limit_hint') }}</p>
                 </div>
               </div>
             </div>
-            <div class="glass-panel p-3">
+            <div class="welcome-panel p-3">
               <div class="flex items-center justify-between gap-2">
                 <div class="flex min-w-0 items-center gap-1.5">
                   <span class="text-xs text-slate-200">{{ tt('protection.welcome_modal.silent_raid') }}</span>
@@ -6546,9 +7119,9 @@ const protCardIndigo =
               </div>
             </div>
           </div>
-          <div class="flex items-center justify-end gap-2 border-t border-white/[0.06] bg-[#0a0a0c] px-3 py-2.5 sm:px-4">
-            <button type="button" class="rounded-xl bg-white/[0.06] px-3 py-2 text-xs font-semibold text-slate-300 transition hover:bg-white/[0.1]" @click="showWelcomeSettingsModal = false">{{ tt('protection.welcome_modal.cancel') }}</button>
-            <button type="button" class="guard-green-soft rounded-xl px-3 py-2 text-xs font-bold text-slate-900 disabled:opacity-50" :disabled="welcomeBusy" @click="saveWelcomeSettings()">{{ welcomeBusy ? tt('protection.welcome_modal.saving') : tt('protection.welcome_modal.save') }}</button>
+          <div class="flex items-center justify-end gap-2 border-t border-white/[0.08] bg-[#0a0a0c]/90 px-3 py-2.5 sm:px-4">
+            <button type="button" class="rounded-xl border border-white/10 bg-white/[0.06] px-3 py-2 text-xs font-semibold text-slate-300 transition hover:bg-white/[0.1]" @click="closeWelcomeSettingsModal()">{{ tt('protection.welcome_modal.cancel') }}</button>
+            <button type="button" class="guard-green-soft rounded-xl px-3 py-2 text-xs font-bold text-slate-900 disabled:opacity-50" :disabled="welcomeBusy || welcomePhotoBusy" @click="saveWelcomeSettings()">{{ welcomeBusy ? tt('protection.welcome_modal.saving') : tt('protection.welcome_modal.save') }}</button>
           </div>
         </div>
       </div>
@@ -6563,7 +7136,7 @@ const protCardIndigo =
         @click.self="closePostRulesSettingsModal()"
       >
         <div
-          class="post-rules-settings-shell flex max-h-[min(90vh,48rem)] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-[#101013] p-0 text-zinc-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]"
+          class="post-rules-settings-shell flex max-h-[min(90vh,48rem)] w-full max-w-3xl flex-col overflow-hidden rounded-[1.35rem] border border-white/10 bg-gradient-to-b from-[#16161f] via-[#0e0e14] to-[#08080c] p-0 text-zinc-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)] ring-1 ring-primary-500/25 shadow-glow-lime"
           @click.stop
         >
           <div class="flex items-center justify-between border-b border-white/[0.06] bg-[#0c0c0f] px-4 py-3">
@@ -6622,138 +7195,65 @@ const protCardIndigo =
           </div>
 
           <div class="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3 sm:px-4">
-              <div class="glass-panel p-3">
-                <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
-                  <p class="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ tt('protection.group_rules_ui.drafts') }}</p>
-                  <div class="flex flex-wrap items-center justify-end gap-1.5">
-                    <button
-                      type="button"
-                      class="rounded-lg border border-emerald-400/40 bg-emerald-500/15 px-2 py-1 text-[11px] font-semibold text-emerald-100 hover:bg-emerald-500/25"
-                      @click="postRulesCreateGroupDraft()"
-                    >{{ tt('protection.group_rules_ui.create_draft') }}</button>
-                    <button
-                      v-if="postRulesShowSaveDraftButton"
-                      type="button"
-                      class="rounded-lg border border-violet-400/45 bg-violet-500/20 px-2 py-1 text-[11px] font-semibold text-violet-100 hover:bg-violet-500/30"
-                      @click="postRulesSaveDraft()"
-                    >{{ tt('protection.group_rules_ui.save_draft') }}</button>
-                  </div>
-                </div>
-                <p v-if="postRulesEditingDraftName" class="mb-2 text-[11px] text-cyan-200">{{ tt('protection.group_rules_ui.editing_now') }} {{ postRulesEditingDraftName }}</p>
-                <p class="mb-2 text-[11px] text-slate-400">{{ tt('protection.group_rules_ui.chat_label') }} {{ postRulesCurrentGroupTitle() }}</p>
-                <div class="space-y-1.5">
-                  <div
-                    v-for="d in postRulesDraftsForChat.slice(0, 8)"
-                    :key="`prd-${d.id}`"
-                    class="flex flex-wrap items-center gap-1.5 rounded-lg border px-2 py-1.5"
-                    :class="String(postRulesActiveDraftId || '') === String(d.id || '') ? 'border-cyan-400/45 bg-cyan-500/12' : 'border-white/10 bg-white/[0.04]'"
-                  >
-                    <span
-                      class="inline-flex h-2 w-2 shrink-0 rounded-full"
-                      :class="String(postRulesGroupRunActiveId || '') === String(d.id || '') ? 'bg-emerald-400' : 'bg-zinc-600'"
-                      :title="String(postRulesGroupRunActiveId || '') === String(d.id || '') ? tt('protection.group_rules_ui.tt_launched') : tt('protection.group_rules_ui.tt_not_launched')"
-                    />
-                    <div class="min-w-0 flex-1">
-                      <div class="flex min-w-0 items-center gap-2">
-                        <input
-                          :value="postRulesDraftDisplayName(d)"
-                          type="text"
-                          class="min-w-0 flex-1 rounded-md border border-white/10 bg-white/[0.05] px-2 py-1 text-[11px] text-slate-200"
-                          @focus="postRulesBeginDraftNameEdit(d)"
-                          @input="postRulesOnDraftNameInput(d, $event)"
-                        />
-                        <button
-                          v-if="postRulesDraftNameDirty && String(postRulesDraftNameEditId || '') === String(d.id || '')"
-                          type="button"
-                          class="shrink-0 rounded-md border border-emerald-300/35 bg-emerald-500/20 px-2 py-0.5 text-[10px] font-extrabold text-emerald-100"
-                          @click="postRulesCommitDraftName(d)"
-                        >✓</button>
-                      </div>
-                      <p class="text-[10px] text-slate-500">{{ postRulesDraftSavedAtLabel(d.savedAt) }}</p>
-                    </div>
-                    <button type="button" class="rounded border border-white/20 bg-white/[0.08] px-1.5 py-0.5 text-[10px] text-slate-200" :disabled="postRulesDraftLoadingId === d.id" @click="postRulesApplyDraft(d)">{{ postRulesDraftLoadingId === d.id ? '…' : tt('protection.group_rules_ui.edit') }}</button>
-                    <button
-                      type="button"
-                      class="rounded px-1.5 py-0.5 text-[10px] font-semibold"
-                      :disabled="!!postRulesGroupRunDraftBusyId"
-                      :class="String(postRulesGroupRunActiveId || '') === String(d.id || '') ? 'border border-rose-400/35 bg-rose-500/20 text-rose-100' : 'border border-emerald-400/35 bg-emerald-500/20 text-emerald-100'"
-                      @click="postRulesToggleRunGroupDraft(d)"
-                    >{{ String(postRulesGroupRunDraftBusyId || '') === String(d.id) ? '…' : (String(postRulesGroupRunActiveId || '') === String(d.id) ? tt('protection.group_rules_ui.launch_off') : tt('protection.group_rules_ui.launch')) }}</button>
-                    <button type="button" class="rounded border border-rose-400/25 bg-rose-500/15 px-1 py-0.5 text-[10px] text-rose-100 hover:bg-rose-500/25" @click="postRulesDeleteDraft(d.id)">🗑</button>
-                  </div>
-                  <p v-if="!postRulesDraftsForChat.length" class="text-[11px] text-slate-500">{{ tt('protection.group_rules_ui.no_drafts') }}</p>
+              <div class="post-rules-panel p-3">
+                <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-primary-300/95">{{ tt('protection.group_rules_ui.autosend_title') }}</p>
+                <p class="mb-2 text-[10px] leading-snug text-slate-500">{{ tt('protection.group_rules_ui.autosend_hint') }}</p>
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <span class="text-xs text-slate-200">{{ postRulesAutosendSummary }}</span>
+                  <button
+                    type="button"
+                    class="rounded-lg border border-primary-400/35 bg-primary-500/15 px-2.5 py-1 text-[11px] font-semibold text-primary-100 hover:bg-primary-500/25"
+                    @click="showPostRulesAutosendModal = true"
+                  >{{ tt('protection.group_rules_ui.autosend_configure') }}</button>
                 </div>
               </div>
 
-              <div class="glass-panel p-3">
-                <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ tt('protection.group_rules_ui.autosend_title') }}</p>
-                <p class="mb-2 text-[10px] text-slate-500">{{ tt('protection.group_rules_ui.autosend_hint') }}</p>
-                <div class="space-y-2">
-                  <div class="flex items-center justify-between gap-2">
-                    <span class="max-w-[14rem] text-xs leading-snug text-slate-200">{{ tt('protection.group_rules_ui.filter_any') }}</span>
-                    <button type="button" :class="boolToggleClass(!!postRulesGroupForm.eventOnTrigger)" class="min-w-[5rem] shrink-0 rounded-lg px-2.5 py-1 text-xs font-medium" @click="postRulesGroupForm.eventOnTrigger = !postRulesGroupForm.eventOnTrigger; postRulesTouchServerDirty()">{{ postRulesGroupForm.eventOnTrigger ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}</button>
-                  </div>
-                  <div v-if="postRulesGroupForm.eventOnTrigger" class="flex items-center justify-between gap-2">
-                    <span class="text-[11px] text-slate-400">{{ tt('protection.group_rules_ui.every_n_events') }}</span>
-                    <input v-model.number="postRulesGroupForm.eventTriggerEveryN" type="number" min="1" max="500" class="w-24 rounded-lg border border-white/14 bg-white/[0.06] px-2 py-1 text-xs" @input="postRulesTouchServerDirty()" />
-                  </div>
-                  <div class="flex items-center justify-between gap-2">
-                    <span class="text-xs text-slate-200">{{ tt('protection.group_rules_ui.on_punish') }}</span>
-                    <button type="button" :class="boolToggleClass(!!postRulesGroupForm.eventOnPunish)" class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium" @click="postRulesGroupForm.eventOnPunish = !postRulesGroupForm.eventOnPunish; postRulesTouchServerDirty()">{{ postRulesGroupForm.eventOnPunish ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}</button>
-                  </div>
-                  <div v-if="postRulesGroupForm.eventOnPunish" class="flex items-center justify-between gap-2">
-                    <span class="text-[11px] text-slate-400">{{ tt('protection.group_rules_ui.every_n_punish') }}</span>
-                    <input v-model.number="postRulesGroupForm.eventPunishEveryN" type="number" min="1" max="500" class="w-24 rounded-lg border border-white/14 bg-white/[0.06] px-2 py-1 text-xs" @input="postRulesTouchServerDirty()" />
-                  </div>
-                </div>
-              </div>
-
-              <div class="glass-panel p-3" :class="postRulesGroupBodyPanelLocked ? 'border-amber-400/15' : ''">
-                <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ tt('protection.group_rules_ui.rules_text') }}</p>
-                <p
-                  v-if="postRulesGroupBodyPanelLocked"
-                  class="mb-2 rounded-lg border border-amber-400/25 bg-amber-950/25 px-2.5 py-2 text-[11px] text-amber-100"
-                >
-                  {{ tt('protection.group_rules_ui.locked_hint') }}
-                </p>
-                <div class="mb-1.5 flex flex-wrap gap-1.5" :class="postRulesGroupBodyPanelLocked ? 'pointer-events-none opacity-45' : ''">
-                  <button type="button" class="post-rules-tool-btn font-semibold" :class="postRulesFormatState.bold ? 'border-cyan-400/50 bg-cyan-500/15' : ''" @mousedown.prevent @click="postRulesExec('bold')">{{ tt('protection.welcome_modal.format_bold_key') }}</button>
-                  <button type="button" class="post-rules-tool-btn italic" :class="postRulesFormatState.italic ? 'border-cyan-400/50 bg-cyan-500/15' : ''" @mousedown.prevent @click="postRulesExec('italic')">{{ tt('protection.welcome_modal.format_italic_key') }}</button>
-                  <button type="button" class="post-rules-tool-btn underline" :class="postRulesFormatState.underline ? 'border-cyan-400/50 bg-cyan-500/15' : ''" @mousedown.prevent @click="postRulesExec('underline')">{{ tt('protection.welcome_modal.format_underline_key') }}</button>
-                  <button type="button" class="post-rules-tool-btn line-through" :class="postRulesFormatState.strike ? 'border-cyan-400/50 bg-cyan-500/15' : ''" @mousedown.prevent @click="postRulesExec('strikeThrough')">{{ tt('protection.welcome_modal.format_strike_key') }}</button>
-                  <button type="button" class="post-rules-tool-btn" @mousedown.prevent @click="postRulesFormatLink">{{ tt('protection.welcome_modal.link_btn') }}</button>
+              <div class="post-rules-panel p-3">
+                <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-primary-300/95">{{ tt('protection.group_rules_ui.rules_text') }}</p>
+                <div class="mb-1.5 flex flex-wrap gap-1.5">
+                  <button type="button" class="post-rules-tool-btn font-semibold" :class="postRulesFormatState.bold ? 'post-rules-tool-active' : ''" @mousedown.prevent @click="postRulesExec('bold')">{{ tt('protection.welcome_modal.format_bold_key') }}</button>
+                  <button type="button" class="post-rules-tool-btn italic" :class="postRulesFormatState.italic ? 'post-rules-tool-active' : ''" @mousedown.prevent @click="postRulesExec('italic')">{{ tt('protection.welcome_modal.format_italic_key') }}</button>
+                  <button type="button" class="post-rules-tool-btn underline" :class="postRulesFormatState.underline ? 'post-rules-tool-active' : ''" @mousedown.prevent @click="postRulesExec('underline')">{{ tt('protection.welcome_modal.format_underline_key') }}</button>
+                  <button type="button" class="post-rules-tool-btn line-through" :class="postRulesFormatState.strike ? 'post-rules-tool-active' : ''" @mousedown.prevent @click="postRulesExec('strikeThrough')">{{ tt('protection.welcome_modal.format_strike_key') }}</button>
+                  <button type="button" class="post-rules-tool-btn text-[11px]" :class="postRulesFormatState.quote ? 'post-rules-tool-active' : ''" :title="tt('channel_rules_modal.fmt_quote_title')" @mousedown.prevent @click="postRulesFormatBlockquote">{{ tt('channel_rules_modal.fmt_quote') }}</button>
+                  <button type="button" class="post-rules-tool-btn text-base leading-none" :class="postRulesEmojiOpen ? 'post-rules-tool-active' : ''" :title="tt('protection.group_rules_ui.fmt_emoji_title')" @mousedown.prevent @click="postRulesToggleEmoji">😀</button>
+                  <button type="button" class="post-rules-tool-btn" :class="postRulesFormatState.link ? 'post-rules-tool-active' : ''" @mousedown.prevent @click="postRulesFormatLink">{{ tt('protection.welcome_modal.link_btn') }}</button>
                   <button type="button" class="post-rules-tool-btn" @mousedown.prevent @click="postRulesClearFormatting">{{ tt('protection.group_rules_ui.clear_format') }}</button>
                 </div>
-                <div class="mb-1.5 flex flex-wrap gap-1.5" :class="postRulesGroupBodyPanelLocked ? 'pointer-events-none opacity-45' : ''">
+                <div v-show="postRulesEmojiOpen" class="post-rules-emoji-popover mb-1.5">
+                  <emoji-picker v-if="postRulesEmojiPickerReady" class="post-rules-emoji-picker" @emoji-click="postRulesOnEmojiClick" />
+                </div>
+                <div class="mb-1.5 flex flex-wrap items-center gap-1.5">
                   <button type="button" class="post-rules-tool-btn px-2.5 text-zinc-200" :class="!postRulesCanUndo() ? 'opacity-40' : ''" :disabled="!postRulesCanUndo()" @mousedown.prevent @click="postRulesUndo">{{ tt('protection.welcome_modal.nav_back') }}</button>
                   <button type="button" class="post-rules-tool-btn px-2.5 text-zinc-200" :class="!postRulesCanRedo() ? 'opacity-40' : ''" :disabled="!postRulesCanRedo()" @mousedown.prevent @click="postRulesRedo">{{ tt('protection.welcome_modal.nav_forward') }}</button>
                   <label class="post-rules-tool-btn cursor-pointer">
                     {{ postRulesBusy ? tt('protection.group_rules_ui.photo_loading') : tt('protection.group_rules_ui.file') }}
-                    <input type="file" accept="image/*" class="hidden" :disabled="postRulesBusy || postRulesGroupBodyPanelLocked" @change="onPostRulesPhotoPicked($event)" />
+                    <input type="file" accept="image/*" class="hidden" :disabled="postRulesBusy" @change="onPostRulesPhotoPicked($event)" />
                   </label>
-                  <button type="button" class="post-rules-tool-btn" :disabled="postRulesBusy || !postRulesGroupPreviewUrl || postRulesGroupBodyPanelLocked" @click="removePostRulesPhoto()">🗑</button>
-                  <button v-if="postRulesGroupPreviewUrl" type="button" class="h-8 w-8 overflow-hidden rounded-lg border border-white/12 bg-black/40" :disabled="postRulesGroupBodyPanelLocked" @click="openPostRulesImagePreview()">
-                    <img :src="postRulesGroupPreviewUrl" alt="" class="h-full w-full object-cover" />
-                  </button>
+                  <div v-if="postRulesGroupPreviewUrl" class="post-rules-thumb-wrap relative h-8 w-8 shrink-0 overflow-hidden rounded-lg border border-white/12 bg-black/40">
+                    <button type="button" class="absolute inset-0 z-0" :aria-label="tt('protection.group_rules_ui.photo_preview_open')" @click="openPostRulesImagePreview()"></button>
+                    <img :src="postRulesGroupPreviewUrl" alt="" class="pointer-events-none relative z-0 h-full w-full object-cover" />
+                  </div>
                   <div class="flex items-center gap-1">
-                    <button type="button" class="post-rules-tool-btn" :disabled="postRulesGroupBodyPanelLocked" @click="showPostRulesButtonsModal = true">{{ tt('protection.group_rules_ui.buttons_inline') }}</button>
+                    <button type="button" class="post-rules-tool-btn" @click="showPostRulesButtonsModal = true">{{ tt('protection.group_rules_ui.buttons_inline') }}</button>
                     <span v-if="postRulesGroupInlineButtonCount > 0" class="rounded-md border border-cyan-400/25 bg-cyan-500/15 px-1.5 py-0.5 text-[10px] font-bold text-cyan-100">{{ postRulesGroupInlineButtonCount }}</span>
                   </div>
                 </div>
                 <div
                   ref="postRulesBodyRef"
-                  :contenteditable="!postRulesGroupBodyPanelLocked"
+                  contenteditable="true"
                   class="post-rules-rich-editor max-h-56 min-h-[8rem] w-full overflow-y-auto rounded-xl border border-white/10 bg-slate-950/90 px-3 py-2 text-sm leading-relaxed text-slate-100 focus-within:border-white/20 focus-within:ring-1 focus-within:ring-white/10"
-                  :class="postRulesGroupBodyPanelLocked ? 'pointer-events-none select-none opacity-55' : ''"
                   :data-placeholder="tt('protection.group_rules_ui.placeholder_rules')"
                   @input="onPostRulesBodyInput"
+                  @keydown="postRulesOnEditorKeydown"
                   @mouseup="postRulesUpdateFormatState"
                   @keyup="postRulesUpdateFormatState"
+                  @click="postRulesUpdateFormatState"
                 />
               </div>
 
-              <div class="glass-panel p-3">
-                <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{{ tt('protection.group_rules_ui.pin_block') }}</p>
+              <div class="post-rules-panel p-3">
+                <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-primary-300/95">{{ tt('protection.group_rules_ui.pin_block') }}</p>
                 <div class="flex items-center justify-between gap-2">
                   <span class="text-xs text-slate-200">{{ tt('protection.group_rules_ui.pin_on_send') }}</span>
                   <button type="button" :class="boolToggleClass(!!postRulesGroupForm.pinOnSend)" class="min-w-[5rem] rounded-lg px-2.5 py-1 text-xs font-medium" @click="postRulesGroupForm.pinOnSend = !postRulesGroupForm.pinOnSend; postRulesTouchServerDirty()">{{ postRulesGroupForm.pinOnSend ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}</button>
@@ -6786,7 +7286,60 @@ const protCardIndigo =
       </div>
     </GuardTeleport>
 
-    <GuardTeleport>
+    <GuardTeleport guard-to="body">
+      <div
+        v-if="showPostRulesAutosendModal && showPostRulesSettingsModal"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483200;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+        class="flex items-end justify-center overscroll-none p-3 backdrop-blur-md md:items-center"
+        @click.self="showPostRulesAutosendModal = false"
+      >
+        <div
+          class="w-full max-w-md overflow-hidden rounded-[1.35rem] border border-white/10 bg-gradient-to-b from-[#16161f] via-[#0e0e14] to-[#08080c] text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)] ring-1 ring-primary-500/25 shadow-glow-lime"
+          @click.stop
+        >
+          <div class="relative flex items-center justify-between gap-2 overflow-hidden border-b border-white/[0.08] px-4 py-3.5">
+            <div class="pointer-events-none absolute inset-0 bg-gradient-to-r from-primary-500/22 via-primary-400/8 to-transparent" aria-hidden="true" />
+            <h4 class="relative text-[13px] font-bold uppercase tracking-[0.08em] text-white">{{ tt('protection.group_rules_ui.autosend_modal_title') }}</h4>
+            <button
+              type="button"
+              class="relative shrink-0 rounded-xl border border-white/10 bg-white/[0.07] px-2.5 py-1 text-xs text-slate-200 transition hover:bg-white/[0.12]"
+              @click="showPostRulesAutosendModal = false"
+            >✕</button>
+          </div>
+          <div class="space-y-4 p-4">
+            <p class="text-[11px] leading-relaxed text-slate-400">{{ tt('protection.group_rules_ui.autosend_modal_hint') }}</p>
+            <div class="flex items-center justify-between gap-2 rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 ring-1 ring-inset ring-white/[0.04]">
+              <span class="text-xs font-medium text-slate-200">{{ tt('protection.group_rules_ui.autosend_enable') }}</span>
+              <button
+                type="button"
+                :class="boolToggleClass(!!postRulesGroupForm.eventOnTrigger)"
+                class="min-w-[5rem] shrink-0 rounded-lg px-2.5 py-1 text-xs font-medium"
+                @click="postRulesGroupForm.eventOnTrigger = !postRulesGroupForm.eventOnTrigger; postRulesTouchServerDirty()"
+              >{{ postRulesGroupForm.eventOnTrigger ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}</button>
+            </div>
+            <div>
+              <p class="mb-1 text-[10px] text-zinc-500">{{ tt('protection.group_rules_ui.every_nth_trigger') }}</p>
+              <input
+                v-model.number="postRulesGroupForm.eventTriggerEveryN"
+                type="number"
+                min="1"
+                max="500"
+                :disabled="!postRulesGroupForm.eventOnTrigger"
+                class="w-full rounded-lg border border-white/14 bg-white/[0.06] px-2 py-1.5 text-xs disabled:opacity-45"
+                @input="postRulesTouchServerDirty()"
+              />
+              <p class="mt-1 text-[9px] leading-relaxed text-zinc-500">{{ tt('protection.group_rules_ui.every_nth_trigger_hint') }}</p>
+            </div>
+          </div>
+          <div class="flex justify-end gap-2 border-t border-white/[0.08] px-4 py-3">
+            <button type="button" class="rounded-xl border border-white/10 bg-white/[0.06] px-3 py-2 text-xs font-semibold text-slate-300" @click="showPostRulesAutosendModal = false">{{ tt('protection.group_rules_ui.cancel') }}</button>
+            <button type="button" class="guard-green-soft rounded-xl px-3 py-2 text-xs font-bold text-slate-900" @click="showPostRulesAutosendModal = false; postRulesTouchServerDirty()">{{ tt('protection.group_rules_ui.autosend_done') }}</button>
+          </div>
+        </div>
+      </div>
+    </GuardTeleport>
+
+    <GuardTeleport v-if="false">
       <div
         v-if="showPostRulesGroupSendModal && showPostRulesSettingsModal"
         style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
@@ -6929,10 +7482,10 @@ const protCardIndigo =
       </div>
     </GuardTeleport>
 
-    <GuardTeleport>
+    <GuardTeleport guard-to="body">
       <div
         v-if="postRulesLinkModalOpen && showPostRulesSettingsModal"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483120;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
         role="dialog"
         aria-modal="true"
         @click.self="postRulesLinkModalOpen = false"
@@ -6943,7 +7496,18 @@ const protCardIndigo =
             <button type="button" class="rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/10" @click="postRulesLinkModalOpen = false">✕</button>
           </div>
           <div class="space-y-2 px-4 py-3">
-            <input v-model.trim="postRulesLinkUrl" type="text" class="w-full rounded-lg border border-white/15 bg-white/[0.06] px-3 py-2 text-sm" :placeholder="tt('protection.editor_buttons_modal.url_placeholder')" />
+            <div class="flex overflow-hidden rounded-lg border border-white/15 bg-white/[0.06] focus-within:border-cyan-400/45 focus-within:ring-1 focus-within:ring-cyan-400/25">
+              <span class="flex shrink-0 items-center border-r border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-slate-400 select-none">https://</span>
+              <input
+                v-model="postRulesLinkUrlPath"
+                type="text"
+                class="min-w-0 flex-1 bg-transparent px-3 py-2 text-sm text-slate-100 outline-none"
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+                @keydown.enter.prevent="postRulesApplyLinkModal()"
+              />
+            </div>
           </div>
           <div class="flex items-center justify-end gap-2 border-t border-white/10 px-4 py-3">
             <button type="button" class="rounded-lg border border-white/15 px-3 py-2 text-sm text-slate-200 hover:bg-white/10" @click="postRulesLinkModalOpen = false">{{ tt('common.cancel') }}</button>
@@ -7045,10 +7609,10 @@ const protCardIndigo =
       </div>
     </GuardTeleport>
 
-    <GuardTeleport>
+    <GuardTeleport guard-to="body">
       <div
         v-if="welcomeLinkModalOpen"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200010;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483120;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
         class="flex items-start justify-center overscroll-none p-4 backdrop-blur-sm md:items-center"
         role="dialog"
         aria-modal="true"
@@ -7060,12 +7624,18 @@ const protCardIndigo =
             <button type="button" class="shrink-0 rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]" @click="welcomeLinkModalOpen = false">✕</button>
           </div>
           <div class="px-4 py-4">
-            <input
-              v-model="welcomeLinkUrl"
-              type="text"
-              :placeholder="tt('protection.editor_buttons_modal.url_placeholder')"
-              class="w-full rounded-xl border-0 bg-black/50 px-3 py-2.5 text-sm text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)] focus:outline-none focus:ring-1 focus:ring-lime-400/35"
-            />
+            <div class="flex overflow-hidden rounded-xl bg-black/50 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)] focus-within:shadow-[inset_0_0_0_1px_rgba(163,230,53,0.35)]">
+              <span class="flex shrink-0 items-center border-r border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-slate-400 select-none">https://</span>
+              <input
+                v-model="welcomeLinkUrlPath"
+                type="text"
+                class="min-w-0 flex-1 bg-transparent px-3 py-2.5 text-sm text-white outline-none"
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+                @keydown.enter.prevent="welcomeApplyLinkModal()"
+              />
+            </div>
             <div class="mt-3 flex flex-wrap gap-2">
               <button type="button" class="guard-green-soft rounded-xl px-4 py-2 text-sm font-bold text-slate-900" @click="welcomeApplyLinkModal">{{ tt('common.apply') }}</button>
               <button type="button" class="rounded-xl bg-white/[0.06] px-4 py-2 text-sm font-semibold text-slate-300 hover:bg-white/[0.1]" @click="welcomeLinkModalOpen = false">{{ tt('common.cancel') }}</button>
@@ -7346,7 +7916,7 @@ const protCardIndigo =
                 <p class="mb-0 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
                   {{ tt('protection.links_modal.trusted_links_title') }}
                   <span class="font-normal normal-case text-zinc-500">
-                    ({{ (chat.whitelist_domains || []).length }}/{{ chat.whitelist_max_domains ?? 5 }})
+                    ({{ (chat.whitelist_domains || []).length }}<span v-if="!premiumFeatureLocked">/{{ chat.whitelist_max_domains ?? 0 }}</span>)
                   </span>
                   <PremiumLockBadge
                     v-if="premiumFeatureLocked"
@@ -7377,13 +7947,13 @@ const protCardIndigo =
                   type="text"
                   :placeholder="tt('protection.links_modal.trusted_placeholder')"
                   class="min-w-0 flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-2.5 py-2 text-xs text-white placeholder:text-zinc-500 focus:border-sky-400/40 focus:outline-none"
-                  :disabled="whitelistLoading"
+                  :disabled="whitelistLoading || premiumFeatureLocked"
                   @keydown.enter.prevent="addWhitelistDomain()"
                 />
                 <button
                   type="button"
                   class="link-glass-add-btn shrink-0"
-                  :disabled="whitelistLoading || !(newWhitelistDomain || '').trim()"
+                  :disabled="whitelistLoading || premiumFeatureLocked || !(newWhitelistDomain || '').trim()"
                   @click="addWhitelistDomain()"
                 >
                   +
@@ -7412,7 +7982,7 @@ const protCardIndigo =
                 <p class="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
                   {{ tt('protection.links_modal.trusted_users_title') }}
                   <span class="font-normal normal-case text-zinc-500">
-                    ({{ (chat.whitelist_users || []).length }}/{{ chat.whitelist_max_users ?? 50 }})
+                    ({{ (chat.whitelist_users || []).length }}<span v-if="!premiumFeatureLocked">/{{ chat.whitelist_max_users ?? 0 }}</span>)
                   </span>
                   <PremiumLockBadge
                     v-if="premiumFeatureLocked"
@@ -7443,13 +8013,13 @@ const protCardIndigo =
                   type="text"
                   :placeholder="tt('protection.links_modal.trusted_users_placeholder')"
                   class="min-w-0 flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-2.5 py-2 text-xs text-white placeholder:text-zinc-500 focus:border-violet-400/40 focus:outline-none"
-                  :disabled="whitelistLoading"
+                  :disabled="whitelistLoading || premiumFeatureLocked"
                   @keydown.enter.prevent="addWhitelistUser()"
                 />
                 <button
                   type="button"
                   class="link-glass-add-btn shrink-0"
-                  :disabled="whitelistLoading || !(newWhitelistUserId || '').trim()"
+                  :disabled="whitelistLoading || premiumFeatureLocked || !(newWhitelistUserId || '').trim()"
                   @click="addWhitelistUser()"
                 >
                   +
@@ -7511,26 +8081,22 @@ const protCardIndigo =
             <h3 class="text-sm font-semibold text-white">{{ tt('protection.channel_posts_modal.title') }}</h3>
             <button type="button" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/10" @click="showChannelPostsFilterModal = false">✕</button>
           </div>
-          <p class="mb-3 text-[12px] leading-snug text-zinc-400">{{ tt('protection.ui.channel_posts_modal_hint') }}</p>
-          <p v-if="premiumFeatureLocked" class="mb-3 text-[11px] leading-snug text-zinc-500">
-            {{ tt('protection.ui.channel_posts_modal_hint_free') }}
-          </p>
           <ul class="space-y-2">
             <li
               v-for="kind in CHANNEL_POST_FILTER_KINDS"
               :key="kind.field"
-              class="flex items-center justify-between gap-3 rounded-xl px-3 py-2.5"
+              class="flex items-start justify-between gap-3 rounded-xl px-3 py-2.5"
               :class="[
                 granularPremiumRowClass(isChannelPostKindPremiumOnly(kind.key)),
                 isChannelPostKindPremiumOnly(kind.key) && premiumFeatureLocked ? 'cursor-pointer' : 'cursor-default',
               ]"
               @click="onChannelPostKindRowClick(kind, $event)"
             >
-              <div class="flex min-w-0 flex-1 items-center gap-2.5">
-                <span class="text-lg leading-none">{{ kind.icon }}</span>
-                <div class="flex min-w-0 flex-col">
-                  <span class="truncate text-[13px] font-medium text-white">{{ tt(`protection.ui.channel_post_kinds.${kind.key}`) }}</span>
-                  <span class="truncate text-[11px] text-zinc-500">{{ tt(`protection.ui.channel_post_kinds_hint.${kind.key}`) }}</span>
+              <div class="flex min-w-0 flex-1 items-start gap-2.5">
+                <span class="shrink-0 pt-0.5 text-lg leading-none">{{ kind.icon }}</span>
+                <div class="flex min-w-0 flex-col gap-0.5">
+                  <span class="break-words text-[13px] font-medium leading-snug text-white">{{ tt(`protection.ui.channel_post_kinds.${kind.key}`) }}</span>
+                  <span class="break-words text-[11px] leading-snug text-zinc-500">{{ tt(`protection.ui.channel_post_kinds_hint.${kind.key}`) }}</span>
                 </div>
               </div>
               <button
@@ -7575,6 +8141,14 @@ const protCardIndigo =
               <span class="font-normal normal-case text-zinc-500">
                 ({{ (chat.whitelist_sender_chats || []).length }})
               </span>
+              <PremiumLockBadge
+                v-if="premiumFeatureLocked"
+                variant="pill"
+                size="xs"
+                interactive
+                class="ml-1 align-middle"
+                @click="openPremiumLock('whitelist_caps')"
+              />
             </p>
             <div class="mb-2 flex gap-2">
               <input
@@ -7582,13 +8156,13 @@ const protCardIndigo =
                 type="text"
                 :placeholder="tt('protection.channel_posts_modal.trusted_placeholder')"
                 class="min-w-0 flex-1 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-2 text-xs text-white placeholder:text-zinc-500 focus:border-white/20 focus:outline-none"
-                :disabled="whitelistLoading"
+                :disabled="whitelistLoading || premiumFeatureLocked"
                 @keydown.enter.prevent="addWhitelistSenderChat()"
               />
               <button
                 type="button"
                 class="link-glass-add-btn shrink-0"
-                :disabled="whitelistLoading || !(newWhitelistSenderChat || '').trim()"
+                :disabled="whitelistLoading || premiumFeatureLocked || !(newWhitelistSenderChat || '').trim()"
                 @click="addWhitelistSenderChat()"
               >
                 +
@@ -7644,10 +8218,6 @@ const protCardIndigo =
             <h3 class="text-sm font-semibold text-white">{{ tt('protection.ui.media_modal_title') }}</h3>
             <button type="button" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/10" @click="showMediaFilterModal = false">✕</button>
           </div>
-          <p class="mb-3 text-[12px] leading-snug text-zinc-400">{{ tt('protection.ui.media_modal_hint') }}</p>
-          <p v-if="premiumFeatureLocked" class="mb-3 text-[11px] leading-snug text-zinc-500">
-            {{ tt('protection.ui.media_modal_premium_rows_hint') }}
-          </p>
           <div
             class="mb-3 flex items-center justify-between gap-3 rounded-xl border border-white/[0.08] bg-white/[0.03] px-3 py-2.5"
           >
@@ -7693,6 +8263,47 @@ const protCardIndigo =
               </div>
             </li>
           </ul>
+          <div class="mt-4 border-t border-white/10 pt-3">
+            <p class="mb-1 text-xs font-semibold text-white">{{ tt('protection.ui.media_trusted_users_title') }}</p>
+            <p class="mb-2 text-[11px] leading-snug text-zinc-500">{{ tt('protection.ui.media_trusted_users_hint') }}</p>
+            <ul
+              v-if="Array.isArray(chat.rule.media_trusted_users) && chat.rule.media_trusted_users.length"
+              class="mb-2 flex flex-wrap gap-2"
+            >
+              <li
+                v-for="entry in chat.rule.media_trusted_users"
+                :key="`mtu-${entry}`"
+                class="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.06] px-2 py-1 text-[11px] text-zinc-200"
+              >
+                <span class="max-w-[220px] truncate font-mono">{{ mediaTrustedChipLabel(entry) }}</span>
+                <button
+                  type="button"
+                  class="text-rose-300 hover:text-rose-200"
+                  :aria-label="tt('protection.ui.media_trusted_users_remove')"
+                  @click="removeMediaTrustedUser(entry)"
+                >
+                  ×
+                </button>
+              </li>
+            </ul>
+            <div class="flex flex-wrap gap-2">
+              <input
+                v-model="mediaTrustedDraft"
+                type="text"
+                autocomplete="off"
+                :placeholder="tt('protection.ui.media_trusted_users_placeholder')"
+                class="min-w-[140px] flex-1 rounded-xl border border-white/12 bg-black/35 px-3 py-2 text-[13px] text-zinc-100 placeholder:text-zinc-600"
+                @keyup.enter="addMediaTrustedUser"
+              />
+              <button
+                type="button"
+                class="shrink-0 rounded-xl border border-emerald-500/40 bg-emerald-500/20 px-3 py-2 text-xs font-semibold text-emerald-100"
+                @click="addMediaTrustedUser"
+              >
+                {{ tt('protection.ui.media_trusted_users_add') }}
+              </button>
+            </div>
+          </div>
         </div>
         <div
           v-else
@@ -7723,26 +8334,22 @@ const protCardIndigo =
             <h3 class="text-sm font-semibold text-white">{{ tt('protection.ui.buttons_modal_title') }}</h3>
             <button type="button" class="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/10" @click="showButtonsFilterModal = false">✕</button>
           </div>
-          <p class="mb-3 text-[12px] leading-snug text-zinc-400">{{ tt('protection.ui.buttons_modal_hint') }}</p>
-          <p v-if="premiumFeatureLocked" class="mb-3 text-[11px] leading-snug text-zinc-500">
-            {{ tt('protection.ui.buttons_modal_hint_free') }}
-          </p>
           <ul class="space-y-2">
             <li
               v-for="kind in BUTTON_FILTER_KINDS"
               :key="kind.field"
-              class="flex items-center justify-between gap-3 rounded-xl px-3 py-2.5"
+              class="flex items-start justify-between gap-3 rounded-xl px-3 py-2.5"
               :class="[
                 granularPremiumRowClass(isButtonKindPremiumOnly(kind.key)),
                 isButtonKindPremiumOnly(kind.key) && premiumFeatureLocked ? 'cursor-pointer' : 'cursor-default',
               ]"
               @click="onButtonKindRowClick(kind, $event)"
             >
-              <div class="flex min-w-0 flex-1 items-center gap-2.5">
-                <span class="text-lg leading-none">{{ kind.icon }}</span>
-                <div class="flex min-w-0 flex-col">
-                  <span class="truncate text-[13px] font-medium text-white">{{ tt(`protection.ui.button_kinds.${kind.key}`) }}</span>
-                  <span class="truncate text-[11px] text-zinc-500">{{ tt(`protection.ui.button_kinds_hint.${kind.key}`) }}</span>
+              <div class="flex min-w-0 flex-1 items-start gap-2.5">
+                <span class="shrink-0 pt-0.5 text-lg leading-none">{{ kind.icon }}</span>
+                <div class="flex min-w-0 flex-col gap-0.5">
+                  <span class="break-words text-[13px] font-medium leading-snug text-white">{{ tt(`protection.ui.button_kinds.${kind.key}`) }}</span>
+                  <span class="break-words text-[11px] leading-snug text-zinc-500">{{ tt(`protection.ui.button_kinds_hint.${kind.key}`) }}</span>
                 </div>
               </div>
               <button
@@ -7764,12 +8371,12 @@ const protCardIndigo =
               :class="[granularPremiumRowClass(true), premiumFeatureLocked ? 'cursor-pointer' : 'cursor-default']"
               @click="onButtonMassCardClick($event)"
             >
-              <div class="flex items-center justify-between gap-3">
-                <div class="flex min-w-0 flex-1 items-center gap-2.5">
-                  <span class="text-lg leading-none">📊</span>
-                  <div class="flex min-w-0 flex-col">
-                    <span class="truncate text-[13px] font-medium text-white">{{ tt('protection.ui.button_kinds.mass') }}</span>
-                    <span class="truncate text-[11px] text-zinc-500">{{ tt('protection.ui.button_kinds_hint.mass') }}</span>
+              <div class="flex items-start justify-between gap-3">
+                <div class="flex min-w-0 flex-1 items-start gap-2.5">
+                  <span class="shrink-0 pt-0.5 text-lg leading-none">📊</span>
+                  <div class="flex min-w-0 flex-col gap-0.5">
+                    <span class="break-words text-[13px] font-medium leading-snug text-white">{{ tt('protection.ui.button_kinds.mass') }}</span>
+                    <span class="break-words text-[11px] leading-snug text-zinc-500">{{ tt('protection.ui.button_kinds_hint.mass') }}</span>
                   </div>
                 </div>
                 <button
@@ -7820,7 +8427,7 @@ const protCardIndigo =
     <GuardTeleport guard-to="body">
     <div
       v-if="showAntinakrutkaSettingsModal && chat?.rule"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483150;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
       class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
       @click.self="showAntinakrutkaSettingsModal = false"
     >
@@ -7972,64 +8579,81 @@ const protCardIndigo =
     <GuardTeleport guard-to="body">
     <div
       v-if="showJoinCaptchaSettingsModal && chat?.rule"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
-      class="flex items-end justify-center overscroll-none p-3 backdrop-blur-sm md:items-center"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483150;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-end justify-center overscroll-none p-3 backdrop-blur-md md:items-center"
       @click.self="showJoinCaptchaSettingsModal = false"
     >
-      <div class="w-full max-w-xl overflow-hidden rounded-2xl border border-white/[0.08] bg-[#101013] text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
-        <div class="flex items-center justify-between gap-2 border-b border-white/[0.06] bg-[#0c0c0f] px-4 py-3">
-          <h3 class="pr-2 text-xs font-semibold uppercase tracking-wide text-white">{{ tt('protection.join_captcha_settings_modal.title') }}</h3>
+      <div
+        class="w-full max-w-xl overflow-hidden rounded-[1.35rem] border border-white/10 bg-gradient-to-b from-[#16161f] via-[#0e0e14] to-[#08080c] text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)] ring-1 ring-primary-500/25 shadow-glow-lime"
+        @click.stop
+        @pointerdown.stop
+      >
+        <div class="relative flex items-center justify-between gap-2 overflow-hidden border-b border-white/[0.08] px-4 py-3.5">
+          <div class="pointer-events-none absolute inset-0 bg-gradient-to-r from-primary-500/22 via-primary-400/8 to-transparent" aria-hidden="true" />
+          <h3 class="relative pr-2 text-[13px] font-bold uppercase tracking-[0.12em] text-white">{{ tt('protection.join_captcha_settings_modal.title') }}</h3>
           <button
             type="button"
-            class="shrink-0 rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
+            class="relative shrink-0 rounded-xl border border-white/10 bg-white/[0.07] px-2.5 py-1 text-xs text-slate-200 transition hover:bg-white/[0.12]"
             @click="showJoinCaptchaSettingsModal = false"
           >
             ✕
           </button>
         </div>
-        <div class="max-h-[min(82dvh,calc(100dvh-24px))] space-y-3 overflow-y-auto overscroll-contain p-4">
-          <div>
-            <p class="mb-1 text-xs text-slate-400">{{ tt('protection.join_captcha_settings_modal.ttl') }}</p>
+        <div class="max-h-[min(82dvh,calc(100dvh-24px))] space-y-4 overflow-y-auto overscroll-contain p-4 select-none">
+          <div class="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 ring-1 ring-inset ring-white/[0.04]">
+            <p class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-primary-300/95">{{ tt('protection.join_captcha_settings_modal.ttl') }}</p>
             <div class="flex flex-wrap gap-2">
               <button
                 v-for="m in joinCaptchaTtlPresets"
                 :key="`jc-ttl-modal-${m}`"
                 type="button"
                 :class="(chat.rule.join_captcha_ttl_minutes ?? 3) === m ? 'guard-green-soft font-bold text-slate-900' : protToggleOff"
-                class="rounded-lg px-2.5 py-1 text-xs"
+                class="min-h-[2.25rem] min-w-[2.25rem] rounded-xl px-3 py-1.5 text-xs font-semibold transition active:scale-[0.98]"
                 @click="updateRule({ join_captcha_ttl_minutes: m })"
               >
                 {{ m }}
               </button>
             </div>
           </div>
-          <div>
-            <p class="mb-1 text-xs text-slate-400">{{ tt('protection.join_captcha_settings_modal.kind') }}</p>
-            <div class="flex max-h-[10rem] flex-wrap gap-1.5 overflow-y-auto pr-0.5">
-              <button
+          <div class="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 ring-1 ring-inset ring-white/[0.04]">
+            <p class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-primary-300/95">{{ tt('protection.join_captcha_settings_modal.kind') }}</p>
+            <div class="flex max-h-[10.5rem] flex-wrap gap-2 overflow-y-auto pr-0.5 [-webkit-overflow-scrolling:touch]">
+              <div
                 v-for="k in joinCaptchaKinds"
                 :key="`jc-kind-modal-${k.value}`"
-                type="button"
-                :class="(chat.rule.join_captcha_kind || 'button') === k.value ? 'guard-green-soft font-bold text-slate-900' : protToggleOff"
-                class="rounded-lg px-2 py-1 text-[11px] leading-tight"
-                @click="updateRule({ join_captcha_kind: k.value })"
+                class="inline-flex items-stretch overflow-hidden rounded-xl ring-1 ring-white/12 shadow-[0_8px_24px_-18px_rgba(0,0,0,0.85)]"
               >
-                {{ k.label }}
-              </button>
+                <button
+                  type="button"
+                  :class="(chat.rule.join_captcha_kind || 'button') === k.value ? 'guard-green-soft font-bold text-slate-900' : protToggleOff"
+                  class="touch-manipulation px-2.5 py-1.5 text-[11px] font-medium leading-tight transition active:scale-[0.99]"
+                  @click="updateRule({ join_captcha_kind: k.value })"
+                >
+                  {{ k.label }}
+                </button>
+                <button
+                  type="button"
+                  class="touch-manipulation border-l border-white/10 bg-white/[0.06] px-2 py-1.5 text-[11px] font-extrabold text-primary-300 hover:bg-primary-500/15"
+                  :aria-label="tt('protection.join_captcha_kind_info_aria', { kind: k.label })"
+                  @click.stop="joinCaptchaKindHintOpen = k.value"
+                >
+                  i
+                </button>
+              </div>
             </div>
           </div>
-          <div class="mt-2 flex items-center justify-between gap-2 rounded-xl bg-white/[0.05] px-3 py-2.5">
-            <span class="text-xs text-slate-300">{{ tt('protection.join_captcha_settings_modal.prefer_dm') }}</span>
+          <div class="flex items-center justify-between gap-3 rounded-xl border border-white/[0.08] bg-white/[0.04] px-3.5 py-3 ring-1 ring-inset ring-white/[0.05]">
+            <span class="text-xs font-medium leading-snug text-slate-200">{{ tt('protection.join_captcha_settings_modal.prefer_dm') }}</span>
             <button
               type="button"
               :class="boolToggleClass(!!chat.rule.join_captcha_prefer_dm)"
-              class="rounded-lg px-2.5 py-1 text-xs"
+              class="shrink-0 rounded-xl px-3 py-1.5 text-xs font-bold"
               @click="updateRule({ join_captcha_prefer_dm: !chat.rule.join_captcha_prefer_dm })"
             >
               {{ chat.rule.join_captcha_prefer_dm ? tt('protection.join_captcha_settings_modal.yes') : tt('protection.join_captcha_settings_modal.no') }}
             </button>
           </div>
-          <p class="text-[11px] leading-snug text-slate-500">
+          <p class="border-t border-white/[0.06] pt-3 text-[11px] leading-relaxed text-slate-500">
             {{ tt('protection.join_captcha_settings_modal.note') }}
           </p>
         </div>
@@ -8039,77 +8663,133 @@ const protCardIndigo =
     <GuardTeleport guard-to="body">
     <div
       v-if="showFilterMediaCaptchaSettingsModal && chat?.rule"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
-      class="flex items-end justify-center overscroll-none p-3 backdrop-blur-sm md:items-center"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483150;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-end justify-center overscroll-none p-3 backdrop-blur-md md:items-center"
       @click.self="showFilterMediaCaptchaSettingsModal = false"
     >
-      <div class="w-full max-w-xl overflow-hidden rounded-2xl border border-white/[0.08] bg-[#101013] text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
-        <div class="flex items-center justify-between gap-2 border-b border-white/[0.06] bg-[#0c0c0f] px-4 py-3">
-          <h3 class="pr-2 text-xs font-semibold uppercase tracking-wide text-white">{{ tt('protection.filter_media_captcha_settings_modal.title') }}</h3>
+      <div
+        class="w-full max-w-xl overflow-hidden rounded-[1.35rem] border border-white/10 bg-gradient-to-b from-[#16161f] via-[#0e0e14] to-[#08080c] text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)] ring-1 ring-primary-500/25 shadow-glow-lime"
+        @click.stop
+        @pointerdown.stop
+      >
+        <div class="relative flex items-center justify-between gap-2 overflow-hidden border-b border-white/[0.08] px-4 py-3.5">
+          <div class="pointer-events-none absolute inset-0 bg-gradient-to-r from-primary-500/22 via-primary-400/8 to-transparent" aria-hidden="true" />
+          <h3 class="relative pr-2 text-[13px] font-bold uppercase tracking-[0.12em] text-white">{{ tt('protection.filter_media_captcha_settings_modal.title') }}</h3>
           <button
             type="button"
-            class="shrink-0 rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
+            class="relative shrink-0 rounded-xl border border-white/10 bg-white/[0.07] px-2.5 py-1 text-xs text-slate-200 transition hover:bg-white/[0.12]"
             @click="showFilterMediaCaptchaSettingsModal = false"
           >
             ✕
           </button>
         </div>
-        <div class="max-h-[min(82dvh,calc(100dvh-24px))] space-y-3 overflow-y-auto overscroll-contain p-4">
-          <div class="flex items-center justify-between gap-2 rounded-xl bg-white/[0.05] px-3 py-2.5">
-            <span class="text-xs text-slate-300">{{ tt('protection.filter_media_captcha_settings_modal.enable') }}</span>
+        <div class="max-h-[min(82dvh,calc(100dvh-24px))] space-y-4 overflow-y-auto overscroll-contain p-4 select-none">
+          <div class="flex items-center justify-between gap-3 rounded-xl border border-white/[0.08] bg-white/[0.04] px-3.5 py-3 ring-1 ring-inset ring-white/[0.05]">
+            <span class="text-xs font-medium leading-snug text-slate-200">{{ tt('protection.filter_media_captcha_settings_modal.enable') }}</span>
             <button
               type="button"
               :class="boolToggleClass(!!chat.rule.filter_media_captcha_enabled)"
-              class="rounded-lg px-2.5 py-1 text-xs"
+              class="shrink-0 rounded-xl px-3 py-1.5 text-xs font-bold"
               @click="updateRule({ filter_media_captcha_enabled: !chat.rule.filter_media_captcha_enabled })"
             >
               {{ chat.rule.filter_media_captcha_enabled ? tt('protection.filter_media_captcha_settings_modal.yes') : tt('protection.filter_media_captcha_settings_modal.no') }}
             </button>
           </div>
-          <div>
-            <p class="mb-1 text-xs text-slate-400">{{ tt('protection.filter_media_captcha_settings_modal.ttl') }}</p>
+          <div class="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 ring-1 ring-inset ring-white/[0.04]">
+            <p class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-primary-300/95">{{ tt('protection.filter_media_captcha_settings_modal.ttl') }}</p>
             <div class="flex flex-wrap gap-2">
               <button
                 v-for="m in joinCaptchaTtlPresets"
                 :key="`fmc-ttl-modal-${m}`"
                 type="button"
                 :class="(chat.rule.filter_media_captcha_ttl_minutes ?? 3) === m ? 'guard-green-soft font-bold text-slate-900' : protToggleOff"
-                class="rounded-lg px-2.5 py-1 text-xs"
+                class="min-h-[2.25rem] min-w-[2.25rem] rounded-xl px-3 py-1.5 text-xs font-semibold transition active:scale-[0.98]"
                 @click="updateRule({ filter_media_captcha_ttl_minutes: m })"
               >
                 {{ m }}
               </button>
             </div>
           </div>
-          <div>
-            <p class="mb-1 text-xs text-slate-400">{{ tt('protection.filter_media_captcha_settings_modal.kind') }}</p>
-            <div class="flex max-h-[10rem] flex-wrap gap-1.5 overflow-y-auto pr-0.5">
-              <button
+          <div class="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 ring-1 ring-inset ring-white/[0.04]">
+            <p class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-primary-300/95">{{ tt('protection.filter_media_captcha_settings_modal.kind') }}</p>
+            <div class="flex max-h-[10.5rem] flex-wrap gap-2 overflow-y-auto pr-0.5 [-webkit-overflow-scrolling:touch]">
+              <div
                 v-for="k in joinCaptchaKinds"
                 :key="`fmc-kind-modal-${k.value}`"
-                type="button"
-                :class="(chat.rule.filter_media_captcha_kind || 'button') === k.value ? 'guard-green-soft font-bold text-slate-900' : protToggleOff"
-                class="rounded-lg px-2 py-1 text-[11px] leading-tight"
-                @click="updateRule({ filter_media_captcha_kind: k.value })"
+                class="inline-flex items-stretch overflow-hidden rounded-xl ring-1 ring-white/12 shadow-[0_8px_24px_-18px_rgba(0,0,0,0.85)]"
               >
-                {{ k.label }}
-              </button>
+                <button
+                  type="button"
+                  :class="(chat.rule.filter_media_captcha_kind || 'button') === k.value ? 'guard-green-soft font-bold text-slate-900' : protToggleOff"
+                  class="touch-manipulation px-2.5 py-1.5 text-[11px] font-medium leading-tight transition active:scale-[0.99]"
+                  @click="updateRule({ filter_media_captcha_kind: k.value })"
+                >
+                  {{ k.label }}
+                </button>
+                <button
+                  type="button"
+                  class="touch-manipulation border-l border-white/10 bg-white/[0.06] px-2 py-1.5 text-[11px] font-extrabold text-primary-300 hover:bg-primary-500/15"
+                  :aria-label="tt('protection.join_captcha_kind_info_aria', { kind: k.label })"
+                  @click.stop="joinCaptchaKindHintOpen = k.value"
+                >
+                  i
+                </button>
+              </div>
             </div>
           </div>
-          <div class="mt-2 flex items-center justify-between gap-2 rounded-xl bg-white/[0.05] px-3 py-2.5">
-            <span class="text-xs text-slate-300">{{ tt('protection.filter_media_captcha_settings_modal.prefer_dm') }}</span>
+          <div class="flex items-center justify-between gap-3 rounded-xl border border-white/[0.08] bg-white/[0.04] px-3.5 py-3 ring-1 ring-inset ring-white/[0.05]">
+            <span class="text-xs font-medium leading-snug text-slate-200">{{ tt('protection.filter_media_captcha_settings_modal.prefer_dm') }}</span>
             <button
               type="button"
               :class="boolToggleClass(!!chat.rule.filter_media_captcha_prefer_dm)"
-              class="rounded-lg px-2.5 py-1 text-xs"
+              class="shrink-0 rounded-xl px-3 py-1.5 text-xs font-bold"
               @click="updateRule({ filter_media_captcha_prefer_dm: !chat.rule.filter_media_captcha_prefer_dm })"
             >
               {{ chat.rule.filter_media_captcha_prefer_dm ? tt('protection.filter_media_captcha_settings_modal.yes') : tt('protection.filter_media_captcha_settings_modal.no') }}
             </button>
           </div>
-          <p class="text-[11px] leading-snug text-slate-500">
+          <p class="border-t border-white/[0.06] pt-3 text-[11px] leading-relaxed text-slate-500">
             {{ tt('protection.filter_media_captcha_settings_modal.note') }}
           </p>
+        </div>
+      </div>
+    </div>
+    </GuardTeleport>
+    <GuardTeleport guard-to="body">
+    <div
+      v-if="joinCaptchaKindHintOpen"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483160;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-end justify-center overscroll-none p-3 pb-[calc(5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-md md:items-center md:pb-6"
+      @click.self="joinCaptchaKindHintOpen = null"
+    >
+      <div
+        class="w-full max-w-xl overflow-hidden rounded-[1.35rem] border border-primary-500/35 bg-gradient-to-b from-[#16161f] via-[#0e0e14] to-[#08080c] text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)] ring-1 ring-primary-400/25 shadow-glow-lime"
+        @click.stop
+        @pointerdown.stop
+      >
+        <div class="relative flex items-center justify-between gap-2 overflow-hidden border-b border-white/[0.08] px-4 py-3.5">
+          <div class="pointer-events-none absolute inset-0 bg-gradient-to-r from-primary-500/18 via-transparent to-transparent" aria-hidden="true" />
+          <h3 class="relative min-w-0 pr-2 text-[15px] font-semibold tracking-tight text-white">
+            {{ tt(`protection.join_captcha_kind_hints.${joinCaptchaKindHintOpen}.title`) }}
+          </h3>
+          <button
+            type="button"
+            class="relative shrink-0 rounded-xl border border-white/10 bg-white/[0.07] px-2.5 py-1 text-xs text-slate-200 transition hover:bg-white/[0.12]"
+            @click="joinCaptchaKindHintOpen = null"
+          >
+            ✕
+          </button>
+        </div>
+        <div class="max-h-[min(72dvh,calc(100dvh-24px))] space-y-3 overflow-y-auto overscroll-contain p-4 text-[13px] leading-relaxed select-none">
+          <p class="text-slate-200/95">
+            {{ tt(`protection.join_captcha_kind_hints.${joinCaptchaKindHintOpen}.lead`) }}
+          </p>
+          <div class="rounded-xl border border-primary-400/45 bg-primary-500/[0.09] p-3.5 shadow-[inset_0_1px_0_rgba(191,239,133,0.14)] ring-1 ring-primary-400/20">
+            <p class="text-[10px] font-bold uppercase tracking-[0.18em] text-primary-300">{{ tt('protection.join_captcha_kind_hint_example_label') }}</p>
+            <p class="mt-2 text-[13px] leading-snug text-slate-50/95">
+              {{ tt(`protection.join_captcha_kind_hints.${joinCaptchaKindHintOpen}.example`) }}
+            </p>
+          </div>
         </div>
       </div>
     </div>
@@ -8251,7 +8931,7 @@ const protCardIndigo =
             :key="`base-${item.user_id}`"
             class="flex items-center justify-between gap-2 rounded-lg border-0 bg-white/[0.04] px-2.5 py-1.5 text-xs shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]"
           >
-            <span class="min-w-0 flex-1 text-slate-100">{{ item.display_label || item.user_id }}{{ item.reason ? ` — ${item.reason}` : '' }}</span>
+            <span class="min-w-0 flex-1 text-slate-100">{{ item.display_label || item.user_id }}{{ (item.reason_display || item.reason) ? ` — ${item.reason_display || item.reason}` : '' }}</span>
             <button
               type="button"
               class="shrink-0 rounded-lg bg-rose-500/15 px-2.5 py-1 text-xs font-medium text-rose-100 hover:bg-rose-500/25"
@@ -8267,80 +8947,6 @@ const protCardIndigo =
     </div>
     </GuardTeleport>
 
-    <GuardTeleport>
-      <div
-        v-if="showFreeLimitsPremiumModal"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/70 p-4 backdrop-blur-[2px]"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="free-limits-premium-title"
-        @click.self="closeFreeLimitsPremiumModal"
-      >
-        <div
-          class="relative w-full max-w-[min(100%,22rem)] overflow-hidden rounded-[1.125rem] border border-violet-500/35 bg-black px-5 py-7 text-white shadow-[0_0_48px_-18px_rgba(124,58,237,0.55)] ring-1 ring-inset ring-violet-500/15"
-          @click.stop
-        >
-          <div
-            class="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_50%_0%,rgba(139,92,246,0.22),transparent_55%)]"
-            aria-hidden="true"
-          />
-          <button
-            type="button"
-            class="absolute right-3 top-3 z-[2] rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-400 transition hover:bg-white/10 hover:text-white"
-            :aria-label="tt('common.close')"
-            @click="closeFreeLimitsPremiumModal"
-          >
-            ✕
-          </button>
-          <div class="relative z-[1] flex flex-col items-center">
-            <div
-              class="flex h-[4.25rem] w-[4.25rem] items-center justify-center rounded-full border-2 border-violet-400/55 bg-gradient-to-b from-violet-950/90 to-black text-[2rem] shadow-[0_0_36px_rgba(167,139,250,0.65)]"
-              aria-hidden="true"
-            >
-              🔒
-            </div>
-            <p
-              id="free-limits-premium-title"
-              class="mt-5 text-center text-[11px] font-extrabold uppercase tracking-[0.22em] text-violet-300"
-            >
-              {{ tt('dashboard.billing.free_limits_title') }}
-            </p>
-            <p class="mt-2 max-w-[19rem] text-center text-[13px] leading-relaxed text-slate-400">
-              {{ tt('dashboard.billing.free_limits_sub') }}
-            </p>
-            <ul class="mt-5 w-full space-y-3 rounded-2xl border border-white/[0.08] bg-zinc-950/90 px-4 py-4">
-              <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
-                <span class="mt-0.5 shrink-0 text-violet-400" aria-hidden="true">🔒</span>
-                {{ tt('dashboard.billing.free_li_autodel') }}
-              </li>
-              <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
-                <span class="mt-0.5 shrink-0 text-violet-400" aria-hidden="true">🔒</span>
-                {{ tt('dashboard.billing.free_li_links') }}
-              </li>
-              <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
-                <span class="mt-0.5 shrink-0 text-violet-400" aria-hidden="true">🔒</span>
-                {{ tt('dashboard.billing.free_li_broadcast') }}
-              </li>
-              <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
-                <span class="mt-0.5 shrink-0 text-violet-400" aria-hidden="true">🔒</span>
-                {{ tt('dashboard.billing.free_li_stats') }}
-              </li>
-              <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
-                <span class="mt-0.5 shrink-0 text-amber-400/95 drop-shadow-[0_0_8px_rgba(251,191,36,0.45)]" aria-hidden="true">🔒</span>
-                {{ tt('dashboard.billing.free_li_support') }}
-              </li>
-            </ul>
-            <button
-              type="button"
-              class="mt-6 w-full rounded-2xl bg-violet-600 py-3.5 text-[15px] font-bold text-white shadow-[0_12px_32px_-8px_rgba(124,58,237,0.55)] transition hover:bg-violet-500 active:scale-[0.99]"
-              @click="onFreeLimitsModalLearnMore"
-            >
-              {{ tt('dashboard.billing.cta_learn_premium') }}
-            </button>
-          </div>
-        </div>
-      </div>
-    </GuardTeleport>
   </div>
 </template>
 
@@ -8538,16 +9144,31 @@ const protCardIndigo =
   text-decoration: underline;
   text-underline-offset: 2px;
 }
-/* Как в редакторе рассылки: цитата визуально в поле */
+/* Как в правилах канала: синяя полоса + кавычка справа */
 .welcome-rich-editor :deep(blockquote) {
   display: block;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
   margin: 0.35rem 0;
-  padding: 0.35rem 0.65rem;
-  border-left: 3px solid rgba(59, 130, 246, 0.9);
+  padding: 0.35rem 1.35rem 0.35rem 0.65rem;
+  border-left: 3px solid rgba(56, 189, 248, 0.88);
   background: rgba(59, 130, 246, 0.12);
   border-radius: 0.4rem;
+  position: relative;
   color: #e2e8f0 !important;
   -webkit-text-fill-color: #e2e8f0;
+}
+.welcome-rich-editor :deep(blockquote)::after {
+  content: '\201d';
+  position: absolute;
+  top: 0.12rem;
+  right: 0.38rem;
+  font-size: 0.95rem;
+  line-height: 1;
+  font-weight: 600;
+  color: rgba(56, 189, 248, 0.72);
+  pointer-events: none;
 }
 .welcome-rich-editor :deep(blockquote) p,
 .welcome-rich-editor :deep(blockquote) div {
@@ -8615,6 +9236,54 @@ const protCardIndigo =
   -webkit-text-fill-color: #94a3b8;
   pointer-events: none;
 }
+.post-rules-tool-active {
+  border-color: rgba(52, 211, 153, 0.55) !important;
+  background: linear-gradient(160deg, rgba(6, 78, 59, 0.55) 0%, rgba(15, 23, 42, 0.52) 100%) !important;
+  color: #ecfdf5 !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 18px -6px rgba(52, 211, 153, 0.35);
+}
+.post-rules-rich-editor :deep(blockquote) {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  margin: 0.35rem 0;
+  padding: 0.35rem 1.35rem 0.35rem 0.65rem;
+  border-left: 3px solid rgba(56, 189, 248, 0.88);
+  background: rgba(59, 130, 246, 0.12);
+  border-radius: 0.4rem;
+  position: relative;
+  color: #e2e8f0 !important;
+  -webkit-text-fill-color: #e2e8f0;
+}
+.post-rules-rich-editor :deep(blockquote)::after {
+  content: '\201d';
+  position: absolute;
+  top: 0.12rem;
+  right: 0.38rem;
+  font-size: 0.95rem;
+  line-height: 1;
+  font-weight: 600;
+  color: rgba(56, 189, 248, 0.72);
+  pointer-events: none;
+}
+.post-rules-emoji-popover {
+  width: 100%;
+}
+.post-rules-emoji-picker {
+  --background: #0f172a;
+  --border-color: #334155;
+  --button-hover-background: #1e293b;
+  --category-font-color: #94a3b8;
+  --indicator-color: #34d399;
+  --input-border-color: #475569;
+  --input-font-color: #f1f5f9;
+  --input-placeholder-color: #64748b;
+  --outline-color: #34d399;
+  width: 100%;
+  max-width: 100%;
+  height: 16rem;
+}
 .post-rules-rich-editor :deep(a) {
   color: #60a5fa !important;
   -webkit-text-fill-color: #60a5fa;
@@ -8657,6 +9326,18 @@ const protCardIndigo =
   border: 1px solid rgba(255, 255, 255, 0.05);
   background: linear-gradient(160deg, rgba(255, 255, 255, 0.04) 0%, rgba(0, 0, 0, 0.2) 100%);
   box-shadow: none;
+}
+.welcome-settings-shell .welcome-panel {
+  border-radius: 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.03);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+.post-rules-settings-shell .post-rules-panel {
+  border-radius: 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.03);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
 }
 .post-rules-footer {
   background: linear-gradient(180deg, rgba(10, 10, 12, 0.96), rgba(6, 6, 8, 0.99));
@@ -8711,6 +9392,42 @@ const protCardIndigo =
 }
 .post-rules-action-btn--save:hover {
   filter: brightness(1.06);
+}
+
+/* Лист во весь экран под шапкой TMA (100dvh; bottom+flex «плавает» в WebView без явной высоты). */
+.guard-fullsheet-sheet {
+  box-sizing: border-box;
+  height: calc(100vh - 2.75rem);
+  height: calc(100dvh - 2.75rem);
+  max-height: calc(100dvh - 2.75rem);
+}
+@media (min-width: 768px) {
+  .guard-fullsheet-sheet {
+    height: calc(100vh - 3rem);
+    height: calc(100dvh - 3rem);
+    max-height: calc(100dvh - 3rem);
+  }
+}
+
+/* Полноэкранные листы (Protection): под шапкой TMA — тёмное стекло, едва заметная прозрачность при blur */
+.guard-protection-fullsheet-glass {
+  background: rgba(12, 12, 14, 0.9);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 -6px 40px rgba(0, 0, 0, 0.4);
+}
+
+@supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  .guard-protection-fullsheet-glass {
+    background: linear-gradient(
+        165deg,
+        rgba(255, 255, 255, 0.055) 0%,
+        rgba(255, 255, 255, 0) 42%
+      ),
+      rgba(10, 10, 13, 0.78);
+    -webkit-backdrop-filter: blur(24px) saturate(165%);
+    backdrop-filter: blur(24px) saturate(165%);
+  }
 }
 
 /* Модалка правил группы — те же «стеклянные» карточки, что в ChannelPostRulesModal */

@@ -26,12 +26,22 @@ const reportsChatUrl = ref(null)
 const saving = ref(false)
 const clearing = ref(false)
 const showReportsInfoModal = ref(false)
+/** 'log' | 'auto' | null — короткая справка к тумблерам в «Настройки» отчётов */
+const reportsSettingInfoOpen = ref(null)
 const botInfo = ref(null)
 const meProfile = ref(null)
 let stopListen = null
 
 function boolToggleClass(on) {
   return on ? 'guard-green-soft' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'
+}
+
+function isChannelChatRow(c) {
+  return String(c?.chat_kind || 'group').toLowerCase() === 'channel'
+}
+
+function filterReportsSelectableChats(list) {
+  return (list || []).filter((c) => !isChannelChatRow(c))
 }
 
 function buildReportsUrl(botData, protectedChatId) {
@@ -59,15 +69,47 @@ const selectedChatTitle = computed(() => {
   return current?.title || chat.value?.title || (isEn.value ? 'No chat selected' : 'Чат не выбран')
 })
 
-const chatsListMine = computed(() => (chatsList.value || []).filter((c) => !c.is_shared))
-const chatsListDelegated = computed(() => (chatsList.value || []).filter((c) => !!c.is_shared))
+const chatsListMine = computed(() => filterReportsSelectableChats(chatsList.value).filter((c) => !c.is_shared))
+const chatsListDelegated = computed(() => filterReportsSelectableChats(chatsList.value).filter((c) => !!c.is_shared))
+const reportsSelectableChatCount = computed(() => chatsListMine.value.length + chatsListDelegated.value.length)
+const hasOnlyChannelChats = computed(() => {
+  const list = chatsList.value || []
+  return list.length > 0 && filterReportsSelectableChats(list).length === 0
+})
 
 const selectedRow = computed(() =>
   (chatsList.value || []).find((c) => Number(c.id) === Number(selectedChatId.value)),
 )
 
+async function ensureReportsSelectionIsGroup() {
+  const id = selectedChatId.value
+  const row = (chatsList.value || []).find((c) => Number(c.id) === Number(id))
+  if (row && !isChannelChatRow(row)) return
+  const next = filterReportsSelectableChats(chatsList.value)[0]
+  if (!next?.id) {
+    selectedChatId.value = null
+    chat.value = { noSelection: true }
+    return
+  }
+  try {
+    await fetchSilent(() => api.selectChat(Number(next.id)))
+    selectedChatId.value = Number(next.id)
+    const picked = (chatsList.value || []).find((c) => Number(c.id) === Number(next.id))
+    if (picked?.is_shared) {
+      setCabinetMode('delegated')
+    } else {
+      setCabinetMode('owner')
+    }
+    await reloadChat()
+    reportsChatUrl.value = buildReportsUrl(botInfo.value, selectedChatId.value)
+  } catch {
+    //
+  }
+}
+
 async function switchChat(chatId) {
-  if (!chatId || Number(chatId) === Number(selectedChatId.value)) return
+  const row = (chatsList.value || []).find((c) => Number(c.id) === Number(chatId))
+  if (!chatId || isChannelChatRow(row) || Number(chatId) === Number(selectedChatId.value)) return
   try {
     await fetchSilent(() => api.selectChat(Number(chatId)))
     selectedChatId.value = Number(chatId)
@@ -94,17 +136,26 @@ onMounted(async () => {
       fetchSilent(() => api.botInfo()).catch(() => ({})),
       fetchSilent(() => api.me()).catch(() => null),
     ])
+    const allChats = chatsData?.chats || []
     const requestedChatId = Number(route.query?.chat_id || 0) || null
     let selected_chat_id = chatsData?.selected_chat_id
-    if (requestedChatId && (chatsData?.chats || []).some((c) => Number(c.id) === requestedChatId)) {
-      selected_chat_id = requestedChatId
-      await fetchSilent(() => api.selectChat(requestedChatId)).catch(() => {})
+    const serverRow =
+      selected_chat_id && allChats.find((c) => Number(c.id) === Number(selected_chat_id))
+    if (!serverRow || isChannelChatRow(serverRow)) {
+      selected_chat_id = null
     }
-    chatsList.value = chatsData?.chats || []
+    if (requestedChatId && allChats.some((c) => Number(c.id) === requestedChatId)) {
+      const reqRow = allChats.find((c) => Number(c.id) === requestedChatId)
+      if (reqRow && !isChannelChatRow(reqRow)) {
+        selected_chat_id = requestedChatId
+        await fetchSilent(() => api.selectChat(requestedChatId)).catch(() => {})
+      }
+    }
+    chatsList.value = allChats
     botInfo.value = botData || null
     meProfile.value = meData || null
     if (!selected_chat_id) {
-      const fallback = (chatsData?.chats || []).find((c) => Number(c?.id || 0) !== 0)
+      const fallback = filterReportsSelectableChats(allChats)[0]
       if (fallback?.id) {
         selected_chat_id = Number(fallback.id)
         await fetchSilent(() => api.selectChat(selected_chat_id)).catch(() => {})
@@ -123,6 +174,7 @@ onMounted(async () => {
     }
     await reloadChat()
     reportsChatUrl.value = buildReportsUrl(botData, selected_chat_id)
+    await ensureReportsSelectionIsGroup()
   } catch {
     chat.value = { noSelection: false, loadError: true }
   }
@@ -167,6 +219,7 @@ async function refreshReportsStatus() {
   try {
     const chatsData = await fetchSilent(() => api.chats('all')).catch(() => null)
     if (chatsData?.chats) chatsList.value = chatsData.chats
+    await ensureReportsSelectionIsGroup()
     await reloadChat()
     showToast(isEn.value ? 'Updated' : 'Обновлено')
   } catch {
@@ -174,8 +227,27 @@ async function refreshReportsStatus() {
   }
 }
 
+function viewerHasPremiumSubscription(me) {
+  if (!me) return false
+  if (!!me.is_premium) return true
+  return ['premium', 'pro', 'business'].includes(String(me.tariff || '').toLowerCase())
+}
+
 async function updateRule(patch) {
   if (!chat.value?.id || chat.value.noSelection) return
+  if (
+    patch &&
+    Object.prototype.hasOwnProperty.call(patch, 'auto_reports_enabled') &&
+    patch.auto_reports_enabled === true &&
+    !viewerHasPremiumSubscription(meProfile.value)
+  ) {
+    openLock({
+      feature: 'auto_reports',
+      me: meProfile.value,
+      descriptionKey: 'premium_lock.feature_desc_short.auto_reports',
+    })
+    return
+  }
   saving.value = true
   try {
     const data = await fetchSilent(() => api.updateRule(chat.value.id, patch))
@@ -194,9 +266,6 @@ function goToExtendedStatsReports() {
   openLock({ feature: 'stats_reports_extended', me: meProfile.value })
 }
 
-function goPremiumFromReports() {
-  router.push({ path: '/', query: { section: 'subscription' } }).catch(() => {})
-}
 </script>
 
 <template>
@@ -232,28 +301,6 @@ function goPremiumFromReports() {
     </div>
 
     <div v-else-if="chat?.rule">
-      <div
-        v-if="meProfile && !meProfile.is_premium && cabinetMode !== 'delegated'"
-        class="mb-3 overflow-hidden rounded-[1.1rem] border border-violet-500/35 bg-gradient-to-br from-violet-950/45 via-[#0c0a12] to-black p-3 text-[12px] leading-snug text-violet-50/95 shadow-[0_0_36px_-12px_rgba(139,92,246,0.4)] ring-1 ring-violet-400/20"
-      >
-        <p class="font-semibold text-violet-200">{{ isEn ? '😈 Guard · reports' : '😈 Guard · отчёты' }}</p>
-        <p class="mt-1 text-[11px] text-slate-300">
-          {{ isEn
-            ? 'On Free, extended stats and per-chat summaries are not shown (without Premium they would be zeros). Get '
-            : 'На Free расширенная статистика и сводки по чатам не показываются (без Premium это были бы нули). Оформите ' }}
-          <b class="text-violet-200">Premium Guard</b>
-          {{ isEn
-            ? ' — charts, reports and "Track" button become unlimited.'
-            : ' — откроются графики, отчёты и кнопка «Отслеживать» без ограничений.' }}
-        </p>
-        <button
-          type="button"
-          class="mt-2 w-full rounded-xl bg-violet-600 py-2.5 text-xs font-bold text-white shadow-[0_10px_28px_-8px_rgba(124,58,237,0.5)] transition hover:bg-violet-500 active:scale-[0.99]"
-          @click="goPremiumFromReports"
-        >
-          {{ isEn ? 'Get Premium' : 'Оформить Premium' }}
-        </button>
-      </div>
       <div
         class="relative -mx-4 overflow-hidden rounded-2xl border border-white/[0.1] bg-white/[0.05] shadow-[0_24px_80px_-32px_rgba(0,0,0,0.75),inset_0_1px_0_rgba(255,255,255,0.06)] ring-1 ring-white/[0.06] backdrop-blur-2xl md:-mx-6"
       >
@@ -316,11 +363,29 @@ function goPremiumFromReports() {
           </button>
         </section>
 
-        <div
-          class="overflow-hidden rounded-[1.1rem] border border-violet-400/25 bg-violet-950/20 p-2.5 text-[11px] leading-snug text-violet-50/95 ring-1 ring-violet-500/20 backdrop-blur-2xl"
+        <section
+          class="overflow-hidden rounded-[1.1rem] border border-sky-400/35 bg-gradient-to-br from-violet-950/20 via-sky-950/12 to-sky-950/18 p-2.5 ring-1 ring-sky-500/25 backdrop-blur-2xl"
         >
-          <div class="flex items-start justify-between gap-1.5">
-            <p class="min-w-0 flex-1 font-medium text-violet-50/95">{{ isEn ? 'Reports log chat' : 'Лог-чат отчётов' }}</p>
+          <div class="flex items-start justify-between gap-2">
+            <div class="min-w-0">
+              <h2 class="text-[11px] font-semibold uppercase tracking-wide text-sky-100/95">
+                {{ isEn ? 'Reports log chat' : 'Лог-чат отчётов' }}
+              </h2>
+              <p class="mt-1 text-[10px] leading-snug text-violet-200/85">
+                {{
+                  isEn
+                    ? 'Use a separate group (e.g. “Logs”) for the journal — not the main protected chat.'
+                    : 'Другая группа (напр. «Логи») для журнала — не основная защищаемая.'
+                }}
+              </p>
+              <p class="mt-1.5 text-[10px] leading-snug text-slate-300/90">
+                {{
+                  isEn
+                    ? 'Tap the button → pick a group in Telegram so the bot joins the log chat. Come back — status will refresh.'
+                    : 'Кнопка → выбор группы в Telegram, бот в лог-чат. Вернитесь сюда — статус обновится.'
+                }}
+              </p>
+            </div>
             <button
               type="button"
               class="inline-flex h-6 min-w-6 shrink-0 items-center justify-center rounded-full border border-sky-400/35 bg-sky-950/25 px-1.5 text-[10px] font-extrabold text-sky-200 hover:bg-sky-900/35 dark:border-sky-500/35 dark:bg-sky-950/35"
@@ -330,23 +395,9 @@ function goPremiumFromReports() {
               i
             </button>
           </div>
-          <p class="mt-1 text-[10px] leading-snug text-violet-200/80">
-            {{ isEn ? 'Another group (e.g. "Logs") for the journal — not the main protected chat.' : 'Другая группа (напр. «Логи») для журнала — не основная защищаемая.' }}
-          </p>
-        </div>
-
-        <section
-          class="overflow-hidden rounded-[1.1rem] border border-sky-400/30 bg-sky-950/15 p-2.5 ring-1 ring-sky-500/20 backdrop-blur-2xl"
-        >
-          <h2 class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-sky-100/90">
-            {{ isEn ? 'Connection' : 'Подключение' }}
-          </h2>
-          <p class="mb-2 text-[10px] leading-snug text-slate-300/90">
-            {{ isEn ? 'Button → pick a group in Telegram, the bot goes to the log chat. Come back — status will refresh.' : 'Кнопка → выбор группы в Telegram, бот в лог-чат. Вернитесь сюда — статус обновится.' }}
-          </p>
           <div
             v-if="chat.log_chat_id"
-            class="mb-2 flex items-center justify-between gap-1.5 rounded-lg border border-emerald-400/40 bg-emerald-950/25 px-2 py-1.5 text-[11px] text-emerald-100 ring-1 ring-emerald-500/15"
+            class="mb-2 mt-2 flex items-center justify-between gap-1.5 rounded-lg border border-emerald-400/40 bg-emerald-950/25 px-2 py-1.5 text-[11px] text-emerald-100 ring-1 ring-emerald-500/15"
           >
             <span class="min-w-0 truncate">✓ {{ chat.log_chat_title || chat.log_chat_id }}</span>
             <button
@@ -360,7 +411,7 @@ function goPremiumFromReports() {
             </button>
           </div>
 
-          <div class="flex flex-col items-stretch gap-1.5">
+          <div class="mt-2 flex flex-col items-stretch gap-1.5">
             <button
               v-if="reportsChatUrl"
               type="button"
@@ -386,38 +437,51 @@ function goPremiumFromReports() {
         >
           <h2 class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-200">{{ isEn ? 'Settings' : 'Настройки' }}</h2>
           <div class="space-y-1.5">
-            <div class="flex items-center justify-between gap-2 rounded-lg border border-slate-700/65 bg-zinc-900/70 px-2 py-1.5 ring-1 ring-slate-700/35">
-              <span class="text-[11px] text-slate-200/90">{{ isEn ? 'To chat' : 'В чат' }}</span>
-              <button
-                type="button"
-                :class="boolToggleClass(chat.rule.log_enabled)"
-                class="rounded-md px-2 py-0.5 text-[11px] font-semibold"
-                @click="updateRule({ log_enabled: !chat.rule.log_enabled })"
-              >
-                {{ chat.rule.log_enabled ? (isEn ? 'ON' : 'ВКЛ') : (isEn ? 'OFF' : 'ВЫКЛ') }}
-              </button>
+            <div class="rounded-lg border border-slate-700/65 bg-zinc-900/70 px-2 py-1.5 ring-1 ring-slate-700/35">
+              <div class="flex items-center justify-between gap-2">
+                <div class="flex min-w-0 items-center gap-1">
+                  <span class="text-[11px] text-slate-200/90">{{ isEn ? 'To chat' : 'В чат' }}</span>
+                  <button
+                    type="button"
+                    class="inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full border border-slate-600/70 bg-white/[0.06] px-1 text-[10px] font-extrabold text-sky-200/95 hover:bg-white/10"
+                    :aria-label="t('reports.setting_log_i_aria')"
+                    @click="reportsSettingInfoOpen = 'log'"
+                  >
+                    i
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  :class="boolToggleClass(chat.rule.log_enabled)"
+                  class="shrink-0 rounded-md px-2 py-0.5 text-[11px] font-semibold"
+                  @click="updateRule({ log_enabled: !chat.rule.log_enabled })"
+                >
+                  {{ chat.rule.log_enabled ? (isEn ? 'ON' : 'ВКЛ') : (isEn ? 'OFF' : 'ВЫКЛ') }}
+                </button>
+              </div>
             </div>
-            <div class="flex items-center justify-between gap-2 rounded-lg border border-slate-700/65 bg-zinc-900/70 px-2 py-1.5 ring-1 ring-slate-700/35">
-              <span class="text-[11px] text-slate-200/90">{{ isEn ? 'Guard msgs' : 'Сообщ. Guard' }}</span>
-              <button
-                type="button"
-                :class="boolToggleClass(chat.rule.guardian_messages_enabled)"
-                class="rounded-md px-2 py-0.5 text-[11px] font-semibold"
-                @click="updateRule({ guardian_messages_enabled: !chat.rule.guardian_messages_enabled })"
-              >
-                {{ chat.rule.guardian_messages_enabled ? (isEn ? 'ON' : 'ВКЛ') : (isEn ? 'OFF' : 'ВЫКЛ') }}
-              </button>
-            </div>
-            <div class="flex items-center justify-between gap-2 rounded-lg border border-slate-700/65 bg-zinc-900/70 px-2 py-1.5 ring-1 ring-slate-700/35">
-              <span class="text-[11px] text-slate-200/90">{{ isEn ? 'Auto reports' : 'Автоотчёты' }}</span>
-              <button
-                type="button"
-                :class="boolToggleClass(chat.rule.auto_reports_enabled)"
-                class="rounded-md px-2 py-0.5 text-[11px] font-semibold"
-                @click="updateRule({ auto_reports_enabled: !chat.rule.auto_reports_enabled })"
-              >
-                {{ chat.rule.auto_reports_enabled ? (isEn ? 'ON' : 'ВКЛ') : (isEn ? 'OFF' : 'ВЫКЛ') }}
-              </button>
+            <div class="rounded-lg border border-slate-700/65 bg-zinc-900/70 px-2 py-1.5 ring-1 ring-slate-700/35">
+              <div class="flex items-center justify-between gap-2">
+                <div class="flex min-w-0 items-center gap-1">
+                  <span class="text-[11px] text-slate-200/90">{{ isEn ? 'Auto reports' : 'Автоотчёты' }}</span>
+                  <button
+                    type="button"
+                    class="inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full border border-slate-600/70 bg-white/[0.06] px-1 text-[10px] font-extrabold text-sky-200/95 hover:bg-white/10"
+                    :aria-label="t('reports.setting_auto_reports_i_aria')"
+                    @click="reportsSettingInfoOpen = 'auto'"
+                  >
+                    i
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  :class="boolToggleClass(chat.rule.auto_reports_enabled)"
+                  class="shrink-0 rounded-md px-2 py-0.5 text-[11px] font-semibold"
+                  @click="updateRule({ auto_reports_enabled: !chat.rule.auto_reports_enabled })"
+                >
+                  {{ chat.rule.auto_reports_enabled ? (isEn ? 'ON' : 'ВКЛ') : (isEn ? 'OFF' : 'ВЫКЛ') }}
+                </button>
+              </div>
             </div>
           </div>
         </section>
@@ -444,7 +508,7 @@ function goPremiumFromReports() {
               {{ t('common.close') }}
             </button>
           </div>
-          <template v-if="(chatsList || []).length > 1">
+          <template v-if="reportsSelectableChatCount > 1">
             <div class="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain py-1 [-webkit-overflow-scrolling:touch]">
               <div v-if="chatsListMine.length">
                 <p class="mb-1.5 px-1 text-[10px] font-semibold uppercase tracking-wide text-cyan-200/80">{{ isEn ? 'My chats' : 'Мои чаты' }}</p>
@@ -482,8 +546,11 @@ function goPremiumFromReports() {
               </div>
             </div>
           </template>
+          <p v-else-if="reportsSelectableChatCount === 1" class="px-1 py-4 text-center text-xs text-slate-400">
+            {{ t('reports.picker_one_group') }}
+          </p>
           <p v-else class="px-1 py-4 text-center text-xs text-slate-400">
-            {{ isEn ? 'Only one group connected. Add more in "Connected chats".' : 'Подключена только одна группа. Добавьте ещё в «Подключённые чаты».' }}
+            {{ hasOnlyChannelChats ? t('reports.picker_only_channels') : t('reports.picker_no_groups') }}
           </p>
         </div>
       </div>
@@ -540,6 +607,33 @@ function goPremiumFromReports() {
             </p>
           </template>
         </div>
+      </div>
+    </div>
+    <div
+      v-if="reportsSettingInfoOpen"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px"
+      class="flex items-end justify-center bg-black/70 p-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] md:items-center md:pb-6"
+      @click.self="reportsSettingInfoOpen = null"
+    >
+      <div
+        class="w-full max-w-md rounded-2xl border border-slate-600/40 bg-zinc-950/95 p-4 text-slate-100 shadow-2xl ring-1 ring-white/10 backdrop-blur-2xl"
+        @click.stop
+      >
+        <div class="mb-2 flex items-center justify-between gap-2 border-b border-white/10 pb-2">
+          <h3 class="text-sm font-semibold text-white">
+            {{ reportsSettingInfoOpen === 'log' ? t('reports.setting_log_i_title') : t('reports.setting_auto_reports_i_title') }}
+          </h3>
+          <button
+            type="button"
+            class="rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-white/10 hover:text-white"
+            @click="reportsSettingInfoOpen = null"
+          >
+            ✕
+          </button>
+        </div>
+        <p class="text-xs leading-relaxed text-slate-300">
+          {{ reportsSettingInfoOpen === 'log' ? t('reports.setting_log_i_body') : t('reports.setting_auto_reports_i_body') }}
+        </p>
       </div>
     </div>
   </div>

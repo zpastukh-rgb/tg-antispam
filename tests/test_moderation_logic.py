@@ -103,6 +103,8 @@ class _StubRule:
             "filter_media_plain_emoji",
         ):
             setattr(self, f, kwargs.get(f, False))
+        if "media_trusted_users_json" in kwargs:
+            setattr(self, "media_trusted_users_json", kwargs.get("media_trusted_users_json"))
 
 
 class _StubMessage:
@@ -196,6 +198,45 @@ def test_matched_media_kind_returns_none_when_no_toggles():
     assert matched_media_kind(msg, rule) is None
 
 
+class _StubUser:
+    def __init__(self, uid: int, username: str | None = None):
+        self.id = uid
+        self.username = username
+
+
+def test_parse_media_trusted_from_rule_ids_and_usernames():
+    from app.handlers.moderation import parse_media_trusted_from_rule
+
+    rule = _StubRule(media_trusted_users_json='["12345", "Some_User"]')
+    ids, names = parse_media_trusted_from_rule(rule)
+    assert ids == {12345}
+    assert names == {"some_user"}
+
+
+def test_is_user_media_trusted_by_id():
+    from app.handlers.moderation import is_user_media_trusted
+
+    rule = _StubRule(media_trusted_users_json='["42424242"]')
+    assert is_user_media_trusted(_StubUser(42424242, "any"), rule) is True
+    assert is_user_media_trusted(_StubUser(1, "any"), rule) is False
+
+
+def test_is_user_media_trusted_by_username():
+    from app.handlers.moderation import is_user_media_trusted
+
+    rule = _StubRule(media_trusted_users_json='["mytrusted"]')
+    assert is_user_media_trusted(_StubUser(1, "MyTrusted"), rule) is True
+    assert is_user_media_trusted(_StubUser(1, "other"), rule) is False
+
+
+def test_is_user_media_trusted_product_bot(monkeypatch):
+    from app.handlers.moderation import is_user_media_trusted
+
+    monkeypatch.setenv("BOT_USERNAME", "GuardAntiSpam_Bot")
+    rule = _StubRule()
+    assert is_user_media_trusted(_StubUser(7, "GuardAntiSpam_Bot"), rule) is True
+
+
 def test_matched_media_kind_plain_emoji_in_text():
     """Обычные Unicode-эмодзи в тексте ловятся через filter_media_plain_emoji."""
     from app.handlers.moderation import matched_media_kind
@@ -268,6 +309,7 @@ class _MentionRule:
             setattr(self, f, kwargs.get(f, False))
         # Порог для массовых: дефолт 5, можно переопределить.
         setattr(self, "filter_mention_mass_threshold", int(kwargs.get("filter_mention_mass_threshold", 5)))
+        setattr(self, "mention_trusted_bots_json", kwargs.get("mention_trusted_bots_json"))
 
 
 class _Entity:
@@ -345,6 +387,28 @@ def test_matched_mention_kind_user_mention_on_returns_users():
     msg = _MentionMessage(text=text, entities=[ent])
     rule = _MentionRule(filter_mention_users=True)
     assert _run_sync(matched_mention_kind(msg, rule, bot=None)) == "users"
+
+
+def test_matched_mention_kind_product_bot_always_exempt(monkeypatch):
+    from app.handlers.moderation import matched_mention_kind
+
+    monkeypatch.setenv("BOT_USERNAME", "GuardAntiSpam_Bot")
+    text = "call @GuardAntiSpam_Bot plz"
+    ent = _Entity("mention", text.index("@"), len("@GuardAntiSpam_Bot"))
+    msg = _MentionMessage(text=text, entities=[ent])
+    rule = _MentionRule(filter_mention_bots=True)
+    assert _run_sync(matched_mention_kind(msg, rule, bot=None)) is None
+
+
+def test_matched_mention_kind_trusted_bots_json(monkeypatch):
+    from app.handlers.moderation import matched_mention_kind
+
+    monkeypatch.setenv("BOT_USERNAME", "GuardAntiSpam_Bot")
+    text = "hi @HelperBot there"
+    ent = _Entity("mention", text.index("@"), len("@HelperBot"))
+    msg = _MentionMessage(text=text, entities=[ent])
+    rule = _MentionRule(filter_mention_bots=True, mention_trusted_bots_json='["HelperBot"]')
+    assert _run_sync(matched_mention_kind(msg, rule, bot=None)) is None
 
 
 def test_matched_mention_kind_bot_via_heuristic():
@@ -852,3 +916,37 @@ def test_any_granular_channel_post_enabled():
     assert any_granular_channel_post_enabled(_ChannelPostRule(filter_channel_post_channels=True)) is True
     assert any_granular_channel_post_enabled(_ChannelPostRule(filter_channel_post_hidden_fwd=True)) is True
     assert any_granular_channel_post_enabled(_ChannelPostRule(filter_channel_post_anon_admin=True)) is True
+
+
+def test_coerce_orphan_legacy_filters_clears_stale_forbid_without_granules():
+    from app.handlers.moderation import coerce_orphan_legacy_filters
+
+    class _Rule:
+        filter_mentions = True
+        filter_media_mode = "forbid"
+        filter_buttons_mode = "forbid"
+        filter_channel_posts_enabled = True
+        filter_media_photos = False
+        filter_mention_users = False
+
+    rule = _Rule()
+    assert coerce_orphan_legacy_filters(rule) is True
+    assert rule.filter_mentions is False
+    assert rule.filter_media_mode == "allow"
+    assert rule.filter_buttons_mode == "allow"
+    assert rule.filter_channel_posts_enabled is False
+    assert coerce_orphan_legacy_filters(rule) is False
+
+
+def test_coerce_orphan_legacy_filters_keeps_legacy_when_granular_on():
+    from app.handlers.moderation import coerce_orphan_legacy_filters
+
+    class _Rule:
+        filter_mentions = True
+        filter_media_mode = "forbid"
+        filter_media_photos = True
+
+    rule = _Rule()
+    assert coerce_orphan_legacy_filters(rule) is False
+    assert rule.filter_mentions is True
+    assert rule.filter_media_mode == "forbid"

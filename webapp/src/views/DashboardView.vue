@@ -12,6 +12,8 @@ import { useDashboardSection } from '../composables/useDashboardSection'
 import { useSecurityPinGate } from '../composables/useSecurityPinGate'
 import { useToast } from '../composables/useToast'
 import { shouldAskPinForAction } from '../utils/settingsSecurity'
+import { userCanUseBroadcasts } from '../utils/broadcastAccess'
+import { usePremiumLock } from '../composables/usePremiumLock'
 import { formatDateTimeRu, formatDateTimeShortRu } from '../utils/formatDateTime'
 import { openTelegramDeepLink } from '../utils/openTelegramDeepLink'
 import {
@@ -25,6 +27,7 @@ const route = useRoute()
 const { t, tm } = useI18n()
 const { api, loading, error, fetchSilent, hasInitData } = useApi()
 const { showToast } = useToast()
+const { openLock: openPremiumLockModal } = usePremiumLock()
 const bootError = ref('')
 const dashCtx = useDashboardSection()
 /** Единое сравниваемое значение для шаблона (вкладки главной). */
@@ -88,6 +91,93 @@ const billingPremiumPlansRef = ref(null)
 const billingPremiumPitchRef = ref(null)
 const billingPremiumCompareRef = ref(null)
 const billingLandingPlansRef = ref(null)
+const billingCompareScrollerRef = ref(null)
+/** Пока тянем карусель тарифов — отключаем snap, чтобы полоса не «цеплялась» */
+const compareCarouselDragging = ref(false)
+/** Перетаскивание горизонтальной карусели мышью и тачем (только узкий экран): короткий жест → сразу двигается полоса. */
+let compareCarouselDrag = {
+  active: false,
+  pointerId: null,
+  pointerType: 'mouse',
+  lastX: 0,
+  lastY: 0,
+  downX: 0,
+  downY: 0,
+  horizontal: false,
+}
+function compareCarouselIsFinePointer(pt) {
+  return pt === 'mouse' || pt === 'pen'
+}
+function compareCarouselCancelDrag(el, pid) {
+  compareCarouselDrag.active = false
+  compareCarouselDrag.pointerId = null
+  compareCarouselDrag.horizontal = false
+  compareCarouselDragging.value = false
+  if (el && pid != null) {
+    try {
+      el.releasePointerCapture(pid)
+    } catch {
+      //
+    }
+  }
+}
+function onCompareCarouselPointerDown(e) {
+  if (typeof window !== 'undefined' && window.innerWidth >= 768) return
+  if (e.pointerType === 'mouse' && e.button !== 0) return
+  const el = billingCompareScrollerRef.value
+  if (!el) return
+  const fine = compareCarouselIsFinePointer(e.pointerType)
+  compareCarouselDrag.active = true
+  compareCarouselDrag.pointerId = e.pointerId
+  compareCarouselDrag.pointerType = e.pointerType || 'mouse'
+  compareCarouselDrag.lastX = e.clientX
+  compareCarouselDrag.lastY = e.clientY
+  compareCarouselDrag.downX = e.clientX
+  compareCarouselDrag.downY = e.clientY
+  // Мышь/стилус: без порога оси — иначе микродрожь по Y отменяет перетаскивание.
+  compareCarouselDrag.horizontal = fine
+  compareCarouselDragging.value = fine
+  try {
+    el.setPointerCapture(e.pointerId)
+  } catch {
+    //
+  }
+}
+function onCompareCarouselPointerMove(e) {
+  if (!compareCarouselDrag.active) return
+  const el = billingCompareScrollerRef.value
+  if (!el) return
+  const pid = compareCarouselDrag.pointerId
+  const fine = compareCarouselIsFinePointer(compareCarouselDrag.pointerType)
+
+  if (!compareCarouselDrag.horizontal) {
+    const totalDx = e.clientX - compareCarouselDrag.downX
+    const totalDy = e.clientY - compareCarouselDrag.downY
+    const threshold = 5
+    if (Math.abs(totalDx) < threshold && Math.abs(totalDy) < threshold) return
+    // Тач: вертикаль только если явно доминирует (страница скроллится).
+    if (Math.abs(totalDy) >= Math.abs(totalDx) * 1.35 && Math.abs(totalDy) > 8) {
+      compareCarouselCancelDrag(el, pid)
+      return
+    }
+    compareCarouselDrag.horizontal = true
+    compareCarouselDragging.value = true
+    compareCarouselDrag.lastX = e.clientX
+    compareCarouselDrag.lastY = e.clientY
+  }
+
+  const dx = e.clientX - compareCarouselDrag.lastX
+  compareCarouselDrag.lastX = e.clientX
+  compareCarouselDrag.lastY = e.clientY
+  const speed = fine ? 1.42 : 1.08
+  el.scrollLeft -= dx * speed
+}
+function onCompareCarouselPointerUp(e) {
+  if (!compareCarouselDrag.active) return
+  const el = billingCompareScrollerRef.value
+  const pid = compareCarouselDrag.pointerId
+  compareCarouselCancelDrag(el, pid)
+}
 /** Выбор на лендинге (1 / 3 / 6 / 12 мес.) — «Продолжить» */
 const landingSelectedPlanMonths = ref(null)
 const showAllLandingPlans = ref(false)
@@ -210,7 +300,7 @@ const DASHBOARD_STATS_PERIOD_OPTIONS = computed(() => [
 /** Компактная карточка рассылки под статистикой (те же правила, что «Рассылка» в таббаре). */
 const broadcastMiniEligibleCount = ref(null)
 const broadcastMiniScheduledCount = ref(null)
-/** Успешные доставки (autopost) за сутки по первому посту — для «Сколько отправлено сегодня». */
+/** Число запусков рассылок за сегодня (локальный TZ устройства): одноразовые + автопост, весь кабинет. */
 const broadcastMiniSentToday = ref(null)
 const broadcastMiniLoading = ref(false)
 let broadcastMiniDebounceTimer = null
@@ -264,15 +354,6 @@ function clearHomeHeroAutoplayFull() {
 
 function heroCarouselTrackTransition() {
   return `transform ${HOME_HERO_TRANS_MS}ms cubic-bezier(0.22, 1, 0.36, 1)`
-}
-
-/** Доля ширины короткой белой метки на полоске прогресса карусели (остальное — серая дорожка). */
-const HOME_HERO_THUMB_FRAC = 0.18
-
-function homeHeroThumbLeftPct(progress01) {
-  const p = Math.max(0, Math.min(1, Number(progress01) || 0))
-  const w = HOME_HERO_THUMB_FRAC * 100
-  return p * (100 - w)
 }
 
 function heroCarouselTrackStyle() {
@@ -350,6 +431,8 @@ function scheduleHeroCloneSnap(toIdx) {
 
 function bumpHomeHeroSlide(delta) {
   cancelHeroCloneResetTok()
+  clearHomeHeroProgressRaf()
+  homeHeroProgress.value = 0
   homeUpdatesPremiumInstant.value = false
   const nBase = HOME_HERO_SLIDES.value?.length ?? 0
   if (!nBase) return
@@ -812,22 +895,31 @@ const totalTokens = computed(() => {
 })
 const tariffIsPremium = computed(() => ['premium', 'pro', 'business'].includes((me.value?.tariff || 'free').toLowerCase()))
 
-/** Одни и те же промо-слайды для всех тарифов: языки, спам, rich, казино-спам — затем только баннер «Премиум» зависит от тарифа, и соцсети. */
+const dashboardBroadcastAccess = computed(() => userCanUseBroadcasts(me.value))
+const broadcastMiniPremiumBadgeInlineClass =
+  'inline-flex shrink-0 items-center gap-0.5 rounded-md border border-amber-400/40 bg-gradient-to-r from-amber-400/95 via-yellow-300/90 to-amber-500/95 px-1 py-[1px] text-[7px] font-extrabold uppercase tracking-wide text-amber-950 shadow-sm sm:px-1.5 sm:text-[8px]'
+
+/** Промо-слайды (PNG) + финальный слайд: Free — premium.svg (исправленная разметка), Premium — premium-active-banner.png */
 const HOME_HERO_SLIDES = computed(() => {
   const b = import.meta.env.BASE_URL || '/'
   const u = (name) => `${b.replace(/\/?$/, '/')}${name}`
-  const premiumTariffBanner = tariffIsPremium.value ? u('hero-home/premium-active-banner.png') : u('hero-home/premium.svg')
+  const closingSrc = tariffIsPremium.value ? u('hero-home/premium-active-banner.png') : u('hero-home/premium.svg')
   return [
-    { src: u('hero-home/updates-i18n-banner.png') },
-    { src: u('hero-home/spam-wave-banner.png') },
-    { src: u('hero-home/rich-media-banner.png') },
-    { src: u('hero-home/casino-spam-banner.png') },
-    { src: premiumTariffBanner },
-    { src: u('hero-home/social.svg') },
+    { src: u('hero-home/hero-channels-discussions.png') },
+    { src: u('hero-home/hero-reports-analytics.png') },
+    { src: u('hero-home/hero-channel-posts.png') },
+    { src: u('hero-home/hero-violator-actions.png') },
+    { src: u('hero-home/hero-broadcast-autopost.png') },
+    { src: u('hero-home/hero-team-management.png') },
+    { src: u('hero-home/hero-rich-content.png') },
+    { src: u('hero-home/hero-casino-spam-filter.png') },
+    { src: u('hero-home/hero-spam-wave-alert.png') },
+    { src: u('hero-home/hero-bilingual-interface.png') },
+    { src: closingSrc },
   ]
 })
 
-/** Расширенная дорожка для wrap без рывка: [соц.] [офиц. слайды…] [языковой]. */
+/** Расширенная дорожка для wrap без рывка: [последний клон] [слайды…] [первый клон]. */
 const HOME_HERO_TRACK_SLIDES = computed(() => {
   const s = HOME_HERO_SLIDES.value
   const n = s.length
@@ -836,6 +928,12 @@ const HOME_HERO_TRACK_SLIDES = computed(() => {
   const firstCl = { ...s[0] }
   return [lastCl, ...s.map((row) => ({ ...row })), firstCl]
 })
+
+/** Тонкая полоска: белая часть заполняет дорожку за HOME_HERO_ADVANCE_MS на каждом слайде, сбрасывается при автосмене. */
+const homeHeroBarFillPct = computed(() =>
+  Math.max(0, Math.min(1, Number(homeHeroProgress.value) || 0)) * 100,
+)
+
 /** 10-дневный Premium-триал: можно ли активировать (FREE + ни разу не активировал + окно открыто). */
 const trialEligible = computed(() => !!me.value && !!me.value.trial_eligible)
 /** Триал сейчас идёт (юзер активировал, осталось N дней Premium бесплатно). */
@@ -1283,18 +1381,82 @@ const premiumPayMethodSummary = computed(() => {
   return p ? `${p.label} · ${p.price}` : ''
 })
 
-/**
- * Лендинг «Free vs Premium»: рефералка; 6 ключевых отличий; внизу лимит чатов 3/3 vs 20/20.
- */
+/** Лендинг «Free vs Premium»: сверка с фактическими лимитами и фичами (см. TARIFF_* в бэкенде). */
 const billingCompareRows = computed(() => [
   { id: 'referral', kind: 'referral', label: t('dashboard.referralRow.label') },
-  { id: 'stats_reports', kind: 'ok', label: t('dashboard.sections.stats_reports'), free: 'no', premium: 'ok' },
-  { id: 'broadcast_autopost', kind: 'ok', label: t('dashboard.sections.broadcast_autopost'), free: 'no', premium: 'ok' },
-  { id: 'aurum_export', kind: 'ok', label: t('dashboard.sections.aurum_export'), free: 'no', premium: 'ok' },
-  { id: 'filters_antiraid', kind: 'ok', label: t('dashboard.sections.filters_antiraid'), free: 'no', premium: 'ok' },
-  { id: 'delegation', kind: 'ok', label: t('dashboard.sections.delegation_cmp'), free: 'no', premium: 'ok' },
-  { id: 'chat_limit', kind: 'limits', label: t('dashboard.sections.chat_limit') },
+  {
+    id: 'quota',
+    kind: 'cells',
+    label: t('dashboard.billing.cmp_quota_label'),
+    freeKey: 'dashboard.billing.cmp_quota_free',
+    premiumKey: 'dashboard.billing.cmp_quota_premium',
+  },
+  {
+    id: 'moderation',
+    kind: 'cells',
+    label: t('dashboard.billing.cmp_moderation_label'),
+    freeKey: 'dashboard.billing.cmp_moderation_free',
+    premiumKey: 'dashboard.billing.cmp_moderation_premium',
+  },
+  {
+    id: 'broadcast',
+    kind: 'ok',
+    label: t('dashboard.billing.cmp_broadcast_label'),
+    free: 'no',
+    premium: 'ok',
+  },
+  {
+    id: 'stats',
+    kind: 'cells',
+    label: t('dashboard.billing.cmp_stats_label'),
+    freeKey: 'dashboard.billing.cmp_stats_free',
+    premiumKey: 'dashboard.billing.cmp_stats_premium',
+  },
+  {
+    id: 'granular',
+    kind: 'cells',
+    label: t('dashboard.billing.cmp_granular_label'),
+    freeKey: 'dashboard.billing.cmp_granular_free',
+    premiumKey: 'dashboard.billing.cmp_granular_premium',
+  },
+  {
+    id: 'dicts_ga',
+    kind: 'cells',
+    label: t('dashboard.billing.cmp_dicts_label'),
+    freeKey: 'dashboard.billing.cmp_dicts_free',
+    premiumKey: 'dashboard.billing.cmp_dicts_premium',
+  },
+  {
+    id: 'captcha_spike',
+    kind: 'cells',
+    label: t('dashboard.billing.cmp_captcha_spike_label'),
+    freeKey: 'dashboard.billing.cmp_captcha_spike_free',
+    premiumKey: 'dashboard.billing.cmp_captcha_spike_premium',
+  },
+  {
+    id: 'delegation',
+    kind: 'ok',
+    label: t('dashboard.billing.cmp_delegation_label'),
+    free: 'no',
+    premium: 'ok',
+  },
+  {
+    id: 'mailings_extra',
+    kind: 'cells',
+    label: t('dashboard.billing.cmp_mailings_extra_label'),
+    freeKey: 'dashboard.billing.cmp_mailings_extra_free',
+    premiumKey: 'dashboard.billing.cmp_mailings_extra_premium',
+  },
 ])
+
+const billingFreeIncludedItems = computed(() => {
+  const raw = tm('dashboard.billing.free_included_items')
+  return Array.isArray(raw) ? raw : []
+})
+const billingFreePremiumOnlyItems = computed(() => {
+  const raw = tm('dashboard.billing.free_premium_only_items')
+  return Array.isArray(raw) ? raw : []
+})
 
 const LANDING_PLAN_UI = [
   { months: 1 },
@@ -1698,7 +1860,7 @@ function scrollToBillingPremiumCompare() {
 }
 
 function scrollToBillingLandingPlans() {
-  scrollBillingElIntoView(billingLandingPlansRef.value)
+  scrollBillingElIntoView(billingLandingPlansRef.value || billingPremiumPitchRef.value)
 }
 
 function selectLandingPlan(months) {
@@ -2177,14 +2339,24 @@ const partnerNetworkCounts = computed(() => {
     total: Number(n?.total ?? 0),
   }
 })
+const partnerUiMaxLevels = computed(() => {
+  const raw = partnerData.value?.partner_ui_max_levels
+  const n = Number(raw)
+  if (Number.isFinite(n) && n >= 1 && n <= 3) return Math.floor(n)
+  return me.value?.is_premium ? 3 : 1
+})
+
 /** Разбивка комиссий по уровням (ожидание / подтверждено). */
 const partnerLevelStatsRows = computed(() => {
+  const maxLv = partnerUiMaxLevels.value
   const raw = partnerData.value?.partner_level_stats
-  if (Array.isArray(raw) && raw.length) return raw
   const rates = partnerData.value?.level_rates || []
   const pct = (lv) => Number((rates.find((r) => Number(r.level) === lv) || {}).percent || 0)
   const z = () => ({ payments: 0, sales_rub: 0, reward_tokens: 0 })
-  return [1, 2, 3].map((level) => ({
+  if (Array.isArray(raw) && raw.length) return raw.filter((row) => Number(row?.level) <= maxLv)
+  const rows = []
+  for (let level = 1; level <= maxLv; level += 1) rows.push(level)
+  return rows.map((level) => ({
     level,
     percent: pct(level) || (level === 1 ? 15 : level === 2 ? 10 : 5),
     pending: z(),
@@ -2388,6 +2560,15 @@ function toggleGroupStatsRangePanel() {
 }
 
 function goBroadcastMiniCreate() {
+  if (!userCanUseBroadcasts(me.value)) {
+    openPremiumLockModal({
+      feature: 'broadcast_nav',
+      me: me.value,
+      titleKey: 'premium_lock.lock_broadcast_nav_title',
+      descriptionKey: 'premium_lock.lock_broadcast_nav_body',
+    })
+    return
+  }
   router.push({ path: '/admin', query: { admin_tab: 'broadcasts' } })
 }
 
@@ -2396,19 +2577,39 @@ function _apSchedActive(ap) {
   return !!ap && (rs === 'running' || rs === 'paused')
 }
 
+function _broadcastMiniEligibleUniqueTotal(gItems, chItems) {
+  const ids = new Set()
+  for (const x of gItems || []) {
+    const id = Number(x?.chat_id || 0)
+    if (Number.isFinite(id) && id !== 0) ids.add(id)
+  }
+  for (const x of chItems || []) {
+    const id = Number(x?.chat_id || 0)
+    if (Number.isFinite(id) && id !== 0) ids.add(id)
+  }
+  return ids.size
+}
+
 async function loadBroadcastMiniSnapshot() {
   if (!me.value || !hasInitData.value) return
   broadcastMiniLoading.value = true
   try {
-    const [gRes, chRes, brRes, campRes] = await Promise.all([
-      rawApi.adminBroadcastGroups('mine').catch(() => ({ items: [] })),
-      rawApi.adminBroadcastChannels('mine').catch(() => ({ items: [] })),
+    let deviceTz = 'Europe/Moscow'
+    try {
+      deviceTz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Moscow'
+    } catch {
+      deviceTz = 'Europe/Moscow'
+    }
+    const [gRes, chRes, brRes, campRes, runTodayRes] = await Promise.all([
+      rawApi.adminBroadcastGroups('mine'),
+      rawApi.adminBroadcastChannels('mine'),
       rawApi.adminBroadcasts('mine').catch(() => ({ items: [] })),
       rawApi.adminAutopostCampaigns().catch(() => ({ items: [] })),
+      rawApi.adminBroadcastRunsToday(deviceTz).catch(() => null),
     ])
     const gItems = gRes?.items || []
     const chItems = chRes?.items || []
-    broadcastMiniEligibleCount.value = gItems.length + chItems.length
+    broadcastMiniEligibleCount.value = _broadcastMiniEligibleUniqueTotal(gItems, chItems)
     const brList = brRes?.items || []
     const camps = campRes?.items || []
     let sched = 0
@@ -2419,18 +2620,10 @@ async function loadBroadcastMiniSnapshot() {
       if (_apSchedActive(b?.autopost)) sched += 1
     }
     broadcastMiniScheduledCount.value = sched
-    broadcastMiniSentToday.value = null
-    if (brList.length > 0) {
-      const bid = Number(brList[0]?.id || 0)
-      if (bid > 0) {
-        try {
-          const st = await rawApi.adminBroadcastAutopostStats(bid, 1)
-          broadcastMiniSentToday.value =
-            Number(st?.bots?.recipient_ok || 0) + Number(st?.groups?.recipient_ok || 0)
-        } catch {
-          broadcastMiniSentToday.value = null
-        }
-      }
+    if (runTodayRes && Number.isFinite(Number(runTodayRes.runs_today))) {
+      broadcastMiniSentToday.value = Math.max(0, Math.trunc(Number(runTodayRes.runs_today)))
+    } else {
+      broadcastMiniSentToday.value = null
     }
   } catch {
     broadcastMiniEligibleCount.value = null
@@ -2768,7 +2961,11 @@ const docsCalc = computed(() => {
   const l1 = Math.round(amount * 0.15 * 100) / 100
   const l2 = Math.round(amount * 0.10 * 100) / 100
   const l3 = Math.round(amount * 0.05 * 100) / 100
-  return { amount, l1, l2, l3, total: Math.round((l1 + l2 + l3) * 100) / 100 }
+  const m = partnerUiMaxLevels.value
+  let total = l1
+  if (m >= 2) total += l2
+  if (m >= 3) total += l3
+  return { amount, l1, l2, l3, total: Math.round(total * 100) / 100 }
 })
 
 async function loadHistoryIfNeeded() {
@@ -3005,7 +3202,7 @@ async function submitReceipt() {
 
     <div
       v-else-if="me"
-      class="relative isolate -mx-4 min-h-0 px-4 pb-1.5 pt-3 font-display md:-mx-6 md:px-6 md:pt-4"
+      class="relative isolate -mx-4 min-h-0 px-4 pb-1.5 pt-2 font-display md:-mx-6 md:px-6 md:pt-3"
     >
       <SubscriptionManagementPanel
         v-if="dashSection === 'subscription'"
@@ -3028,14 +3225,18 @@ async function submitReceipt() {
           :class="showTokenBreakdown ? 'z-[45]' : ''"
         >
           <!-- Главный блок: без отдельной тёмной подложки — контент на фоне экрана -->
-          <div class="pb-1 pl-0 pr-2 pt-0 md:pb-1.5 md:pr-2.5">
+          <div class="pb-0 pl-0 pr-2 pt-0 md:pb-1 md:pr-2.5">
             <div class="flex items-start gap-0">
-              <div class="relative mt-1 -ml-3 flex h-28 w-28 shrink-0 items-center justify-center self-start md:-ml-3.5">
+              <div
+                class="relative -mt-0.5 -ml-3 flex h-28 w-28 shrink-0 items-center justify-center self-start md:-ml-3.5"
+                :class="!tariffIsPremium ? 'overflow-hidden' : ''"
+              >
                 <img
                   :src="dashboardAvatarSrc"
                   alt=""
                   draggable="false"
                   class="block h-28 w-28 max-h-[7rem] max-w-[7rem] object-contain object-top"
+                  :class="!tariffIsPremium ? 'origin-top scale-[1.07]' : ''"
                   @dragstart.prevent
                 />
               </div>
@@ -3090,30 +3291,39 @@ async function submitReceipt() {
                 </div>
 
                 <div class="mt-2 w-full min-w-0 sm:mt-2.5">
-                  <div
-                    class="flex w-full min-w-0 items-stretch justify-between divide-x divide-white/[0.07]"
-                  >
+                  <div class="relative isolate px-2 pt-2.5 pb-1.5 sm:px-3 sm:pt-3 sm:pb-2">
+                    <div
+                      aria-hidden="true"
+                      class="pointer-events-none absolute inset-0 rounded-xl bg-black/40 backdrop-blur-[7px]"
+                      style="
+                        -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 12%, #000 88%, transparent 100%);
+                        mask-image: linear-gradient(90deg, transparent 0%, #000 12%, #000 88%, transparent 100%);
+                      "
+                    />
+                    <div
+                      class="relative flex w-full min-w-0 items-stretch justify-between divide-x divide-white/[0.09]"
+                    >
                     <div class="flex min-w-0 flex-1 flex-col items-center px-1.5 text-center sm:px-2">
-                      <p class="w-full text-[8px] font-semibold uppercase tracking-wide text-white/45">{{ t('dashboard.hero.col_deleted') }}</p>
-                      <p class="mt-0.5 w-full text-[15px] font-extrabold tabular-nums leading-none text-white sm:text-[16px]">
+                      <p class="w-full text-[9px] font-semibold uppercase tracking-wide text-white sm:text-[10px]">{{ t('dashboard.hero.col_deleted') }}</p>
+                      <p class="mt-0.5 w-full text-[16px] font-extrabold tabular-nums leading-none text-white sm:text-[17px]">
                         {{ activitySummary?.today?.deleted ?? 0 }}
                       </p>
-                      <p class="mt-0.5 w-full text-[9px] font-medium leading-tight text-lime-400/95">{{ t('dashboard.hero.col_deleted_sub') }}</p>
+                      <p class="mt-0.5 w-full text-[10px] font-medium leading-tight text-lime-400/95 sm:text-[11px]">{{ t('dashboard.hero.col_deleted_sub') }}</p>
                     </div>
                     <div class="flex min-w-0 flex-1 flex-col items-center px-1.5 text-center sm:px-2">
-                      <p class="w-full text-[8px] font-semibold uppercase tracking-wide text-white/45">{{ t('dashboard.hero.col_saved') }}</p>
-                      <p class="mt-0.5 w-full whitespace-nowrap text-center text-[12px] font-extrabold tabular-nums leading-none text-white sm:text-[13px]">
+                      <p class="w-full text-[9px] font-semibold uppercase tracking-wide text-white sm:text-[10px]">{{ t('dashboard.hero.col_saved') }}</p>
+                      <p class="mt-0.5 w-full whitespace-nowrap text-center text-[13px] font-extrabold tabular-nums leading-none text-white sm:text-[14px]">
                         ~ {{ fmtRubInt(dashboardEstimatedSavedRub) }} ₽
                       </p>
-                      <p class="mt-0.5 w-full text-[9px] font-medium leading-tight text-lime-400/95">{{ t('dashboard.hero.col_saved_sub') }}</p>
+                      <p class="mt-0.5 w-full text-[10px] font-medium leading-tight text-lime-400/95 sm:text-[11px]">{{ t('dashboard.hero.col_saved_sub') }}</p>
                     </div>
                     <div class="flex min-w-0 flex-1 flex-col items-center px-1.5 text-center sm:px-2">
-                      <p class="w-full whitespace-nowrap text-[8px] font-semibold uppercase leading-tight tracking-wide text-white/45">
+                      <p class="w-full whitespace-nowrap text-[9px] font-semibold uppercase leading-tight tracking-wide text-white sm:text-[10px]">
                         {{ t('dashboard.hero.col_level') }}
                       </p>
                       <div class="mt-0.5 flex w-full min-w-0 flex-col items-stretch gap-1">
                         <p
-                          class="text-center text-[13px] font-extrabold leading-tight sm:text-[14px]"
+                          class="text-center text-[14px] font-extrabold leading-tight sm:text-[15px]"
                           :class="dashboardProtectionLevelMeta.labelClass"
                         >
                           {{ dashboardProtectionLevelMeta.label }}
@@ -3136,12 +3346,13 @@ async function submitReceipt() {
                         </div>
                       </div>
                     </div>
+                    </div>
                   </div>
                 </div>
 
                 <button
                   type="button"
-                  class="mt-2 flex w-full items-center gap-1.5 rounded-lg bg-zinc-900/80 px-2 py-1 text-left transition hover:bg-zinc-800/80 active:bg-zinc-800/90 sm:mt-2.5 sm:py-1.5"
+                  class="mt-1 flex w-full items-center gap-1.5 rounded-lg bg-zinc-900/80 px-2 py-1 text-left transition hover:bg-zinc-800/80 active:bg-zinc-800/90 sm:mt-1.5 sm:py-1.5"
                   @click="goManageChats"
                 >
                   <span class="grid h-5 w-5 shrink-0 place-items-center rounded-md bg-lime-500/15 text-lime-300">
@@ -3163,7 +3374,7 @@ async function submitReceipt() {
 
           <template v-if="dashSection === 'account'">
           <!-- Нижний ряд: AURUM (уже) | чаты (шире) -->
-          <div class="mt-1 grid min-w-0 grid-cols-[minmax(0,40%)_minmax(0,60%)] gap-1.5 items-stretch md:grid-cols-[minmax(0,38%)_minmax(0,62%)] md:gap-2">
+          <div class="mt-0 grid min-w-0 grid-cols-[minmax(0,40%)_minmax(0,60%)] gap-1.5 items-stretch md:grid-cols-[minmax(0,38%)_minmax(0,62%)] md:gap-2">
             <div class="relative flex h-full min-h-0 min-w-0 flex-col rounded-xl border border-amber-400/15 bg-gradient-to-b from-black/45 to-zinc-950/90 px-1 pb-0.5 pt-1 shadow-[0_10px_36px_-18px_rgba(0,0,0,0.65)] backdrop-blur-md md:px-1.5">
               <div class="flex min-h-0 flex-1 flex-col">
               <div class="flex items-start justify-between gap-1.5">
@@ -3312,7 +3523,7 @@ async function submitReceipt() {
 
           <!-- Статистика ↔ Рассылки: на всю ширину, свайп / подсказка раз в 3 с -->
           <div
-            class="guard-stat-broadcast-rail mt-0.5 w-full min-w-0"
+            class="guard-stat-broadcast-rail mt-0 w-full min-w-0"
             :class="accountShowBroadcastMiniCard ? 'cursor-grab touch-pan-x active:cursor-grabbing' : ''"
             @pointerdown="onStatBroadcastRailPointerDown"
             @pointermove="onStatBroadcastRailPointerMove"
@@ -3433,7 +3644,7 @@ async function submitReceipt() {
                 class="w-1/2 shrink-0 pl-[3px]"
               >
                 <div
-                  class="overflow-hidden rounded-2xl border border-violet-500/35 bg-gradient-to-br from-[#151220] via-[#0c0a12] to-black shadow-[0_14px_40px_-20px_rgba(91,33,182,0.45)] ring-1 ring-inset ring-violet-400/10"
+                  class="relative overflow-hidden rounded-2xl border border-violet-500/35 bg-gradient-to-br from-[#151220] via-[#0c0a12] to-black shadow-[0_14px_40px_-20px_rgba(91,33,182,0.45)] ring-1 ring-inset ring-violet-400/10"
                 >
                   <div class="flex items-start gap-1.5 px-1.5 pb-1 pt-1 sm:gap-2 sm:px-2 sm:pb-1 sm:pt-1.5">
                     <div
@@ -3443,7 +3654,16 @@ async function submitReceipt() {
                       <NavIcon name="telegram" class="h-[17px] w-[17px] text-white drop-shadow-[0_1px_8px_rgba(255,255,255,0.35)]" />
                     </div>
                     <div class="min-w-0 flex-1">
-                      <span class="text-[12px] font-extrabold leading-tight text-white sm:text-[13px]">{{ t('dashboard.broadcast_mini.title') }}</span>
+                      <div class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                        <span class="text-[12px] font-extrabold leading-tight text-white sm:text-[13px]">{{ t('dashboard.broadcast_mini.title') }}</span>
+                        <span
+                          v-if="!dashboardBroadcastAccess"
+                          :class="broadcastMiniPremiumBadgeInlineClass"
+                          aria-hidden="true"
+                        >
+                          <span class="text-[9px]" aria-hidden="true">👑</span> {{ t('owner_cabinet_home.premium_badge') }}
+                        </span>
+                      </div>
                       <p class="mt-0.5 line-clamp-2 text-[8px] leading-snug text-white/50 sm:text-[9px]">
                         {{ t('dashboard.broadcast_mini.sub') }}
                       </p>
@@ -3512,7 +3732,7 @@ async function submitReceipt() {
 
           <!-- Карусель промо: только картинки + полоска таймера (клики по премиум — позже) -->
           <div
-            class="guard-hero-carousel mb-5 mt-0.5 w-full min-w-0 overflow-hidden border-0 shadow-none ring-0 outline-none ring-offset-0 sm:mb-6 sm:mt-1"
+            class="guard-hero-carousel mb-3 mt-0 w-full min-w-0 overflow-hidden border-0 shadow-none ring-0 outline-none ring-offset-0 sm:mb-4 sm:mt-0"
           >
             <div
               class="relative cursor-grab touch-pan-x select-none border-0 shadow-none ring-0 outline-none ring-offset-0 focus:outline-none focus-visible:outline-none active:cursor-grabbing"
@@ -3524,7 +3744,7 @@ async function submitReceipt() {
             >
               <div
                 ref="homeHeroCarouselViewportRef"
-                class="relative isolate h-[min(14rem,70vw)] w-full overflow-hidden border-0 shadow-none ring-0 outline-none ring-offset-0 sm:h-[15rem] md:h-[15.75rem] lg:h-[16.25rem]"
+                class="relative isolate h-[min(16rem,78vw)] w-full overflow-hidden rounded-xl border-0 shadow-none ring-0 outline-none ring-offset-0 sm:h-[17.25rem] md:h-[18rem] lg:h-[18.75rem]"
               >
                 <div
                   class="flex h-full border-0 shadow-none ring-0 outline-none ring-offset-0"
@@ -3546,21 +3766,18 @@ async function submitReceipt() {
                       alt=""
                       draggable="false"
                       decoding="async"
+                      :fetchpriority="idx === 1 ? 'high' : 'low'"
                       class="pointer-events-none block h-full w-full max-w-none border-0 object-contain object-center outline-none ring-0 ring-offset-0 [box-shadow:none]"
                     />
                   </div>
                 </div>
-                <div class="pointer-events-none absolute inset-x-7 bottom-2 z-[1] sm:inset-x-9">
-                  <div class="relative h-px w-full rounded-full bg-white/22">
-                    <div
-                      class="absolute top-1/2 min-w-[14px] -translate-y-1/2 rounded-full bg-white shadow-none"
-                      :style="{
-                        left: `${homeHeroThumbLeftPct(homeHeroProgress)}%`,
-                        width: `${HOME_HERO_THUMB_FRAC * 100}%`,
-                        height: '2px',
-                        maxWidth: '5rem',
-                      }"
-                    />
+                <!-- Тонкая полоска: таймер слайда (HOME_HERO_ADVANCE_MS); дорожка ~⅓ ширины по центру -->
+                <div
+                  class="pointer-events-none absolute inset-x-0 bottom-0 z-[2] flex justify-center pb-2 pt-1 sm:pb-2.5"
+                  aria-hidden="true"
+                >
+                  <div class="h-px w-1/3 overflow-hidden rounded-full bg-white/[0.22] sm:h-[2px]">
+                    <div class="h-full rounded-full bg-white" :style="{ width: `${homeHeroBarFillPct}%` }" />
                   </div>
                 </div>
               </div>
@@ -3638,10 +3855,20 @@ async function submitReceipt() {
                   {{ t('partner.tier_net_title') }}
                 </p>
                 <p class="mt-2 font-mono text-[11px] text-slate-200 sm:text-[12px]">
+                  <template v-if="partnerUiMaxLevels >= 3">
                   ├ {{ t('partner.tier_net_l1', { n: partnerNetworkCounts.l1 }) }}<br>
                   ├ {{ t('partner.tier_net_l2', { n: partnerNetworkCounts.l2 }) }}<br>
                   ├ {{ t('partner.tier_net_l3', { n: partnerNetworkCounts.l3 }) }}<br>
                   └ {{ t('partner.tier_net_total', { n: partnerNetworkCounts.total }) }}
+                  </template>
+                  <template v-else>
+                  └ {{ t('partner.tier_net_l1', { n: partnerNetworkCounts.l1 }) }}<br>
+                  └ {{
+                    t('partner.tier_net_total_direct', { n: partnerNetworkCounts.l1 })
+                  }}
+                  <br>
+                  <span class="font-sans text-[10px] text-slate-500">{{ t('partner.tier_network_premium_hint') }}</span>
+                  </template>
                 </p>
               </div>
               <div class="border-t border-white/[0.08] pt-2">
@@ -3795,16 +4022,25 @@ async function submitReceipt() {
           <div class="rounded-2xl border border-lime-400/30 bg-[#0f1115]/95 p-4 text-slate-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
             <p class="text-lg font-extrabold text-lime-400/95">{{ t('partner.docs_q_program') }}</p>
             <p class="mt-2 text-sm leading-relaxed text-slate-300">
-              {{ t('partner.docs_program_intro') }}
+              {{ partnerUiMaxLevels >= 3 ? t('partner.docs_program_intro') : t('partner.docs_program_intro_free') }}
             </p>
             <div class="mt-2 space-y-1 text-sm text-slate-300">
               <p><span class="inline-flex h-5 w-5 items-center justify-center rounded border border-lime-400/40 bg-slate-950/80 text-xs font-bold text-lime-200">1</span> {{ t('partner.docs_lvl_1') }}</p>
-              <p><span class="inline-flex h-5 w-5 items-center justify-center rounded border border-lime-400/40 bg-slate-950/80 text-xs font-bold text-lime-200">2</span> {{ t('partner.docs_lvl_2') }}</p>
-              <p><span class="inline-flex h-5 w-5 items-center justify-center rounded border border-lime-400/40 bg-slate-950/80 text-xs font-bold text-lime-200">3</span> {{ t('partner.docs_lvl_3') }}</p>
+              <template v-if="partnerUiMaxLevels >= 3">
+                <p><span class="inline-flex h-5 w-5 items-center justify-center rounded border border-lime-400/40 bg-slate-950/80 text-xs font-bold text-lime-200">2</span> {{ t('partner.docs_lvl_2') }}</p>
+                <p><span class="inline-flex h-5 w-5 items-center justify-center rounded border border-lime-400/40 bg-slate-950/80 text-xs font-bold text-lime-200">3</span> {{ t('partner.docs_lvl_3') }}</p>
+              </template>
             </div>
-            <p class="mt-3 rounded-lg border border-amber-400/25 bg-amber-500/[0.08] px-3 py-2 text-sm leading-relaxed text-amber-100/90">
-              {{ t('partner.docs_free_tiers') }}
-            </p>
+            <template v-if="partnerUiMaxLevels < 3">
+              <p class="mt-3 rounded-lg border border-amber-400/25 bg-amber-500/[0.08] px-3 py-2 text-sm leading-relaxed text-amber-100/90">
+                {{ t('partner.docs_free_tiers') }}
+              </p>
+            </template>
+            <template v-else>
+              <p class="mt-3 rounded-lg border border-emerald-400/20 bg-emerald-500/[0.07] px-3 py-2 text-sm leading-relaxed text-emerald-50/95">
+                {{ t('partner.docs_premium_levels_note') }}
+              </p>
+            </template>
             <p class="mt-2 text-sm leading-relaxed text-slate-400">
               {{ t('partner.docs_payouts_note') }}
             </p>
@@ -3818,7 +4054,7 @@ async function submitReceipt() {
           <div class="rounded-2xl border border-lime-400/30 bg-[#0f1115]/95 p-4 text-slate-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
             <p class="text-lg font-extrabold text-lime-400/95">{{ t('partner.docs_q_accrual') }}</p>
             <p class="mt-2 text-sm leading-relaxed text-slate-300">
-              {{ t('partner.docs_accrual_example') }}
+              {{ partnerUiMaxLevels >= 3 ? t('partner.docs_accrual_example') : t('partner.docs_accrual_example_free') }}
             </p>
             <p class="mt-2 text-sm italic text-slate-400">
               {{ t('partner.docs_accrual_auto') }}
@@ -3828,8 +4064,8 @@ async function submitReceipt() {
               <input v-model="docsExampleSale" type="number" min="0" step="100" class="mt-2 w-full rounded-lg border border-slate-600 bg-[#0a0c10] px-3 py-2 text-sm text-slate-200">
               <p class="mt-2 text-xs text-slate-300">{{ t('partner.docs_sale_label') }} <b class="text-slate-100">{{ fmtAmount(docsCalc.amount) }} ₽</b></p>
               <p class="text-xs text-slate-300"><span class="inline-flex h-4 w-4 items-center justify-center rounded border border-lime-400/35 bg-slate-900 text-[10px] font-bold text-lime-200">+</span> {{ t('partner.docs_lvl1_calc') }} <b class="text-slate-100">{{ fmtAmount(docsCalc.l1) }} ₽</b></p>
-              <p class="text-xs text-slate-300"><span class="inline-flex h-4 w-4 items-center justify-center rounded border border-lime-400/35 bg-slate-900 text-[10px] font-bold text-lime-200">+</span> {{ t('partner.docs_lvl2_calc') }} <b class="text-slate-100">{{ fmtAmount(docsCalc.l2) }} ₽</b></p>
-              <p class="text-xs text-slate-300"><span class="inline-flex h-4 w-4 items-center justify-center rounded border border-lime-400/35 bg-slate-900 text-[10px] font-bold text-lime-200">+</span> {{ t('partner.docs_lvl3_calc') }} <b class="text-slate-100">{{ fmtAmount(docsCalc.l3) }} ₽</b></p>
+              <p v-if="partnerUiMaxLevels >= 2" class="text-xs text-slate-300"><span class="inline-flex h-4 w-4 items-center justify-center rounded border border-lime-400/35 bg-slate-900 text-[10px] font-bold text-lime-200">+</span> {{ t('partner.docs_lvl2_calc') }} <b class="text-slate-100">{{ fmtAmount(docsCalc.l2) }} ₽</b></p>
+              <p v-if="partnerUiMaxLevels >= 3" class="text-xs text-slate-300"><span class="inline-flex h-4 w-4 items-center justify-center rounded border border-lime-400/35 bg-slate-900 text-[10px] font-bold text-lime-200">+</span> {{ t('partner.docs_lvl3_calc') }} <b class="text-slate-100">{{ fmtAmount(docsCalc.l3) }} ₽</b></p>
               <p class="text-xs text-slate-400">{{ t('partner.docs_total') }} <b class="text-slate-100">{{ fmtAmount(docsCalc.total) }} ₽</b></p>
             </div>
           </div>
@@ -4478,15 +4714,15 @@ async function submitReceipt() {
         <section
             v-if="me && !me.is_premium"
             id="billing-free-limits"
-            class="relative overflow-hidden rounded-[1.125rem] border border-violet-500/30 bg-black px-4 py-6 text-white shadow-[0_0_48px_-18px_rgba(124,58,237,0.45)] ring-1 ring-inset ring-violet-500/15"
+            class="relative overflow-hidden rounded-[1.125rem] border border-white/[0.12] bg-[#0b0f18]/78 px-4 py-6 text-white shadow-[0_28px_90px_-28px_rgba(0,0,0,0.88)] ring-1 ring-white/[0.08] backdrop-blur-2xl backdrop-saturate-150"
           >
             <div
-              class="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_50%_0%,rgba(139,92,246,0.22),transparent_55%)]"
+              class="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_50%_0%,rgba(139,92,246,0.2),transparent_55%)]"
               aria-hidden="true"
             />
             <div class="relative z-[1] flex flex-col items-center">
               <div
-                class="flex h-[4.25rem] w-[4.25rem] items-center justify-center rounded-full border-2 border-violet-400/55 bg-gradient-to-b from-violet-950/90 to-black text-[2rem] shadow-[0_0_36px_rgba(167,139,250,0.65)]"
+                class="flex h-[4.25rem] w-[4.25rem] items-center justify-center rounded-full border-2 border-white/25 bg-black/35 text-[2rem] shadow-[0_0_36px_rgba(167,139,250,0.55)] backdrop-blur-md"
                 aria-hidden="true"
               >
                 🔒
@@ -4497,31 +4733,38 @@ async function submitReceipt() {
               <p class="mt-2 max-w-[19rem] text-center text-[13px] leading-relaxed text-slate-400">
                 {{ t('dashboard.billing.free_limits_sub') }}
               </p>
-              <ul class="mt-5 w-full max-w-md space-y-3 rounded-2xl border border-white/[0.08] bg-zinc-950/90 px-4 py-4">
-                <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
-                  <span class="mt-0.5 shrink-0 text-violet-400" aria-hidden="true">🔒</span>
-                  {{ t('dashboard.billing.free_li_autodel') }}
-                </li>
-                <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
-                  <span class="mt-0.5 shrink-0 text-violet-400" aria-hidden="true">🔒</span>
-                  {{ t('dashboard.billing.free_li_links') }}
-                </li>
-                <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
-                  <span class="mt-0.5 shrink-0 text-violet-400" aria-hidden="true">🔒</span>
-                  {{ t('dashboard.billing.free_li_broadcast') }}
-                </li>
-                <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
-                  <span class="mt-0.5 shrink-0 text-violet-400" aria-hidden="true">🔒</span>
-                  {{ t('dashboard.billing.free_li_stats') }}
-                </li>
-                <li class="flex items-start gap-3 text-[13px] leading-snug text-slate-200">
-                  <span class="mt-0.5 shrink-0 text-amber-400/95 drop-shadow-[0_0_8px_rgba(251,191,36,0.45)]" aria-hidden="true">🔒</span>
-                  {{ t('dashboard.billing.free_li_support') }}
+
+              <p class="mt-5 w-full max-w-md text-[10px] font-extrabold uppercase tracking-[0.18em] text-emerald-300/95">
+                {{ t('dashboard.billing.free_limits_included_heading') }}
+              </p>
+              <ul class="mt-2 w-full max-w-md space-y-2.5 rounded-2xl border border-white/[0.1] bg-black/25 px-4 py-4 ring-1 ring-inset ring-white/[0.05] backdrop-blur-md">
+                <li
+                  v-for="(line, ix) in billingFreeIncludedItems"
+                  :key="`free-inc-${ix}`"
+                  class="flex items-start justify-between gap-3 text-[13px] leading-snug text-slate-100"
+                >
+                  <span class="min-w-0">{{ line }}</span>
+                  <span class="shrink-0 font-bold text-emerald-400" aria-hidden="true">✓</span>
                 </li>
               </ul>
+
+              <p class="mt-5 w-full max-w-md text-[10px] font-extrabold uppercase tracking-[0.18em] text-violet-300/95">
+                {{ t('dashboard.billing.free_limits_locked_heading') }}
+              </p>
+              <ul class="mt-2 w-full max-w-md space-y-2.5 rounded-2xl border border-white/[0.1] bg-black/35 px-4 py-4 ring-1 ring-inset ring-violet-500/15 backdrop-blur-md">
+                <li
+                  v-for="(line, ix) in billingFreePremiumOnlyItems"
+                  :key="`free-gate-${ix}`"
+                  class="flex items-start justify-between gap-3 text-[13px] leading-snug text-slate-200"
+                >
+                  <span class="min-w-0">{{ line }}</span>
+                  <span class="shrink-0 text-violet-400" aria-hidden="true">🔒</span>
+                </li>
+              </ul>
+
               <button
                 type="button"
-                class="mt-6 w-full max-w-md rounded-2xl bg-violet-600 py-3.5 text-[15px] font-bold text-white shadow-[0_12px_32px_-8px_rgba(124,58,237,0.55)] transition hover:bg-violet-500 active:scale-[0.99]"
+                class="mt-6 w-full max-w-md rounded-2xl border border-white/[0.1] bg-violet-600/95 py-3.5 text-[15px] font-bold text-white shadow-[0_12px_32px_-8px_rgba(124,58,237,0.55)] transition hover:bg-violet-500 active:scale-[0.99]"
                 @click="scrollToBillingPremiumPitch"
               >
                 {{ t('dashboard.billing.cta_learn_premium') }}
@@ -4611,7 +4854,7 @@ async function submitReceipt() {
           <section
             id="billing-premium-compare"
             ref="billingPremiumCompareRef"
-            class="scroll-mt-3 relative overflow-hidden rounded-[1.125rem] border border-violet-500/25 bg-black px-4 py-6 text-white shadow-[0_0_48px_-12px_rgba(139,92,246,0.35)] ring-1 ring-inset ring-white/[0.06]"
+            class="scroll-mt-3 relative overflow-hidden rounded-[1.125rem] border border-white/[0.11] bg-[#0b0f18]/75 px-4 py-6 text-white shadow-[0_28px_88px_-28px_rgba(0,0,0,0.85)] ring-1 ring-white/[0.08] backdrop-blur-2xl backdrop-saturate-150"
           >
             <div
               class="pointer-events-none absolute -right-1/4 top-0 h-48 w-48 rounded-full bg-[radial-gradient(circle_at_center,rgba(250,204,21,0.1),transparent_65%)] blur-2xl"
@@ -4626,121 +4869,124 @@ async function submitReceipt() {
                 {{ t('dashboard.billing.compare_title') }}
               </h2>
 
-              <div
-                class="mt-5 flex items-stretch gap-1 rounded-2xl border border-white/[0.1] bg-zinc-950/90 p-1 shadow-inner"
-                role="presentation"
-              >
-                <div class="flex flex-1 items-center justify-center rounded-xl border border-transparent py-3">
-                  <span class="text-xs font-bold uppercase tracking-[0.2em] text-violet-300/90">Free</span>
-                </div>
-                <div
-                  class="flex w-12 shrink-0 flex-col items-center justify-center rounded-xl border border-white/[0.08] bg-black/50 py-2"
-                  aria-hidden="true"
-                >
-                  <span class="text-xl leading-none text-violet-300/90">🛡</span>
-                </div>
-                <div
-                  class="flex flex-[1.12] flex-col items-center justify-center rounded-xl border-2 border-amber-400/75 bg-gradient-to-b from-amber-500/12 to-violet-950/40 py-2.5 shadow-[0_0_24px_-6px_rgba(251,191,36,0.35)]"
-                >
-                  <span class="text-xs font-extrabold uppercase tracking-[0.18em] text-amber-200">Premium</span>
-                </div>
-              </div>
+              <!-- Мобильная карусель: Free по центру, Premium чуть «выглядывает» справа; справа — наоборот -->
+              <p class="mx-auto mb-3 max-w-sm text-center text-[11px] leading-snug text-white/42 md:hidden">
+                {{ t('dashboard.billing.compare_carousel_hint') }}
+              </p>
 
               <div
-                class="mt-4 overflow-x-auto overflow-y-hidden rounded-xl border border-white/[0.08] bg-black/60"
+                ref="billingCompareScrollerRef"
+                class="mt-2 flex gap-3 overflow-x-auto scroll-auto pb-3 select-none [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden max-md:[touch-action:pan-y] max-md:overscroll-x-contain max-md:pl-[calc(50vw_-_min(18rem,82vw)/2)] max-md:pr-[calc(50vw_-_min(18rem,82vw)/2)] max-md:[-webkit-overflow-scrolling:touch] md:mx-auto md:mt-6 md:max-w-4xl md:grid md:grid-cols-2 md:gap-5 md:overflow-visible md:px-0 md:pb-0 md:cursor-default md:snap-none"
+                :class="
+                  compareCarouselDragging
+                    ? 'snap-none max-md:cursor-grabbing'
+                    : 'snap-x snap-proximity max-md:cursor-grab max-md:active:cursor-grabbing'
+                "
+                @pointerdown="onCompareCarouselPointerDown"
+                @pointermove="onCompareCarouselPointerMove"
+                @pointerup="onCompareCarouselPointerUp"
+                @pointercancel="onCompareCarouselPointerUp"
               >
-                <!-- Free и Premium: равные доли остатка ширины (1fr + 1fr), чтобы внутри было больше места для подписи внизу -->
-                <div
-                  class="grid w-full min-w-0 grid-cols-[minmax(0,auto)_minmax(0,1fr)_minmax(0,1fr)] justify-items-stretch gap-x-1.5 sm:gap-x-2"
+                <article
+                  class="snap-center shrink-0 w-[min(18rem,82vw)] rounded-[1.125rem] border border-white/12 bg-zinc-950/85 backdrop-blur-sm md:w-auto md:max-w-none md:snap-none"
                 >
-                <span
-                  class="min-w-0 border-b border-white/[0.08] bg-white/[0.03] py-2.5 pl-2 pr-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500 sm:pl-2.5"
-                >{{ t('dashboard.billing.compare_feature_col') }}</span>
-                <span
-                  class="flex min-w-0 items-center justify-center border-b border-l border-white/[0.08] bg-white/[0.03] px-1.5 py-2.5 text-center text-[10px] font-bold uppercase text-violet-300/85"
-                >Free</span>
-                <span
-                  class="flex min-w-0 flex-col items-center justify-center border-b border-l border-amber-400/40 bg-amber-500/[0.1] px-1.5 py-2 text-[10px] font-bold uppercase text-amber-100/95"
+                  <div class="flex items-center gap-2 rounded-t-[1.125rem] border-b border-white/10 px-4 py-3">
+                    <span class="text-lg leading-none text-violet-300/95" aria-hidden="true">🛡</span>
+                    <span class="text-[11px] font-black uppercase tracking-[0.2em] text-violet-300/90">Free</span>
+                  </div>
+                  <div class="px-3 py-3">
+                    <template
+                      v-for="(row, idx) in billingCompareRows"
+                      :key="`cm-free-${row.id}`"
+                    >
+                      <div
+                        class="flex items-start justify-between gap-2 border-b border-white/[0.06] py-2.5 last:border-b-0"
+                        :class="idx % 2 === 1 ? 'bg-white/[0.015]' : ''"
+                      >
+                        <div class="min-w-0 flex-1">
+                          <p class="text-[12px] font-semibold leading-snug text-slate-100">{{ row.label }}</p>
+                          <template v-if="row.kind === 'referral'">
+                            <p class="mt-1 text-[10px] font-medium leading-tight text-slate-400">{{
+                              t('dashboard.billing.referral_tier_free')
+                            }}</p>
+                          </template>
+                          <template v-else-if="row.kind === 'cells'">
+                            <p class="mt-1 whitespace-normal text-[10px] font-medium leading-snug text-slate-300">{{ t(row.freeKey) }}</p>
+                          </template>
+                        </div>
+                        <div
+                          v-if="row.kind === 'referral' || row.kind === 'ok'"
+                          class="shrink-0 self-start pt-0.5 text-[17px] font-bold leading-none"
+                          :class="
+                            row.kind === 'referral'
+                              ? 'text-emerald-400'
+                              : row.free === 'ok'
+                                ? 'text-emerald-400'
+                                : 'text-rose-400/90'
+                          "
+                          aria-hidden="true"
+                        >{{ row.kind === 'referral' ? '✓' : row.free === 'ok' ? '✓' : '✕' }}</div>
+                      </div>
+                    </template>
+                  </div>
+                </article>
+
+                <article
+                  class="snap-center shrink-0 w-[min(18rem,82vw)] rounded-[1.125rem] border-2 border-amber-400/55 bg-gradient-to-b from-amber-500/[0.1] via-zinc-950/92 to-black shadow-[0_0_42px_-12px_rgba(251,191,36,0.38)] ring-1 ring-inset ring-amber-300/20 backdrop-blur-sm md:w-auto md:max-w-none md:snap-none"
                 >
-                  <span class="leading-none">👑</span>
-                  <span class="mt-0.5">Premium</span>
-                </span>
-                <template
-                  v-for="(row, idx) in billingCompareRows"
-                  :key="row.id"
-                >
-                  <template v-if="row.kind === 'referral'">
-                    <span
-                      class="min-w-0 border-b border-white/[0.06] py-2.5 pl-2 pr-1.5 text-[12px] leading-snug text-slate-200 sm:pl-2.5"
-                      :class="idx % 2 === 1 ? 'bg-white/[0.02]' : 'bg-white/[0.01]'"
-                    >{{ row.label }}</span>
-                    <div
-                      class="flex min-w-0 flex-col items-center justify-center border-b border-l border-white/[0.06] px-1.5 py-2.5 text-center"
-                      :class="idx % 2 === 1 ? 'bg-white/[0.02]' : 'bg-white/[0.01]'"
+                  <div class="flex items-center gap-2 rounded-t-[1.05rem] border-b border-amber-400/25 bg-amber-500/[0.07] px-4 py-3">
+                    <span class="text-lg leading-none" aria-hidden="true">👑</span>
+                    <span class="text-[11px] font-black uppercase tracking-[0.2em] text-amber-100">Premium</span>
+                  </div>
+                  <div class="px-3 py-3">
+                    <template
+                      v-for="(row, idx) in billingCompareRows"
+                      :key="`cm-pre-${row.id}`"
                     >
-                      <span class="text-[15px] font-bold leading-none text-emerald-400">✓</span>
-                      <span class="mt-1 w-full text-center text-[9px] font-medium leading-none text-slate-400">{{ t('dashboard.billing.referral_tier_free') }}</span>
-                    </div>
-                    <div
-                      class="flex min-w-0 flex-col items-center justify-center border-b border-l border-amber-400/15 bg-amber-500/[0.05] px-1.5 py-2.5 text-center"
-                    >
-                      <span class="text-[15px] font-bold leading-none text-emerald-400">✓</span>
-                      <span class="mt-1 w-full text-center text-[9px] font-semibold leading-tight text-emerald-300">{{ t('dashboard.billing.referral_tier_premium') }}</span>
-                    </div>
-                  </template>
-                  <template v-else-if="row.kind === 'limits'">
-                    <span
-                      class="min-w-0 border-b border-white/[0.06] py-2.5 pl-2 pr-1.5 text-[12px] leading-snug text-slate-200 sm:pl-2.5"
-                      :class="idx % 2 === 1 ? 'bg-white/[0.02]' : 'bg-white/[0.01]'"
-                    >{{ row.label }}</span>
-                    <div
-                      class="flex min-w-0 flex-col items-center justify-center border-b border-l border-white/[0.06] px-1.5 py-2.5 text-center"
-                      :class="idx % 2 === 1 ? 'bg-white/[0.02]' : 'bg-white/[0.01]'"
-                    >
-                      <span class="text-[11px] font-bold tabular-nums tracking-tight text-violet-300/95">{{ t('dashboard.billing.limits_free') }}</span>
-                    </div>
-                    <div
-                      class="flex min-w-0 flex-col items-center justify-center border-b border-l border-amber-400/15 bg-amber-500/[0.05] px-1.5 py-2.5 text-center"
-                    >
-                      <span class="text-[11px] font-semibold tabular-nums leading-tight text-amber-200/95">{{ t('dashboard.billing.limits_premium') }}</span>
-                    </div>
-                  </template>
-                  <template v-else>
-                    <span
-                      class="min-w-0 border-b border-white/[0.06] py-2.5 pl-2 pr-1.5 text-[12px] leading-snug text-slate-200 sm:pl-2.5"
-                      :class="idx % 2 === 1 ? 'bg-white/[0.02]' : 'bg-white/[0.01]'"
-                    >{{ row.label }}</span>
-                    <span
-                      class="flex min-w-0 items-center justify-center border-b border-l border-white/[0.05] px-1.5 text-[16px] font-bold"
-                      :class="[row.free === 'ok' ? 'text-emerald-400' : 'text-rose-400/90', idx % 2 === 1 ? 'bg-white/[0.02]' : 'bg-white/[0.01]']"
-                    >{{ row.free === 'ok' ? '✓' : '✕' }}</span>
-                    <span
-                      class="flex min-w-0 items-center justify-center border-b border-l border-amber-400/15 bg-amber-500/[0.05] px-1.5 text-[16px] font-bold text-emerald-400"
-                    >{{ row.premium === 'ok' ? '✓' : '✕' }}</span>
-                  </template>
-                </template>
-                </div>
+                      <div
+                        class="flex items-start justify-between gap-2 border-b border-amber-400/[0.12] py-2.5 last:border-b-0"
+                        :class="idx % 2 === 1 ? 'bg-amber-500/[0.04]' : ''"
+                      >
+                        <div class="min-w-0 flex-1">
+                          <p class="text-[12px] font-semibold leading-snug text-slate-50">{{ row.label }}</p>
+                          <template v-if="row.kind === 'referral'">
+                            <p class="mt-1 text-[10px] font-semibold leading-tight text-emerald-200/85">{{
+                              t('dashboard.billing.referral_tier_premium')
+                            }}</p>
+                          </template>
+                          <template v-else-if="row.kind === 'cells'">
+                            <p class="mt-1 whitespace-normal text-[10px] font-semibold leading-snug text-emerald-100/90">{{ t(row.premiumKey) }}</p>
+                          </template>
+                        </div>
+                        <div
+                          v-if="row.kind === 'referral' || row.kind === 'ok'"
+                          class="shrink-0 self-start pt-0.5 text-[17px] font-bold leading-none text-emerald-400"
+                          aria-hidden="true"
+                        >{{ row.kind === 'referral' ? '✓' : row.premium === 'ok' ? '✓' : '✕' }}</div>
+                      </div>
+                    </template>
+                  </div>
+                </article>
               </div>
+
+              <button
+                type="button"
+                class="mt-6 w-full rounded-2xl border border-white/[0.14] bg-white/[0.07] px-4 py-3.5 text-[14px] font-bold tracking-tight text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.1)] backdrop-blur-sm transition hover:bg-white/[0.11] active:scale-[0.99]"
+                @click="scrollToBillingLandingPlans"
+              >
+                {{ t('dashboard.billing.compare_scroll_to_tariffs') }}
+              </button>
 
               <button
                 v-if="showTrialCta"
                 type="button"
                 :disabled="trialActivating"
-                class="relative w-full overflow-hidden rounded-2xl px-4 py-3 text-[15px] font-extrabold tracking-tight text-emerald-950 text-center shadow-[0_14px_42px_-14px_rgba(16,185,129,0.62),inset_0_1px_0_rgba(255,255,255,0.32)] ring-1 ring-emerald-300/45 transition active:scale-[0.99] disabled:opacity-60"
+                class="relative mt-3 w-full overflow-hidden rounded-2xl px-4 py-3 text-[15px] font-extrabold tracking-tight text-emerald-950 text-center shadow-[0_14px_42px_-14px_rgba(16,185,129,0.62),inset_0_1px_0_rgba(255,255,255,0.32)] ring-1 ring-emerald-300/45 transition active:scale-[0.99] disabled:opacity-60"
                 style="background: linear-gradient(90deg, #34d399 0%, #10b981 50%, #84cc16 100%);"
                 @click="activateTrialClick"
               >
                 <span aria-hidden="true" class="mr-1.5">🚀</span>
                 {{ trialActivating ? t('dashboard.trial.activating') : t('dashboard.trial.activate_btn') }}
-              </button>
-              <button
-                v-else
-                type="button"
-                class="relative w-full overflow-hidden rounded-2xl px-4 py-3 text-[15px] font-extrabold tracking-tight text-white text-center shadow-[0_14px_42px_-14px_rgba(243,156,18,0.62),inset_0_1px_0_rgba(255,255,255,0.28)] transition active:scale-[0.99]"
-              style="background: linear-gradient(90deg, #f39c12 0%, #df5a3b 34%, #b043cc 56%, #5c2dc1 74%, #2a1a83 100%);"
-                @click="scrollToBillingLandingPlans"
-              >
-                {{ t('dashboard.billing.cta_choose_premium_btn') }}
               </button>
               <p
                 v-if="showTrialCta"
@@ -4754,7 +5000,7 @@ async function submitReceipt() {
             v-if="!showTrialCta"
             id="billing-landing-plans"
             ref="billingLandingPlansRef"
-            class="relative overflow-hidden rounded-[1.125rem] border border-white/[0.12] bg-black px-4 py-6 text-white ring-1 ring-inset ring-white/[0.06]"
+            class="relative scroll-mt-[4.75rem] overflow-hidden rounded-[1.125rem] border border-white/[0.12] bg-black px-4 py-6 text-white ring-1 ring-inset ring-white/[0.06]"
           >
             <h2 class="text-center text-lg font-extrabold tracking-tight text-white sm:text-xl">
               {{ t('dashboard.billing.plan_choice_title') }}
@@ -4895,12 +5141,16 @@ async function submitReceipt() {
       </div>
 
       <div v-if="dashSection === 'history'" class="mt-1">
-        <div class="rounded-2xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
+        <div class="rounded-2xl border border-slate-200 bg-white p-3 dark:border-white/[0.07] dark:bg-[#050608]">
           <div class="grid grid-cols-2 gap-2">
             <button
               type="button"
               class="rounded-xl px-3 py-2 text-sm font-semibold"
-              :class="historyTab === 'payments' ? 'bg-sky-100 text-sky-800 dark:bg-sky-900/30 dark:text-sky-200' : 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200'"
+              :class="
+                historyTab === 'payments'
+                  ? 'bg-sky-100 text-sky-800 dark:bg-[#12151c] dark:text-white dark:ring-1 dark:ring-white/[0.08]'
+                  : 'bg-slate-100 text-slate-700 dark:bg-black/55 dark:text-white/42 dark:ring-1 dark:ring-inset dark:ring-white/[0.05]'
+              "
               @click="historyTab = 'payments'"
             >
               {{ t('dashboard.billing.history_payments_tab') }}
@@ -4908,22 +5158,29 @@ async function submitReceipt() {
             <button
               type="button"
               class="rounded-xl px-3 py-2 text-sm font-semibold"
-              :class="historyTab === 'tokens' ? 'bg-sky-100 text-sky-800 dark:bg-sky-900/30 dark:text-sky-200' : 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200'"
+              :class="
+                historyTab === 'tokens'
+                  ? 'bg-sky-100 text-sky-800 dark:bg-[#12151c] dark:text-white dark:ring-1 dark:ring-white/[0.08]'
+                  : 'bg-slate-100 text-slate-700 dark:bg-black/55 dark:text-white/42 dark:ring-1 dark:ring-inset dark:ring-white/[0.05]'
+              "
               @click="historyTab = 'tokens'"
             >
               {{ t('dashboard.billing.history_tokens_tab') }}
             </button>
           </div>
-          <div v-if="historyLoading" class="py-6 text-center text-sm text-slate-500 dark:text-slate-400">{{ t('dashboard.billing.history_wait') }}</div>
+          <div v-if="historyLoading" class="py-6 text-center text-sm text-slate-500 dark:text-white/40">{{ t('dashboard.billing.history_wait') }}</div>
           <div v-else-if="historyTab === 'payments'" class="mt-3 space-y-2">
-            <div v-if="historyPayments.length === 0" class="rounded-xl bg-slate-50 p-4 text-center text-sm text-slate-500 dark:bg-slate-700/40 dark:text-slate-400">
+            <div
+              v-if="historyPayments.length === 0"
+              class="rounded-xl bg-slate-50 p-4 text-center text-sm text-slate-500 dark:bg-[#0a0c12] dark:text-white/45 dark:ring-1 dark:ring-white/[0.05]"
+            >
               {{ t('dashboard.billing.history_no_payments') }}
             </div>
-            <div v-for="(item, idx) in historyPayments" :key="`dp-${idx}`" class="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
-              <p class="text-xs text-slate-500 dark:text-slate-400">{{ item.created_at || '—' }}</p>
+            <div v-for="(item, idx) in historyPayments" :key="`dp-${idx}`" class="rounded-xl border border-slate-200 p-3 dark:border-white/[0.06] dark:bg-[#080a10]">
+              <p class="text-xs text-slate-500 dark:text-white/42">{{ item.created_at || '—' }}</p>
               <div class="mt-1 flex items-center justify-between gap-2">
                 <div>
-                  <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                  <p class="text-sm font-semibold text-slate-900 dark:text-white">
                     <template v-if="String(item.tariff || '').toLowerCase() === 'tokens'">
                       {{ fmtAmount(item.amount_rub) }} ₽ · {{ item.months }} ⚡
                     </template>
@@ -4931,7 +5188,7 @@ async function submitReceipt() {
                       {{ fmtAmount(item.amount_rub) }} ₽ · {{ t('dashboard.billing.months_short', { n: item.months }) }}
                     </template>
                   </p>
-                  <p class="text-xs text-slate-500 dark:text-slate-400">
+                  <p class="text-xs text-slate-500 dark:text-white/42">
                     {{ providerLabel(item.provider) }} · {{ item.status }}
                   </p>
                 </div>
@@ -4956,15 +5213,18 @@ async function submitReceipt() {
             </div>
           </div>
           <div v-else class="mt-3 space-y-2">
-            <div v-if="historyTokens.length === 0" class="rounded-xl bg-slate-50 p-4 text-center text-sm text-slate-500 dark:bg-slate-700/40 dark:text-slate-400">
+            <div
+              v-if="historyTokens.length === 0"
+              class="rounded-xl bg-slate-50 p-4 text-center text-sm text-slate-500 dark:bg-[#0a0c12] dark:text-white/45 dark:ring-1 dark:ring-white/[0.05]"
+            >
               {{ t('dashboard.billing.history_no_tokens') }}
             </div>
-            <div v-for="(item, idx) in historyTokens" :key="`dt-${idx}`" class="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
-              <p class="text-xs text-slate-500 dark:text-slate-400">{{ item.created_at || '—' }}</p>
+            <div v-for="(item, idx) in historyTokens" :key="`dt-${idx}`" class="rounded-xl border border-slate-200 p-3 dark:border-white/[0.06] dark:bg-[#080a10]">
+              <p class="text-xs text-slate-500 dark:text-white/42">{{ item.created_at || '—' }}</p>
               <p class="mt-1 text-sm font-semibold" :class="item.delta >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'">
                 {{ item.delta >= 0 ? '+' : '' }}{{ fmtAmount(item.delta) }} ⚡
               </p>
-              <p class="text-xs text-slate-500 dark:text-slate-400">{{ tokenReasonLabel(item.reason) }}</p>
+              <p class="text-xs text-slate-500 dark:text-white/42">{{ tokenReasonLabel(item.reason) }}</p>
             </div>
           </div>
         </div>
@@ -5021,38 +5281,39 @@ async function submitReceipt() {
       </div>
     </div>
 
+    <Teleport to="body">
     <div
       v-if="showAccountHistoryModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/40 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-md md:items-center md:pb-3"
+      class="fixed inset-0 z-[95200] flex items-end justify-center bg-black/55 p-3 pb-[calc(4.5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-md md:items-center md:pb-3"
       role="dialog"
       aria-modal="true"
       :aria-label="t('dashboard.home_shell.history_modal.aria')"
       @click.self="showAccountHistoryModal = false"
     >
       <div
-        class="flex max-h-[min(85vh,calc(100dvh-2.5rem))] w-full max-w-md flex-col overflow-hidden rounded-[22px] border border-black/[0.08] bg-[#f2f2f7] shadow-[0_25px_80px_-24px_rgba(0,0,0,0.45)] dark:border-white/[0.12] dark:bg-[#1c1c1e]"
+        class="flex max-h-[min(85vh,calc(100dvh-5rem))] w-full max-w-md flex-col overflow-hidden rounded-[22px] border border-white/[0.12] bg-[#0b0f18]/78 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.88)] ring-1 ring-white/[0.08] backdrop-blur-2xl backdrop-saturate-150 md:max-h-[min(85vh,calc(100dvh-2.5rem))]"
         @click.stop
       >
-        <div class="flex shrink-0 items-center justify-between px-4 pb-2 pt-3">
-          <h2 class="text-[17px] font-semibold tracking-tight text-black dark:text-white">{{ t('dashboard.home_shell.history_modal.title') }}</h2>
+        <div class="flex shrink-0 items-center justify-between border-b border-white/[0.08] bg-black/20 px-4 pb-2.5 pt-3 backdrop-blur-md">
+          <h2 class="text-[17px] font-semibold tracking-tight text-white">{{ t('dashboard.home_shell.history_modal.title') }}</h2>
           <button
             type="button"
-            class="flex h-8 w-8 items-center justify-center rounded-full bg-black/[0.06] text-[17px] font-light leading-none text-black/45 transition active:scale-95 dark:bg-white/[0.12] dark:text-white/55 dark:hover:bg-white/[0.18]"
+            class="flex h-8 w-8 items-center justify-center rounded-full bg-white/[0.08] text-[17px] font-light leading-none text-zinc-200 transition hover:bg-white/[0.14] active:scale-95"
             :aria-label="t('common.close')"
             @click="showAccountHistoryModal = false"
           >
             ✕
           </button>
         </div>
-        <div class="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-y-contain px-3 pb-4 [-webkit-overflow-scrolling:touch]">
-          <div class="flex rounded-[10px] bg-black/[0.06] p-0.5 dark:bg-white/[0.08]">
+        <div class="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-y-contain bg-gradient-to-b from-black/15 to-black/35 px-3 pb-4 pt-3 [-webkit-overflow-scrolling:touch]">
+          <div class="flex rounded-[12px] border border-white/[0.08] bg-black/25 p-0.5 ring-1 ring-inset ring-white/[0.05] backdrop-blur-md">
             <button
               type="button"
-              class="flex-1 rounded-[9px] py-2 text-[13px] font-medium transition"
+              class="flex-1 rounded-[10px] py-2 text-[13px] font-medium transition"
               :class="
                 historyTab === 'payments'
-                  ? 'bg-white text-black shadow-sm dark:bg-zinc-600 dark:text-white dark:shadow-none'
-                  : 'text-black/45 dark:text-white/40'
+                  ? 'bg-white/[0.14] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.12)] ring-1 ring-white/15'
+                  : 'text-zinc-400 hover:bg-white/[0.05] hover:text-zinc-200'
               "
               @click="historyTab = 'payments'"
             >
@@ -5060,11 +5321,11 @@ async function submitReceipt() {
             </button>
             <button
               type="button"
-              class="flex-1 rounded-[9px] py-2 text-[13px] font-medium transition"
+              class="flex-1 rounded-[10px] py-2 text-[13px] font-medium transition"
               :class="
                 historyTab === 'tokens'
-                  ? 'bg-white text-black shadow-sm dark:bg-zinc-600 dark:text-white dark:shadow-none'
-                  : 'text-black/45 dark:text-white/40'
+                  ? 'bg-white/[0.14] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.12)] ring-1 ring-white/15'
+                  : 'text-zinc-400 hover:bg-white/[0.05] hover:text-zinc-200'
               "
               @click="historyTab = 'tokens'"
             >
@@ -5072,23 +5333,23 @@ async function submitReceipt() {
             </button>
           </div>
 
-          <div v-if="historyLoading" class="py-8 text-center text-[15px] text-black/35 dark:text-white/35">{{ t('dashboard.home_shell.moment') }}</div>
+          <div v-if="historyLoading" class="py-8 text-center text-[15px] text-zinc-400">{{ t('dashboard.home_shell.moment') }}</div>
           <div v-else-if="historyTab === 'payments'" class="space-y-2">
             <div
               v-if="historyPayments.length === 0"
-              class="rounded-[14px] bg-white px-4 py-6 text-center text-[15px] text-black/45 dark:bg-white/[0.06] dark:text-white/45"
+              class="rounded-[14px] border border-white/[0.08] bg-white/[0.04] px-4 py-6 text-center text-[15px] text-zinc-400 ring-1 ring-white/[0.04] backdrop-blur-sm"
             >
               {{ t('dashboard.home_shell.history_modal.no_payments') }}
             </div>
             <div
               v-for="(item, idx) in historyPayments"
               :key="`mh-dp-${idx}`"
-              class="rounded-[14px] border border-black/[0.06] bg-white p-3 dark:border-white/[0.08] dark:bg-white/[0.05]"
+              class="rounded-[14px] border border-white/[0.1] bg-[#11151C]/85 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] ring-1 ring-white/[0.05] backdrop-blur-md"
             >
-              <p class="text-[13px] text-black/45 dark:text-white/45">{{ item.created_at || '—' }}</p>
+              <p class="text-[13px] text-zinc-400">{{ item.created_at || '—' }}</p>
               <div class="mt-1.5 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                 <div class="min-w-0">
-                  <p class="text-[15px] font-semibold text-black dark:text-white">
+                  <p class="text-[15px] font-semibold text-white">
                     <template v-if="String(item.tariff || '').toLowerCase() === 'tokens'">
                       {{ fmtAmount(item.amount_rub) }} ₽ · {{ item.months }} ⚡
                     </template>
@@ -5096,7 +5357,7 @@ async function submitReceipt() {
                       {{ fmtAmount(item.amount_rub) }} ₽ · {{ t('dashboard.billing.months_short', { n: item.months }) }}
                     </template>
                   </p>
-                  <p class="mt-0.5 text-[13px] text-black/45 dark:text-white/45">
+                  <p class="mt-0.5 text-[13px] text-zinc-400">
                     {{ providerLabel(item.provider) }} · {{ item.status }}
                   </p>
                 </div>
@@ -5104,7 +5365,7 @@ async function submitReceipt() {
                   <button
                     v-if="item.receipt_url"
                     type="button"
-                    class="rounded-full bg-emerald-500/90 px-3 py-1.5 text-[13px] font-semibold text-white"
+                    class="rounded-full bg-emerald-500/90 px-3 py-1.5 text-[13px] font-semibold text-white shadow-[0_8px_24px_-8px_rgba(16,185,129,0.6)]"
                     @click="openReceiptLink(item)"
                   >
                     {{ t('dashboard.billing.get_receipt') }}
@@ -5116,25 +5377,26 @@ async function submitReceipt() {
           <div v-else class="space-y-2">
             <div
               v-if="historyTokens.length === 0"
-              class="rounded-[14px] bg-white px-4 py-6 text-center text-[15px] text-black/45 dark:bg-white/[0.06] dark:text-white/45"
+              class="rounded-[14px] border border-white/[0.08] bg-white/[0.04] px-4 py-6 text-center text-[15px] text-zinc-400 ring-1 ring-white/[0.04] backdrop-blur-sm"
             >
               {{ t('dashboard.billing.history_no_tokens') }}
             </div>
             <div
               v-for="(item, idx) in historyTokens"
               :key="`mh-dt-${idx}`"
-              class="rounded-[14px] border border-black/[0.06] bg-white p-3 dark:border-white/[0.08] dark:bg-white/[0.05]"
+              class="rounded-[14px] border border-white/[0.1] bg-[#11151C]/85 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] ring-1 ring-white/[0.05] backdrop-blur-md"
             >
-              <p class="text-[13px] text-black/45 dark:text-white/45">{{ item.created_at || '—' }}</p>
-              <p class="mt-1 text-[15px] font-semibold" :class="item.delta >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'">
+              <p class="text-[13px] font-medium text-zinc-400">{{ item.created_at || '—' }}</p>
+              <p class="mt-1 text-[15px] font-semibold tabular-nums" :class="item.delta >= 0 ? 'text-emerald-300' : 'text-rose-300'">
                 {{ item.delta >= 0 ? '+' : '' }}{{ fmtAmount(item.delta) }} ⚡
               </p>
-              <p class="mt-0.5 text-[13px] text-black/45 dark:text-white/45">{{ tokenReasonLabel(item.reason) }}</p>
+              <p class="mt-1 text-[13px] leading-snug text-zinc-200">{{ tokenReasonLabel(item.reason) }}</p>
             </div>
           </div>
         </div>
       </div>
     </div>
+    </Teleport>
 
     <div
       v-if="showActivityModal"
@@ -5590,27 +5852,31 @@ async function submitReceipt() {
     >
       <div
         ref="fundsModalWrapRef"
-        class="flex max-h-[88vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-slate-600 bg-white shadow-2xl dark:border-slate-600 dark:bg-slate-900"
+        class="flex max-h-[88vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-slate-600 bg-white shadow-2xl dark:border-white/[0.07] dark:bg-[#050608]"
         role="dialog"
         aria-modal="true"
         aria-labelledby="funds-modal-title"
       >
-        <div class="flex shrink-0 items-center justify-between gap-2 border-b border-slate-200 px-3 py-2.5 dark:border-slate-700">
+        <div class="flex shrink-0 items-center justify-between gap-2 border-b border-slate-200 px-3 py-2.5 dark:border-white/[0.06]">
           <h3 id="funds-modal-title" class="text-sm font-semibold text-slate-900 dark:text-white">{{ t('dashboard.home_shell.funds_modal.title') }}</h3>
           <button
             type="button"
-            class="rounded-lg px-2 py-1 text-sm text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+            class="rounded-lg px-2 py-1 text-sm text-slate-500 hover:bg-slate-100 dark:text-white/55 dark:hover:bg-white/[0.08]"
             @click="closeFundsMovementModal"
           >
             ✕
           </button>
         </div>
-        <div class="min-h-0 flex-1 overflow-y-auto overscroll-y-contain p-3 [-webkit-overflow-scrolling:touch]">
+        <div class="min-h-0 flex-1 overflow-y-auto overscroll-y-contain p-3 [-webkit-overflow-scrolling:touch] dark:bg-[#050608]">
           <div class="grid grid-cols-2 gap-2">
             <button
               type="button"
               class="rounded-xl px-3 py-2 text-sm font-semibold"
-              :class="historyTab === 'payments' ? 'bg-sky-100 text-sky-800 dark:bg-sky-900/30 dark:text-sky-200' : 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200'"
+              :class="
+                historyTab === 'payments'
+                  ? 'bg-sky-100 text-sky-800 dark:bg-[#12151c] dark:text-white dark:ring-1 dark:ring-white/[0.08]'
+                  : 'bg-slate-100 text-slate-700 dark:bg-black/55 dark:text-white/42 dark:ring-1 dark:ring-inset dark:ring-white/[0.05]'
+              "
               @click="historyTab = 'payments'"
             >
               {{ t('dashboard.home_shell.funds_modal.tab_payments') }}
@@ -5618,22 +5884,29 @@ async function submitReceipt() {
             <button
               type="button"
               class="rounded-xl px-3 py-2 text-sm font-semibold"
-              :class="historyTab === 'tokens' ? 'bg-sky-100 text-sky-800 dark:bg-sky-900/30 dark:text-sky-200' : 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200'"
+              :class="
+                historyTab === 'tokens'
+                  ? 'bg-sky-100 text-sky-800 dark:bg-[#12151c] dark:text-white dark:ring-1 dark:ring-white/[0.08]'
+                  : 'bg-slate-100 text-slate-700 dark:bg-black/55 dark:text-white/42 dark:ring-1 dark:ring-inset dark:ring-white/[0.05]'
+              "
               @click="historyTab = 'tokens'"
             >
               {{ t('dashboard.home_shell.funds_modal.tab_tokens') }}
             </button>
           </div>
-          <div v-if="historyLoading" class="py-6 text-center text-sm text-slate-500 dark:text-slate-400">{{ t('dashboard.home_shell.moment') }}</div>
+          <div v-if="historyLoading" class="py-6 text-center text-sm text-slate-500 dark:text-white/40">{{ t('dashboard.home_shell.moment') }}</div>
           <div v-else-if="historyTab === 'payments'" class="mt-3 space-y-2">
-            <div v-if="historyPayments.length === 0" class="rounded-xl bg-slate-50 p-4 text-center text-sm text-slate-500 dark:bg-slate-700/40 dark:text-slate-400">
+            <div
+              v-if="historyPayments.length === 0"
+              class="rounded-xl bg-slate-50 p-4 text-center text-sm text-slate-500 dark:bg-[#0a0c12] dark:text-white/45 dark:ring-1 dark:ring-white/[0.05]"
+            >
               {{ t('dashboard.home_shell.funds_modal.no_payments') }}
             </div>
-            <div v-for="(item, idx) in historyPayments" :key="`mf-dp-${idx}`" class="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
-              <p class="text-xs text-slate-500 dark:text-slate-400">{{ item.created_at || '—' }}</p>
+            <div v-for="(item, idx) in historyPayments" :key="`mf-dp-${idx}`" class="rounded-xl border border-slate-200 p-3 dark:border-white/[0.06] dark:bg-[#080a10]">
+              <p class="text-xs text-slate-500 dark:text-white/42">{{ item.created_at || '—' }}</p>
               <div class="mt-1 flex items-center justify-between gap-2">
                 <div>
-                  <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                  <p class="text-sm font-semibold text-slate-900 dark:text-white">
                     <template v-if="String(item.tariff || '').toLowerCase() === 'tokens'">
                       {{ fmtAmount(item.amount_rub) }} ₽ · {{ item.months }} ⚡
                     </template>
@@ -5641,7 +5914,7 @@ async function submitReceipt() {
                       {{ fmtAmount(item.amount_rub) }} ₽ · {{ t('dashboard.billing.months_short', { n: item.months }) }}
                     </template>
                   </p>
-                  <p class="text-xs text-slate-500 dark:text-slate-400">
+                  <p class="text-xs text-slate-500 dark:text-white/42">
                     {{ providerLabel(item.provider) }} · {{ item.status }}
                   </p>
                 </div>
@@ -5666,15 +5939,18 @@ async function submitReceipt() {
             </div>
           </div>
           <div v-else class="mt-3 space-y-2">
-            <div v-if="historyTokens.length === 0" class="rounded-xl bg-slate-50 p-4 text-center text-sm text-slate-500 dark:bg-slate-700/40 dark:text-slate-400">
+            <div
+              v-if="historyTokens.length === 0"
+              class="rounded-xl bg-slate-50 p-4 text-center text-sm text-slate-500 dark:bg-[#0a0c12] dark:text-white/45 dark:ring-1 dark:ring-white/[0.05]"
+            >
               {{ t('dashboard.billing.history_no_tokens') }}
             </div>
-            <div v-for="(item, idx) in historyTokens" :key="`mf-dt-${idx}`" class="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
-              <p class="text-xs text-slate-500 dark:text-slate-400">{{ item.created_at || '—' }}</p>
+            <div v-for="(item, idx) in historyTokens" :key="`mf-dt-${idx}`" class="rounded-xl border border-slate-200 p-3 dark:border-white/[0.06] dark:bg-[#080a10]">
+              <p class="text-xs text-slate-500 dark:text-white/42">{{ item.created_at || '—' }}</p>
               <p class="mt-1 text-sm font-semibold" :class="item.delta >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'">
                 {{ item.delta >= 0 ? '+' : '' }}{{ fmtAmount(item.delta) }} ⚡
               </p>
-              <p class="text-xs text-slate-500 dark:text-slate-400">{{ tokenReasonLabel(item.reason) }}</p>
+              <p class="text-xs text-slate-500 dark:text-white/42">{{ tokenReasonLabel(item.reason) }}</p>
             </div>
           </div>
         </div>

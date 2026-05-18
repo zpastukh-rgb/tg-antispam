@@ -1,5 +1,5 @@
 /**
- * Тесты санитайзера: `@<буква>` экранируется через `{'@'}`,
+ * Тесты санитайзера: литеральный `@` экранируется через `{'@'}`,
  * валидный linked `@:foo` и email-подобный `name@host` — НЕ трогаются.
  */
 
@@ -26,6 +26,12 @@ describe('sanitizeI18nString', () => {
     expect(sanitizeI18nString('{username} — @ник или пусто')).toBe(
       "{username} — {'@'}ник или пусто",
     )
+  })
+
+  it('экранирует одиночную `@` в скобках — ломало vue-i18n в hints модалки медиа', () => {
+    expect(sanitizeI18nString('других ботов (без @) — их')).toBe("других ботов (без {'@'}) — их")
+    expect(sanitizeI18nString('usernames (without @). The')).toBe("usernames (without {'@'}). The")
+    expect(sanitizeI18nString('no @)')).toBe("no {'@'})")
   })
 
   it('экранирует длинную строку placeholders_hint целиком', () => {

@@ -20,6 +20,8 @@ import {
   getInitData,
 } from '../api/client'
 import { hasFullAdminRights } from '../utils/adminAccess'
+import { userCanUseBroadcasts, ownerHasPremiumAnalytics } from '../utils/broadcastAccess'
+import { usePremiumLock } from '../composables/usePremiumLock'
 import { useCabinetMode } from '../composables/useCabinetMode'
 import SubscriptionManagementPanel from '../components/SubscriptionManagementPanel.vue'
 import OwnerCabinetHome from '../components/OwnerCabinetHome.vue'
@@ -27,10 +29,21 @@ import OwnerCabinetProtectionStats from '../components/OwnerCabinetProtectionSta
 import CabinetPremiumTitleBar from '../components/CabinetPremiumTitleBar.vue'
 import SecurityPinGateModal from '../components/SecurityPinGateModal.vue'
 import GuardTeleport from '../components/GuardTeleport.vue'
+import { normalizeHtmlForTelegram, telegramHtmlToEditorInnerHtml } from '../utils/telegramHtmlForTg'
+import {
+  editorSplitBlockquoteAtCaret,
+  editorSoftBreakInsideBlockquote,
+  editorPlaceCaretAtEditableStart,
+  editorResetTypingExecCommands,
+  editorUnwrapRangeInsideContainer,
+  editorUnwrapElementFully,
+  editorApplyMonospaceFormat,
+} from '../utils/richEditorDom'
 import { useSecurityPinGate } from '../composables/useSecurityPinGate'
 import { shouldAskPinForAction } from '../utils/settingsSecurity'
 
 const { api, fetch, fetchSilent, hasInitData } = useApi()
+const { openLock: openPremiumFeatureLock } = usePremiumLock()
 const route = useRoute()
 const router = useRouter()
 const { cabinetMode, setCabinetMode } = useCabinetMode()
@@ -66,6 +79,15 @@ function openPremiumAdmCard(key) {
     return
   }
   if (k === 'broadcasts') {
+    if (isOwnerCabinet.value && !userCanUseBroadcasts(meAdminProfile.value)) {
+      openPremiumFeatureLock({
+        feature: 'broadcast_owner_hub',
+        me: meAdminProfile.value,
+        titleKey: 'premium_lock.lock_broadcast_owner_title',
+        descriptionKey: 'premium_lock.lock_broadcast_owner_body',
+      })
+      return
+    }
     premiumAdmSection.value = ''
     ownerProtectionStatsMode.value = 'protection'
     tab.value = 'broadcasts'
@@ -84,9 +106,29 @@ function openPremiumAdmCard(key) {
     return
   }
   if (k === 'stats') {
+    if (isOwnerCabinet.value && !ownerHasPremiumAnalytics(meAdminProfile.value)) {
+      openPremiumFeatureLock({
+        feature: 'owner_stats_hub',
+        me: meAdminProfile.value,
+        titleKey: 'premium_lock.lock_owner_stats_title',
+        descriptionKey: 'premium_lock.lock_owner_stats_body',
+      })
+      return
+    }
     premiumAdmSection.value = 'protection'
     ownerProtectionStatsMode.value = 'growth'
     return
+  }
+  if (k === 'protection') {
+    if (isOwnerCabinet.value && !ownerHasPremiumAnalytics(meAdminProfile.value)) {
+      openPremiumFeatureLock({
+        feature: 'owner_protection_reports_hub',
+        me: meAdminProfile.value,
+        titleKey: 'premium_lock.lock_owner_protection_reports_title',
+        descriptionKey: 'premium_lock.lock_owner_protection_reports_body',
+      })
+      return
+    }
   }
   ownerProtectionStatsMode.value = 'protection'
   premiumAdmSection.value = k
@@ -211,6 +253,12 @@ const bcSaving = ref(false)
 const bcUploading = ref(false)
 const bcSending = ref(false)
 const bcShowAllRecentModal = ref(false)
+/** Модалка статистики по записи из «Последние рассылки» + повтор отправки */
+const bcRecentStatsModalOpen = ref(false)
+const bcRecentStatsBroadcastId = ref(0)
+const bcRecentStatsBroadcastMeta = ref(null)
+const bcRecentStatsLoading = ref(false)
+const bcRecentStatsSnapshot = ref(null)
 const bcQuickDraftModalOpen = ref(false)
 /** Сохранённое на сервере название при открытии быстрого черновика — для кнопки ✓ */
 const bcQuickTitleBaseline = ref('')
@@ -218,9 +266,13 @@ const bcQuickDraftBaseline = ref(null)
 const bcOpeningQuickDraft = ref(false)
 const bcQuickDraftInitializing = ref(false)
 const bcSendTargetModalOpen = ref(false)
+/** Ошибка quote / валидации на шаге «Куда отправить» без нативного alert под стеком модалок */
+const bcSendQuoteError = ref('')
+const bcRecentPulseById = ref({})
 const bcSendTargetChannels = ref(false)
 const bcSendTargetGroups = ref(false)
 const bcSendTargetBots = ref(false)
+const bcAdminIncludeBotRecipients = ref(false)
 const bcShowBotsPicker = ref(false)
 const bcBotsSearch = ref('')
 const bcBotRecipients = ref([{ id: 1, special: 'all' }])
@@ -253,10 +305,23 @@ const bcButtonRows = ref([[{ text: '', url: '', web_app_url: '', callback_data: 
 const bcMediaKindStored = ref('none')
 const bcMediaOriginalName = ref('')
 const bcBodyRef = ref(null)
+/** Подсветка «тряски» при «Далее» с незаполненными полями */
+const bcQuickDraftTitleInputRef = ref(null)
+const bcCampaignUxWizardTitleInputRef = ref(null)
+const bcCampaignUxWizardPostsListRef = ref(null)
+const bcEditModalOpen = ref(false)
+const bcEditBodyRef = ref(null)
 function bcBodyEditors() {
+  const out = []
   const v = bcBodyRef.value
-  if (!v) return []
-  return Array.isArray(v) ? v.filter(Boolean) : [v]
+  if (v) {
+    if (Array.isArray(v)) out.push(...v.filter(Boolean))
+    else out.push(v)
+  }
+  if (bcEditModalOpen.value && bcEditBodyRef.value) {
+    out.push(bcEditBodyRef.value)
+  }
+  return out.filter(Boolean)
 }
 function bcResolveBodyEditor() {
   const list = bcBodyEditors()
@@ -268,9 +333,10 @@ function bcResolveBodyEditor() {
   return visible || list[0] || null
 }
 function bcSetBodyEditorHtml(html) {
-  const next = String(html || '')
+  const raw = String(html || '')
+  const next = telegramHtmlToEditorInnerHtml(raw)
   for (const el of bcBodyEditors()) {
-    el.innerHTML = next
+    el.innerHTML = next || ''
   }
 }
 const bcEmojiHostRef = ref(null)
@@ -294,6 +360,12 @@ const bcBroadcastCanScopeAll = ref(false)
 const bcBroadcastGroupScope = ref('mine')
 /** Список черновиков: mine — только свои (по умолчанию); all — явно для полного админа. */
 const bcBroadcastDraftListScope = ref('mine')
+
+const bcCurrentBroadcastIsOneshot = computed(() => {
+  const id = Number(bcSelectedId.value || 0)
+  const row = (broadcasts.value || []).find((x) => Number(x?.id || 0) === id)
+  return String(row?.cabinet_draft_scope || '') === 'oneshot'
+})
 
 const bcRecentBroadcasts = computed(() =>
   (broadcasts.value || [])
@@ -327,8 +399,8 @@ const bcSendTargetSummary = computed(() => {
   if (bcSendTargetGroups.value) {
     rows.push(tt('admin.broadcast_send.target_groups', { n: Number(bcSelectedGroupIds.value?.length || 0) }))
   }
-  if (bcSendTargetBots.value) {
-    rows.push(tt('admin.broadcast_send.target_bots', { n: Number(bcSelectedBotRecipientIds.value?.length || 0) }))
+  if (showFullAdminShell.value && bcAdminIncludeBotRecipients.value) {
+    rows.push(tt('admin.broadcast_ui.include_bot_users_short'))
   }
   return rows
 })
@@ -421,14 +493,12 @@ const bcSendProgressTotal = computed(() => {
   const kind = String(bcSendTargetKind.value || 'groups')
   let n = 0
   if (kind === 'users') n = Number(bcSelectedBotRecipientIds.value?.length || 0)
-  else if (kind === 'groups') {
-    n =
-      Number(bcSelectedGroupIds.value?.length || 0) +
-      Number(bcSelectedChannelIds.value?.length || 0)
+  else if (kind === 'groups' || kind === 'all') {
+    n = bcActiveSendGroupIds.value.length + bcActiveSendChannelIds.value.length
   } else {
     n =
-      Number(bcSelectedGroupIds.value?.length || 0) +
-      Number(bcSelectedChannelIds.value?.length || 0) +
+      bcActiveSendGroupIds.value.length +
+      bcActiveSendChannelIds.value.length +
       Number(bcSelectedBotRecipientIds.value?.length || 0)
   }
   return Math.max(0, Math.trunc(n))
@@ -458,56 +528,33 @@ const bcSendCircleDash = computed(() => {
   return `${filled.toFixed(2)} ${C.toFixed(2)}`
 })
 
-const bcSendStatsOverall = computed(() => bcSendResultSnapshot.value?.overall || null)
-const bcSendStatsBots = computed(() => bcSendResultSnapshot.value?.bots || null)
-const bcSendStatsGroups = computed(() => bcSendResultSnapshot.value?.groups || null)
-
 const bcSendDeliveredOk = computed(() => {
-  const aud = Number(bcSendResultSnapshot.value?.audience_ok || 0)
-  if (Number.isFinite(aud) && aud > 0) return Math.max(0, Math.trunc(aud))
-  const o = bcSendStatsOverall.value
-  const v = Number(o?.ok ?? o?.delivered ?? 0)
-  return Number.isFinite(v) ? Math.max(0, Math.trunc(v)) : 0
+  const s = bcSendResultSnapshot.value
+  if (!s) return 0
+  const o = Number(s.overall?.ok ?? NaN)
+  if (Number.isFinite(o) && o > 0) return Math.max(0, Math.trunc(o))
+  const g = Number(s.groups?.ok ?? 0)
+  const b = Number(s.bots?.ok ?? 0)
+  const sum = (Number.isFinite(g) ? g : 0) + (Number.isFinite(b) ? b : 0)
+  if (sum > 0) return Math.max(0, Math.trunc(sum))
+  const aud = Number(s.audience_ok || 0)
+  return Number.isFinite(aud) && aud > 0 ? Math.max(0, Math.trunc(aud)) : 0
 })
 
 const bcSendDeliveredTotal = computed(() => {
-  const aud = Number(bcSendResultSnapshot.value?.audience_total || 0)
+  const s = bcSendResultSnapshot.value
+  if (!s) return bcSendProgressTotal.value
+  const t = Number(s.overall?.total ?? NaN)
+  if (Number.isFinite(t) && t > 0) return Math.max(0, Math.trunc(t))
+  const aud = Number(s.audience_total || 0)
   if (Number.isFinite(aud) && aud > 0) return Math.max(0, Math.trunc(aud))
-  const o = bcSendStatsOverall.value
-  const v = Number(o?.total ?? o?.attempts ?? 0)
-  return Number.isFinite(v) && v > 0 ? Math.trunc(v) : bcSendProgressTotal.value
+  return bcSendProgressTotal.value
 })
 
 const bcSendDeliveredPct = computed(() =>
   fmtPctPartFromRatio(bcSendDeliveredOk.value, bcSendDeliveredTotal.value),
 )
 
-/** «Клики»: успешные доставки в личку боту (users). Подпись уточняется в карточке UI. */
-const bcSendClicks = computed(() => {
-  const real = Number(bcSendResultSnapshot.value?.real_clicks || 0)
-  if (Number.isFinite(real) && real >= 0) return Math.max(0, Math.trunc(real))
-  const b = bcSendStatsBots.value
-  const v = Number(b?.ok ?? 0)
-  return Number.isFinite(v) ? Math.max(0, Math.trunc(v)) : 0
-})
-
-/** «Переходы»: успешные доставки в группы/каналы (чаты). */
-const bcSendTransitions = computed(() => {
-  const real = Number(bcSendResultSnapshot.value?.real_transitions || 0)
-  if (Number.isFinite(real) && real >= 0) return Math.max(0, Math.trunc(real))
-  const g = bcSendStatsGroups.value
-  const v = Number(g?.ok ?? 0)
-  return Number.isFinite(v) ? Math.max(0, Math.trunc(v)) : 0
-})
-
-const bcSendClicksPct = computed(() => fmtPctPartFromRatio(bcSendClicks.value, bcSendDeliveredOk.value))
-
-const bcSendTransitionsPct = computed(() => fmtPctPartFromRatio(bcSendTransitions.value, bcSendDeliveredOk.value))
-
-/**
- * CTR в карточке — «охват базы»: доставлено успешно относительно всех подключённых групп/каналов
- * и активных пользователей бота (как в /stats: connected_*).
- */
 const bcSendCtrDen = computed(() => {
   const s = bcSendResultSnapshot.value
   const g = Number(s?.connected_groups_total || 0)
@@ -516,13 +563,111 @@ const bcSendCtrDen = computed(() => {
   return Math.max(1, Math.trunc(sum))
 })
 
-const bcSendCtrPct = computed(() => {
-  const clicksTotal = Number(bcSendResultSnapshot.value?.real_clicks_total || 0)
-  if (Number.isFinite(clicksTotal) && clicksTotal >= 0) {
-    return fmtPctPartFromRatio(Math.max(0, Math.trunc(clicksTotal)), bcSendDeliveredOk.value)
-  }
-  return fmtPctPartFromRatio(bcSendDeliveredOk.value, bcSendCtrDen.value)
+const bcSendStatCtrUsesClickRatio = computed(() => {
+  const s = bcSendResultSnapshot.value
+  if (!s) return true
+  const m = String(s.stats_ctr_mode || '').toLowerCase()
+  if (m === 'reach') return false
+  if (m === 'interactions') return true
+  const t = Number(s.real_clicks_total ?? NaN)
+  return Number.isFinite(t) && t >= 0
 })
+
+const bcSendStatCtrSub = computed(() => {
+  const s = bcSendResultSnapshot.value
+  if (!s) return ''
+  const delivered = bcSendDeliveredOk.value
+  const clicksTotal = Math.max(0, Math.trunc(Number(s.real_clicks_total || 0)))
+  if (bcSendStatCtrUsesClickRatio.value) {
+    return tt('admin.broadcast_shell.ctr_sub_clicks', {
+      clicks: fmtIntSpace(clicksTotal),
+      delivered: fmtIntSpace(delivered),
+    })
+  }
+  return tt('admin.broadcast_shell.ctr_sub_reach', {
+    delivered: fmtIntSpace(delivered),
+    base: fmtIntSpace(bcSendCtrDen.value),
+  })
+})
+
+const bcSendCtrPct = computed(() => {
+  const s = bcSendResultSnapshot.value
+  if (!s) return null
+  const apiPct = s.stats_ctr_percent
+  if (apiPct != null && Number.isFinite(Number(apiPct))) {
+    return clampPct(Number(apiPct))
+  }
+  const clicksTotal = Number(s.real_clicks_total || 0)
+  const delivered = bcSendDeliveredOk.value
+  if (Number.isFinite(clicksTotal) && clicksTotal >= 0) {
+    return fmtPctPartFromRatio(Math.max(0, Math.trunc(clicksTotal)), delivered)
+  }
+  return fmtPctPartFromRatio(delivered, bcSendCtrDen.value)
+})
+
+/** Реакции по ссылкам reaction:… в учёте */
+const bcSendDoneReactions = computed(() => Number(bcSendResultSnapshot.value?.real_reactions_total || 0))
+
+const bcRecentStatDeliveredOk = computed(() => {
+  const s = bcRecentStatsSnapshot.value
+  if (!s) return 0
+  const o = Number(s.overall?.ok ?? NaN)
+  if (Number.isFinite(o) && o > 0) return Math.max(0, Math.trunc(o))
+  const g = Number(s.groups?.ok ?? 0)
+  const b = Number(s.bots?.ok ?? 0)
+  const sum = (Number.isFinite(g) ? g : 0) + (Number.isFinite(b) ? b : 0)
+  if (sum > 0) return Math.max(0, Math.trunc(sum))
+  const aud = Number(s.audience_ok || 0)
+  return Number.isFinite(aud) ? Math.max(0, Math.trunc(aud)) : 0
+})
+const bcRecentStatCtrDen = computed(() => {
+  const s = bcRecentStatsSnapshot.value
+  if (!s) return 1
+  const g = Number(s.connected_groups_total || 0)
+  const b = Number(s.connected_bots_total || 0)
+  const sum = (Number.isFinite(g) ? g : 0) + (Number.isFinite(b) ? b : 0)
+  return Math.max(1, Math.trunc(sum))
+})
+const bcRecentStatCtrUsesClickRatio = computed(() => {
+  const s = bcRecentStatsSnapshot.value
+  if (!s) return true
+  const m = String(s.stats_ctr_mode || '').toLowerCase()
+  if (m === 'reach') return false
+  if (m === 'interactions') return true
+  const t = Number(s.real_clicks_total ?? NaN)
+  return Number.isFinite(t) && t >= 0
+})
+const bcRecentStatCtrSub = computed(() => {
+  const s = bcRecentStatsSnapshot.value
+  if (!s) return ''
+  const delivered = bcRecentStatDeliveredOk.value
+  const clicksTotal = Math.max(0, Math.trunc(Number(s.real_clicks_total || 0)))
+  if (bcRecentStatCtrUsesClickRatio.value) {
+    return tt('admin.broadcast_shell.ctr_sub_clicks', {
+      clicks: fmtIntSpace(clicksTotal),
+      delivered: fmtIntSpace(delivered),
+    })
+  }
+  return tt('admin.broadcast_shell.ctr_sub_reach', {
+    delivered: fmtIntSpace(delivered),
+    base: fmtIntSpace(bcRecentStatCtrDen.value),
+  })
+})
+const bcRecentStatCtrPct = computed(() => {
+  const s = bcRecentStatsSnapshot.value
+  if (!s) return null
+  const apiPct = s.stats_ctr_percent
+  if (apiPct != null && Number.isFinite(Number(apiPct))) {
+    return clampPct(Number(apiPct))
+  }
+  const clicksTotal = Number(s.real_clicks_total || 0)
+  const delivered = bcRecentStatDeliveredOk.value
+  if (Number.isFinite(clicksTotal) && clicksTotal >= 0) {
+    return fmtPctPartFromRatio(Math.max(0, Math.trunc(clicksTotal)), delivered)
+  }
+  return fmtPctPartFromRatio(delivered, bcRecentStatCtrDen.value)
+})
+const bcRecentStatReactions = computed(() => Number(bcRecentStatsSnapshot.value?.real_reactions_total || 0))
 
 const bcSendCompletedAtLabel = computed(() => {
   const row = bcSendLiveRow.value
@@ -548,8 +693,17 @@ const bcFilteredBots = computed(() => {
   if (!q) return list
   return list.filter((b) => bcBotRowTitle(b).toLowerCase().includes(q))
 })
-const bcSelectedTargetsCount = computed(() =>
-  Number((bcSelectedChannelIds.value || []).length || 0) + Number((bcSelectedGroupIds.value || []).length || 0),
+/** ID каналов/групп только для включённых галочек «Куда отправить» (старый выбор не тащим). */
+const bcActiveSendChannelIds = computed(() => {
+  if (!bcSendTargetChannels.value) return []
+  return (bcSelectedChannelIds.value || []).map((x) => Number(x || 0)).filter((x) => x !== 0)
+})
+const bcActiveSendGroupIds = computed(() => {
+  if (!bcSendTargetGroups.value) return []
+  return (bcSelectedGroupIds.value || []).map((x) => Number(x || 0)).filter((x) => x !== 0)
+})
+const bcSelectedTargetsCount = computed(
+  () => bcActiveSendChannelIds.value.length + bcActiveSendGroupIds.value.length,
 )
 
 function bcRecentWhenLabel(item) {
@@ -572,6 +726,185 @@ function bcRecentStatusLabel(item) {
   return tt('admin.broadcast_send.status_launch')
 }
 
+function bcRecentOneShotStatusClass(item) {
+  const st = String(item?.status || '').toLowerCase()
+  if (st === 'draft') return 'text-rose-400 font-medium'
+  if (st === 'failed') return 'text-rose-300'
+  if (st === 'sending') return 'text-amber-300'
+  if (st === 'sent') return 'text-emerald-400'
+  return 'text-sky-300'
+}
+
+function bcRecentBroadcastDisplayTitle(item) {
+  if (!item) return ''
+  const camp = bcCampaignForRecentBroadcast(item)
+  if (camp) {
+    const ct = String(camp.title || '').trim()
+    if (ct) return ct
+  }
+  const draftTitle = String(item.title || item.run_title || '').trim()
+  if (draftTitle) return draftTitle
+  return tt('admin.broadcast_shell.untitled', { id: item.id })
+}
+
+const bcRecentStatsHeaderTitle = computed(() => {
+  const id = Number(bcRecentStatsBroadcastId.value || 0)
+  const fromList = (broadcasts.value || []).find((b) => Number(b?.id || 0) === id)
+  const meta = bcRecentStatsBroadcastMeta.value
+  const row = fromList || meta
+  if (row) return bcRecentBroadcastDisplayTitle(row)
+  return tt('admin.broadcast_shell.untitled', { id })
+})
+function bcBroadcastStatsTargetKindForSendFlow() {
+  if (isBroadcastShellLite.value) return 'groups'
+  const sk = String(bcSendTargetKind.value || '').toLowerCase()
+  if (sk === 'groups') return 'groups'
+  if (sk === 'users') return 'bots'
+  if (sk === 'all') return 'groups'
+  return 'bots'
+}
+
+/** Из списка: без target_kind — чтобы не сужать доставки до «ботов» для групповых рассылок. */
+function bcBroadcastStatsTargetKindForRecentModal() {
+  return isBroadcastShellLite.value ? 'groups' : ''
+}
+
+function bcApplyRecentStatsSnapshot(r) {
+  return {
+    overall: r?.overall || { ok: 0, fail: 0, total: 0 },
+    groups: r?.groups || { ok: 0, fail: 0, total: 0 },
+    bots: r?.bots || { ok: 0, fail: 0, total: 0 },
+    audience_ok: Number(r?.audience_ok || 0),
+    audience_total: Number(r?.audience_total || 0),
+    real_clicks: Number(r?.real_clicks || 0),
+    real_transitions: Number(r?.real_transitions || 0),
+    real_clicks_total: Number(r?.real_clicks_total || 0),
+    real_link_clicks_total: Number(r?.real_link_clicks_total || 0),
+    real_callback_clicks_total: Number(r?.real_callback_clicks_total || 0),
+    real_reactions_total: Number(r?.real_reactions_total || 0),
+    connected_groups_total: Number(r?.connected_groups_total || 0),
+    connected_bots_total: Number(r?.connected_bots_total || 0),
+    broadcast_url_tracking_configured: Boolean(r?.broadcast_url_tracking_configured),
+    real_link_items: Array.isArray(r?.real_link_items) ? r.real_link_items : [],
+    real_callback_items: Array.isArray(r?.real_callback_items) ? r.real_callback_items : [],
+    stats_ctr_percent: r?.stats_ctr_percent != null && Number.isFinite(Number(r.stats_ctr_percent)) ? Number(r.stats_ctr_percent) : null,
+    stats_ctr_mode: String(r?.stats_ctr_mode || ''),
+    per_groups: Array.isArray(r?.per_groups) ? r.per_groups : [],
+    send_history: Array.isArray(r?.send_history) ? r.send_history : [],
+  }
+}
+
+async function bcLoadRecentBroadcastStats(broadcastId, opts = {}) {
+  const bid = Number(broadcastId || 0)
+  if (!bid) return
+  const silent = Boolean(opts?.silent)
+  const tk = bcBroadcastStatsTargetKindForRecentModal()
+  if (!silent) {
+    bcRecentStatsLoading.value = true
+    bcRecentStatsSnapshot.value = null
+  }
+  try {
+    const runFetch = silent ? fetchSilent : fetch
+    const r = await runFetch(() => api.adminBroadcastStats(bid, '', '', '', tk))
+    if (r && typeof r === 'object') {
+      bcRecentStatsSnapshot.value = bcApplyRecentStatsSnapshot(r)
+    }
+    try {
+      const row = await fetchSilent(() => api.adminBroadcast(bid))
+      if (row && Number(row?.id || 0) === bid) {
+        upsertBroadcastInList(row)
+        if (bcRecentStatsBroadcastId.value === bid) {
+          bcRecentStatsBroadcastMeta.value =
+            bcRecentStatsBroadcastMeta.value && Number(bcRecentStatsBroadcastMeta.value?.id || 0) === bid
+              ? { ...bcRecentStatsBroadcastMeta.value, ...row }
+              : { ...row }
+        }
+      }
+    } catch {
+      //
+    }
+  } catch {
+    if (!silent) bcRecentStatsSnapshot.value = null
+  } finally {
+    if (!silent) bcRecentStatsLoading.value = false
+  }
+}
+
+async function bcOpenRecentBroadcastStats(item) {
+  const id = Number(item?.id || 0)
+  if (!id) return
+  try {
+    await loadAutopostCampaigns()
+  } catch {
+    //
+  }
+  const camp = bcCampaignForRecentBroadcast(item)
+  if (camp) {
+    bcShowAllRecentModal.value = false
+    bcCloseRecentBroadcastStats()
+    tab.value = 'broadcasts'
+    const freshId = Number(camp?.id || 0)
+    const fresh = freshId ? (bcAutopostCampaigns.value || []).find((c) => Number(c?.id || 0) === freshId) : null
+    await openBcCampaignUxManage(fresh || camp)
+    return
+  }
+
+  bcRecentStatsBroadcastId.value = id
+  bcRecentStatsBroadcastMeta.value = item ? { ...item } : null
+  bcRecentStatsModalOpen.value = true
+  bcRecentStatsSnapshot.value = null
+  await bcLoadRecentBroadcastStats(id)
+}
+
+function bcCloseRecentBroadcastStats() {
+  bcRecentStatsModalOpen.value = false
+  bcRecentStatsBroadcastId.value = 0
+  bcRecentStatsSnapshot.value = null
+  bcRecentStatsBroadcastMeta.value = null
+}
+
+function bcRecentStatsGoToBroadcastsTab() {
+  bcCloseRecentBroadcastStats()
+  tab.value = 'broadcasts'
+}
+
+function bcRecentStatsRepeatBroadcast() {
+  if (isOwnerCabinet.value && !meAdminProfile.value?.is_premium) {
+    void router.push({ path: '/', query: { section: 'billing', scroll: 'plans' } })
+    return
+  }
+  const id = Number(bcRecentStatsBroadcastId.value || 0)
+  if (!id) return
+  const item =
+    (broadcasts.value || []).find((x) => Number(x?.id || 0) === id) || bcRecentStatsBroadcastMeta.value
+  if (!item || Number(item?.id || 0) !== id) {
+    window.alert(tt('admin.broadcast_shell.repeat_need_refresh'))
+    return
+  }
+  bcRecentStatsModalOpen.value = false
+  bcRecentStatsBroadcastId.value = 0
+  bcRecentStatsSnapshot.value = null
+  bcRecentStatsBroadcastMeta.value = null
+
+  applyBroadcastToForm(item)
+  bcEditorOpen.value = false
+  bcQuickDraftModalOpen.value = true
+  bcQuickTitleBaseline.value = String(bcTitle.value || '')
+  bcQuickDraftBaseline.value = null
+  nextTick(() => {
+    bcSetBodyEditorHtml(bcBodyHtml.value || '')
+    bcSyncEditorHtml()
+    bcQuickDraftBaseline.value = {
+      title: String(bcTitle.value || '').trim(),
+      body: String(bcNormalizeHtmlForTelegram(bcBodyHtml.value || '') || ''),
+      keyboard: JSON.stringify(bcBuildKeyboardPayload() || []),
+      mediaKind: String(bcMediaKindStored.value || 'none'),
+      mediaName: String(bcMediaOriginalName.value || ''),
+    }
+    bcUpdateFormatState()
+  })
+}
+
 async function openQuickBroadcastDraft() {
   if (isOwnerCabinet.value && !meAdminProfile.value?.is_premium) {
     void router.push({ path: '/', query: { section: 'billing', scroll: 'plans' } })
@@ -580,22 +913,23 @@ async function openQuickBroadcastDraft() {
   if (bcOpeningQuickDraft.value) return
   bcOpeningQuickDraft.value = true
   try {
-    const needsCreate = !bcSelectedId.value
-    if (needsCreate) {
-      bcQuickDraftInitializing.value = true
-      bcEditorOpen.value = false
-      bcQuickDraftModalOpen.value = true
-      bcTitle.value = tt('admin.broadcast_send.new_draft')
-      bcBodyHtml.value = ''
-      await nextTick()
-      bcSetBodyEditorHtml(bcBodyHtml.value || '')
-    }
-    if (!bcSelectedId.value) {
-      await createBcDraft()
-    }
+    bcQuickDraftInitializing.value = true
+    bcEditorOpen.value = false
+    revokeAllBcMediaPreviewUrls()
+    bcSelectedId.value = null
+    bcTitle.value = ''
+    bcBodyHtml.value = ''
+    bcButtonRows.value = [[bcEmptyButton()]]
+    bcMediaKindStored.value = 'none'
+    bcMediaOriginalName.value = ''
+    bcMediaHistory.value = []
+    bcQuickDraftModalOpen.value = true
+    await nextTick()
+    bcSetBodyEditorHtml('')
+    bcSyncEditorHtml()
+    await createBcDraft('oneshot')
     if (!bcSelectedId.value) return
     bcEditorOpen.value = false
-    bcQuickDraftModalOpen.value = true
     bcQuickTitleBaseline.value = String(bcTitle.value || '')
     bcQuickDraftBaseline.value = null
     await nextTick()
@@ -616,63 +950,105 @@ async function openQuickBroadcastDraft() {
 }
 
 async function openSendTargetModal() {
+  bcSendQuoteError.value = ''
   bcSendTargetChannels.value = false
   bcSendTargetGroups.value = false
   bcSendTargetBots.value = false
+  bcAdminIncludeBotRecipients.value = false
   bcBroadcastGroupScope.value = 'mine'
   await Promise.all([loadBroadcastEligibleGroups(), loadBroadcastEligibleChannels()])
   bcSendTargetModalOpen.value = true
 }
 
 async function proceedSendTargetModal() {
-  if (Number(bcSelectedTargetsCount.value || 0) <= 0) return
+  if (!bcCanProceedSendTargets.value) return
+  bcSendQuoteError.value = ''
   await openBcConfirmModal()
 }
 
 function bcConfirmBuildPayload() {
-  const channelIds = (bcSelectedChannelIds.value || []).map((x) => Number(x || 0)).filter((x) => x !== 0)
-  const groupIds = (bcSelectedGroupIds.value || []).map((x) => Number(x || 0)).filter((x) => x !== 0)
+  const channelIds = [...bcActiveSendChannelIds.value]
+  const groupIds = [...bcActiveSendGroupIds.value]
   const mergedIds = [...new Set([...channelIds, ...groupIds].map((x) => Number(x || 0)).filter((x) => x !== 0))]
-  const nChannels = mergedIds.filter((id) => bcBroadcastChannels.value.some((c) => bcNormalizeChatId(c) === id)).length
-  const nGroups = mergedIds.filter((id) => bcBroadcastGroups.value.some((c) => bcNormalizeChatId(c) === id)).length
-  if (mergedIds.length > 0) {
-    if (!mergedIds.length) return null
-    let label = ''
-    if (localeIsEn()) {
-      if (nChannels > 0 && nGroups === 0) {
-        label =
-          nChannels === 1
-            ? tt('admin.broadcast_send.en_channel_one', { n: nChannels })
-            : tt('admin.broadcast_send.en_channel_other', { n: nChannels })
-      } else if (nGroups > 0 && nChannels === 0) {
-        label =
-          nGroups === 1
-            ? tt('admin.broadcast_send.en_group_one', { n: nGroups })
-            : tt('admin.broadcast_send.en_group_other', { n: nGroups })
-      } else {
-        const ch =
-          nChannels === 1
-            ? tt('admin.broadcast_send.en_channel_one', { n: nChannels })
-            : tt('admin.broadcast_send.en_channel_other', { n: nChannels })
-        const gr =
-          nGroups === 1
-            ? tt('admin.broadcast_send.en_group_one', { n: nGroups })
-            : tt('admin.broadcast_send.en_group_other', { n: nGroups })
-        label = `${ch} · ${gr}`
+  const wantBotsDmOnly = !!(showFullAdminShell.value && bcAdminIncludeBotRecipients.value && !mergedIds.length)
+  const wantBotsAlso = !!(showFullAdminShell.value && bcAdminIncludeBotRecipients.value && mergedIds.length > 0)
+
+  if (!mergedIds.length) {
+    if (wantBotsDmOnly && !bcSendTargetChannels.value && !bcSendTargetGroups.value) {
+      return {
+        mode: 'users',
+        ids: [],
+        recipientLabel: tt('admin.broadcast_send.all_bot_users'),
       }
-    } else if (nChannels > 0 && nGroups === 0) {
-      label = `${nChannels} ${ruPlural(nChannels, 'канал', 'канала', 'каналов')}`
-    } else if (nGroups > 0 && nChannels === 0) {
-      label = `${nGroups} ${ruPlural(nGroups, 'группа', 'группы', 'групп')}`
-    } else {
-      label = `${nChannels} ${ruPlural(nChannels, 'канал', 'канала', 'каналов')} · ${nGroups} ${ruPlural(nGroups, 'группа', 'группы', 'групп')}`
     }
-    return { mode: 'groups', ids: mergedIds, recipientLabel: label }
+    return null
   }
-  return null
+  if (!bcSendTargetChannels.value && !bcSendTargetGroups.value) {
+    return null
+  }
+  const chSet = new Set((bcBroadcastChannels.value || []).map((c) => bcNormalizeChatId(c)))
+  const grSet = new Set((bcBroadcastGroups.value || []).map((c) => bcNormalizeChatId(c)))
+  let nChannels = 0
+  let nGroups = 0
+  for (const rawId of mergedIds) {
+    const id = Number(rawId || 0)
+    if (!id) continue
+    const inCh = chSet.has(id)
+    const inGr = grSet.has(id)
+    if (inCh && inGr) {
+      nChannels += 1
+    } else if (inCh) {
+      nChannels += 1
+    } else if (inGr) {
+      nGroups += 1
+    } else {
+      nGroups += 1
+    }
+  }
+
+  let label = ''
+  if (localeIsEn()) {
+    if (nChannels > 0 && nGroups === 0) {
+      label =
+        nChannels === 1
+          ? tt('admin.broadcast_send.en_channel_one', { n: nChannels })
+          : tt('admin.broadcast_send.en_channel_other', { n: nChannels })
+    } else if (nGroups > 0 && nChannels === 0) {
+      label =
+        nGroups === 1
+          ? tt('admin.broadcast_send.en_group_one', { n: nGroups })
+          : tt('admin.broadcast_send.en_group_other', { n: nGroups })
+    } else {
+      const ch =
+        nChannels === 1
+          ? tt('admin.broadcast_send.en_channel_one', { n: nChannels })
+          : tt('admin.broadcast_send.en_channel_other', { n: nChannels })
+      const gr =
+        nGroups === 1 ? tt('admin.broadcast_send.en_group_one', { n: nGroups }) : tt('admin.broadcast_send.en_group_other', { n: nGroups })
+      label = `${ch} · ${gr}`
+    }
+  } else if (nChannels > 0 && nGroups === 0) {
+    label = `${nChannels} ${ruPlural(nChannels, 'канал', 'канала', 'каналов')}`
+  } else if (nGroups > 0 && nChannels === 0) {
+    label = `${nGroups} ${ruPlural(nGroups, 'группа', 'группы', 'групп')}`
+  } else {
+    label = `${nChannels} ${ruPlural(nChannels, 'канал', 'канала', 'каналов')} · ${nGroups} ${ruPlural(nGroups, 'группа', 'группы', 'групп')}`
+  }
+
+  let mode = 'groups'
+  if (wantBotsAlso) {
+    mode = 'all'
+    label = `${label} — ${tt('admin.broadcast_ui.include_bot_users_short')}`
+  }
+  return {
+    mode,
+    ids: mergedIds,
+    recipientLabel: label,
+  }
 }
 
 async function openBcConfirmModal() {
+  bcSendQuoteError.value = ''
   const payload = bcConfirmBuildPayload()
   if (!payload) {
     return
@@ -690,16 +1066,55 @@ async function openBcConfirmModal() {
   try {
     const q = await fetch(() => api.adminBroadcastQuote(bid, payload.mode, payload.ids))
     const need = Number(q?.cost_tokens ?? 0)
+    const reqN = Number(q?.requested_chat_ids ?? payload.ids.length)
+    const resN = Number(q?.n_groups ?? 0)
     if (need > 0 && q?.can_afford === false) {
-      alert(tt('admin.broadcast_send.aurum_short', { need, have: Number(q?.spendable_credits || 0) }))
+      bcSendQuoteError.value = tt('admin.broadcast_send.aurum_short', { need, have: Number(q?.spendable_credits || 0) })
       return
     }
+    if (payload.ids.length && resN < reqN) {
+      bcSendQuoteError.value = tt('admin.broadcast_send.some_chats_filtered', {
+        requested: reqN,
+        resolved: resN,
+      })
+      if (resN <= 0) return
+    } else {
+      bcSendQuoteError.value = ''
+    }
+    if (resN > 0 && (payload.mode === 'groups' || payload.mode === 'all')) {
+      const nCh = payload.ids.filter((id) =>
+        (bcBroadcastChannels.value || []).some((c) => bcNormalizeChatId(c) === Number(id)),
+      ).length
+      const nGr = Math.max(0, resN - nCh)
+      if (localeIsEn()) {
+        const parts = []
+        if (nCh > 0) {
+          parts.push(
+            nCh === 1
+              ? tt('admin.broadcast_send.en_channel_one', { n: nCh })
+              : tt('admin.broadcast_send.en_channel_other', { n: nCh }),
+          )
+        }
+        if (nGr > 0) {
+          parts.push(
+            nGr === 1
+              ? tt('admin.broadcast_send.en_group_one', { n: nGr })
+              : tt('admin.broadcast_send.en_group_other', { n: nGr }),
+          )
+        }
+        bcConfirmRecipientLabel.value = parts.join(' · ') || payload.recipientLabel
+      } else {
+        const parts = []
+        if (nCh > 0) parts.push(`${nCh} ${ruPlural(nCh, 'канал', 'канала', 'каналов')}`)
+        if (nGr > 0) parts.push(`${nGr} ${ruPlural(nGr, 'группа', 'группы', 'групп')}`)
+        bcConfirmRecipientLabel.value = parts.join(' · ') || payload.recipientLabel
+      }
+    }
     bcConfirmQuoteTokens.value = need
-    // Экран подтверждения — отдельный шаг поверх админки, без подложки "Куда отправить".
     bcSendTargetModalOpen.value = false
     bcConfirmModalOpen.value = true
   } catch (e) {
-    alert(String(e?.body?.detail || e?.message || tt('admin.broadcast_send.quote_failed')))
+    bcSendQuoteError.value = String(e?.body?.detail || e?.message || tt('admin.broadcast_send.quote_failed'))
   } finally {
     bcConfirmLoading.value = false
   }
@@ -717,16 +1132,24 @@ async function submitBcConfirmedSend() {
   try {
     await persistCurrentBroadcast()
     bcDismissBroadcastSendPrefaceOverlays()
+    const sendPayload = bcConfirmBuildPayload()
+    if (!sendPayload) {
+      throw new Error(tt('admin.broadcast_ui.nothing_selected'))
+    }
     const sendTargetKind =
-      bcConfirmMode.value === 'users'
+      sendPayload.mode === 'users'
         ? 'users'
-        : bcConfirmMode.value === 'groups'
+        : sendPayload.mode === 'groups'
           ? 'groups'
-          : 'mixed'
+          : sendPayload.mode === 'all'
+            ? 'all'
+            : 'mixed'
     upsertBroadcastInList({ id: bid, status: 'sending' })
     await startBroadcastProgressPolling(bid, sendTargetKind)
+    const chatIdsPayload =
+      sendPayload.mode === 'groups' || sendPayload.mode === 'all' ? sendPayload.ids : []
     await fetch(() =>
-      api.adminBroadcastSend(bid, bcConfirmMode.value, bcConfirmMode.value === 'groups' ? bcConfirmChatIds.value : [], {
+      api.adminBroadcastSend(bid, sendPayload.mode, chatIdsPayload, {
         keepDraftAfter: true,
       }),
     )
@@ -767,6 +1190,31 @@ const showFullAdminShell = computed(() => {
   const m = meAdminProfile.value
   return !!(m && hasFullAdminRights(m))
 })
+
+/** Полный админ: только галка «в личку всем активным пользователям бота», без групп/каналов (target users). */
+const bcSendBotsDmOnlyEligible = computed(() => {
+  if (!showFullAdminShell.value || !bcAdminIncludeBotRecipients.value) return false
+  if (Number(bcSelectedTargetsCount.value || 0) > 0) return false
+  if (bcSendTargetChannels.value || bcSendTargetGroups.value) return false
+  return true
+})
+
+const bcCanProceedSendTargets = computed(() => {
+  if (bcSendBotsDmOnlyEligible.value) return true
+  if (bcSendTargetChannels.value && bcActiveSendChannelIds.value.length > 0) return true
+  if (bcSendTargetGroups.value && bcActiveSendGroupIds.value.length > 0) return true
+  return false
+})
+
+function bcToggleSendTargetChannels() {
+  bcSendTargetChannels.value = !bcSendTargetChannels.value
+  if (!bcSendTargetChannels.value) bcSelectedChannelIds.value = []
+}
+
+function bcToggleSendTargetGroups() {
+  bcSendTargetGroups.value = !bcSendTargetGroups.value
+  if (!bcSendTargetGroups.value) bcSelectedGroupIds.value = []
+}
 /** Фактический базовый URL API в WebView (для подсказки при «мониторинг не загрузился»). */
 const guardApiBaseEffective = computed(() => {
   if (typeof window === 'undefined') return ''
@@ -1922,17 +2370,32 @@ const bcPreviewMediaThumbs = ref([])
 const bcDraftRenameId = ref(null)
 const bcDraftRenameValue = ref('')
 const bcSavingTitleId = ref(null)
-const bcEditModalOpen = ref(false)
 const bcEditTitle = ref('')
 const bcEditBodyHtml = ref('')
-const bcEditBodyRef = ref(null)
 const bcLinkModalOpen = ref(false)
-const bcLinkUrl = ref('https://')
+const bcEditorHintOpen = ref(false)
+const bcEditorHintText = ref('')
+const bcLinkUrl = ref('')
 const bcLinkRange = ref(null)
+
+function bcEditorShowHint(message) {
+  const msg = String(message || '').trim()
+  if (!msg) return
+  bcEditorHintText.value = msg
+  bcEditorHintOpen.value = true
+}
 const bcEmojiPickerReady = ref(false)
 const bcEditorOpen = ref(false)
 const bcSavedTick = ref(false)
-const bcFormatState = ref({ bold: false, italic: false, underline: false, strike: false, spoiler: false, link: false })
+const bcFormatState = ref({
+  bold: false,
+  italic: false,
+  underline: false,
+  strike: false,
+  spoiler: false,
+  link: false,
+  quote: false,
+})
 const bcSavedRange = ref(null)
 const bcActiveSpoilerText = ref('')
 const bcActiveLinkUrl = ref('')
@@ -1955,7 +2418,13 @@ const bcStatsFrom = ref('')
 const bcStatsTo = ref('')
 const bcStatsPreset = ref('')
 const bcLastSendTargetByPost = ref({})
+/** Тихое автообновление статистики одноразовой рассылки (bcRecentStatsModalOpen) и экрана «отправлено». */
 const bcStatsPollTimer = ref(null)
+const bcSendResultPollTimer = ref(null)
+/** Тихое автообновление списка «последние рассылки» пока открыта вкладка broadcasts. */
+const bcBroadcastsListPollTimer = ref(null)
+/** Тихий опрос статистики в модалке «Статистика рассылки». */
+const bcStatsModalPollTimer = ref(null)
 const bcStatsHistoryModalOpen = ref(false)
 const bcStatsReloadTimer = ref(null)
 const bcSendModalOpen = ref(false)
@@ -1981,6 +2450,9 @@ const bcTelegramPlaneIconUrl = `${import.meta.env.BASE_URL}broadcast/telegram-pl
 const adminBcBg = `${import.meta.env.BASE_URL}admin-bg-dark-final.png`
 /** Верхняя отсечка AURUM за один запуск/слот на бэкенде (broadcast_send_plan.BROADCAST_MAX_TOKENS). */
 const BC_BROADCAST_MAX_TOKENS = 2500
+/** Лимит текста без медиа (Telegram). С медиа — подпись до 1024 символов HTML, остаток отдельными сообщениями. */
+const BC_BROADCAST_BODY_MAX_CHARS = 4096
+const BC_BROADCAST_CAPTION_MAX_CHARS = 1024
 const bcAutopostingModalOpen = ref(false)
 /** stopped | running | paused — с сервера (поле autopost у черновика) */
 const bcAutopostRunState = ref('stopped')
@@ -2034,13 +2506,32 @@ const bcCampaignUxBusy = ref(false)
 const bcCampaignUxManageId = ref(0)
 const bcCampaignUxStatsPeriod = ref(7)
 const bcCampaignUxStatsData = ref(null)
+const bcCampaignUxStatsDeliverModalOpen = ref(false)
 const bcCampaignUxRecipientPickerOpen = ref(false)
 const bcCampaignUxRecipientPickerKind = ref('groups')
 const bcCampaignUxRecipientQuery = ref('')
+const bcCampaignUxRecipientsModalOpen = ref(false)
+const bcCampaignUxCampaignPostsModalOpen = ref(false)
+const bcCampaignUxCampaignPostsModalItems = ref([])
+const bcCampaignUxCampaignPostsModalHeading = computed(() => {
+  const n = (bcCampaignUxCampaignPostsModalItems.value || []).length
+  if (n <= 1) return tt('admin.bc_campaign.modal_single_post_title')
+  return tt('admin.bc_campaign.modal_posts_title')
+})
+const bcCampaignUxRemovingPostBid = ref(0)
+/** id черновика → превью первого медиа для модалки «Посты кампании» */
+/** Снимок последнего слота отправки автокампании (экран «Процесс отправки»). */
+const bcCampaignUxProgressSnapshot = ref(null)
+let bcCampaignUxProgressPollTimer = null
+/** Тихое обновление экранов автокампании: статистика, список кампаний. */
+let bcCampaignUxStatsPollTimer = null
+let bcCampaignUxCampaignSyncPollTimer = null
+
 const bcCampaignUxEditingCampaignId = ref(0)
 const bcCampaignUxPostEditorId = ref(0)
 const bcCampaignUxPostEditorMode = ref('create') // create | edit
 const bcCampaignUxPostEditorReturn = ref('wizard')
+const bcCampaignUxPostEditorLoading = ref(false)
 const bcCampaignUxWizard = ref({
   title: '',
   postIds: [],
@@ -2048,12 +2539,15 @@ const bcCampaignUxWizard = ref({
   scheduleMode: 'every_day', // every_day | weekdays | interval
   intervalDays: 1,
   weekdays: [0, 1, 2, 3, 4],
+  startDate: '',
+  endDate: '',
   sendTime: '09:00',
   timezone: typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Yekaterinburg' : 'Asia/Yekaterinburg',
   postsPerDay: 1,
   spreadInWindow: true,
   windowStart: '09:00',
   windowEnd: '21:00',
+  sendWindows: [{ windowStart: '09:00', windowEnd: '21:00', posts: 1 }],
   targetChannels: true,
   targetGroups: true,
   targetBots: false,
@@ -2063,30 +2557,281 @@ const bcCampaignUxWizard = ref({
 })
 const bcCampaignUxSuccessInfo = ref({ id: 0, nextAt: '' })
 
+const bcCampaignUxScheduleModalOpen = ref(false)
+const bcCampaignUxScheduleCampId = ref(0)
+const bcCampaignUxScheduleBusy = ref(false)
+const bcCampaignUxScheduleForm = ref({
+  scheduleMode: 'every_day',
+  intervalDays: 1,
+  weekdays: [0, 1, 2, 3, 4],
+  startDate: '',
+  endDate: '',
+  sendTime: '09:00',
+  timezone: 'Asia/Yekaterinburg',
+  spreadInWindow: true,
+  customDays: '',
+  sendWindows: [{ windowStart: '09:00', windowEnd: '21:00', posts: 1 }],
+})
+
 const bcCampaignUxManageItem = computed(() => {
   const id = Number(bcCampaignUxManageId.value || 0)
   return (bcAutopostCampaigns.value || []).find((c) => Number(c?.id || 0) === id) || null
 })
+const bcCampaignUxManageDestinations = computed(() => {
+  const it = bcCampaignUxManageItem.value
+  if (!it) return { usersOnly: false, channels: [], groups: [] }
+  return bcCampaignUxDestinationsForCamp(it)
+})
+
+/** Ожидаемое число чатов в одном слоте (группы + каналы); для ЛС/ботов — 0, смотри run в API. */
+function bcCampaignUxProgressExpectedRecipients() {
+  const it = bcCampaignUxManageItem.value
+  const d = bcCampaignUxDestinationsForCamp(it)
+  if (d.usersOnly) return 0
+  return d.channels.length + d.groups.length
+}
+
+async function bcCampaignUxRefreshProgressSnapshot() {
+  const id = Number(bcCampaignUxManageId.value || 0)
+  if (!id) {
+    bcCampaignUxProgressSnapshot.value = null
+    return
+  }
+  try {
+    const d = await fetchSilent(() => api.adminAutopostCampaignAutopostStats(id, 1))
+    const done = Math.max(0, Math.trunc(Number(d?.post_slots_sent_today ?? 0)))
+    const total = Math.max(0, Math.trunc(Number(d?.post_slots_planned_today ?? 0)))
+    const fail = Math.max(0, Math.trunc(Number(d?.post_slots_with_fail_today ?? 0)))
+    bcCampaignUxProgressSnapshot.value = { total, done, fail }
+  } catch {
+    bcCampaignUxProgressSnapshot.value = { total: 0, done: 0, fail: 0 }
+  }
+}
+
+function bcCampaignUxStopAuxCampaignPollers() {
+  if (bcCampaignUxStatsPollTimer) {
+    clearInterval(bcCampaignUxStatsPollTimer)
+    bcCampaignUxStatsPollTimer = null
+  }
+  if (bcCampaignUxCampaignSyncPollTimer) {
+    clearInterval(bcCampaignUxCampaignSyncPollTimer)
+    bcCampaignUxCampaignSyncPollTimer = null
+  }
+}
+
+async function bcCampaignUxRefreshStatsQuiet() {
+  const id = Number(bcCampaignUxManageId.value || 0)
+  if (!id || bcCampaignUxScreen.value !== 'stats' || !bcCampaignUxOpen.value) return
+  try {
+    const data = await fetchSilent(() =>
+      api.adminAutopostCampaignAutopostStats(id, Number(bcCampaignUxStatsPeriod.value || 7) || 7),
+    )
+    if (data && typeof data === 'object') bcCampaignUxStatsData.value = data
+  } catch {
+    //
+  }
+}
+
+function bcCampaignUxStopProgressPolling() {
+  if (bcCampaignUxProgressPollTimer) {
+    clearInterval(bcCampaignUxProgressPollTimer)
+    bcCampaignUxProgressPollTimer = null
+  }
+}
+
+/** Текст на карточке «Посты» экрана кампании — названия черновиков, без числа постов */
+const bcCampaignUxManagePostsCardLabel = computed(() => bcCampaignUxPostsCardLabelForCamp(bcCampaignUxManageItem.value))
+const bcCampaignUxManageAurumUi = computed(() => bcCampaignUxManagePeriodAurumBreakdown(bcCampaignUxManageItem.value))
+const bcCampaignUxStatsDeliveredOk = computed(() => {
+  const d = bcCampaignUxStatsData.value
+  if (!d) return 0
+  const b = Number(d.bots?.recipient_ok || 0)
+  const g = Number(d.groups?.recipient_ok || 0)
+  return Math.max(0, Math.trunc(b + g))
+})
+const bcCampaignUxStatsSortedRuns = computed(() => {
+  const rows = [...(bcCampaignUxStatsData.value?.runs || [])]
+  rows.sort((a, b) => {
+    const ta = Date.parse(String(a?.sent_at || a?.created_at || ''))
+    const tb = Date.parse(String(b?.sent_at || b?.created_at || ''))
+    return (Number.isFinite(tb) ? tb : 0) - (Number.isFinite(ta) ? ta : 0)
+  })
+  return rows
+})
+const bcCampaignUxStatsCtrSub = computed(() => {
+  const d = bcCampaignUxStatsData.value
+  if (!d) return ''
+  const m = String(d.stats_ctr_mode || '').toLowerCase()
+  const clicks = fmtIntSpace(Math.max(0, Math.trunc(Number(d.real_clicks_total || 0))))
+  const del = fmtIntSpace(bcCampaignUxStatsDeliveredOk.value)
+  if (m === 'reach') {
+    return tt('admin.broadcast_shell.ctr_sub_reach', {
+      delivered: del,
+      base: fmtIntSpace(
+        Math.max(
+          1,
+          Math.trunc(Number(d.connected_groups_total || 0)) + Math.trunc(Number(d.connected_bots_total || 0)),
+        ),
+      ),
+    })
+  }
+  return tt('admin.broadcast_shell.ctr_sub_clicks', { clicks, delivered: del })
+})
+const bcCampaignUxStatsCtrPct = computed(() => {
+  const d = bcCampaignUxStatsData.value
+  if (!d) return null
+  const p = d.stats_ctr_percent
+  if (p != null && Number.isFinite(Number(p))) return clampPct(Number(p))
+  const g = Number(d.groups?.ctr || 0)
+  return Number.isFinite(g) ? clampPct(g) : null
+})
+
+/** Экран «Процесс отправки»: посты за календарный день кампании из /autopost-stats (post_slots_*). */
+const bcCampaignAutopostProgressDone = computed(() => {
+  const s = bcCampaignUxProgressSnapshot.value
+  if (s && typeof s.done === 'number') return Math.max(0, Math.trunc(s.done))
+  return 0
+})
+const bcCampaignAutopostProgressTotal = computed(() => {
+  const s = bcCampaignUxProgressSnapshot.value
+  if (s && typeof s.total === 'number' && s.total >= 0) return Math.max(0, Math.trunc(s.total))
+  return 0
+})
+const bcCampaignAutopostProgressPct = computed(() => {
+  const s = bcCampaignUxProgressSnapshot.value
+  if (!s) return 0
+  const t = Number(s.total || 0)
+  const d = Number(s.done || 0)
+  if (t > 0) return clampPct(Math.min(1, d / t) * 100)
+  return d > 0 ? 100 : 0
+})
+const bcCampaignAutopostProgressRingDash = computed(() => {
+  const p = bcCampaignAutopostProgressPct.value
+  const R = 52
+  const C = 2 * Math.PI * R
+  const filled = C * (p / 100)
+  return `${filled.toFixed(2)} ${C.toFixed(2)}`
+})
+const bcCampaignAutopostProgressFail = computed(() => {
+  const s = bcCampaignUxProgressSnapshot.value
+  if (s && typeof s.fail === 'number') return Math.max(0, Math.trunc(s.fail))
+  return 0
+})
 const bcCampaignUxWizardCanNext = computed(() => {
   const w = bcCampaignUxWizard.value
+  const botsOk = showFullAdminShell.value && w.targetBots
   if (bcCampaignUxStep.value === 1) return !!String(w.title || '').trim() && Number(w.postIds?.length || 0) > 0
   if (bcCampaignUxStep.value === 2) return ['progress', 'rotation', 'simple'].includes(String(w.campaignType || ''))
-  if (bcCampaignUxStep.value === 3) return !!String(w.sendTime || '').trim() && Number(w.postsPerDay || 0) > 0
-  if (bcCampaignUxStep.value === 4) return !!(w.targetChannels || w.targetGroups || w.targetBots)
+  if (bcCampaignUxStep.value === 3) {
+    const postsTotal = bcCampaignUxWizardPostsPerDayTotal.value
+    if (postsTotal <= 0) return false
+    const sd = String(w.startDate || '').trim()
+    const ed = String(w.endDate || '').trim()
+    if (sd && ed && sd > ed) return false
+    return true
+  }
+  if (bcCampaignUxStep.value === 4) {
+    if (botsOk && !w.targetChannels && !w.targetGroups) return true
+    if (!w.targetChannels && !w.targetGroups) return false
+    if (w.targetChannels && !(w.selectedChannels || []).length) return false
+    if (w.targetGroups && !(w.selectedGroups || []).length) return false
+    return true
+  }
   return true
 })
-const bcCampaignUxSelectedSummary = computed(() => {
+function bcCampaignUxWizardActiveChannelIds() {
   const w = bcCampaignUxWizard.value
+  if (!w.targetChannels) return []
+  return (w.selectedChannels || []).map((x) => Number(x || 0)).filter((x) => x !== 0)
+}
+function bcCampaignUxWizardActiveGroupIds() {
+  const w = bcCampaignUxWizard.value
+  if (!w.targetGroups) return []
+  return (w.selectedGroups || []).map((x) => Number(x || 0)).filter((x) => x !== 0)
+}
+const bcCampaignUxSelectedSummary = computed(() => {
   return {
-    channels: w.targetChannels ? Number(w.selectedChannels?.length || 0) : 0,
-    groups: w.targetGroups ? Number(w.selectedGroups?.length || 0) : 0,
-    bots: w.targetBots ? Number(bcSelectedBotRecipientIds.value?.length || 0) : 0,
+    channels: bcCampaignUxWizardActiveChannelIds().length,
+    groups: bcCampaignUxWizardActiveGroupIds().length,
+    bots: bcCampaignUxWizard.value.targetBots ? Number(bcSelectedBotRecipientIds.value?.length || 0) : 0,
   }
 })
+/** Лимит AURUM за один слот как в broadcast_charge_tokens на бэке. */
+const BC_AUTOPOST_SLOT_AURUM_CAP = 2500
 const bcCampaignUxEstimatedCost = computed(() => {
   const s = bcCampaignUxSelectedSummary.value
   return Math.max(0, Math.trunc((s.channels || 0) + (s.groups || 0)))
 })
+const bcCampaignUxSlotAurumCharge = computed(() =>
+  Math.min(BC_AUTOPOST_SLOT_AURUM_CAP, Math.max(0, Math.trunc(Number(bcCampaignUxEstimatedCost.value || 0)))),
+)
+const bcCampaignUxPeriodQualifiedDays = computed(() => {
+  const w = bcCampaignUxWizard.value
+  const pad = (n) => String(n).padStart(2, '0')
+  const today = new Date()
+  let startStr = String(w.startDate || '').trim()
+  if (!startStr) {
+    startStr = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`
+  }
+  let sd = bcCampaignUxParseYmdLocal(startStr)
+  if (!sd) {
+    sd = bcCampaignUxParseYmdLocal(`${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`)
+  }
+  if (!sd) return 0
+  const endRaw = String(w.endDate || '').trim()
+  let ed = endRaw ? bcCampaignUxParseYmdLocal(endRaw) : null
+  if (!ed) {
+    ed = new Date(sd.getFullYear(), sd.getMonth(), sd.getDate())
+    ed.setDate(ed.getDate() + 365)
+  }
+  const sdDay = new Date(sd.getFullYear(), sd.getMonth(), sd.getDate())
+  const edDay = new Date(ed.getFullYear(), ed.getMonth(), ed.getDate())
+  if (edDay < sdDay) return 0
+  const wdSet = bcCampaignUxWizardWeekdaySet()
+  if (!wdSet.size) return 0
+  let n = 0
+  const cur = new Date(sdDay)
+  while (cur <= edDay) {
+    const pyWd = (cur.getDay() + 6) % 7
+    if (wdSet.has(pyWd)) n++
+    cur.setDate(cur.getDate() + 1)
+  }
+  return n
+})
+const bcCampaignUxPeriodSendingOpenEnded = computed(() => !String(bcCampaignUxWizard.value.endDate || '').trim())
+const bcCampaignUxWizardPostsPerDayTotal = computed(() => {
+  const w = bcCampaignUxWizard.value
+  const rows = Array.isArray(w.sendWindows) ? w.sendWindows.filter((x) => x && typeof x === 'object') : []
+  if (rows.length >= 2) {
+    let s = 0
+    for (const r of rows) {
+      s += Math.max(1, Math.min(288, Math.trunc(Number(r.posts || 1))))
+    }
+    return Math.max(1, Math.min(288, s))
+  }
+  if (rows.length === 1) {
+    return Math.max(1, Math.min(288, Math.trunc(Number(rows[0].posts || w.postsPerDay || 1))))
+  }
+  return Math.max(1, Math.min(288, Math.trunc(Number(w.postsPerDay || 1))))
+})
+const bcCampaignUxWizardSlotTimePreview = computed(() => bcCampaignUxSlotPreviewLines(bcCampaignUxWizard.value))
+const bcCampaignUxScheduleModalSlotTimePreview = computed(() => bcCampaignUxSlotPreviewLines(bcCampaignUxScheduleForm.value))
+const bcCampaignUxWizardReviewTimingPreview = computed(() => {
+  const w = bcCampaignUxWizard.value
+  return bcCampaignUxScheduleSubtitleFromAutopost({
+    windowStart: w.windowStart,
+    windowEnd: w.windowEnd,
+    postsPerDay: bcCampaignUxWizardPostsPerDayTotal.value,
+    sendWindows: w.sendWindows,
+  })
+})
+const bcCampaignUxPeriodScheduledSends = computed(() =>
+  Math.max(0, Math.trunc(bcCampaignUxPeriodQualifiedDays.value * Math.max(1, Number(bcCampaignUxWizardPostsPerDayTotal.value || 1)))),
+)
+const bcCampaignUxPeriodAurumEstimate = computed(() =>
+  Math.max(0, Math.trunc(bcCampaignUxSlotAurumCharge.value * bcCampaignUxPeriodScheduledSends.value)),
+)
+
 const bcCampaignUxPostMap = computed(() => {
   const map = new Map()
   for (const b of broadcasts.value || []) {
@@ -2107,11 +2852,462 @@ const bcCampaignUxRecipientsFiltered = computed(() => {
   return (src || []).filter((c) => String(c?.title || c?.username || bcNormalizeChatId(c)).toLowerCase().includes(q))
 })
 
+/** Черновики для ротации «все посты»: не одноразовые; autopost или ещё без scope. */
+function bcBroadcastIsAutopostRotationDraft(b) {
+  if (String(b?.status || 'draft').toLowerCase() !== 'draft') return false
+  const sc = String(b?.cabinet_draft_scope || '').trim().toLowerCase()
+  if (sc === 'oneshot') return false
+  if (sc === 'autopost') return true
+  return b?.cabinet_draft_scope == null || sc === ''
+}
+
+function bcCampaignForRecentBroadcast(item) {
+  const bid = Number(item?.id || 0)
+  if (!bid) return null
+  const camps = bcAutopostCampaigns.value || []
+  const soleUseAll =
+    camps.filter((c) => c?.autopost?.use_all_broadcasts).length === 1
+      ? camps.find((c) => c?.autopost?.use_all_broadcasts) || null
+      : null
+  for (const camp of camps) {
+    const ap = camp?.autopost || {}
+    const anchor = Number(camp?.anchor_broadcast_id || ap?.anchor_broadcast_id || 0)
+    if (anchor === bid) return camp
+    const br = Array.isArray(ap.broadcast_ids) ? ap.broadcast_ids.map((x) => Number(x)) : []
+    if (br.some((x) => x === bid)) return camp
+    if (ap.use_all_broadcasts) {
+      if (String(item?.cabinet_draft_scope || '').toLowerCase() === 'autopost') return camp
+      if (soleUseAll && soleUseAll === camp && bcBroadcastIsAutopostRotationDraft(item)) return camp
+    }
+  }
+  return null
+}
+
+function bcRecentBroadcastKindIsCampaign(item) {
+  if (!item) return false
+  if (String(item.cabinet_draft_scope || '').toLowerCase() === 'oneshot') return false
+  if (bcCampaignForRecentBroadcast(item)) return true
+  if (String(item.cabinet_draft_scope || '').toLowerCase() === 'autopost') return true
+  return false
+}
+
+function bcRecentBroadcastKindLabel(item) {
+  if (!item) return tt('admin.broadcast_shell.recent_kind_oneshot')
+  if (String(item.cabinet_draft_scope || '').toLowerCase() === 'oneshot')
+    return tt('admin.broadcast_shell.recent_kind_oneshot')
+  if (bcRecentBroadcastKindIsCampaign(item)) return tt('admin.broadcast_shell.recent_kind_campaign')
+  return tt('admin.broadcast_shell.recent_kind_oneshot')
+}
+
+function bcRecentSendHistoryHasSuccess(h) {
+  if (Number(h?.recipient_ok || 0) > 0) return true
+  if (Number(h?.bots?.ok || 0) > 0) return true
+  if ((h?.groups || []).some((g) => Number(g.ok || 0) > 0)) return true
+  return false
+}
+
+function bcFormatPerSendEngagementLine(eng) {
+  if (!eng || typeof eng !== 'object') return ''
+  return tt('admin.bc_campaign.per_send_engagement_line', {
+    links: fmtIntSpace(Math.max(0, Number(eng.link_total || 0))),
+    buttons: fmtIntSpace(Math.max(0, Number(eng.callback_total || 0))),
+    reactions: fmtIntSpace(Math.max(0, Number(eng.reaction_total || 0))),
+  })
+}
+
+function bcBroadcastRowHasKeyboardButtons(item) {
+  const rows = item?.keyboard?.rows
+  if (!Array.isArray(rows) || !rows.length) return false
+  return rows.some(
+    (row) =>
+      Array.isArray(row) &&
+      row.some((b) => {
+        const txt = String(b?.text || '').trim()
+        if (!txt) return false
+        return !!String(b?.url || b?.web_app_url || '').trim()
+      }),
+  )
+}
+
+function bcBroadcastRowHasHttpLink(item) {
+  return /https?:\/\//i.test(String(item?.body_text || ''))
+}
+
+function bcBroadcastRowHasTrackables(item) {
+  return bcBroadcastRowHasKeyboardButtons(item) || bcBroadcastRowHasHttpLink(item)
+}
+
+function bcRecentPulseEntry(bid) {
+  const id = Number(bid || 0)
+  if (!id) return null
+  return bcRecentPulseById.value[id] || null
+}
+
+function bcRecentCardPrimaryLabel(item) {
+  const lt = String(item?.last_target || '').toLowerCase()
+  if (lt === 'channels') return tt('admin.broadcast_shell.recent_metric_channel_reach')
+  if (bcBroadcastRowHasTrackables(item)) return tt('admin.broadcast_shell.recent_metric_interactions')
+  return tt('admin.broadcast_shell.recent_metric_delivered_runs')
+}
+
+function bcRecentCardPrimaryValue(item, pulse) {
+  const lt = String(item?.last_target || '').toLowerCase()
+  const p = pulse && typeof pulse === 'object' ? pulse : null
+  const linkT = Number(p?.real_link_clicks_total || 0)
+  const cbT = Number(p?.real_callback_clicks_total || 0)
+  if (lt === 'channels') {
+    const aud = Number(p?.audience_ok || 0)
+    return Math.max(aud, Number(item?.recipient_total || 0))
+  }
+  if (bcBroadcastRowHasTrackables(item)) return linkT + cbT
+  return Number(item?.recipient_ok || 0)
+}
+
+async function bcRecentPulseHydrateQuiet() {
+  const src = bcRecentBroadcasts.value || []
+  const cap = bcShowAllRecentModal.value ? Math.min(120, src.length) : 12
+  const ids = src
+    .slice(0, cap)
+    .map((b) => Number(b?.id || 0))
+    .filter((x) => x > 0)
+  if (!ids.length) return
+  const tk = bcBroadcastStatsTargetKindForRecentModal()
+  await Promise.all(
+    ids.map(async (bid) => {
+      try {
+        const r = await fetchSilent(() => api.adminBroadcastStats(bid, '', '', '', tk))
+        if (!r || typeof r !== 'object') return
+        bcRecentPulseById.value = {
+          ...bcRecentPulseById.value,
+          [bid]: {
+            audience_ok: Number(r.audience_ok || 0),
+            real_link_clicks_total: Number(r.real_link_clicks_total || 0),
+            real_callback_clicks_total: Number(r.real_callback_clicks_total || 0),
+          },
+        }
+      } catch {
+        //
+      }
+    }),
+  )
+}
+
+function bcCampaignUxPostsPerDayFromAutopost(ap) {
+  if (!ap || typeof ap !== 'object') return 1
+  const sw = Array.isArray(ap.sendWindows) ? ap.sendWindows.filter((x) => x && typeof x === 'object') : []
+  if (sw.length >= 2) {
+    let s = 0
+    for (const seg of sw) {
+      s += Math.max(1, Math.min(288, Math.trunc(Number(seg.posts || 1))))
+    }
+    return Math.max(1, Math.min(288, s))
+  }
+  if (sw.length === 1) return Math.max(1, Math.min(288, Math.trunc(Number(sw[0].posts || ap.postsPerDay || 1))))
+  return Math.max(1, Math.min(288, Math.trunc(Number(ap.postsPerDay || 1))))
+}
+
+function bcCampaignUxScheduleSubtitleFromAutopost(ap) {
+  if (!ap || typeof ap !== 'object') return '—'
+  const sw = Array.isArray(ap.sendWindows) ? ap.sendWindows.filter((x) => x && typeof x === 'object') : []
+  if (sw.length >= 2) {
+    return sw
+      .map((s) => {
+        const a = String(s.windowStart || '').slice(0, 5)
+        const b = String(s.windowEnd || '').slice(0, 5)
+        const n = Math.max(1, Math.min(288, Math.trunc(Number(s.posts || 1))))
+        return `${a}–${b} (${n})`
+      })
+      .join(' · ')
+  }
+  if (sw.length === 1) {
+    const s = sw[0]
+    const a = String(s.windowStart || ap.windowStart || '').slice(0, 5)
+    const b = String(s.windowEnd || ap.windowEnd || '').slice(0, 5)
+    const n = Math.max(1, Math.min(288, Math.trunc(Number(s.posts || ap.postsPerDay || 1))))
+    return `${a}–${b} · ${n} ${tt('admin.bc_campaign.slot_posts_suffix')}`
+  }
+  const a = String(ap.windowStart || '09:00').slice(0, 5)
+  const b = String(ap.windowEnd || '21:00').slice(0, 5)
+  return `${a}–${b}`
+}
+
+function bcCampaignUxPeriodLabelFromCamp(camp) {
+  const ap = camp?.autopost || {}
+  const s = String(ap.startDate || '').trim().slice(0, 10)
+  const e = String(ap.endDate || '').trim().slice(0, 10)
+  if (!s && !e) return tt('admin.bc_campaign.period_open_both_inline')
+  if (s && e) return `${s} — ${e}`
+  if (s && !e) return tt('admin.bc_campaign.period_from_open', { d: s })
+  return tt('admin.bc_campaign.period_until', { d: e })
+}
+
+function bcCampaignUxScheduleSegmentsFromAp(ap) {
+  const baseWs = String(ap?.windowStart || '09:00').slice(0, 5)
+  const baseWe = String(ap?.windowEnd || '21:00').slice(0, 5)
+  const basePosts = Math.max(1, Math.min(288, Math.trunc(Number(ap?.postsPerDay || 1))))
+  const swRaw = Array.isArray(ap?.sendWindows) ? ap.sendWindows.filter((x) => x && typeof x === 'object') : []
+  const out = []
+  for (const s of swRaw.slice(0, 24)) {
+    out.push({
+      windowStart: String(s.windowStart || baseWs).slice(0, 5),
+      windowEnd: String(s.windowEnd || baseWe).slice(0, 5),
+      posts: Math.max(1, Math.min(288, Math.trunc(Number(s.posts || basePosts)))),
+    })
+  }
+  if (!out.length) {
+    out.push({ windowStart: baseWs, windowEnd: baseWe, posts: basePosts })
+  }
+  return out
+}
+
+function bcCampaignUxNormalizeSendWindowRowsFromInput(w) {
+  const baseWs = String(w.windowStart || '').trim().slice(0, 5) || '09:00'
+  const baseWe = String(w.windowEnd || '').trim().slice(0, 5) || '21:00'
+  const fbPosts = Math.max(1, Math.min(288, Math.trunc(Number(w.postsPerDay || 1))))
+  const raw = Array.isArray(w.sendWindows) ? w.sendWindows.filter((x) => x && typeof x === 'object') : []
+  const rows = []
+  for (const r of raw) {
+    rows.push({
+      windowStart: String(r.windowStart || baseWs).slice(0, 5),
+      windowEnd: String(r.windowEnd || baseWe).slice(0, 5),
+      posts: Math.max(1, Math.min(288, Math.trunc(Number(r.posts || fbPosts)))),
+    })
+  }
+  if (!rows.length) {
+    rows.push({ windowStart: baseWs, windowEnd: baseWe, posts: fbPosts })
+  }
+  let sum = rows.reduce((a, r) => a + r.posts, 0)
+  for (let guard = 0; guard < 50000 && sum > 288; guard++) {
+    let cut = false
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (rows[i].posts > 1) {
+        rows[i].posts -= 1
+        cut = true
+        break
+      }
+    }
+    if (!cut) break
+    sum = rows.reduce((a, r) => a + r.posts, 0)
+  }
+  return { rows, sum }
+}
+
+function bcCampaignUxAutopostTimingPayloadFromRows(w, rows) {
+  const sum = rows.reduce((a, r) => a + r.posts, 0)
+  const first = rows[0]
+  const firstPost = String(first.windowStart || '09:00').slice(0, 5)
+  const spread = w.spreadInWindow !== false
+  const base = {
+    postsPerDay: Math.max(1, Math.min(288, sum)),
+    firstPostTime: firstPost,
+    windowStart: String(first.windowStart || '09:00').slice(0, 5),
+    windowEnd: String(first.windowEnd || '21:00').slice(0, 5),
+    spreadInWindow: spread,
+  }
+  if (rows.length >= 2) {
+    return {
+      ...base,
+      postsPerDay: Math.max(1, Math.min(288, sum)),
+      sendWindows: rows.map((r) => ({
+        windowStart: r.windowStart,
+        windowEnd: r.windowEnd,
+        posts: r.posts,
+      })),
+    }
+  }
+  return {
+    ...base,
+    postsPerDay: Math.max(1, Math.min(288, first.posts)),
+    sendWindows: [],
+  }
+}
+
+/** Предпросмотр времени слотов (совпадает с autopost_loop при обычном дневном окне; без учёта перехода TZ). */
+function bcParseHmCampaign(s) {
+  const parts = String(s || '00:00').trim().split(':')
+  const h = Math.max(0, Math.min(23, parseInt(parts[0], 10) || 0))
+  const m = Math.max(0, Math.min(59, parseInt(parts[1], 10) || 0))
+  return { h, m }
+}
+
+function bcHmMinutesCampaign(hm) {
+  return hm.h * 60 + hm.m
+}
+
+function bcCampaignUxDayWindowMinuteSpan(ws, we) {
+  const lo = bcHmMinutesCampaign(bcParseHmCampaign(ws))
+  let hi = bcHmMinutesCampaign(bcParseHmCampaign(we))
+  if (hi <= lo) hi += 24 * 60
+  return { lo, hi }
+}
+
+function bcClampMinCampaign(m, lo, hi) {
+  return Math.min(hi, Math.max(lo, m))
+}
+
+function bcFireMinutesCampaign(lo, hi, n, spread) {
+  const span = hi - lo
+  if (n <= 0) return []
+  if (n === 1) {
+    if (span <= 0) return [lo]
+    return [spread ? lo + span / 2 : lo]
+  }
+  if (span <= 0) return Array(n).fill(lo)
+  if (spread) return Array.from({ length: n }, (_, k) => lo + (span * (k + 1)) / n)
+  return Array.from({ length: n }, (_, k) => lo + (span * k) / (n - 1))
+}
+
+function bcComposeAnchoredMinutesCampaign(lo, hi, n, fpMin) {
+  const tFirst = bcClampMinCampaign(fpMin, lo, hi)
+  if (n <= 1) return [tFirst]
+  const tLo = Math.max(lo, tFirst + 1)
+  if (tLo >= hi) return [tFirst]
+  const rem = bcFireMinutesCampaign(tLo, hi, n - 1, true)
+  return [tFirst, ...rem].sort((a, b) => a - b)
+}
+
+function bcMinToHmLabelCampaign(totalMin) {
+  const wrap = Math.floor(totalMin / (24 * 60))
+  let x = totalMin % (24 * 60)
+  if (x < 0) x += 24 * 60
+  const hh = Math.floor(x / 60)
+  const mm = Math.round(x % 60)
+  const pad = (u) => String(u).padStart(2, '0')
+  if (wrap > 0) return `${pad(hh)}:${pad(mm)} (+${wrap})`
+  return `${pad(hh)}:${pad(mm)}`
+}
+
+function bcPickAnchorSegmentMinuteCampaign(ordered, fpMin) {
+  if (!ordered.length) return { idx: 0, anchorInside: fpMin }
+  const t0First = ordered[0].lo
+  const t1Last = ordered[ordered.length - 1].hi
+  if (fpMin <= t0First) return { idx: 0, anchorInside: t0First }
+  if (fpMin >= t1Last) {
+    const last = ordered[ordered.length - 1]
+    return { idx: ordered.length - 1, anchorInside: bcClampMinCampaign(fpMin, last.lo, last.hi) }
+  }
+  for (let idx = 0; idx < ordered.length; idx++) {
+    const { lo, hi } = ordered[idx]
+    if (lo <= fpMin && fpMin <= hi) return { idx, anchorInside: bcClampMinCampaign(fpMin, lo, hi) }
+  }
+  for (let j = 0; j < ordered.length - 1; j++) {
+    const t1cur = ordered[j].hi
+    const t0next = ordered[j + 1].lo
+    if (t1cur < fpMin && fpMin < t0next) return { idx: j + 1, anchorInside: t0next }
+  }
+  return { idx: 0, anchorInside: t0First }
+}
+
+function bcCampaignUxOrderedMinuteSegments(rows) {
+  return rows
+    .map((seg, iOrig) => {
+      const { lo, hi } = bcCampaignUxDayWindowMinuteSpan(seg.windowStart, seg.windowEnd)
+      return { iOrig, seg, lo, hi }
+    })
+    .sort((a, b) => a.lo - b.lo)
+}
+
+function bcCampaignUxSlotPreviewByOriginalIndex(form) {
+  const spread = form?.spreadInWindow !== false
+  const { rows } = bcCampaignUxNormalizeSendWindowRowsFromInput(form || {})
+  const out = rows.map(() => [])
+  if (!rows.length) return out
+  let fpSrc = String(rows[0].windowStart || '09:00').slice(0, 5)
+  const fpMin = bcHmMinutesCampaign(bcParseHmCampaign(fpSrc))
+
+  function setLabels(iOrig, mins) {
+    const uniq = [...new Set(mins.map((x) => Math.round(x * 1000) / 1000))]
+    uniq.sort((a, b) => a - b)
+    out[iOrig] = uniq.map((x) => bcMinToHmLabelCampaign(x))
+  }
+
+  if (rows.length < 2) {
+    const seg = rows[0]
+    const { lo, hi } = bcCampaignUxDayWindowMinuteSpan(seg.windowStart, seg.windowEnd)
+    const n = Math.max(1, Math.min(288, Math.trunc(Number(seg.posts) || 1)))
+    const mins = spread ? bcComposeAnchoredMinutesCampaign(lo, hi, n, fpMin) : bcFireMinutesCampaign(lo, hi, n, false)
+    setLabels(0, mins)
+    return out
+  }
+
+  const ordered = bcCampaignUxOrderedMinuteSegments(rows)
+  let anchorIdx = null
+  let anchorInside = null
+  if (spread) {
+    const pick = bcPickAnchorSegmentMinuteCampaign(ordered, fpMin)
+    anchorIdx = pick.idx
+    anchorInside = pick.anchorInside
+  }
+  for (let ord_i = 0; ord_i < ordered.length; ord_i++) {
+    const ord = ordered[ord_i]
+    const n = Math.max(1, Math.min(288, Math.trunc(Number(ord.seg.posts) || 1)))
+    let mins
+    if (spread && anchorIdx !== null && anchorInside != null && ord_i === anchorIdx) {
+      mins = bcComposeAnchoredMinutesCampaign(ord.lo, ord.hi, n, anchorInside)
+    } else {
+      mins = bcFireMinutesCampaign(ord.lo, ord.hi, n, spread)
+    }
+    setLabels(ord.iOrig, mins)
+  }
+  return out
+}
+
+function bcCampaignUxSlotPreviewLines(form) {
+  const byIx = bcCampaignUxSlotPreviewByOriginalIndex(form)
+  return byIx.map((labels) => labels || [])
+}
+
+async function bcCampaignUxBroadcastsResolvedForCamp(camp) {
+  if (!camp) return []
+  const ap = camp.autopost || {}
+  if (ap.use_all_broadcasts) return (broadcasts.value || []).filter((b) => bcBroadcastIsAutopostRotationDraft(b))
+  const ids = []
+  const brIds = Array.isArray(ap.broadcast_ids) ? ap.broadcast_ids : []
+  for (const x of brIds) {
+    const v = Math.trunc(Number(x))
+    if (v > 0) ids.push(v)
+  }
+  if (!ids.length) {
+    const anchor = Number(camp.anchor_broadcast_id || ap.anchor_broadcast_id || 0)
+    if (anchor > 0) ids.push(anchor)
+  }
+  const uniq = [...new Set(ids)]
+  const out = []
+  for (const bid of uniq) {
+    let row =
+      bid > 0 ? (broadcasts.value || []).find((b) => Number(b?.id || 0) === bid) : null
+    if (!row && bid > 0) {
+      try {
+        row = await fetch(() => api.adminBroadcast(bid))
+        if (row) upsertBroadcastInList(row)
+      } catch {
+        row = null
+      }
+    }
+    if (row) out.push(row)
+  }
+  return out
+}
+
 function bcCampaignUxStatusLabel(camp) {
   const s = bcCampaignRunState(camp)
   if (s === 'running') return tt('admin.autopost.status_running')
   if (s === 'paused') return tt('admin.autopost.status_paused')
-  return tt('admin.autopost.status_draft')
+  return tt('admin.autopost.status_stopped')
+}
+
+function bcCampaignUxStatusBadgeClass(camp) {
+  const s = bcCampaignRunState(camp)
+  if (s === 'running') return 'border border-emerald-400/25 bg-emerald-500/10 text-emerald-300'
+  if (s === 'paused') return 'border border-amber-400/30 bg-amber-500/10 text-amber-200'
+  return 'border border-rose-400/35 bg-rose-500/12 text-rose-200'
+}
+
+function bcCampaignUxListCtrPct(camp) {
+  const p = camp?.stats_ctr_percent
+  if (p != null && Number.isFinite(Number(p))) return clampPct(Number(p))
+  const c = Number(camp?.ctr ?? 0)
+  return Number.isFinite(c) ? clampPct(c) : null
 }
 function bcCampaignUxTodaySent(camp) {
   const rows = Array.isArray(camp?.autopost?.recent_runs) ? camp.autopost.recent_runs : []
@@ -2126,40 +3322,421 @@ function bcCampaignUxTodaySent(camp) {
 }
 function bcCampaignUxNearestAt() {
   const now = new Date()
-  const [h, mm] = String(bcCampaignUxWizard.value.sendTime || '09:00').split(':').map((x) => Number(x || 0))
+  const w = bcCampaignUxWizard.value
+  const sw0 = Array.isArray(w.sendWindows) && w.sendWindows.length ? w.sendWindows[0] : null
+  const t0 = sw0?.windowStart || w.windowStart || '09:00'
+  const [h, mm] = String(t0 || '09:00').split(':').map((x) => Number(x || 0))
   const dt = new Date(now)
   dt.setHours(Number.isFinite(h) ? h : 9, Number.isFinite(mm) ? mm : 0, 0, 0)
   if (dt.getTime() <= now.getTime()) dt.setDate(dt.getDate() + 1)
   return fmtDateTime(dt.toISOString())
 }
-function bcCampaignUxHydrateWizardFromCampaign(camp) {
+
+function bcCampaignUxParseYmdLocal(ymd) {
+  const p = String(ymd || '')
+    .trim()
+    .split('-')
+    .map((x) => Number(String(x || '').trim()))
+  if (p.length !== 3) return null
+  const [y, mo, da] = p
+  if (!Number.isFinite(y) || !Number.isFinite(mo) || !Number.isFinite(da)) return null
+  const dt = new Date(y, mo - 1, da)
+  if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== da) return null
+  return dt
+}
+
+function bcCampaignUxWeekdaySetFromAutopost(ap) {
+  const mode = String(ap?.scheduleMode || 'every_day')
+  if (mode === 'weekdays') {
+    const wd = Array.isArray(ap?.weekdays) && ap.weekdays.length ? ap.weekdays.map(Number).filter((x) => x >= 0 && x <= 6) : [0, 1, 2, 3, 4]
+    return new Set(wd)
+  }
+  return new Set([0, 1, 2, 3, 4, 5, 6])
+}
+
+function bcCampaignUxQualifiedSendingDaysFromAutopost(ap) {
+  const pad = (n) => String(n).padStart(2, '0')
+  const today = new Date()
+  let startStr = String(ap?.startDate || '').trim()
+  if (!startStr) {
+    startStr = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`
+  }
+  let sd = bcCampaignUxParseYmdLocal(startStr)
+  if (!sd) {
+    sd = bcCampaignUxParseYmdLocal(`${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`)
+  }
+  if (!sd) return 0
+  const endRaw = String(ap?.endDate || '').trim()
+  let ed = endRaw ? bcCampaignUxParseYmdLocal(endRaw) : null
+  if (!ed) {
+    ed = new Date(sd.getFullYear(), sd.getMonth(), sd.getDate())
+    ed.setDate(ed.getDate() + 365)
+  }
+  const sdDay = new Date(sd.getFullYear(), sd.getMonth(), sd.getDate())
+  const edDay = new Date(ed.getFullYear(), ed.getMonth(), ed.getDate())
+  if (edDay < sdDay) return 0
+  const wdSet = bcCampaignUxWeekdaySetFromAutopost(ap)
+  if (!wdSet.size) return 0
+  let n = 0
+  const cur = new Date(sdDay)
+  while (cur <= edDay) {
+    const pyWd = (cur.getDay() + 6) % 7
+    if (wdSet.has(pyWd)) n++
+    cur.setDate(cur.getDate() + 1)
+  }
+  return n
+}
+
+function bcCampaignUxScheduledSendsFromAutopost(ap) {
+  const ppd = bcCampaignUxPostsPerDayFromAutopost(ap)
+  return Math.max(0, Math.trunc(bcCampaignUxQualifiedSendingDaysFromAutopost(ap) * Math.max(1, ppd)))
+}
+
+function bcCampaignUxSlotAurumFromAutopost(ap) {
+  const ng = Number((ap?.group_chat_ids || []).length || 0)
+  const nc = ap?.autopost_channels_disabled ? 0 : Number((ap?.channel_chat_ids || []).length || 0)
+  return Math.min(BC_AUTOPOST_SLOT_AURUM_CAP, Math.max(0, Math.trunc(ng + nc)))
+}
+
+/** Оценка AURUM за период для сохранённой кампании (как на экране обзора мастера). */
+function bcCampaignUxManagePeriodAurumBreakdown(camp) {
+  const ap = camp?.autopost
+  if (!ap || typeof ap !== 'object') return null
+  if (String(ap.autopost_target || 'groups') === 'users') return { usersOnly: true }
+  const slot = bcCampaignUxSlotAurumFromAutopost(ap)
+  const sends = bcCampaignUxScheduledSendsFromAutopost(ap)
+  const openEnded = !String(ap.endDate || '').trim()
+  const total = Math.max(0, Math.trunc(slot * sends))
+  return { slot, sends, total, openEnded, usersOnly: false }
+}
+
+function bcCampaignUxWizardWeekdaySet() {
+  const w = bcCampaignUxWizard.value
+  const mode = String(w.scheduleMode || 'every_day')
+  const wdFromCustom = String(w.customDays || '')
+    .split(',')
+    .map((x) => Number(String(x || '').trim()))
+    .filter((n) => Number.isFinite(n) && n >= 0 && n <= 6)
+  if (mode === 'weekdays') return new Set((w.weekdays || []).map(Number).filter((x) => x >= 0 && x <= 6))
+  if (mode === 'custom')
+    return new Set(wdFromCustom.length ? [...new Set(wdFromCustom)] : [1, 3, 5])
+  return new Set([0, 1, 2, 3, 4, 5, 6])
+}
+
+function bcCampaignUxSetStartDateTodayFromTz() {
+  const w = bcCampaignUxWizard.value
+  const tz = String(w.timezone || '').trim()
+  const d = new Date()
+  const pad = (n) => String(n).padStart(2, '0')
+  let ymd = ''
+  let hm = '09:00'
+  try {
+    const tzUse = tz || (typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : 'UTC')
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: tzUse,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(d)
+    const gp = (t) => parts.find((x) => x.type === t)?.value || ''
+    ymd = `${gp('year')}-${gp('month')}-${gp('day')}`
+    hm = `${gp('hour')}:${gp('minute')}`
+  } catch {
+    ymd = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+    hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  }
+  hm = hm.slice(0, 5)
+  bcCampaignUxWizard.value = { ...bcCampaignUxWizard.value, startDate: ymd, sendTime: hm }
+}
+
+function bcCampaignUxChatTitleFromEligible(chatId) {
+  const id = Number(chatId)
+  if (!id) return ''
+  let row = (bcBroadcastChannels.value || []).find((c) => bcNormalizeChatId(c) === id)
+  if (row) {
+    const t = String(row?.title || row?.username || '').trim()
+    if (t) return t
+  }
+  row = (bcBroadcastGroups.value || []).find((c) => bcNormalizeChatId(c) === id)
+  if (row) {
+    const t = String(row?.title || row?.username || '').trim()
+    if (t) return t
+  }
+  return tt('admin.bc_campaign.chat_label_unknown', { id: String(id) })
+}
+
+function bcCampaignUxDestinationsIsEmpty(camp) {
+  const d = bcCampaignUxDestinationsForCamp(camp)
+  if (d.usersOnly) return false
+  return !d.channels.length && !d.groups.length
+}
+
+function bcCampaignUxDestinationsForCamp(camp) {
   const ap = camp?.autopost || {}
-  const brIds = Array.isArray(ap?.broadcast_ids) ? ap.broadcast_ids.map((x) => Number(x)).filter((x) => x > 0) : []
-  const useAll = !!ap?.use_all_broadcasts
-  bcCampaignUxWizard.value = {
-    title: String(camp?.title || tt('admin.autopost.campaign_default_title', { id: camp?.id || '' })),
-    postIds: useAll ? (broadcasts.value || []).map((b) => Number(b?.id || 0)).filter((x) => x > 0) : brIds,
-    campaignType: useAll ? 'rotation' : (brIds.length <= 1 ? 'simple' : 'progress'),
-    scheduleMode: ap?.scheduleMode === 'weekdays' ? 'weekdays' : 'every_day',
-    intervalDays: 1,
-    weekdays: Array.isArray(ap?.weekdays) && ap.weekdays.length ? ap.weekdays.map((x) => Number(x)) : [0, 1, 2, 3, 4],
-    sendTime: String(ap?.windowStart || '09:00').slice(0, 5),
-    windowStart: String(ap?.windowStart || '09:00').slice(0, 5),
-    windowEnd: String(ap?.windowEnd || '21:00').slice(0, 5),
-    timezone: String(ap?.timezone || 'Asia/Yekaterinburg'),
-    postsPerDay: Math.max(1, Number(ap?.postsPerDay || 1)),
-    spreadInWindow: ap?.spreadInWindow !== false,
-    targetChannels: ap?.autopost_channels_disabled ? false : true,
-    targetGroups: true,
-    targetBots: String(ap?.autopost_target || 'groups') === 'users',
-    selectedGroups: Array.isArray(ap?.group_chat_ids) ? ap.group_chat_ids.map((x) => Number(x)).filter((x) => x < 0) : [],
-    selectedChannels: Array.isArray(ap?.channel_chat_ids) ? ap.channel_chat_ids.map((x) => Number(x)).filter((x) => x < 0) : [],
-    customDays: '',
+  const usersOnly = String(ap.autopost_target || 'groups') === 'users'
+  const chDisabled = !!ap.autopost_channels_disabled
+  const channels = chDisabled ? [] : [...new Set((ap.channel_chat_ids || []).map(Number).filter((x) => Number.isFinite(x) && x !== 0))]
+  const groups = [...new Set((ap.group_chat_ids || []).map(Number).filter((x) => Number.isFinite(x) && x !== 0))]
+  const chLbl = channels.map((cid) => ({ id: cid, label: bcCampaignUxChatTitleFromEligible(cid), kind: 'ch' }))
+  const grLbl = groups.map((gid) => ({ id: gid, label: bcCampaignUxChatTitleFromEligible(gid), kind: 'gr' }))
+  return { usersOnly, channels: chLbl, groups: grLbl }
+}
+
+function bcCampaignUxDestinationsPreviewLines(camp) {
+  const d = bcCampaignUxDestinationsForCamp(camp)
+  if (d.usersOnly) return tt('admin.bc_campaign.targets_dm_autopost')
+  const parts = []
+  if (d.channels.length) {
+    const tail = d.channels.length > 3 ? '…' : ''
+    parts.push(`${tt('admin.bc_campaign.tgt_channels_short')}: ${d.channels.slice(0, 3).map((x) => x.label).join(', ')}${tail}`)
+  }
+  if (d.groups.length) {
+    const tail = d.groups.length > 3 ? '…' : ''
+    parts.push(`${tt('admin.bc_campaign.tgt_groups_short')}: ${d.groups.slice(0, 3).map((x) => x.label).join(', ')}${tail}`)
+  }
+  return parts.join(' · ') || tt('admin.bc_campaign.destinations_fallback')
+}
+
+/** Посты, закреплённые за автокампанией (для модалки и проверок). */
+function bcCampaignUxBroadcastsForCamp(camp) {
+  if (!camp) return []
+  const ap = camp.autopost || {}
+  if (ap.use_all_broadcasts) {
+    return (broadcasts.value || []).filter((b) => bcBroadcastIsAutopostRotationDraft(b))
+  }
+  const ids = Array.isArray(ap.broadcast_ids) ? ap.broadcast_ids.map((x) => Number(x)).filter((x) => x > 0) : []
+  if (ids.length) {
+    const seen = new Set()
+    const out = []
+    for (const id of ids) {
+      const b = (broadcasts.value || []).find((bb) => Number(bb?.id || 0) === id)
+      if (b && !seen.has(id)) {
+        seen.add(id)
+        out.push(b)
+      }
+    }
+    return out
+  }
+  const anchor = Number(camp.anchor_broadcast_id || ap.anchor_broadcast_id || 0)
+  if (anchor > 0) {
+    const b = (broadcasts.value || []).find((x) => Number(x?.id || 0) === anchor)
+    return b ? [b] : []
+  }
+  return []
+}
+
+function bcCampaignUxPostButtonRowsForDisplay(item) {
+  if (!item) return []
+  const rows = Array.isArray(item.keyboard_rows) && item.keyboard_rows.length
+    ? item.keyboard_rows
+    : bcKeyboardRowsFromApi(item?.keyboard)
+  return (rows || []).filter((row) => Array.isArray(row) && row.some((b) => String(b?.text || '').trim()))
+}
+
+function bcCampaignUxOpenRecipientsModal() {
+  bcCampaignUxRecipientsModalOpen.value = true
+}
+
+function bcCampaignUxCloseRecipientsModal() {
+  bcCampaignUxRecipientsModalOpen.value = false
+}
+
+function bcCampaignUxCloseCampaignPostsModal() {
+  bcCampaignUxCampaignPostsModalOpen.value = false
+  bcCampaignUxCampaignPostsModalItems.value = []
+  const m = bcCampaignUxPostsModalMedia.value || {}
+  for (const k of Object.keys(m)) {
+    const entry = m[k]
+    if (entry?.previewUrl) revokeBroadcastMediaPreviewUrl(entry.previewUrl)
+  }
+  bcCampaignUxPostsModalMedia.value = {}
+}
+
+async function bcCampaignUxFillCampaignPostsModalMedia() {
+  const list = await bcCampaignUxBroadcastsResolvedForCamp(bcCampaignUxManageItem.value)
+  bcCampaignUxCampaignPostsModalItems.value = list
+  const map = {}
+  await Promise.all(
+    (list || []).map(async (b) => {
+      const bid = Number(b?.id || 0)
+      if (!bid) return
+      try {
+        let rows = Array.isArray(b.media_items) ? b.media_items : []
+        if (
+          !rows.length &&
+          (b.has_media_file ||
+            b.telegram_file_id ||
+            String(b.media_kind || 'none').toLowerCase() !== 'none')
+        ) {
+          const full = await fetch(() => api.adminBroadcast(bid))
+          rows = Array.isArray(full?.media_items) ? full.media_items : []
+        }
+        for (const mi of rows) {
+          const mk = String(mi.media_kind || '').toLowerCase()
+          const mid = Number(mi.id || 0)
+          if (!mid) continue
+          if (mk.includes('photo') || mk.includes('video') || mk === 'animation') {
+            const previewUrl = await fetchAdminBroadcastMediaPreviewUrl(bid, mid)
+            map[bid] = {
+              previewUrl,
+              kind: mk.includes('photo') ? 'photo' : mk.includes('video') ? 'video' : 'animation',
+            }
+            break
+          }
+        }
+      } catch {
+        //
+      }
+    }),
+  )
+  bcCampaignUxPostsModalMedia.value = map
+}
+
+async function bcCampaignUxOpenCampaignPostsModal() {
+  for (const k of Object.keys(bcCampaignUxPostsModalMedia.value || {})) {
+    const entry = bcCampaignUxPostsModalMedia.value[k]
+    if (entry?.previewUrl) revokeBroadcastMediaPreviewUrl(entry.previewUrl)
+  }
+  bcCampaignUxPostsModalMedia.value = {}
+  bcCampaignUxCampaignPostsModalItems.value = []
+  bcCampaignUxCampaignPostsModalOpen.value = true
+  try {
+    await loadBroadcasts()
+  } catch {
+    //
+  }
+  await bcCampaignUxFillCampaignPostsModalMedia()
+}
+
+async function bcCampaignUxRemoveBroadcastFromCampaignModal(broadcastId) {
+  const bid = Number(broadcastId || 0)
+  const camp = bcCampaignUxManageItem.value
+  const cid = Number(camp?.id || 0)
+  if (!bid || !cid) return
+  const ap = camp?.autopost && typeof camp.autopost === 'object' ? { ...camp.autopost } : {}
+  if (ap.use_all_broadcasts) {
+    window.alert(tt('admin.bc_campaign.modal_posts_rotation_no_remove'))
+    return
+  }
+  const curIds = bcCampaignUxBroadcastsForCamp(camp)
+    .map((b) => Number(b?.id || 0))
+    .filter((x) => x > 0)
+  const nextIds = curIds.filter((x) => x !== bid)
+  if (!nextIds.length) {
+    window.alert(tt('admin.bc_campaign.modal_posts_need_one'))
+    return
+  }
+  if (!window.confirm(tt('admin.bc_campaign.modal_posts_remove_confirm'))) return
+  bcCampaignUxRemovingPostBid.value = bid
+  try {
+    ap.use_all_broadcasts = false
+    ap.broadcast_ids = [...nextIds]
+    await fetch(() =>
+      api.adminAutopostCampaignPatch(cid, {
+        anchor_broadcast_id: nextIds[0],
+        autopost: ap,
+      }),
+    )
+    await loadAutopostCampaigns()
+    await loadBroadcasts()
+    await bcCampaignUxFillCampaignPostsModalMedia()
+  } catch (e) {
+    window.alert(String(e?.body?.detail || e?.message || tt('admin.autopost.err_save')))
+  } finally {
+    bcCampaignUxRemovingPostBid.value = 0
   }
 }
-function openBcCampaignUxManage(camp) {
+
+function bcCampaignUxPostsCountLabelForCamp(camp) {
+  if (!camp) return '0'
+  const ap = camp.autopost || {}
+  if (ap.use_all_broadcasts) return tt('admin.bc_campaign.word_all')
+  const resolved = bcCampaignUxBroadcastsForCamp(camp)
+  if (resolved.length) return String(resolved.length)
+  const ids = [...new Set((Array.isArray(ap.broadcast_ids) ? ap.broadcast_ids : []).map((x) => Number(x)).filter((x) => x > 0))]
+  if (ids.length) return String(ids.length)
+  const anchor = Number(camp.anchor_broadcast_id || ap.anchor_broadcast_id || 0)
+  return anchor > 0 ? '1' : '0'
+}
+
+function bcCampaignUxDraftDisplayTitle(row) {
+  const s = String(row?.run_title ?? row?.title ?? '').trim()
+  if (s) return s
+  return tt('admin.broadcast_stats.untitled')
+}
+
+function bcCampaignUxPrimaryBroadcastIdForCamp(camp) {
+  if (!camp) return 0
+  const ap = camp.autopost || {}
+  const anchor = Number(camp.anchor_broadcast_id || ap.anchor_broadcast_id || 0)
+  if (anchor > 0) return anchor
+  const br = Array.isArray(ap.broadcast_ids) ? ap.broadcast_ids : []
+  for (const x of br) {
+    const id = Number(x)
+    if (id > 0) return id
+  }
+  if (ap.use_all_broadcasts) {
+    const drafts = (broadcasts.value || []).filter((b) => bcBroadcastIsAutopostRotationDraft(b))
+    if (drafts.length) return Number(drafts[0].id || 0)
+  }
+  return 0
+}
+
+/** Подпись карточки «Посты» — название(я) черновика, без счётчика */
+function bcCampaignUxPostsCardLabelForCamp(camp) {
+  if (!camp) return '—'
+  const ap = camp.autopost || {}
+  if (ap.use_all_broadcasts) return tt('admin.bc_campaign.word_all')
+  const resolved = bcCampaignUxBroadcastsForCamp(camp)
+  if (resolved.length) {
+    const parts = resolved.map((b) => bcCampaignUxDraftDisplayTitle(b))
+    return parts.join(' · ')
+  }
+  const ids = [...new Set((Array.isArray(ap.broadcast_ids) ? ap.broadcast_ids : []).map((x) => Number(x)).filter((x) => x > 0))]
+  const anchor = Number(camp.anchor_broadcast_id || ap.anchor_broadcast_id || 0)
+  const need = [...ids]
+  if (anchor > 0 && !need.includes(anchor)) need.unshift(anchor)
+  if (!need.length) return '—'
+  const parts = need.map((id) => {
+    const b = (broadcasts.value || []).find((bb) => Number(bb?.id || 0) === id)
+    if (b) return bcCampaignUxDraftDisplayTitle(b)
+    return tt('admin.broadcast_stats.untitled')
+  })
+  return parts.join(' · ')
+}
+
+async function bcCampaignUxManageOpenPostEditor(opts = {}) {
+  const camp = bcCampaignUxManageItem.value
+  const bid = bcCampaignUxPrimaryBroadcastIdForCamp(camp || {})
+  if (!bid) {
+    window.alert(tt('admin.bc_campaign.modal_posts_empty'))
+    return
+  }
+  const returnScreen =
+    opts?.returnScreen === 'stats' || bcCampaignUxScreen.value === 'stats' ? 'stats' : 'manage'
+  void bcCampaignUxOpenPostEditor(bid, { returnScreen })
+}
+
+async function bcCampaignUxStatsOpenPostEditor() {
+  await bcCampaignUxManageOpenPostEditor({ returnScreen: 'stats' })
+}
+
+async function openBcCampaignUxManage(camp) {
   const id = Number(camp?.id || 0)
   if (!id) return
+  const ap = camp?.autopost || {}
+  const savedG = Array.isArray(ap?.group_chat_ids) ? ap.group_chat_ids : []
+  const savedCh = Array.isArray(ap?.channel_chat_ids) ? ap.channel_chat_ids : []
+  bcBroadcastGroupScope.value = 'mine'
+  try {
+    await Promise.all([loadBroadcastEligibleGroups(), loadBroadcastEligibleChannels()])
+    await bcExpandBroadcastScopeIfSavedTargetsMissing(savedG, savedCh)
+  } catch {
+    /* ignore */
+  }
   bcCampaignUxManageId.value = id
   bcCampaignUxScreen.value = 'manage'
   bcCampaignUxOpen.value = true
@@ -2172,53 +3749,81 @@ async function openBcCampaignUxList() {
   bcCampaignUxOpen.value = true
   bcCampaignUxScreen.value = 'list'
   await loadAutopostCampaigns()
+  void Promise.all([loadBroadcastEligibleGroups(), loadBroadcastEligibleChannels()])
 }
 async function openBcCampaignUxWizard() {
   if (!(broadcasts.value || []).length) {
-    await createBcDraft()
+    const created = await createBcDraft('autopost')
+    if (!created) return
   }
+  bcBroadcastGroupScope.value = 'mine'
   await loadBroadcastEligibleGroups()
   await loadBroadcastEligibleChannels()
   const selectedBid = Number(bcSelectedId.value || (broadcasts.value?.[0]?.id || 0) || 0)
   bcCampaignUxWizard.value = {
     title: '',
     postIds: selectedBid ? [selectedBid] : [],
-    campaignType: 'progress',
+    campaignType: 'simple',
     scheduleMode: 'every_day',
     intervalDays: 1,
     weekdays: [0, 1, 2, 3, 4],
+    startDate: '',
+    endDate: '',
     sendTime: '09:00',
     windowStart: '09:00',
     windowEnd: '21:00',
     timezone: typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Yekaterinburg' : 'Asia/Yekaterinburg',
     postsPerDay: 1,
     spreadInWindow: true,
-    targetChannels: true,
+    sendWindows: [{ windowStart: '09:00', windowEnd: '21:00', posts: 1 }],
+    targetChannels: false,
     targetGroups: true,
     targetBots: false,
-    selectedGroups: [...(bcSelectedGroupIds.value || [])],
-    selectedChannels: [...(bcSelectedChannelIds.value || [])],
+    selectedGroups: [],
+    selectedChannels: [],
     customDays: '',
   }
+  bcCampaignUxSetStartDateTodayFromTz()
   bcCampaignUxEditingCampaignId.value = 0
   bcCampaignUxStep.value = 1
   bcCampaignUxScreen.value = 'wizard'
   bcCampaignUxOpen.value = true
 }
-async function openBcCampaignUxEditCampaign(camp) {
-  const id = Number(camp?.id || 0)
-  if (!id) return
-  await loadBroadcastEligibleGroups()
-  await loadBroadcastEligibleChannels()
-  bcCampaignUxHydrateWizardFromCampaign(camp)
-  bcCampaignUxManageId.value = id
-  bcCampaignUxEditingCampaignId.value = id
-  bcCampaignUxStep.value = 1
-  bcCampaignUxScreen.value = 'wizard'
-  bcCampaignUxOpen.value = true
+function bcOneShotFlowBack() {
+  if (bcConfirmModalOpen.value) {
+    bcConfirmModalOpen.value = false
+    return
+  }
+  if (bcSendTargetModalOpen.value) {
+    bcSendTargetModalOpen.value = false
+    return
+  }
+  if (bcAuxModal.value) {
+    bcAuxModal.value = ''
+    return
+  }
+  void closeQuickBroadcastDraft()
 }
+
 function bcCampaignUxBack() {
+  if (bcAuxModal.value && bcCampaignUxOpen.value) {
+    bcAuxModal.value = ''
+    return
+  }
+  if (bcCampaignUxScheduleModalOpen.value) {
+    bcCampaignUxCloseScheduleModal()
+    return
+  }
+  if (bcCampaignUxRecipientsModalOpen.value) {
+    bcCampaignUxCloseRecipientsModal()
+    return
+  }
+  if (bcCampaignUxCampaignPostsModalOpen.value) {
+    bcCampaignUxCloseCampaignPostsModal()
+    return
+  }
   if (bcCampaignUxScreen.value === 'postEditor') {
+    bcCampaignUxPostEditorLoading.value = false
     bcCampaignUxScreen.value = String(bcCampaignUxPostEditorReturn.value || 'wizard')
     return
   }
@@ -2245,23 +3850,109 @@ function bcCampaignUxNextStep() {
   }
   bcCampaignUxStep.value += 1
 }
+
+function bcRunShakeClass(el) {
+  if (!el || typeof el.classList === 'undefined') return
+  try {
+    el.classList.remove('bc-shake-x')
+    void el.offsetWidth
+    el.classList.add('bc-shake-x')
+    window.setTimeout(() => {
+      try {
+        el.classList.remove('bc-shake-x')
+      } catch {
+        //
+      }
+    }, 480)
+  } catch {
+    //
+  }
+}
+
+function bcCampaignUxNextStepAttempt() {
+  if (bcCampaignUxWizardCanNext.value) {
+    bcCampaignUxNextStep()
+    return
+  }
+  if (bcCampaignUxStep.value === 1) {
+    const w = bcCampaignUxWizard.value
+    const titleOk = !!String(w.title || '').trim()
+    const postsOk = Number(w.postIds?.length || 0) > 0
+    if (!titleOk) {
+      bcRunShakeClass(bcCampaignUxWizardTitleInputRef.value)
+      return
+    }
+    if (!postsOk) {
+      bcRunShakeClass(bcCampaignUxWizardPostsListRef.value)
+    }
+  }
+}
+
+function bcQuickDraftTryNext() {
+  bcSyncEditorHtml()
+  const titleOk = String(bcTitle.value || '').trim().length > 0
+  const bodyOk = bcHasMessageText()
+  if (!titleOk) {
+    bcRunShakeClass(bcQuickDraftTitleInputRef.value)
+    return
+  }
+  if (!bodyOk) {
+    bcRunShakeClass(bcBodyRef.value)
+    return
+  }
+  void openSendTargetModal()
+}
+
+async function bcCampaignUxDeleteAllDraftPosts() {
+  const ids = bcDraftBroadcastsForAutopost.value.map((b) => Number(b?.id || 0)).filter((x) => x > 0)
+  if (!ids.length) return
+  if (!window.confirm(tt('admin.dlg.bc_delete_all_draft_posts_confirm'))) return
+  try {
+    for (const id of ids) {
+      await fetch(() => api.adminBroadcastDelete(id))
+      try {
+        localStorage.removeItem(bcDraftCacheKey(id))
+      } catch {
+        //
+      }
+    }
+    const sel = Number(bcSelectedId.value || 0)
+    if (sel && ids.includes(sel)) {
+      bcSelectedId.value = null
+      bcTitle.value = ''
+      bcBodyHtml.value = ''
+      bcButtonRows.value = [[bcEmptyButton()]]
+      bcMediaKindStored.value = 'none'
+      bcMediaOriginalName.value = ''
+      bcMediaHistory.value = []
+      bcEditorOpen.value = false
+    }
+    await loadBroadcasts()
+    bcCampaignUxPruneStalePostIds()
+  } catch (e) {
+    alert(String(e?.body?.detail || e?.message || tt('admin.dlg.bc_delete_failed')))
+  }
+}
 function bcCampaignUxTogglePost(id) {
   const bid = Number(id || 0)
   if (!bid) return
-  const set = new Set((bcCampaignUxWizard.value.postIds || []).map((x) => Number(x)))
-  if (set.has(bid)) set.delete(bid)
-  else set.add(bid)
-  bcCampaignUxWizard.value.postIds = [...set]
+  const cur = (bcCampaignUxWizard.value.postIds || []).map((x) => Number(x))
+  if (cur.length === 1 && cur[0] === bid) {
+    bcCampaignUxWizard.value.postIds = []
+    return
+  }
+  bcCampaignUxWizard.value.postIds = [bid]
 }
-function bcCampaignUxMovePost(id, dir) {
-  const bid = Number(id || 0)
-  const list = [...(bcCampaignUxWizard.value.postIds || [])].map((x) => Number(x))
-  const idx = list.findIndex((x) => x === bid)
-  if (idx < 0) return
-  const j = idx + (Number(dir) > 0 ? 1 : -1)
-  if (j < 0 || j >= list.length) return
-  ;[list[idx], list[j]] = [list[j], list[idx]]
-  bcCampaignUxWizard.value.postIds = list
+function bcCampaignUxSelectAllDraftPosts() {
+  const ids = bcDraftBroadcastsForAutopost.value.map((b) => Number(b.id || 0)).filter((x) => x > 0)
+  if (!ids.length) return
+  bcCampaignUxWizard.value.postIds = [ids[0]]
+}
+function bcCampaignUxClearDraftPostSelection() {
+  const draftSet = new Set(bcDraftBroadcastsForAutopost.value.map((b) => Number(b.id || 0)).filter((x) => x > 0))
+  bcCampaignUxWizard.value.postIds = (bcCampaignUxWizard.value.postIds || [])
+    .map((x) => Number(x))
+    .filter((x) => x > 0 && !draftSet.has(x))
 }
 function bcCampaignUxRemovePost(id) {
   const bid = Number(id || 0)
@@ -2275,31 +3966,109 @@ function bcCampaignUxPostMeta(item) {
   if (hasButtons) return '🔗'
   return '✍️'
 }
-async function bcCampaignUxOpenPostEditor(id = 0) {
+async function bcCampaignUxHydratePostEditor(bid) {
+  const id = Number(bid || 0)
+  if (!id) return false
+  let item = bcCampaignUxPostMap.value.get(id)
+  if (!item) {
+    try {
+      item = await fetch(() => api.adminBroadcast(id))
+      if (item?.id) upsertBroadcastInList(item)
+    } catch {
+      item = null
+    }
+  }
+  if (!item) return false
+  let full = item
+  const listItems = Array.isArray(item?.media_items) ? item.media_items : []
+  const needsFull =
+    !listItems.length ||
+    listItems.some((m) => !Number(m?.id)) ||
+    String(item?.media_kind || 'none').toLowerCase() !== 'none' ||
+    !!(item?.has_media_file || item?.telegram_file_id)
+  if (needsFull) {
+    try {
+      const row = await fetch(() => api.adminBroadcast(id))
+      if (row?.id) {
+        full = row
+        upsertBroadcastInList(row)
+      }
+    } catch {
+      //
+    }
+  }
+  applyBroadcastToForm(full)
+  bcQuickTitleBaseline.value = String(bcTitle.value || '')
+  return true
+}
+
+async function bcCampaignUxOpenPostEditor(id = 0, opts = {}) {
   const bid = Number(id || 0)
-  bcCampaignUxPostEditorReturn.value = 'wizard'
+  const returnScreen = opts?.returnScreen === 'stats' ? 'stats' : opts?.returnScreen === 'manage' ? 'manage' : 'wizard'
+  bcCampaignUxPostEditorReturn.value = returnScreen
   if (bid > 0) {
-    const item = bcCampaignUxPostMap.value.get(bid)
-    if (!item) return
-    applyBroadcastToForm(item)
     bcCampaignUxPostEditorId.value = bid
     bcCampaignUxPostEditorMode.value = 'edit'
     bcCampaignUxScreen.value = 'postEditor'
+    const cached = bcCampaignUxPostMap.value.get(bid)
+    if (cached) {
+      applyBroadcastToForm(cached)
+      bcQuickTitleBaseline.value = String(bcTitle.value || '')
+    } else {
+      bcTitle.value = ''
+      bcBodyHtml.value = ''
+      bcButtonRows.value = []
+      bcMediaHistory.value = []
+      bcSelectedId.value = bid
+    }
+    bcCampaignUxPostEditorLoading.value = true
+    try {
+      const ok = await bcCampaignUxHydratePostEditor(bid)
+      if (!ok) {
+        window.alert(tt('admin.dlg.generic_error'))
+        bcCampaignUxScreen.value = returnScreen
+      }
+    } finally {
+      bcCampaignUxPostEditorLoading.value = false
+    }
     return
   }
-  await createBcDraft()
-  bcCampaignUxPostEditorId.value = Number(bcSelectedId.value || 0)
+  const created = await createBcDraft('autopost')
+  if (!created) return
+  const nid = Number(bcSelectedId.value || 0)
+  if (!nid) {
+    window.alert(tt('admin.bc_campaign.err_draft_create'))
+    return
+  }
+  bcCampaignUxPostEditorId.value = nid
   bcCampaignUxPostEditorMode.value = 'create'
   bcCampaignUxScreen.value = 'postEditor'
+  bcQuickTitleBaseline.value = String(bcTitle.value || '')
 }
 async function bcCampaignUxSavePostEditor() {
   const ok = await saveBcDraft()
   if (!ok) return
   const bid = Number(bcSelectedId.value || bcCampaignUxPostEditorId.value || 0)
-  if (bid > 0 && !(bcCampaignUxWizard.value.postIds || []).includes(bid)) {
-    bcCampaignUxWizard.value.postIds = [...(bcCampaignUxWizard.value.postIds || []), bid]
+  if (bid > 0 && String(bcCampaignUxPostEditorReturn.value || 'wizard') === 'wizard') {
+    bcCampaignUxWizard.value.postIds = [bid]
   }
-  bcCampaignUxScreen.value = 'wizard'
+  const nextScreen = String(bcCampaignUxPostEditorReturn.value || 'wizard')
+  bcCampaignUxScreen.value = nextScreen
+  if (nextScreen === 'stats' && bcCampaignUxManageItem.value) {
+    try {
+      await bcCampaignUxOpenStats(bcCampaignUxManageItem.value)
+    } catch {
+      //
+    }
+    return
+  }
+  if (nextScreen === 'manage') {
+    try {
+      await Promise.all([loadBroadcasts(), loadAutopostCampaigns()])
+    } catch {
+      //
+    }
+  }
 }
 function bcCampaignUxToggleWeekday(day) {
   const v = Number(day)
@@ -2308,6 +4077,16 @@ function bcCampaignUxToggleWeekday(day) {
   if (set.has(v)) set.delete(v)
   else set.add(v)
   bcCampaignUxWizard.value.weekdays = [...set].sort((a, b) => a - b)
+}
+function bcCampaignUxToggleWizardTargetChannels() {
+  const w = bcCampaignUxWizard.value
+  w.targetChannels = !w.targetChannels
+  if (!w.targetChannels) w.selectedChannels = []
+}
+function bcCampaignUxToggleWizardTargetGroups() {
+  const w = bcCampaignUxWizard.value
+  w.targetGroups = !w.targetGroups
+  if (!w.targetGroups) w.selectedGroups = []
 }
 function bcCampaignUxOpenRecipientPicker(kind) {
   bcCampaignUxRecipientPickerKind.value = kind === 'channels' ? 'channels' : 'groups'
@@ -2340,48 +4119,91 @@ function bcCampaignUxClearRecipients() {
 async function bcCampaignUxCreateCampaign() {
   if (bcCampaignUxBusy.value) return
   const w = bcCampaignUxWizard.value
-  const postIds = (w.postIds || []).map((x) => Number(x)).filter((x) => x > 0)
-  if (!String(w.title || '').trim() || !postIds.length) return
+  if (!String(w.title || '').trim()) return
   bcCampaignUxBusy.value = true
   try {
-    const mode = String(w.scheduleMode || 'every_day')
-    const wdFromCustom = String(w.customDays || '')
-      .split(',')
-      .map((x) => Number(String(x || '').trim()))
-      .filter((n) => Number.isFinite(n) && n >= 0 && n <= 6)
-    const wd =
-      mode === 'weekdays'
-        ? [...(w.weekdays || [0, 1, 2, 3, 4])]
-        : mode === 'custom'
-          ? (wdFromCustom.length ? [...new Set(wdFromCustom)] : [1, 3, 5])
-          : [0, 1, 2, 3, 4, 5, 6]
+    await loadBroadcasts()
+    const existing = new Set((broadcasts.value || []).map((b) => Number(b?.id || 0)).filter((x) => x > 0))
+    const rawPosts = [...new Set((w.postIds || []).map((x) => Number(x)).filter((x) => x > 0))]
+    if (!rawPosts.length) return
+    const postIds = rawPosts.filter((x) => existing.has(x)).slice(0, 1)
+    if (!postIds.length) {
+      window.alert(tt('admin.bc_campaign.err_posts_resolve'))
+      return
+    }
+    const modeRaw = String(w.scheduleMode || 'every_day')
+    const mode = modeRaw === 'weekdays' ? 'weekdays' : 'every_day'
+    const wd = mode === 'weekdays' ? [...(w.weekdays || [0, 1, 2, 3, 4])] : [0, 1, 2, 3, 4, 5, 6]
+    const { rows } = bcCampaignUxNormalizeSendWindowRowsFromInput(w)
+    const timing = bcCampaignUxAutopostTimingPayloadFromRows(w, rows)
+    const activeG = bcCampaignUxWizardActiveGroupIds()
+    const activeCh = bcCampaignUxWizardActiveChannelIds()
+    const usersOnly =
+      showFullAdminShell.value &&
+      !isBroadcastShellLite.value &&
+      w.targetBots &&
+      !w.targetGroups &&
+      !w.targetChannels
+    if (!usersOnly && !activeG.length && !activeCh.length) {
+      window.alert(tt('admin.bc_campaign.err_pick_recipients'))
+      return
+    }
     const ap = {
       runState: 'stopped',
-      scheduleMode: mode === 'weekdays' || mode === 'custom' ? 'weekdays' : 'every_day',
+      scheduleMode: mode === 'weekdays' ? 'weekdays' : 'every_day',
       weekdays: wd,
-      postsPerDay: Math.max(1, Math.min(288, Number(w.postsPerDay || 1))),
+      startDate: String(w.startDate || '').trim().slice(0, 10),
+      endDate: String(w.endDate || '').trim().slice(0, 10),
       timezone: String(w.timezone || 'Asia/Yekaterinburg').trim() || 'Asia/Yekaterinburg',
-      windowStart: String(w.windowStart || w.sendTime || '09:00'),
-      windowEnd: String(w.windowEnd || w.sendTime || '21:00'),
-      spreadInWindow: w.spreadInWindow !== false,
-      autopost_target: w.targetBots && !w.targetGroups && !w.targetChannels ? 'users' : 'groups',
-      group_chat_ids: w.targetGroups ? [...(w.selectedGroups || [])] : [],
-      channel_chat_ids: w.targetChannels ? [...(w.selectedChannels || [])] : [],
+      ...timing,
+      autopost_target:
+        showFullAdminShell.value &&
+        !isBroadcastShellLite.value &&
+        w.targetBots &&
+        !w.targetGroups &&
+        !w.targetChannels
+          ? 'users'
+          : 'groups',
+      group_chat_ids: [...bcCampaignUxWizardActiveGroupIds()],
+      channel_chat_ids: [...bcCampaignUxWizardActiveChannelIds()],
       autopost_channels_disabled: !w.targetChannels,
-      use_all_broadcasts: w.campaignType === 'rotation',
-      broadcast_ids: w.campaignType === 'rotation' ? [] : [...postIds],
+      use_all_broadcasts: false,
+      broadcast_ids: [...postIds],
     }
     let cid = Number(bcCampaignUxEditingCampaignId.value || 0)
     if (cid > 0) {
-      await fetch(() => api.adminAutopostCampaignPatch(cid, { title: String(w.title || '').trim(), autopost: ap }))
+      await fetch(() =>
+        api.adminAutopostCampaignPatch(cid, {
+          title: String(w.title || '').trim(),
+          anchor_broadcast_id: postIds[0],
+          autopost: ap,
+        }),
+      )
     } else {
       const created = await fetch(() => api.adminAutopostCampaignCreate({ anchor_broadcast_id: postIds[0] }))
       cid = Number(created?.id || 0)
       if (!cid) throw new Error(tt('admin.autopost.err_campaign_not_created'))
-      await fetch(() => api.adminAutopostCampaignPatch(cid, { title: String(w.title || '').trim(), autopost: ap }))
+      await fetch(() =>
+        api.adminAutopostCampaignPatch(cid, {
+          title: String(w.title || '').trim(),
+          anchor_broadcast_id: postIds[0],
+          autopost: ap,
+        }),
+      )
     }
     await loadAutopostCampaigns()
-    bcCampaignUxSuccessInfo.value = { id: cid, nextAt: bcCampaignUxNearestAt() }
+    const camp = (bcAutopostCampaigns.value || []).find((c) => Number(c?.id || 0) === cid)
+    const apSaved = camp?.autopost && typeof camp.autopost === 'object' ? camp.autopost : {}
+    const savedN =
+      (apSaved.group_chat_ids || []).length +
+      (apSaved.autopost_channels_disabled ? 0 : (apSaved.channel_chat_ids || []).length)
+    const wantedN = activeG.length + activeCh.length
+    if (wantedN > 0 && savedN === 0) {
+      window.alert(tt('admin.bc_campaign.err_recipients_filtered'))
+    } else if (wantedN > savedN && savedN > 0) {
+      window.alert(tt('admin.broadcast_send.some_chats_filtered', { requested: wantedN, resolved: savedN }))
+    }
+    bcCampaignUxSuccessInfo.value = { id: cid, nextAt: bcCampaignUxNearestAt(), needsStart: true }
     bcCampaignUxManageId.value = cid
     bcCampaignUxScreen.value = 'success'
   } catch (e) {
@@ -2390,12 +4212,205 @@ async function bcCampaignUxCreateCampaign() {
     bcCampaignUxBusy.value = false
   }
 }
+
+function bcCampaignUxOpenScheduleModal(camp) {
+  const id = Number(camp?.id || 0)
+  if (!id) return
+  const ap = camp?.autopost || {}
+  bcCampaignUxScheduleCampId.value = id
+  const apModeRaw = String(ap?.scheduleMode || 'every_day')
+  const apMode = apModeRaw === 'weekdays' ? 'weekdays' : 'every_day'
+  bcCampaignUxScheduleForm.value = {
+    scheduleMode: apMode,
+    intervalDays: 1,
+    weekdays: Array.isArray(ap?.weekdays) && ap.weekdays.length ? ap.weekdays.map((x) => Number(x)) : [0, 1, 2, 3, 4],
+    startDate: String(ap?.startDate || '').slice(0, 10),
+    endDate: String(ap?.endDate || '').slice(0, 10),
+    sendTime: String(ap?.firstPostTime || ap?.windowStart || '09:00').slice(0, 5),
+    timezone: String(ap?.timezone || 'Asia/Yekaterinburg'),
+    spreadInWindow: ap?.spreadInWindow !== false,
+    customDays: '',
+    sendWindows: bcCampaignUxScheduleSegmentsFromAp(ap),
+  }
+  bcCampaignUxScheduleModalOpen.value = true
+}
+
+function bcCampaignUxCloseScheduleModal() {
+  bcCampaignUxScheduleModalOpen.value = false
+  bcCampaignUxScheduleCampId.value = 0
+}
+
+function bcCampaignUxScheduleSetStartTodayFromTz() {
+  const w = bcCampaignUxScheduleForm.value
+  const tz = String(w.timezone || '').trim()
+  const d = new Date()
+  const pad = (n) => String(n).padStart(2, '0')
+  let ymd = ''
+  let hm = '09:00'
+  try {
+    const tzUse = tz || (typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : 'UTC')
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: tzUse,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(d)
+    const gp = (t) => parts.find((x) => x.type === t)?.value || ''
+    ymd = `${gp('year')}-${gp('month')}-${gp('day')}`
+    hm = `${gp('hour')}:${gp('minute')}`
+  } catch {
+    ymd = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+    hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  }
+  hm = hm.slice(0, 5)
+  bcCampaignUxScheduleForm.value = { ...bcCampaignUxScheduleForm.value, startDate: ymd, sendTime: hm }
+}
+
+function bcCampaignUxScheduleToggleWeekday(day) {
+  const v = Number(day)
+  if (!(v >= 0 && v <= 6)) return
+  const w = bcCampaignUxScheduleForm.value
+  const set = new Set((w.weekdays || []).map((x) => Number(x)))
+  if (set.has(v)) set.delete(v)
+  else set.add(v)
+  bcCampaignUxScheduleForm.value = { ...w, weekdays: [...set].sort((a, b) => a - b) }
+}
+
+function bcCampaignUxScheduleFormAddSegment() {
+  const w = bcCampaignUxScheduleForm.value
+  const arr = [...(w.sendWindows || [])]
+  const last = arr.length ? arr[arr.length - 1] : { windowStart: '09:00', windowEnd: '21:00', posts: 1 }
+  arr.push({
+    windowStart: String(last.windowStart || '09:00').slice(0, 5),
+    windowEnd: String(last.windowEnd || '21:00').slice(0, 5),
+    posts: Math.max(1, Math.min(288, Math.trunc(Number(last.posts || 1)))),
+  })
+  bcCampaignUxScheduleForm.value = { ...w, sendWindows: arr }
+}
+
+function bcCampaignUxScheduleFormRemoveSegment(idx) {
+  const w = bcCampaignUxScheduleForm.value
+  const arr = [...(w.sendWindows || [])]
+  if (arr.length <= 1) return
+  arr.splice(Number(idx), 1)
+  bcCampaignUxScheduleForm.value = { ...w, sendWindows: arr }
+}
+
+function bcCampaignUxWizardAddScheduleSegment() {
+  const w = bcCampaignUxWizard.value
+  const arr = [...(w.sendWindows || [])]
+  const last = arr.length ? arr[arr.length - 1] : null
+  const row = last
+    ? {
+        windowStart: String(last.windowStart || '09:00').slice(0, 5),
+        windowEnd: String(last.windowEnd || '21:00').slice(0, 5),
+        posts: Math.max(1, Math.min(288, Math.trunc(Number(last.posts || w.postsPerDay || 1)))),
+      }
+    : {
+        windowStart: String(w.windowStart || '09:00').slice(0, 5),
+        windowEnd: String(w.windowEnd || '21:00').slice(0, 5),
+        posts: Math.max(1, Math.min(288, Math.trunc(Number(w.postsPerDay || 1)))),
+      }
+  bcCampaignUxWizard.value = { ...w, sendWindows: [...arr, row] }
+}
+
+function bcCampaignUxWizardRemoveScheduleSegment(idx) {
+  const w = bcCampaignUxWizard.value
+  const arr = [...(w.sendWindows || [])]
+  if (arr.length <= 1) return
+  arr.splice(Number(idx), 1)
+  bcCampaignUxWizard.value = { ...w, sendWindows: arr }
+}
+
+function bcCampaignUxWizardPostsPerDayEdited() {
+  const w = bcCampaignUxWizard.value
+  const arr = [...(w.sendWindows || [])]
+  if (arr.length !== 1) return
+  const ppd = Math.max(1, Math.min(288, Math.trunc(Number(w.postsPerDay || 1))))
+  arr[0].posts = ppd
+  bcCampaignUxWizard.value = { ...w, windowStart: arr[0].windowStart, windowEnd: arr[0].windowEnd, sendWindows: arr }
+}
+
+function bcCampaignUxWizardSegmentPostsEdited() {
+  const w = bcCampaignUxWizard.value
+  const arr = [...(w.sendWindows || [])]
+  if (arr.length !== 1) return
+  const p = Math.max(1, Math.min(288, Math.trunc(Number(arr[0].posts || 1))))
+  arr[0].posts = p
+  bcCampaignUxWizard.value = { ...w, postsPerDay: p, windowStart: arr[0].windowStart, windowEnd: arr[0].windowEnd, sendWindows: arr }
+}
+
+async function bcCampaignUxSaveScheduleModal() {
+  if (bcCampaignUxScheduleBusy.value) return
+  const cid = Number(bcCampaignUxScheduleCampId.value || 0)
+  if (!cid) return
+  const w = bcCampaignUxScheduleForm.value
+  const modeRaw = String(w.scheduleMode || 'every_day')
+  const mode = modeRaw === 'weekdays' ? 'weekdays' : 'every_day'
+  const wd = mode === 'weekdays' ? [...(w.weekdays || [0, 1, 2, 3, 4])] : [0, 1, 2, 3, 4, 5, 6]
+  const { rows } = bcCampaignUxNormalizeSendWindowRowsFromInput(w)
+  const timing = bcCampaignUxAutopostTimingPayloadFromRows(w, rows)
+  const ap = {
+    scheduleMode: mode === 'weekdays' ? 'weekdays' : 'every_day',
+    weekdays: wd,
+    startDate: String(w.startDate || '').trim().slice(0, 10),
+    endDate: String(w.endDate || '').trim().slice(0, 10),
+    timezone: String(w.timezone || 'Asia/Yekaterinburg').trim() || 'Asia/Yekaterinburg',
+    ...timing,
+  }
+  bcCampaignUxScheduleBusy.value = true
+  try {
+    await fetch(() => api.adminAutopostCampaignPatch(cid, { autopost: ap }))
+    await loadAutopostCampaigns()
+    bcCampaignUxCloseScheduleModal()
+  } catch (e) {
+    window.alert(String(e?.body?.detail || e?.message || tt('admin.autopost.err_save')))
+  } finally {
+    bcCampaignUxScheduleBusy.value = false
+  }
+}
+
+function bcCampaignUxFormatCampStatInstant(iso) {
+  if (!iso) return '—'
+  try {
+    const d = new Date(String(iso))
+    if (Number.isNaN(d.getTime())) return String(iso)
+    const tz = String(bcCampaignUxManageItem.value?.autopost?.timezone || '').trim()
+    const opts = { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }
+    if (tz) {
+      try {
+        return new Intl.DateTimeFormat(undefined, { ...opts, timeZone: tz }).format(d)
+      } catch {
+        //
+      }
+    }
+    return new Intl.DateTimeFormat(undefined, opts).format(d)
+  } catch {
+    return String(iso)
+  }
+}
+
+function bcCampaignUxLeaveStatsToManage() {
+  bcCampaignUxStatsDeliverModalOpen.value = false
+  bcCampaignUxScreen.value = 'manage'
+}
+
 async function bcCampaignUxOpenStats(camp) {
   const id = Number(camp?.id || bcCampaignUxManageId.value || 0)
   if (!id) return
+  bcCampaignUxStatsDeliverModalOpen.value = false
   bcCampaignUxManageId.value = id
   bcCampaignUxScreen.value = 'stats'
   bcCampaignUxStatsData.value = null
+  bcBroadcastGroupScope.value = 'mine'
+  try {
+    await Promise.all([loadBroadcastEligibleGroups(), loadBroadcastEligibleChannels()])
+  } catch {
+    /* ignore */
+  }
   try {
     bcCampaignUxStatsData.value = await fetch(() =>
       api.adminAutopostCampaignAutopostStats(id, Number(bcCampaignUxStatsPeriod.value || 7) || 7),
@@ -2529,7 +4544,7 @@ function bcSanitizeSelectionsToEligibleLists() {
 async function loadBroadcastEligibleGroups() {
   try {
     const sc = bcBroadcastGroupScope.value === 'all' ? 'all' : 'mine'
-    const r = await fetch(() => api.adminBroadcastGroups(sc))
+    const r = await fetch(() => api.adminBroadcastGroups(sc, { includeInactive: true }))
     const items = r?.items || []
     const myTg = Number(meAdminProfile.value?.telegram_id || 0)
     const onlyForeign =
@@ -2666,6 +4681,24 @@ async function loadBroadcastEligibleChannels() {
   } catch {
     bcBroadcastChannels.value = []
   }
+}
+
+/**
+ * Расширяем scope=all только если в сохранённых id есть чаты вне списка «мой кабинет»
+ * (полный админ сервиса). Иначе счётчик на главной и выбор получателей совпадают по умолчанию.
+ */
+async function bcExpandBroadcastScopeIfSavedTargetsMissing(savedGroupIds, savedChannelIds) {
+  if (!bcBroadcastCanScopeAll.value) return
+  const gids = [...new Set((savedGroupIds || []).map(Number).filter((x) => Number.isFinite(x) && x < 0))]
+  const cids = [...new Set((savedChannelIds || []).map(Number).filter((x) => Number.isFinite(x) && x < 0))]
+  const haveG = new Set((bcBroadcastGroups.value || []).map((c) => bcNormalizeChatId(c)))
+  const haveCh = new Set((bcBroadcastChannels.value || []).map((c) => bcNormalizeChatId(c)))
+  const missG = gids.some((id) => !haveG.has(id))
+  const missCh = cids.some((id) => !haveCh.has(id))
+  if (!missG && !missCh) return
+  bcBroadcastGroupScope.value = 'all'
+  await loadBroadcastEligibleGroups()
+  await loadBroadcastEligibleChannels()
 }
 
 async function loadBcAutopostDetailStats() {
@@ -2843,13 +4876,10 @@ async function openBcAutopostCampaignModal(camp) {
   bcBroadcastGroupScope.value = 'mine'
   await loadBroadcastEligibleGroups()
   await loadBroadcastEligibleChannels()
-  const saved = [...(bcAutopostingForm.value.group_chat_ids || [])]
-  const have = new Set(bcBroadcastGroups.value.map((c) => bcNormalizeChatId(c)))
-  if (saved.some((gid) => !have.has(Number(gid))) && bcBroadcastCanScopeAll.value) {
-    bcBroadcastGroupScope.value = 'all'
-    await loadBroadcastEligibleGroups()
-    await loadBroadcastEligibleChannels()
-  }
+  await bcExpandBroadcastScopeIfSavedTargetsMissing(
+    bcAutopostingForm.value.group_chat_ids || [],
+    bcAutopostingForm.value.channel_chat_ids || [],
+  )
   if (!bcAutopostingForm.value.use_all_broadcasts && !(bcAutopostingForm.value.broadcast_ids || []).length) {
     const cid = Number(bcAutopostCampaignAnchorBid.value || 0)
     if (cid > 0) {
@@ -2904,6 +4934,12 @@ async function deleteBcAutopostCampaign(camp) {
   try {
     await fetch(() => api.adminAutopostCampaignDelete(id))
     await loadAutopostCampaigns()
+    bcCampaignUxManageId.value = 0
+    bcCampaignUxScreen.value = 'list'
+    bcCampaignUxStatsDeliverModalOpen.value = false
+    bcCampaignUxRecipientsModalOpen.value = false
+    bcCampaignUxCloseScheduleModal()
+    if (bcCampaignUxCampaignPostsModalOpen.value) bcCampaignUxCloseCampaignPostsModal()
   } catch (e) {
     window.alert(String(e?.body?.detail || e?.message || tt('admin.autopost.err_delete')))
   }
@@ -2976,6 +5012,7 @@ const bcStatsData = ref({
   errors: [],
   connected_groups_total: 0,
   connected_bots_total: 0,
+  send_history: [],
 })
 
 const bcStatsBatchesFiltered = computed(() => Array.isArray(bcStatsData.value?.batches) ? bcStatsData.value.batches : [])
@@ -3012,7 +5049,14 @@ function bcMediaIcon(kind) {
 }
 
 function bcNormalizeChatId(c) {
-  return Number(c?.chat_id || c?.id || 0)
+  if (!c || typeof c !== 'object') return 0
+  if (c.chat_id !== undefined && c.chat_id !== null && c.chat_id !== '') {
+    const n = Number(c.chat_id)
+    if (Number.isFinite(n) && n !== 0) return n
+  }
+  const alt = Number(c.telegram_chat_id ?? c.channel_id ?? 0)
+  if (Number.isFinite(alt) && alt !== 0) return alt
+  return Number(c.id || 0)
 }
 
 function fmtDateTime(v) {
@@ -3215,7 +5259,12 @@ function openBroadcastStats() {
   }
   const sid = Number(bcStatsSelectedId.value || 0)
   const remembered = String(bcLastSendTargetByPost.value?.[sid] || '').toLowerCase()
-  bcStatsTab.value = isBroadcastShellLite.value ? 'groups' : remembered === 'groups' ? 'groups' : 'bots'
+  bcStatsTab.value =
+    isBroadcastShellLite.value
+      ? 'groups'
+      : remembered === 'groups' || remembered === 'all'
+        ? 'groups'
+        : 'bots'
   bcStatsFrom.value = ''
   bcStatsTo.value = nowLocalInputValue()
   bcStatsModalOpen.value = true
@@ -3247,12 +5296,14 @@ function applyHistoryItem(item) {
   loadBroadcastStats()
 }
 
-async function loadBroadcastStats() {
+async function loadBroadcastStats(opts = {}) {
+  const silent = Boolean(opts?.silent)
   const id = Number(bcStatsSelectedId.value || 0)
   if (!id) return
-  bcStatsLoading.value = true
+  if (!silent) bcStatsLoading.value = true
+  const doFetch = silent ? fetchSilent : fetch
   try {
-    const r = await fetch(() =>
+    const r = await doFetch(() =>
       api.adminBroadcastStats(
         id,
         '',
@@ -3270,6 +5321,7 @@ async function loadBroadcastStats() {
       errors: Array.isArray(r?.errors) ? r.errors : [],
       connected_groups_total: Number(r?.connected_groups_total || 0),
       connected_bots_total: Number(r?.connected_bots_total || 0),
+      send_history: Array.isArray(r?.send_history) ? r.send_history : [],
     }
     bcStatsBatchId.value = String(r?.active_batch_id || '')
   } catch {
@@ -3282,9 +5334,10 @@ async function loadBroadcastStats() {
       errors: [],
       connected_groups_total: 0,
       connected_bots_total: 0,
+      send_history: [],
     }
   } finally {
-    bcStatsLoading.value = false
+    if (!silent) bcStatsLoading.value = false
   }
 }
 
@@ -3305,43 +5358,65 @@ function resetBcSendUiExtras() {
   bcSendResultLoading.value = false
 }
 
-async function loadBcSendResultStats(broadcastId) {
+async function loadBcSendResultStats(broadcastId, opts = {}) {
   const bid = Number(broadcastId || 0)
   if (!bid) return
-  bcSendResultLoading.value = true
+  const silent = Boolean(opts?.silent)
+  if (!silent) bcSendResultLoading.value = true
   try {
-    const r = await fetchSilent(() =>
-      api.adminBroadcastStats(
-        bid,
-        '',
-        minusMinutesLocalInputValue(30),
-        nowLocalInputValue(),
-        isBroadcastShellLite.value ? 'groups' : String(bcSendTargetKind.value || '') === 'groups' ? 'groups' : 'bots',
-      ),
-    )
+    const tk = bcBroadcastStatsTargetKindForSendFlow()
+    const r = await fetchSilent(() => api.adminBroadcastStats(bid, '', '', '', tk))
     bcSendResultSnapshot.value = {
       bots: r?.bots || { ok: 0, fail: 0, total: 0 },
       groups: r?.groups || { ok: 0, fail: 0, total: 0 },
       overall: r?.overall || { ok: 0, fail: 0, total: 0 },
+      audience_ok: Number(r?.audience_ok || 0),
+      audience_total: Number(r?.audience_total || 0),
       per_groups: Array.isArray(r?.per_groups) ? r.per_groups : [],
       batches: Array.isArray(r?.batches) ? r.batches : [],
       errors: Array.isArray(r?.errors) ? r.errors : [],
       connected_groups_total: Number(r?.connected_groups_total || 0),
       connected_bots_total: Number(r?.connected_bots_total || 0),
+      real_clicks: Number(r?.real_clicks || 0),
+      real_transitions: Number(r?.real_transitions || 0),
+      real_clicks_total: Number(r?.real_clicks_total || 0),
+      real_link_clicks_total: Number(r?.real_link_clicks_total || 0),
+      real_callback_clicks_total: Number(r?.real_callback_clicks_total || 0),
+      real_reactions_total: Number(r?.real_reactions_total || 0),
+      broadcast_url_tracking_configured: Boolean(r?.broadcast_url_tracking_configured),
+      real_link_items: Array.isArray(r?.real_link_items) ? r.real_link_items : [],
+      real_callback_items: Array.isArray(r?.real_callback_items) ? r.real_callback_items : [],
+      stats_ctr_percent: r?.stats_ctr_percent != null && Number.isFinite(Number(r.stats_ctr_percent)) ? Number(r.stats_ctr_percent) : null,
+      stats_ctr_mode: String(r?.stats_ctr_mode || ''),
     }
   } catch {
-    bcSendResultSnapshot.value = {
+    if (!silent) {
+      bcSendResultSnapshot.value = {
       bots: { ok: 0, fail: 0, total: 0 },
       groups: { ok: 0, fail: 0, total: 0 },
       overall: { ok: 0, fail: 0, total: 0 },
+      audience_ok: 0,
+      audience_total: 0,
       per_groups: [],
       batches: [],
       errors: [],
       connected_groups_total: 0,
       connected_bots_total: 0,
+      real_clicks: 0,
+      real_transitions: 0,
+      real_clicks_total: 0,
+      real_link_clicks_total: 0,
+      real_callback_clicks_total: 0,
+      real_reactions_total: 0,
+      broadcast_url_tracking_configured: true,
+      real_link_items: [],
+      real_callback_items: [],
+      stats_ctr_percent: null,
+      stats_ctr_mode: '',
+    }
     }
   } finally {
-    bcSendResultLoading.value = false
+    if (!silent) bcSendResultLoading.value = false
   }
 }
 
@@ -3362,14 +5437,20 @@ function bcSendGoToBroadcasts() {
 function bcSendOpenStatsFromModal() {
   const bid = Number(bcSendModalBroadcastId.value || 0)
   if (!bid) return
-  bcStatsSelectedId.value = bid
-  const remembered = String(bcLastSendTargetByPost.value?.[bid] || '').toLowerCase()
-  bcStatsTab.value = isBroadcastShellLite.value ? 'groups' : remembered === 'groups' ? 'groups' : 'bots'
-  bcStatsFrom.value = minusMinutesLocalInputValue(30)
-  bcStatsTo.value = nowLocalInputValue()
-  bcStatsModalOpen.value = true
-  loadBroadcastStats()
+  const live =
+    bcSendLiveRow.value && Number(bcSendLiveRow.value?.id || 0) === bid ? { ...bcSendLiveRow.value } : null
+  const row = live || (broadcasts.value || []).find((x) => Number(x?.id || 0) === bid)
+  const item =
+    row || {
+      id: bid,
+      title: '',
+      status: 'sent',
+      recipient_ok: Number(bcSendLiveRow.value?.recipient_ok || 0),
+      recipient_total: Number(bcSendLiveRow.value?.recipient_total || 0),
+      sent_at: bcSendLiveRow.value?.sent_at || bcSendLiveRow.value?.finished_at || '',
+    }
   closeBcSendModal()
+  bcOpenRecentBroadcastStats(item)
 }
 
 /** Отмена в UI не останавливает серверную отправку — только закрывает экран прогресса. */
@@ -3391,6 +5472,7 @@ function bcDismissBroadcastSendPrefaceOverlays() {
   bcShowGroupsPicker.value = false
   bcShowChannelsPicker.value = false
   bcShowBotsPicker.value = false
+  bcCampaignUxRecipientPickerOpen.value = false
 }
 
 async function startBroadcastProgressPolling(id, target) {
@@ -3413,7 +5495,15 @@ async function startBroadcastProgressPolling(id, target) {
   bcStatsFrom.value = minusMinutesLocalInputValue(1)
   bcStatsTo.value = nowLocalInputValue()
   if (bcStatsModalOpen.value && Number(bcStatsSelectedId.value || 0) === Number(id || 0)) {
-    bcStatsTab.value = String(target || '').toLowerCase() === 'groups' ? 'groups' : 'bots'
+    const t = String(target || '').toLowerCase()
+    bcStatsTab.value =
+      t === 'groups'
+        ? 'groups'
+        : t === 'users'
+          ? 'bots'
+          : t === 'all'
+            ? 'groups'
+            : 'bots'
   }
   const tick = async () => {
     const bid = Number(bcSendModalBroadcastId.value || 0)
@@ -3427,7 +5517,7 @@ async function startBroadcastProgressPolling(id, target) {
         Number(bcStatsSelectedId.value || 0) === bid &&
         !bcSendModalOpen.value
       ) {
-        await loadBroadcastStats()
+        await loadBroadcastStats({ silent: true })
       }
       const st = String(row?.status || '').toLowerCase()
       const sentAt = row?.sent_at
@@ -3439,8 +5529,11 @@ async function startBroadcastProgressPolling(id, target) {
       const sendingVisibleFor = Date.now() - Number(bcSendSendingStartedAt.value || 0)
       const finishedBySentAtFallback = !!sentAt && st !== 'failed' && sendingVisibleFor >= 9000
       const errMsg = String(row?.error_message || '').trim()
-      const failedAsDraftWithError = st === 'draft' && !sentAt && !!errMsg && sendingVisibleFor >= 3500
-      if (st === 'sent' || finishedAsDraftWithStats || finishedBySentAtFallback) {
+      const failedAsDraftWithError =
+        st === 'draft' && !sentAt && !!errMsg && okc <= 0 && sendingVisibleFor >= 3500
+      const succeededDespiteDraft =
+        st === 'draft' && !!sentAt && okc > 0 && (countsLookComplete || finishedBySentAtFallback)
+      if (st === 'sent' || finishedAsDraftWithStats || finishedBySentAtFallback || succeededDespiteDraft) {
         stopBroadcastProgressPolling()
         const bidSnap = bid
         const t0 = bcSendSendingStartedAt.value || Date.now()
@@ -3481,8 +5574,23 @@ function bcFileExt(name) {
   return n.slice(i + 1).toUpperCase()
 }
 
+function bcEditorHasMediaAttachment() {
+  if ((bcMediaHistory.value || []).length > 0) return true
+  const mk = String(bcMediaKindStored.value || 'none').toLowerCase()
+  if (mk !== 'none') return true
+  const bid = Number(bcSelectedId.value || 0)
+  if (!bid) return false
+  const row = (broadcasts.value || []).find((b) => Number(b?.id || 0) === bid)
+  return !!(
+    row?.has_media_file ||
+    row?.telegram_file_id ||
+    (Array.isArray(row?.media_items) && row.media_items.length) ||
+    String(row?.media_original_name || '').trim()
+  )
+}
+
 function bcCurrentMaxLen() {
-  return bcMediaKindStored.value === 'none' ? 4096 : 1024
+  return bcEditorHasMediaAttachment() ? BC_BROADCAST_CAPTION_MAX_CHARS : BC_BROADCAST_BODY_MAX_CHARS
 }
 
 function bcCurrentLen() {
@@ -3513,12 +5621,13 @@ async function ensureEmojiPicker() {
 function bcSyncEditorHtml() {
   const el = bcResolveBodyEditor()
   if (!el) return
-  const html = String(el.innerHTML || '')
-  const plain = String(el.innerText || '').trim()
-  const normalized = bcNormalizeHtmlForTelegram(html)
-  // iOS/WebView can temporarily leave innerHTML blank during IME composition.
-  // Fallback to plain text so "Далее/Отправить" sees already typed content.
-  bcBodyHtml.value = !normalized && plain ? plain : html
+  const htmlFromEditor = String(el.innerHTML || '')
+  const normalized = bcNormalizeHtmlForTelegram(htmlFromEditor)
+  if (bcEditModalOpen.value && bcEditBodyRef.value && el === bcEditBodyRef.value) {
+    bcEditBodyHtml.value = normalized
+    return
+  }
+  bcBodyHtml.value = normalized
 }
 
 function bcRecordHistory(force = false) {
@@ -3569,44 +5678,45 @@ function bcRedo() {
   bcUpdateFormatState()
 }
 
-function bcNormalizeHtmlForTelegram(raw) {
-  const esc = (s) => String(s || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-  const host = document.createElement('div')
-  host.innerHTML = String(raw || '')
-  const walk = (node) => {
-    if (!node) return ''
-    if (node.nodeType === Node.TEXT_NODE) return esc(node.textContent || '')
-    if (node.nodeType !== Node.ELEMENT_NODE) return ''
-    const el = node
-    const tag = String(el.tagName || '').toLowerCase()
-    const inner = Array.from(el.childNodes || []).map((n) => walk(n)).join('')
-    if (tag === 'br') return '\n'
-    if (tag === 'div' || tag === 'p') return `${inner}\n`
-    if (tag === 'b' || tag === 'strong') return `<b>${inner}</b>`
-    if (tag === 'i' || tag === 'em') return `<i>${inner}</i>`
-    if (tag === 'u') return `<u>${inner}</u>`
-    if (tag === 's' || tag === 'strike' || tag === 'del') return `<s>${inner}</s>`
-    if (tag === 'code') return `<code>${inner}</code>`
-    if (tag === 'pre') return `<pre>${inner}</pre>`
-    if (tag === 'blockquote') return `<blockquote>${inner}</blockquote>`
-    if (tag === 'a') {
-      const href = String(el.getAttribute('href') || '').trim().replace(/"/g, '&quot;')
-      return href ? `<a href="${href}">${inner}</a>` : inner
-    }
-    if (tag === 'span' && String(el.getAttribute('data-spoiler') || '') === '1') {
-      return `<tg-spoiler>${inner}</tg-spoiler>`
-    }
-    if (tag === 'tg-spoiler') return `<tg-spoiler>${inner}</tg-spoiler>`
-    if (tag === 'tg-emoji') {
-      const id = String(el.getAttribute('emoji-id') || '').trim()
-      return id ? `<tg-emoji emoji-id="${id}">${inner || '🙂'}</tg-emoji>` : (inner || '🙂')
-    }
-    return inner
+/** Подчёркивание только из атрибута style (fragment не в дереве документа — getComputedStyle неверен). */
+function bcUnderlineFromStyleAttr(el) {
+  const st = String(el?.getAttribute?.('style') || '')
+  return (
+    /\btext-decoration-line\s*:\s*[^;'"]*\bunderline\b/i.test(st) ||
+    /\btext-decoration\s*:\s*[^;'"]*\bunderline\b/i.test(st)
+  )
+}
+
+function bcElementUnderlineInRenderedEditor(spanEl) {
+  if (!(spanEl instanceof HTMLElement)) return false
+  if (bcUnderlineFromStyleAttr(spanEl)) return true
+  if (!spanEl.isConnected) return false
+  try {
+    const cs = window.getComputedStyle(spanEl)
+    const line = `${cs.textDecorationLine || ''} ${cs.textDecoration || ''}`
+    return line.includes('underline')
+  } catch {
+    return false
   }
-  return walk(host).replace(/\n{3,}/g, '\n\n').trim()
+}
+
+/** span с underline после execCommand → <u>, иначе нормализация удаляет оформление. */
+function bcCoerceUnderlineSpansToU(root) {
+  if (!(root instanceof HTMLElement)) return
+  const spans = root.querySelectorAll('span')
+  for (let i = spans.length - 1; i >= 0; i -= 1) {
+    const sp = spans.item(i)
+    if (!(sp instanceof HTMLElement)) continue
+    if (String(sp.getAttribute('data-spoiler') || '') === '1') continue
+    if (!bcElementUnderlineInRenderedEditor(sp)) continue
+    const u = document.createElement('u')
+    while (sp.firstChild) u.appendChild(sp.firstChild)
+    sp.parentNode?.replaceChild(u, sp)
+  }
+}
+
+function bcNormalizeHtmlForTelegram(raw) {
+  return normalizeHtmlForTelegram(String(raw ?? ''))
 }
 
 function bcInsertHtmlAtCursor(html) {
@@ -3662,35 +5772,55 @@ function bcExec(cmd) {
   const el = bcResolveBodyEditor()
   if (!el) return
   el.focus()
+  if (cmd === 'underline') {
+    try {
+      document.execCommand('styleWithCSS', false, false)
+    } catch {
+      //
+    }
+  }
   document.execCommand(cmd, false)
+  if (cmd === 'underline') bcCoerceUnderlineSpansToU(el)
   bcUpdateFormatState()
   bcSyncEditorHtml()
   bcRecordHistory()
 }
 
-function bcExecEdit(cmd) {
-  const el = bcEditBodyRef.value
-  if (!el) return
-  el.focus()
-  document.execCommand(cmd, false)
-  bcEditBodyHtml.value = bcNormalizeHtmlForTelegram(String(el.innerHTML || ''))
-}
 
 function bcFormatBold() { bcExec('bold') }
 function bcFormatItalic() { bcExec('italic') }
 function bcFormatUnderline() { bcExec('underline') }
 function bcFormatStrike() { bcExec('strikeThrough') }
-function bcEditBold() { bcExecEdit('bold') }
-function bcEditItalic() { bcExecEdit('italic') }
-function bcEditUnderline() { bcExecEdit('underline') }
-function bcEditStrike() { bcExecEdit('strikeThrough') }
 function bcFormatSpoiler() {
   const el = bcResolveBodyEditor()
   if (!el) return
   el.focus()
   const range = bcCurrentRange()
+  if (!range) {
+    bcEditorShowHint(tt('admin.broadcast_editor.select_text_spoiler'))
+    return
+  }
+  let n = range.commonAncestorContainer
+  if (n.nodeType === Node.TEXT_NODE) n = n.parentElement
+  const spoiler = n?.closest?.('[data-spoiler="1"], tg-spoiler')
+  if (spoiler && el.contains(spoiler)) {
+    if (range.collapsed) {
+      editorUnwrapElementFully(spoiler)
+    } else if (!bcSelectedTextFromRange(range).trim()) {
+      bcEditorShowHint(tt('admin.broadcast_editor.select_text_spoiler'))
+      return
+    } else if (!editorUnwrapRangeInsideContainer(spoiler, range)) {
+      bcEditorShowHint(tt('admin.broadcast_editor.select_text_spoiler'))
+      return
+    }
+    bcSyncEditorHtml()
+    bcRecordHistory()
+    bcSavedTick.value = false
+    bcUpdateFormatState()
+    return
+  }
   if (!bcWrapRange(range, '<span data-spoiler="1">', '</span>')) {
-    alert(tt('admin.broadcast_editor.select_text_spoiler'))
+    bcEditorShowHint(tt('admin.broadcast_editor.select_text_spoiler'))
     return
   }
   bcSavedTick.value = false
@@ -3700,22 +5830,53 @@ function bcFormatPre() {
   const el = bcResolveBodyEditor()
   if (!el) return
   el.focus()
-  const sel = window.getSelection?.()
-  const text = sel?.toString() || ''
-  if (!text.trim()) {
-    alert(tt('admin.broadcast_editor.select_text_pre'))
+  const range = bcCurrentRange()
+  if (!range) {
+    bcEditorShowHint(tt('admin.broadcast_editor.select_text_pre'))
     return
   }
-  bcInsertHtmlAtCursor(`<pre>${text}</pre>`)
+  if (
+    !editorApplyMonospaceFormat(el, range, {
+      onEmpty: () => bcEditorShowHint(tt('admin.broadcast_editor.select_text_pre')),
+    })
+  ) {
+    return
+  }
+  bcSyncEditorHtml()
+  bcRecordHistory()
   bcSavedTick.value = false
+  bcUpdateFormatState()
 }
 function bcFormatBlockquote() {
   const el = bcResolveBodyEditor()
   if (!el) return
   el.focus()
   const range = bcCurrentRange()
+  if (!range) {
+    bcEditorShowHint(tt('admin.broadcast_editor.select_text_quote'))
+    return
+  }
+  let n = range.commonAncestorContainer
+  if (n.nodeType === Node.TEXT_NODE) n = n.parentElement
+  const bq = n?.closest?.('blockquote')
+  if (bq && el.contains(bq)) {
+    if (range.collapsed) {
+      editorUnwrapElementFully(bq)
+    } else if (!bcSelectedTextFromRange(range).trim()) {
+      bcEditorShowHint(tt('admin.broadcast_editor.select_text_quote'))
+      return
+    } else if (!editorUnwrapRangeInsideContainer(bq, range)) {
+      bcEditorShowHint(tt('admin.broadcast_editor.select_text_quote'))
+      return
+    }
+    bcSyncEditorHtml()
+    bcRecordHistory()
+    bcSavedTick.value = false
+    bcUpdateFormatState()
+    return
+  }
   if (!bcWrapRange(range, '<blockquote>', '</blockquote>')) {
-    alert(tt('admin.broadcast_editor.select_text_quote'))
+    bcEditorShowHint(tt('admin.broadcast_editor.select_text_quote'))
     return
   }
   bcSavedTick.value = false
@@ -3736,38 +5897,48 @@ function bcClearFormatting() {
   bcRecordHistory()
   bcSavedTick.value = false
 }
-function bcFormatCode() {
+function bcFormatLink() {
   const el = bcResolveBodyEditor()
   if (!el) return
   el.focus()
   const sel = window.getSelection?.()
-  const text = sel?.toString() || ''
-  if (!text.trim()) {
-    alert(tt('admin.broadcast_editor.select_text_code'))
+  const range = sel && sel.rangeCount ? sel.getRangeAt(0).cloneRange() : bcSavedRange.value
+  let n = range?.commonAncestorContainer
+  if (n && n.nodeType === Node.TEXT_NODE) n = n.parentElement
+  const linkEl = n?.closest?.('a')
+  if (linkEl && el.contains(linkEl)) {
+    try {
+      const rg = document.createRange()
+      rg.selectNodeContents(linkEl)
+      sel?.removeAllRanges()
+      sel?.addRange(rg)
+      document.execCommand('unlink', false, null)
+    } catch {
+      //
+    }
+    bcSyncEditorHtml()
+    bcRecordHistory()
+    bcSavedTick.value = false
+    bcUpdateFormatState()
     return
   }
-  bcInsertHtmlAtCursor(`<code>${text}</code>`)
-  bcSavedTick.value = false
-}
-
-function bcFormatLink() {
-  const el = bcResolveBodyEditor()
-  if (!el) return
-  const sel = window.getSelection?.()
-  const range = sel && sel.rangeCount ? sel.getRangeAt(0).cloneRange() : bcSavedRange.value
   const selectedText = bcSelectedTextFromRange(range)
   if (!selectedText.trim()) {
-    alert(tt('admin.broadcast_editor.select_text_link'))
+    bcEditorShowHint(tt('admin.broadcast_editor.select_text_link'))
     return
   }
   bcLinkRange.value = range || null
-  bcLinkUrl.value = 'https://'
+  bcLinkUrl.value = ''
   bcLinkModalOpen.value = true
 }
 
 function bcApplyLinkModal() {
   const href = String(bcLinkUrl.value || '').trim()
-  if (!href) return
+  const hrefOk = /^https?:\/\//i.test(href) || /^tg:\/\//i.test(href) || /^mailto:/i.test(href)
+  if (!hrefOk) {
+    bcEditorShowHint(tt('admin.broadcast_editor.link_url_invalid'))
+    return
+  }
   const el = bcResolveBodyEditor()
   if (!el) return
   const sel = window.getSelection?.()
@@ -3782,16 +5953,7 @@ function bcApplyLinkModal() {
   bcSavedTick.value = false
   bcLinkModalOpen.value = false
   bcLinkRange.value = null
-}
-
-function bcEditLink() {
-  const el = bcEditBodyRef.value
-  if (!el) return
-  const href = window.prompt(tt('admin.broadcast_editor.link_prompt'), 'https://')
-  if (!href || !String(href).trim()) return
-  el.focus()
-  document.execCommand('createLink', false, String(href).trim())
-  bcEditBodyHtml.value = bcNormalizeHtmlForTelegram(String(el.innerHTML || ''))
+  bcLinkUrl.value = ''
 }
 
 function onBcEditInput(ev) {
@@ -3815,6 +5977,61 @@ function onBcEditorInput(ev) {
   bcSaveLocalSnapshot()
 }
 
+/** Вставка из буфера: берём plain text и кладём в редактор как текст + &lt;br&gt;, без «слоя» Chrome div/br, которые дают лишние пустые строки. */
+function bcInsertPlainTextAtCursor(ed, plain) {
+  const lines = String(plain ?? '').replace(/\r\n/g, '\n').split('\n')
+  const sel = window.getSelection?.()
+  if (!ed || !sel?.rangeCount) return false
+  const range = sel.getRangeAt(0)
+  if (!ed.contains(range.commonAncestorContainer)) return false
+  range.deleteContents()
+  const frag = document.createDocumentFragment()
+  lines.forEach((ln, i) => {
+    frag.appendChild(document.createTextNode(ln))
+    if (i < lines.length - 1) frag.appendChild(document.createElement('br'))
+  })
+  const last = frag.lastChild
+  if (!last) return false
+  range.insertNode(frag)
+  try {
+    range.setStartAfter(last)
+    range.collapse(true)
+    sel.removeAllRanges()
+    sel.addRange(range)
+  } catch {
+    //
+  }
+  bcSavedRange.value = range.cloneRange()
+  return true
+}
+
+function bcOnEditorPaste(ev) {
+  const el = bcResolveBodyEditor()
+  if (!el || ev?.defaultPrevented) return
+  const t = ev.target
+  if (t !== el && !el.contains(t)) return
+  const dt = ev.clipboardData
+  if (!dt || dt.files?.length) return
+  let plain = ''
+  try {
+    plain = dt.getData('text/plain')
+  } catch {
+    plain = ''
+  }
+  // Пустая вставка с HTML только — оставляем поведение браузера (редко нужна «богатая» вставка).
+  if (plain === '' && dt.types?.includes('text/html')) return
+  if (plain === null) return
+  ev.preventDefault()
+  if (!bcInsertPlainTextAtCursor(el, plain)) return
+  bcSyncEditorHtml()
+  bcSavedTick.value = false
+  bcRecordHistory(true)
+  if (!bcEditModalOpen.value || el !== bcEditBodyRef.value) {
+    bcSaveLocalSnapshot()
+  }
+  nextTick(() => bcUpdateFormatState())
+}
+
 function onBcEditorClick(ev) {
   const el = ev?.target
   if (!(el instanceof HTMLElement)) return
@@ -3824,13 +6041,60 @@ function onBcEditorClick(ev) {
   window.setTimeout(() => spoiler.classList.remove('reveal'), 5000)
 }
 
+function bcResetTypingFormatsAtCaret(root) {
+  editorResetTypingExecCommands(root, { coerceUnderlineSpans: bcCoerceUnderlineSpansToU })
+}
+
+function bcOnEditorKeydown(e) {
+  const root = e.currentTarget
+  if (!(root instanceof HTMLElement)) return
+  if (e.key === 'Enter' && e.shiftKey && !e.isComposing) {
+    if (editorSoftBreakInsideBlockquote(root)) {
+      e.preventDefault()
+      e.stopPropagation()
+      bcSyncEditorHtml()
+      bcRecordHistory(true)
+      bcSaveLocalSnapshot()
+      bcSavedTick.value = false
+      requestAnimationFrame(() => {
+        bcResetTypingFormatsAtCaret(root)
+        bcUpdateFormatState()
+      })
+    }
+    return
+  }
+  if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return
+  if (editorSplitBlockquoteAtCaret(root, editorPlaceCaretAtEditableStart)) {
+    e.preventDefault()
+    e.stopPropagation()
+    bcSyncEditorHtml()
+    bcRecordHistory(true)
+    bcSaveLocalSnapshot()
+    bcSavedTick.value = false
+    requestAnimationFrame(() => {
+      bcResetTypingFormatsAtCaret(root)
+      bcUpdateFormatState()
+    })
+    return
+  }
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      bcResetTypingFormatsAtCaret(root)
+      bcSyncEditorHtml()
+      bcSaveLocalSnapshot()
+      bcSavedTick.value = false
+      bcUpdateFormatState()
+    })
+  })
+}
+
 function onBcEditorSelectionChange() {
   const sel = window.getSelection?.()
   if (!sel || !sel.rangeCount) return
   const range = sel.getRangeAt(0)
-  const editor = bcResolveBodyEditor()
+  const editors = bcBodyEditors()
+  const editor = editors.find((el) => el && typeof el.contains === 'function' && el.contains(range.startContainer))
   if (!editor) return
-  if (!editor.contains(range.startContainer)) return
   bcSavedRange.value = range.cloneRange()
   const from = range.startContainer instanceof Element ? range.startContainer : range.startContainer?.parentElement
   const spoilerEl = from?.closest?.('[data-spoiler="1"], tg-spoiler')
@@ -3849,6 +6113,20 @@ function onGlobalClickForEmoji(ev) {
 }
 
 function bcUpdateFormatState() {
+  let quote = false
+  try {
+    const sel = window.getSelection?.()
+    if (sel?.rangeCount) {
+      const r = sel.getRangeAt(0)
+      let n = r.commonAncestorContainer
+      if (n.nodeType === Node.TEXT_NODE) n = n.parentElement
+      const qn = n?.closest?.('blockquote')
+      const ed = bcResolveBodyEditor()
+      quote = !!(qn && ed && ed.contains(qn))
+    }
+  } catch {
+    quote = false
+  }
   try {
     bcFormatState.value = {
       bold: !!document.queryCommandState('bold'),
@@ -3857,9 +6135,18 @@ function bcUpdateFormatState() {
       strike: !!document.queryCommandState('strikeThrough'),
       spoiler: !!bcActiveSpoilerText.value,
       link: !!bcActiveLinkUrl.value,
+      quote,
     }
   } catch {
-    bcFormatState.value = { bold: false, italic: false, underline: false, strike: false, spoiler: false, link: false }
+    bcFormatState.value = {
+      bold: false,
+      italic: false,
+      underline: false,
+      strike: false,
+      spoiler: false,
+      link: false,
+      quote: false,
+    }
   }
 }
 
@@ -4753,9 +7040,9 @@ async function persistCurrentBroadcast() {
   if (!id) return null
   bcSyncEditorHtml()
   const normalizedBody = bcNormalizeHtmlForTelegram(bcBodyHtml.value)
-  const maxLen = bcMediaKindStored.value === 'none' ? 4096 : 1024
-  if (normalizedBody.length > maxLen) {
-    throw new Error(tt('admin.dlg.bc_text_too_long', { max: maxLen }))
+  const bodyMax = bcCurrentMaxLen()
+  if (normalizedBody.length > bodyMax) {
+    throw new Error(tt('admin.dlg.bc_text_too_long', { max: bodyMax }))
   }
   const r = await fetch(() =>
     api.adminBroadcastPatch(id, {
@@ -4821,8 +7108,9 @@ async function setBcBroadcastDraftListScope(scope) {
   await loadBroadcasts()
 }
 
-async function loadBroadcasts() {
-  bcLoading.value = true
+async function loadBroadcasts(opts = {}) {
+  const silent = Boolean(opts?.silent)
+  if (!silent) bcLoading.value = true
   try {
     const listScope =
       bcBroadcastDraftListScope.value === 'all' && bcBroadcastCanScopeAll.value ? 'all' : 'mine'
@@ -4832,12 +7120,15 @@ async function loadBroadcasts() {
       bcBroadcastDraftListScope.value = 'mine'
     }
   } catch {
-    broadcasts.value = []
+    if (!silent) broadcasts.value = []
   } finally {
-    bcLoading.value = false
-    await loadAutopostCampaigns()
+    if (!silent) bcLoading.value = false
+    if (!silent) await loadAutopostCampaigns()
   }
-  await prefetchBcDraftListThumbs()
+  bcCampaignUxPruneStalePostIds()
+  if (!silent) await prefetchBcDraftListThumbs()
+  if (silent) return
+
   const currentId = Number(bcSelectedId.value || 0)
   if (currentId && broadcasts.value.some((x) => Number(x?.id || 0) === currentId)) return
   let preferredId = 0
@@ -4852,12 +7143,16 @@ async function loadBroadcasts() {
   else if (fallback) applyBroadcastToForm(fallback)
 }
 
-async function loadAutopostCampaigns() {
+async function loadAutopostCampaigns(opts = {}) {
+  const silent = !!opts.silent
   try {
-    const r = await fetch(() => api.adminAutopostCampaigns())
-    bcAutopostCampaigns.value = r?.items || []
+    const r = silent
+      ? await fetchSilent(() => api.adminAutopostCampaigns())
+      : await fetch(() => api.adminAutopostCampaigns())
+    if (Array.isArray(r?.items)) bcAutopostCampaigns.value = r.items
+    else if (!silent) bcAutopostCampaigns.value = []
   } catch {
-    bcAutopostCampaigns.value = []
+    if (!silent) bcAutopostCampaigns.value = []
   }
 }
 
@@ -4919,21 +7214,25 @@ function applyBroadcastToForm(item) {
   })
 }
 
-async function createBcDraft() {
+async function createBcDraft(cabinetScope = null) {
   try {
-    const r = await fetch(() =>
-      api.adminBroadcastCreate({
-        title: tt('admin.broadcast_send.new_draft'),
-        body_text: '',
-        parse_mode: BC_PARSE_MODE,
-        keyboard_rows: [],
-      }),
-    )
+    const body = {
+      title: '',
+      body_text: '',
+      parse_mode: BC_PARSE_MODE,
+      keyboard_rows: [],
+    }
+    if (cabinetScope === 'autopost' || cabinetScope === 'oneshot') {
+      body.cabinet_draft_scope = cabinetScope
+    }
+    const r = await fetch(() => api.adminBroadcastCreate(body))
     upsertBroadcastInList(r)
     applyBroadcastToForm(r)
-    await prefetchBcDraftListThumbs()
+    void prefetchBcDraftListThumbs()
+    return true
   } catch (e) {
     alert(String(e?.body?.detail || e?.message || tt('admin.dlg.bc_create_failed')))
+    return false
   }
 }
 
@@ -5031,7 +7330,13 @@ async function loadBcMediaThumbnails() {
   if (!bid) return
   revokeAllBcMediaPreviewUrls()
   let sourceRows = [...bcMediaHistory.value]
-  if (sourceRows.some((m) => !Number(m?.id) && (m?.name || String(m?.kind || '').toLowerCase() !== 'none'))) {
+  const rowFromList = (broadcasts.value || []).find((b) => Number(b?.id || 0) === bid)
+  const needsFull =
+    !sourceRows.length ||
+    sourceRows.some((m) => !Number(m?.id)) ||
+    !!(rowFromList?.has_media_file || rowFromList?.telegram_file_id) ||
+    String(rowFromList?.media_kind || bcMediaKindStored.value || 'none').toLowerCase() !== 'none'
+  if (needsFull) {
     try {
       const full = await fetch(() => api.adminBroadcast(bid))
       const items = Array.isArray(full?.media_items) ? full.media_items : []
@@ -5157,10 +7462,12 @@ async function deleteBcDraftItem(item) {
   try {
     await fetch(() => api.adminBroadcastDelete(id))
     broadcasts.value = (broadcasts.value || []).filter((b) => Number(b?.id || 0) !== id)
+    bcCampaignUxPruneStalePostIds()
     if (Number(bcSelectedId.value || 0) === id) {
       bcSelectedId.value = null
       bcEditorOpen.value = false
     }
+    await loadBroadcasts()
   } catch (e) {
     alert(String(e?.body?.detail || e?.message || tt('admin.dlg.bc_delete_failed')))
   }
@@ -5187,6 +7494,7 @@ async function deleteBcDraftById(id) {
       bcEditorOpen.value = false
     }
     await loadBroadcasts()
+    bcCampaignUxPruneStalePostIds()
   } catch (e) {
     alert(String(e?.body?.detail || e?.message || tt('admin.dlg.bc_delete_failed')))
   }
@@ -5271,6 +7579,19 @@ async function openChannelsSendModal() {
   bcShowChannelsPicker.value = true
 }
 
+/** Пикер над шагом «Куда отправить»: перед открытием подтягиваем список с API (иначе висят старые/урезанные данные). */
+async function openBcBroadcastGroupsPickerInFlow() {
+  await loadBroadcastEligibleGroups()
+  bcGroupsSearch.value = ''
+  bcShowGroupsPicker.value = true
+}
+
+async function openBcBroadcastChannelsPickerInFlow() {
+  await loadBroadcastEligibleChannels()
+  bcChannelsSearch.value = ''
+  bcShowChannelsPicker.value = true
+}
+
 function selectedGroupTitles() {
   const selected = new Set(bcSelectedGroupIds.value.map((x) => Number(x || 0)))
   const names = bcBroadcastGroups.value
@@ -5326,8 +7647,27 @@ function bcAutopostClearChannelSelection() {
 }
 
 const bcDraftBroadcastsForAutopost = computed(() =>
-  (broadcasts.value || []).filter((b) => String(b?.status || 'draft').toLowerCase() === 'draft'),
+  (broadcasts.value || []).filter((b) => bcBroadcastIsAutopostRotationDraft(b)),
 )
+const bcCampaignUxHasDraftPostsSelected = computed(() => {
+  const draftSet = new Set(bcDraftBroadcastsForAutopost.value.map((b) => Number(b.id || 0)).filter((x) => x > 0))
+  return (bcCampaignUxWizard.value.postIds || []).some((pid) => draftSet.has(Number(pid)))
+})
+
+/** Убираем из мастера автокампаний id постов, которых уже нет среди черновиков (после удаления и т.п.). */
+function bcCampaignUxPruneStalePostIds() {
+  const draftIds = new Set(
+    (broadcasts.value || [])
+      .filter((b) => String(b?.status || 'draft').toLowerCase() === 'draft')
+      .map((b) => Number(b.id || 0))
+      .filter((x) => x > 0),
+  )
+  const cur = [...(bcCampaignUxWizard.value.postIds || [])].map(Number).filter((x) => x > 0)
+  const next = cur.filter((id) => draftIds.has(id)).slice(0, 1)
+  if (next.length !== cur.length || cur.length > 1) {
+    bcCampaignUxWizard.value = { ...bcCampaignUxWizard.value, postIds: next }
+  }
+}
 
 function bcAutopostSetUseAllPosts(checked) {
   const v = !!checked
@@ -5715,11 +8055,53 @@ onBeforeUnmount(() => {
   }
   document.body.style.overflow = ''
   stopBroadcastProgressPolling()
+  bcCampaignUxStopProgressPolling()
   if (bcStatsPollTimer.value) {
     clearInterval(bcStatsPollTimer.value)
     bcStatsPollTimer.value = null
   }
+  if (bcSendResultPollTimer.value) {
+    clearInterval(bcSendResultPollTimer.value)
+    bcSendResultPollTimer.value = null
+  }
+  if (bcBroadcastsListPollTimer.value) {
+    clearInterval(bcBroadcastsListPollTimer.value)
+    bcBroadcastsListPollTimer.value = null
+  }
+  if (bcStatsModalPollTimer.value) {
+    clearInterval(bcStatsModalPollTimer.value)
+    bcStatsModalPollTimer.value = null
+  }
 })
+
+watch(
+  () => [bcCampaignUxOpen.value, bcCampaignUxScreen.value],
+  ([open, s]) => {
+    bcCampaignUxStopProgressPolling()
+    bcCampaignUxStopAuxCampaignPollers()
+    if (!open) {
+      bcCampaignUxProgressSnapshot.value = null
+      return
+    }
+    if (s === 'progress') {
+      void bcCampaignUxRefreshProgressSnapshot()
+      bcCampaignUxProgressPollTimer = setInterval(() => {
+        void bcCampaignUxRefreshProgressSnapshot()
+      }, 2500)
+    } else {
+      bcCampaignUxProgressSnapshot.value = null
+    }
+    if (s === 'stats') {
+      void bcCampaignUxRefreshStatsQuiet()
+      bcCampaignUxStatsPollTimer = window.setInterval(() => void bcCampaignUxRefreshStatsQuiet(), 4000)
+    }
+    if (s === 'list' || s === 'manage') {
+      bcCampaignUxCampaignSyncPollTimer = window.setInterval(() => {
+        void loadAutopostCampaigns({ silent: true })
+      }, 7000)
+    }
+  },
+)
 
 watch(
   () => [tab.value, isDelegatedFreeBroadcastCabinet.value],
@@ -5773,6 +8155,7 @@ watch(
       await loadBroadcastEligibleChannels()
       tryApplyDelegatedPreferredGroup()
       tryApplyOpenChannelPref()
+      void bcRecentPulseHydrateQuiet()
     }
   }
 )
@@ -5817,9 +8200,15 @@ watch(() => bcBodyHtml.value, () => {
 watch(
   () => [bcStatsModalOpen.value, bcStatsSelectedId.value],
   ([open, id]) => {
-    if (!open) return
-    if (!Number(id || 0)) return
+    if (bcStatsModalPollTimer.value) {
+      clearInterval(bcStatsModalPollTimer.value)
+      bcStatsModalPollTimer.value = null
+    }
+    if (!open || !Number(id || 0)) return
     loadBroadcastStats()
+    bcStatsModalPollTimer.value = window.setInterval(() => {
+      void loadBroadcastStats({ silent: true })
+    }, 3000)
   },
 )
 
@@ -5870,6 +8259,7 @@ watch(
     partnerOverlayOpen.value ||
     bcQuickDraftModalOpen.value ||
     bcShowAllRecentModal.value ||
+    bcRecentStatsModalOpen.value ||
     bcSendTargetModalOpen.value ||
     bcSendModalOpen.value ||
     bcConfirmModalOpen.value ||
@@ -5906,12 +8296,56 @@ watch(
   { immediate: true },
 )
 
-watch(() => bcStatsModalOpen.value, () => {
-  if (bcStatsPollTimer.value) {
-    clearInterval(bcStatsPollTimer.value)
-    bcStatsPollTimer.value = null
-  }
-})
+watch(
+  () => bcShowAllRecentModal.value,
+  (open) => {
+    if (open) void bcRecentPulseHydrateQuiet()
+  },
+)
+
+watch(
+  () => [bcRecentStatsModalOpen.value, bcRecentStatsBroadcastId.value],
+  ([open, bid]) => {
+    if (bcStatsPollTimer.value) {
+      clearInterval(bcStatsPollTimer.value)
+      bcStatsPollTimer.value = null
+    }
+    if (!open || !Number(bid || 0)) return
+    bcStatsPollTimer.value = window.setInterval(() => {
+      void bcLoadRecentBroadcastStats(Number(bid), { silent: true })
+    }, 3000)
+  },
+)
+
+watch(
+  () => [bcSendModalOpen.value, bcSendModalState.value, bcSendModalBroadcastId.value],
+  ([open, st, bid]) => {
+    if (bcSendResultPollTimer.value) {
+      clearInterval(bcSendResultPollTimer.value)
+      bcSendResultPollTimer.value = null
+    }
+    if (!open || st !== 'done' || !Number(bid || 0)) return
+    bcSendResultPollTimer.value = window.setInterval(() => {
+      void loadBcSendResultStats(Number(bid), { silent: true })
+    }, 3000)
+  },
+)
+
+watch(
+  () => tab.value,
+  (v) => {
+    if (bcBroadcastsListPollTimer.value) {
+      clearInterval(bcBroadcastsListPollTimer.value)
+      bcBroadcastsListPollTimer.value = null
+    }
+    if (v !== 'broadcasts') return
+    bcBroadcastsListPollTimer.value = window.setInterval(() => {
+      void loadBroadcasts({ silent: true })
+      void bcRecentPulseHydrateQuiet()
+    }, 3500)
+  },
+  { immediate: true },
+)
 
 watch(
   [() => tab.value, () => chatsOwnerFilter.value, () => usersPreset.value],
@@ -6028,36 +8462,7 @@ watch(
           </div>
         </template>
         <template v-else-if="premiumAdmSection === 'protection'">
-          <div
-            v-if="isOwnerCabinet && !meAdminProfile?.is_premium"
-            class="col-span-2 overflow-hidden rounded-[1.15rem] border border-violet-500/35 bg-gradient-to-br from-violet-950/50 via-[#0c0a14] to-black p-4 text-center shadow-[0_0_40px_-12px_rgba(139,92,246,0.45)] ring-1 ring-violet-400/20"
-          >
-            <div
-              class="mx-auto flex h-12 w-12 items-center justify-center rounded-full border-2 border-violet-400/50 bg-violet-950/80 text-2xl shadow-[0_0_28px_rgba(167,139,250,0.4)]"
-              aria-hidden="true"
-            >
-              😈
-            </div>
-            <p class="mt-3 text-[11px] font-extrabold uppercase tracking-[0.18em] text-violet-300">{{ tt('common.locale_code') === 'en' ? 'Guard · stats' : 'Guard · статистика' }}</p>
-            <p class="mx-auto mt-2 max-w-md text-[13px] leading-relaxed text-slate-300">
-              <template v-if="tt('common.locale_code') === 'en'">
-                On Free plan, counters are intentionally hidden: everything would be zeros without real analytics. Enable
-                <b class="text-violet-200">Premium Guard</b> to see deletions, joins and reports for your chats.
-              </template>
-              <template v-else>
-                На Free тарифе счётчики намеренно скрыты: здесь всё было бы «нулями» без реальной аналитики. Подключите
-                <b class="text-violet-200">Premium Guard</b>, чтобы видеть удаления, вступления и отчёты по вашим чатам.
-              </template>
-            </p>
-            <button
-              type="button"
-              class="mt-4 w-full max-w-sm rounded-2xl bg-violet-600 py-3 text-sm font-bold text-white shadow-[0_12px_32px_-8px_rgba(124,58,237,0.55)] transition hover:bg-violet-500 active:scale-[0.99]"
-              @click="goOwnerSubscriptionPage"
-            >
-              {{ tt('common.locale_code') === 'en' ? 'Get Premium' : 'Оформить Premium' }}
-            </button>
-          </div>
-          <div v-else class="col-span-2 min-h-0 space-y-2">
+          <div class="col-span-2 min-h-0 space-y-2">
             <div
               v-if="ownerProtectionStatsMode === 'protection'"
               class="flex items-center justify-between gap-2 rounded-2xl bg-gradient-to-r from-cyan-950/70 via-sky-950/60 to-indigo-950/70 px-3 py-2.5 ring-1 ring-cyan-300/20"
@@ -7356,17 +9761,27 @@ watch(
             <div
               v-for="item in bcRecentBroadcastsPreview"
               :key="`recent-bc-${item.id}`"
-              class="rounded-xl border border-white/[0.07] bg-[#111827]/88 px-3 py-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] ring-1 ring-white/[0.03]"
+              role="button"
+              tabindex="0"
+              class="cursor-pointer rounded-xl border border-white/[0.07] bg-[#111827]/88 px-3 py-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] ring-1 ring-white/[0.03] transition hover:border-white/[0.12] hover:bg-[#151d2e]/90"
+              @click="bcOpenRecentBroadcastStats(item)"
+              @keydown.enter.prevent="bcOpenRecentBroadcastStats(item)"
+              @keydown.space.prevent="bcOpenRecentBroadcastStats(item)"
             >
               <div class="flex items-start justify-between gap-2">
                 <div class="min-w-0">
-                  <p class="truncate text-[15px] font-extrabold text-zinc-100">{{ item.title || tt('admin.broadcast_shell.untitled', { id: item.id }) }}</p>
-                  <p class="mt-0.5 text-[11px] text-zinc-400">{{ bcRecentStatusLabel(item) }} • {{ bcRecentWhenLabel(item) }}</p>
+                  <p class="truncate text-[15px] font-extrabold text-zinc-100">{{ bcRecentBroadcastDisplayTitle(item) }}</p>
+                  <p class="mt-0.5 text-[11px] text-zinc-400">
+                    <span :class="bcRecentOneShotStatusClass(item)">{{ bcRecentStatusLabel(item) }}</span>
+                    <span> · </span
+                    ><span :class="bcRecentBroadcastKindIsCampaign(item) ? 'font-semibold text-emerald-400' : 'font-semibold text-sky-400'">{{ bcRecentBroadcastKindLabel(item) }}</span
+                    ><span> · {{ bcRecentWhenLabel(item) }}</span>
+                  </p>
                 </div>
                 <span class="text-lg leading-none text-zinc-500">›</span>
               </div>
               <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-zinc-300">
-                <span>{{ tt('admin.broadcast_shell.reach') }} <b class="text-zinc-100">{{ Number(item.recipient_total || 0) }}</b></span>
+                <span>{{ bcRecentCardPrimaryLabel(item) }} <b class="text-zinc-100">{{ fmtIntSpace(bcRecentCardPrimaryValue(item, bcRecentPulseEntry(item.id))) }}</b></span>
                 <span>{{ tt('admin.broadcast_shell.delivered_ok') }} <b class="text-zinc-100">{{ Number(item.recipient_ok || 0) }}</b></span>
                 <span>{{ tt('admin.broadcast_shell.errors') }} <b class="text-zinc-100">{{ Number(item.recipient_fail || 0) }}</b></span>
               </div>
@@ -7378,19 +9793,20 @@ watch(
         </div>
       </div>
 
-      <GuardTeleport>
+      <GuardTeleport guard-to="body">
         <div
           v-if="bcQuickDraftModalOpen"
-          class="fixed inset-0 z-[95000] flex min-h-[100dvh] min-w-0 flex-col bg-[#0b0d14] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
+          class="fixed inset-0 z-[95000] flex min-h-[100dvh] min-w-0 flex-col bg-[#0b0d14] pb-[env(safe-area-inset-bottom,0px)] pt-[max(0.25rem,calc(env(safe-area-inset-top,0px)+48px))]"
           @click.self="closeQuickBroadcastDraft"
         >
           <div class="flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-2">
-            <div class="flex min-h-0 flex-1 flex-col bg-[#12161f] p-3 text-zinc-100">
+            <div class="flex flex-col bg-[#12161f] p-3 text-zinc-100">
           <div class="mb-2 flex items-start justify-between gap-2 pb-2">
             <div class="min-w-0 flex-1">
               <p class="truncate text-[19px] font-black text-white">{{ tt('admin.broadcast_ui.quick_new_broadcast') }}</p>
               <div class="mt-1.5 flex min-w-0 items-center gap-1.5">
                 <input
+                  ref="bcQuickDraftTitleInputRef"
                   v-model="bcTitle"
                   type="text"
                   class="min-w-0 flex-1 rounded-lg border border-white/10 bg-zinc-950/80 px-2.5 py-1.5 text-[13px] text-zinc-200 placeholder:text-zinc-500 focus:border-cyan-500/45 focus:outline-none focus:ring-1 focus:ring-cyan-500/25"
@@ -7402,7 +9818,7 @@ watch(
                 <button
                   v-show="bcQuickTitleDirty"
                   type="button"
-                  class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-emerald-500/40 bg-emerald-500/20 text-[16px] font-bold text-emerald-200 shadow-[0_0_20px_-4px_rgba(16,185,129,0.5)] transition active:scale-95 hover:border-emerald-400/55 hover:bg-emerald-500/30 disabled:opacity-50"
+                  class="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-emerald-500/40 bg-emerald-500/20 text-[13px] font-bold text-emerald-200 shadow-[0_0_20px_-4px_rgba(16,185,129,0.5)] transition active:scale-95 hover:border-emerald-400/55 hover:bg-emerald-500/30 disabled:opacity-50"
                   :disabled="Number(bcSavingTitleId || 0) === Number(bcSelectedId || 0) && Number(bcSelectedId || 0) > 0"
                   :title="tt('admin.broadcast_ui.apply_title')"
                   @click="applyBcQuickDraftTitle"
@@ -7430,10 +9846,12 @@ watch(
           <p class="text-[12px] font-semibold text-zinc-300">{{ tt('admin.broadcast_ui.message_text') }}</p>
           <div
             ref="bcBodyRef"
-            class="bc-editor mt-2 h-40 overflow-y-auto rounded-xl border border-white/[0.08] bg-zinc-950 px-3 py-2.5 text-sm leading-relaxed focus-within:border-white/20 focus-within:ring-0"
+            class="bc-editor mt-2 h-40 min-h-[10rem] shrink-0 overflow-y-auto rounded-xl border border-white/[0.08] bg-zinc-950 px-3 py-2.5 text-sm leading-relaxed focus-within:border-white/20 focus-within:ring-0"
             contenteditable="true"
             :data-placeholder="tt('admin.broadcast_ui.message_body_ph')"
             @input="onBcEditorInput"
+            @paste="bcOnEditorPaste"
+            @keydown="bcOnEditorKeydown"
             @click="onBcEditorClick"
             @mouseup="bcUpdateFormatState"
             @keyup="bcUpdateFormatState"
@@ -7444,6 +9862,10 @@ watch(
             <button type="button" class="bc-tool-btn min-w-[2.1rem] !px-2" :class="bcFormatState.italic ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatItalic"><i>I</i></button>
             <button type="button" class="bc-tool-btn min-w-[2.1rem] !px-2" :class="bcFormatState.underline ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatUnderline"><u>U</u></button>
             <button type="button" class="bc-tool-btn min-w-[2.1rem] !px-2" :class="bcFormatState.strike ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatStrike"><s>S</s></button>
+            <button type="button" class="bc-tool-btn min-w-[2.1rem] !px-2 !text-[11px]" :class="bcFormatState.quote ? 'bc-tool-active' : ''" title="Цитата" @mousedown.prevent @click="bcFormatBlockquote">❝</button>
+            <button type="button" class="bc-tool-btn min-w-[2.1rem] !px-2 !text-[11px]" :class="bcFormatState.spoiler ? 'bc-tool-active' : ''" title="Скрытый" @mousedown.prevent @click="bcFormatSpoiler">🙈</button>
+            <button type="button" class="bc-tool-btn min-w-[2.1rem] !px-2 !text-[11px]" :class="bcFormatState.link ? 'bc-tool-active' : ''" title="Ссылка" @mousedown.prevent @click="bcFormatLink">🔗</button>
+            <button type="button" class="bc-tool-btn font-mono min-w-[2.1rem] !px-2 !text-[11px]" title="Моноширинный блок" @mousedown.prevent @click="bcFormatPre">⌨</button>
             <button type="button" class="bc-tool-btn !px-2 !text-[11px]" :class="!bcCanUndo() ? 'opacity-40' : ''" :disabled="!bcCanUndo()" @mousedown.prevent @click="bcUndo">↶</button>
             <button type="button" class="bc-tool-btn !px-2 !text-[11px]" :class="!bcCanRedo() ? 'opacity-40' : ''" :disabled="!bcCanRedo()" @mousedown.prevent @click="bcRedo">↷</button>
           </div>
@@ -7505,9 +9927,9 @@ watch(
 
           <button
             type="button"
-            class="mt-auto w-full rounded-xl border border-indigo-400/40 bg-gradient-to-r from-indigo-600/95 to-blue-700/95 px-4 py-2 text-[13px] font-extrabold text-white shadow-[0_14px_30px_-16px_rgba(59,130,246,0.8)] disabled:cursor-not-allowed disabled:opacity-45"
-            :disabled="!bcHasMessageText()"
-            @click="openSendTargetModal"
+            class="mt-4 w-full shrink-0 rounded-xl border border-indigo-400/40 bg-gradient-to-r from-indigo-600/95 to-blue-700/95 px-4 py-2 text-[13px] font-extrabold text-white shadow-[0_14px_30px_-16px_rgba(59,130,246,0.8)]"
+            :class="!String(bcTitle || '').trim() || !bcHasMessageText() ? 'cursor-not-allowed opacity-45' : ''"
+            @click="bcQuickDraftTryNext"
           >
             {{ tt('common.next') }}
           </button>
@@ -7516,17 +9938,17 @@ watch(
         </div>
       </GuardTeleport>
 
-      <GuardTeleport>
+      <GuardTeleport guard-to="body">
         <div
           v-if="bcSendTargetModalOpen"
-          class="fixed inset-0 z-[95000] flex min-h-[100dvh] min-w-0 flex-col bg-[#0b0d14] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
+          class="fixed inset-0 z-[95200] flex min-h-[100dvh] min-w-0 flex-col bg-[#0b0d14] pb-[env(safe-area-inset-bottom,0px)] pt-[max(0.25rem,calc(env(safe-area-inset-top,0px)+48px))]"
           @click.self="bcSendTargetModalOpen = false"
         >
           <div class="flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-2">
-            <div class="flex min-h-0 w-full flex-1 flex-col rounded-2xl border border-white/[0.04] bg-[#12161f] p-3 text-zinc-100 shadow-[0_24px_72px_-28px_rgba(0,0,0,0.9)] ring-1 ring-white/[0.02]">
+            <div class="flex flex-col rounded-2xl border border-white/[0.04] bg-[#12161f] p-3 text-zinc-100 shadow-[0_24px_72px_-28px_rgba(0,0,0,0.9)] ring-1 ring-white/[0.02]">
           <div class="flex items-center justify-between gap-2">
             <div class="flex min-w-0 items-center gap-1">
-              <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-transparent text-[14px] text-white/90 hover:bg-white/[0.08]" @click="bcSendTargetModalOpen = false">←</button>
+              <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-transparent text-[14px] text-white/90 hover:bg-white/[0.08]" @click="bcOneShotFlowBack">←</button>
               <p class="truncate text-[19px] font-black text-white">{{ tt('admin.broadcast_ui.send_where') }}</p>
             </div>
             <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-transparent text-[14px] text-white/90 hover:bg-white/[0.08]" @click="bcSendTargetModalOpen = false">✕</button>
@@ -7537,7 +9959,7 @@ watch(
             <button
               type="button"
               class="flex w-full items-center justify-between gap-3 rounded-xl bg-white/[0.035] px-3 py-2.5 text-left"
-              @click="bcSendTargetChannels = !bcSendTargetChannels"
+              @click="bcToggleSendTargetChannels"
             >
               <span class="min-w-0">
                 <span class="block text-[18px] font-extrabold text-white">{{ tt('admin.broadcast_ui.channels_title') }}</span>
@@ -7549,7 +9971,7 @@ watch(
             <button
               type="button"
               class="flex w-full items-center justify-between gap-3 rounded-xl bg-white/[0.035] px-3 py-2.5 text-left"
-              @click="bcSendTargetGroups = !bcSendTargetGroups"
+              @click="bcToggleSendTargetGroups"
             >
               <span class="min-w-0">
                 <span class="block text-[18px] font-extrabold text-white">{{ tt('admin.broadcast_ui.groups_title') }}</span>
@@ -7558,17 +9980,16 @@ watch(
               <span class="inline-flex h-6 w-6 items-center justify-center rounded-md border text-[14px] font-black" :class="bcSendTargetGroups ? 'border-violet-300/55 bg-violet-600/85 text-white' : 'border-white/35 bg-transparent text-transparent'">✓</span>
             </button>
 
-            <button
-              type="button"
-              class="flex w-full items-center justify-between gap-3 rounded-xl bg-white/[0.035] px-3 py-2.5 text-left"
-              @click="bcSendTargetBots = !bcSendTargetBots"
+            <label
+              v-if="showFullAdminShell"
+              class="flex cursor-pointer items-start gap-3 rounded-xl border border-cyan-500/28 bg-white/[0.04] px-3 py-2.5 text-left"
             >
+              <input v-model="bcAdminIncludeBotRecipients" type="checkbox" class="mt-1 size-5 shrink-0 rounded border-white/25 bg-transparent text-indigo-500 focus:ring-indigo-500/40" />
               <span class="min-w-0">
-                <span class="block text-[18px] font-extrabold text-white">{{ tt('admin.broadcast_ui.bots_title') }}</span>
-                <span class="block text-[12px] text-slate-200/90">{{ tt('admin.broadcast_ui.bots_sub') }}</span>
+                <span class="block text-[16px] font-extrabold text-white">{{ tt('admin.broadcast_ui.include_bot_users') }}</span>
+                <span class="mt-0.5 block text-[12px] text-slate-300/95">{{ tt('admin.broadcast_ui.include_bot_users_sub') }}</span>
               </span>
-              <span class="inline-flex h-6 w-6 items-center justify-center rounded-md border text-[14px] font-black" :class="bcSendTargetBots ? 'border-violet-300/55 bg-violet-600/85 text-white' : 'border-white/35 bg-transparent text-transparent'">✓</span>
-            </button>
+            </label>
           </div>
 
           <div class="mt-5">
@@ -7578,7 +9999,7 @@ watch(
                 v-if="bcSendTargetChannels"
                 type="button"
                 class="flex w-full items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2 text-left text-[14px] font-semibold text-zinc-100"
-                @click="bcShowChannelsPicker = true"
+                @click="openBcBroadcastChannelsPickerInFlow()"
               >
                 <span>{{ tt('admin.broadcast_send.target_channels', { n: Number(bcSelectedChannelIds.length || 0) }) }}</span>
                 <span>›</span>
@@ -7587,23 +10008,25 @@ watch(
                 v-if="bcSendTargetGroups"
                 type="button"
                 class="flex w-full items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2 text-left text-[14px] font-semibold text-zinc-100"
-                @click="bcShowGroupsPicker = true"
+                @click="openBcBroadcastGroupsPickerInFlow()"
               >
                 <span>{{ tt('admin.broadcast_send.target_groups', { n: Number(bcSelectedGroupIds.length || 0) }) }}</span>
                 <span>›</span>
               </button>
-              <div v-if="bcSendTargetBots" class="rounded-xl bg-white/[0.04] px-3 py-2 text-[14px] font-semibold text-zinc-100">
-                {{ tt('admin.broadcast_send.target_bots', { n: Number(bcSelectedBotRecipientIds.length || 0) }) }}
-              </div>
               <p v-if="!bcSendTargetSummary.length" class="rounded-xl bg-white/[0.03] px-3 py-2 text-[12px] text-zinc-400">{{ tt('admin.broadcast_ui.nothing_selected') }}</p>
             </div>
           </div>
 
+          <div v-if="bcSendQuoteError" class="mt-3 rounded-xl border border-rose-500/35 bg-rose-950/40 px-3 py-2 text-[12px] leading-snug text-rose-50">
+            {{ bcSendQuoteError }}
+          </div>
+
           <button
             type="button"
-            class="mt-auto w-full rounded-xl border border-indigo-400/40 bg-gradient-to-r from-indigo-600/95 to-blue-700/95 px-4 py-2 text-[13px] font-extrabold text-white shadow-[0_14px_30px_-16px_rgba(59,130,246,0.8)] disabled:cursor-not-allowed disabled:opacity-45"
-            :disabled="bcSelectedTargetsCount <= 0"
-            @click="proceedSendTargetModal"
+            class="mt-4 w-full rounded-xl border border-indigo-400/40 bg-gradient-to-r from-indigo-600/95 to-blue-700/95 px-4 py-2 text-[13px] font-extrabold text-white shadow-[0_14px_30px_-16px_rgba(59,130,246,0.8)]"
+            :class="!bcCanProceedSendTargets || bcConfirmLoading ? 'cursor-not-allowed opacity-45' : ''"
+            :disabled="!bcCanProceedSendTargets || bcConfirmLoading"
+            @click="proceedSendTargetModal()"
           >
             {{ tt('common.next') }}
           </button>
@@ -7615,14 +10038,14 @@ watch(
       <GuardTeleport>
       <div
         v-if="bcConfirmModalOpen"
-        class="fixed inset-0 z-[95000] flex flex-col overflow-y-auto bg-[#0b0d14] px-1.5 pb-[max(5.75rem,calc(5.25rem+env(safe-area-inset-bottom,0px)))] pt-[max(0.25rem,calc(env(safe-area-inset-top,0px)+46px))]"
+        class="fixed inset-0 z-[95350] flex flex-col overflow-y-auto bg-[#0b0d14] px-1.5 pb-[max(5.75rem,calc(5.25rem+env(safe-area-inset-bottom,0px)))] pt-[max(0.25rem,calc(env(safe-area-inset-top,0px)+46px))]"
         @click.self="bcConfirmModalOpen = false"
       >
         <div
           class="mx-auto flex w-full max-w-[min(28rem,calc(100vw-0.75rem))] min-h-[calc(100dvh-7.9rem)] flex-col rounded-2xl border border-white/[0.08] bg-[#101622] px-2.5 py-2.5 text-zinc-100 shadow-[0_22px_70px_-30px_rgba(0,0,0,0.88)]"
         >
           <div class="flex items-center gap-2">
-            <button type="button" class="inline-flex h-7 w-7 items-center justify-center rounded-full bg-transparent text-[13px] text-white/90 hover:bg-white/[0.08]" @click="bcConfirmModalOpen = false">←</button>
+            <button type="button" class="inline-flex h-7 w-7 items-center justify-center rounded-full bg-transparent text-[13px] text-white/90 hover:bg-white/[0.08]" @click="bcOneShotFlowBack">←</button>
             <p class="text-[19px] font-bold text-white leading-none">{{ tt('admin.broadcast_ui.confirmation') }}</p>
           </div>
 
@@ -7686,12 +10109,22 @@ watch(
             <div
               v-for="item in bcRecentBroadcasts"
               :key="`recent-all-bc-${item.id}`"
-              class="rounded-xl border border-white/[0.08] bg-[#121a27]/88 px-3 py-2.5"
+              role="button"
+              tabindex="0"
+              class="cursor-pointer rounded-xl border border-white/[0.08] bg-[#121a27]/88 px-3 py-2.5 transition hover:border-white/[0.14] hover:bg-[#172032]/95"
+              @click="bcOpenRecentBroadcastStats(item)"
+              @keydown.enter.prevent="bcOpenRecentBroadcastStats(item)"
+              @keydown.space.prevent="bcOpenRecentBroadcastStats(item)"
             >
-              <p class="truncate text-[14px] font-bold text-zinc-100">{{ item.title || tt('admin.broadcast_shell.untitled', { id: item.id }) }}</p>
-              <p class="mt-0.5 text-[11px] text-zinc-400">{{ bcRecentStatusLabel(item) }} • {{ bcRecentWhenLabel(item) }}</p>
+              <p class="truncate text-[14px] font-bold text-zinc-100">{{ bcRecentBroadcastDisplayTitle(item) }}</p>
+              <p class="mt-0.5 text-[11px] text-zinc-400">
+                <span :class="bcRecentOneShotStatusClass(item)">{{ bcRecentStatusLabel(item) }}</span>
+                <span> · </span
+                ><span :class="bcRecentBroadcastKindIsCampaign(item) ? 'font-semibold text-emerald-400' : 'font-semibold text-sky-400'">{{ bcRecentBroadcastKindLabel(item) }}</span
+                ><span> · {{ bcRecentWhenLabel(item) }}</span>
+              </p>
               <div class="mt-1.5 flex flex-wrap items-center gap-3 text-[11px] text-zinc-300">
-                <span>{{ tt('admin.broadcast_shell.reach') }} <b class="text-zinc-100">{{ Number(item.recipient_total || 0) }}</b></span>
+                <span>{{ bcRecentCardPrimaryLabel(item) }} <b class="text-zinc-100">{{ fmtIntSpace(bcRecentCardPrimaryValue(item, bcRecentPulseEntry(item.id))) }}</b></span>
                 <span>{{ tt('admin.broadcast_shell.delivered_ok') }} <b class="text-zinc-100">{{ Number(item.recipient_ok || 0) }}</b></span>
                 <span>{{ tt('admin.broadcast_shell.errors') }} <b class="text-zinc-100">{{ Number(item.recipient_fail || 0) }}</b></span>
               </div>
@@ -7702,6 +10135,139 @@ watch(
           </div>
         </div>
       </div>
+
+      <GuardTeleport guard-to="body">
+      <div
+        v-if="bcRecentStatsModalOpen"
+        class="fixed inset-0 z-[95500] flex items-end justify-center bg-black/72 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] backdrop-blur-[2px] md:items-center md:pb-6"
+        @click.self="bcCloseRecentBroadcastStats"
+      >
+        <div class="flex max-h-[min(85vh,36rem)] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-white/12 bg-[#12161f] text-zinc-100 shadow-[0_24px_64px_-24px_rgba(0,0,0,0.92)]">
+          <div class="flex shrink-0 items-start justify-between gap-2 border-b border-white/10 px-4 py-3">
+            <div class="min-w-0">
+              <p class="truncate text-[16px] font-extrabold leading-snug text-white">{{ bcRecentStatsHeaderTitle }}</p>
+              <p class="mt-0.5 text-[12px] text-zinc-500">{{ tt('admin.broadcast_shell.recent_stats_title') }}</p>
+              <p v-if="bcRecentStatsBroadcastMeta" class="mt-0.5 text-[11px] text-zinc-500">
+                <span :class="bcRecentOneShotStatusClass(bcRecentStatsBroadcastMeta)">{{ bcRecentStatusLabel(bcRecentStatsBroadcastMeta) }}</span>
+                <span> · </span
+                ><span :class="bcRecentBroadcastKindIsCampaign(bcRecentStatsBroadcastMeta) ? 'font-semibold text-emerald-400' : 'font-semibold text-sky-400'">{{ bcRecentBroadcastKindLabel(bcRecentStatsBroadcastMeta) }}</span
+                ><span> · {{ bcRecentWhenLabel(bcRecentStatsBroadcastMeta) }}</span>
+              </p>
+            </div>
+            <button type="button" class="shrink-0 rounded-lg px-2 py-1 text-sm text-zinc-300 hover:bg-white/10" @click="bcCloseRecentBroadcastStats">✕</button>
+          </div>
+          <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3">
+            <p v-if="bcRecentStatsLoading" class="py-8 text-center text-sm text-zinc-400">{{ tt('admin.broadcast_shell.stats_loading') }}</p>
+            <template v-else-if="bcRecentStatsSnapshot">
+              <p
+                v-if="bcRecentStatsSnapshot.broadcast_url_tracking_configured === false"
+                class="mb-2 rounded-lg border border-amber-500/25 bg-amber-500/8 px-2.5 py-1.5 text-[10px] leading-snug text-amber-100/90"
+              >
+                {{ tt('admin.broadcast_shell.tracking_off_hint') }}
+              </p>
+              <div class="grid grid-cols-2 gap-2">
+                <div class="rounded-xl border border-white/10 bg-[#11151C] p-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+                  <p class="text-[10px] text-slate-500">{{ tt('admin.bc_campaign.metric_delivered_posts') }}</p>
+                  <p class="text-lg font-bold tabular-nums text-white">{{ fmtIntSpace(bcRecentStatDeliveredOk) }}</p>
+                  <div class="mt-2 space-y-1.5 border-t border-white/[0.08] pt-2">
+                    <div class="flex items-center justify-between gap-2 text-[11px]">
+                      <span class="text-slate-500">{{ tt('admin.bc_campaign.metric_reactions') }}</span>
+                      <span class="font-semibold tabular-nums text-white">{{ fmtIntSpace(bcRecentStatReactions) }}</span>
+                    </div>
+                    <div class="flex items-center justify-between gap-2 text-[11px]">
+                      <span class="text-slate-500">{{ tt('admin.bc_campaign.metric_link_clicks') }}</span>
+                      <span class="font-semibold tabular-nums text-white">{{ fmtIntSpace(Number(bcRecentStatsSnapshot.real_link_clicks_total || 0)) }}</span>
+                    </div>
+                    <div class="flex items-center justify-between gap-2 text-[11px]">
+                      <span class="text-slate-500">{{ tt('admin.bc_campaign.metric_button_clicks') }}</span>
+                      <span class="font-semibold tabular-nums text-white">{{ fmtIntSpace(Number(bcRecentStatsSnapshot.real_callback_clicks_total || 0)) }}</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="rounded-xl border border-white/10 bg-[#11151C] p-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+                  <p class="text-[10px] text-slate-500">
+                    <abbr :title="tt('admin.broadcast_shell.ctr_hint_title')" class="cursor-help underline decoration-dotted decoration-slate-500 underline-offset-2">{{
+                      tt('admin.broadcast_shell.ctr_abbr')
+                    }}</abbr>
+                  </p>
+                  <p class="text-lg font-bold tabular-nums text-emerald-300">{{ fmtPctTrim(bcRecentStatCtrPct) }}</p>
+                  <p class="mt-0.5 text-[10px] leading-tight text-slate-500">{{ bcRecentStatCtrSub }}</p>
+                </div>
+              </div>
+              <div v-if="(bcRecentStatsSnapshot.per_groups || []).length" class="mt-2">
+                <p class="mb-1.5 text-[11px] font-semibold text-slate-400">{{ tt('admin.broadcast_shell.delivered_by_chat_title') }}</p>
+                <div class="rounded-xl border border-white/10 bg-[#11151C] px-2.5 py-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+                  <div
+                    v-for="(row, idx) in bcRecentStatsSnapshot.per_groups"
+                    :key="`bc-recent-pg-${idx}-${row.chat_id}`"
+                    class="flex items-center justify-between gap-2 border-b border-white/[0.06] py-2 last:border-b-0"
+                  >
+                    <p class="min-w-0 flex-1 truncate text-[12px] text-zinc-200">{{ row.title || row.chat_id }}</p>
+                    <span class="shrink-0 text-[12px] font-semibold tabular-nums text-emerald-200">{{ fmtIntSpace(row.ok) }}</span>
+                  </div>
+                </div>
+              </div>
+              <div v-if="(bcRecentStatsSnapshot.send_history || []).length" class="mt-3">
+                <p class="mb-1.5 text-[11px] font-semibold text-slate-400">{{ tt('admin.broadcast_shell.send_history_title') }}</p>
+                <div class="max-h-52 space-y-2 overflow-y-auto overscroll-contain rounded-xl border border-white/10 bg-[#11151C] px-2.5 py-2">
+                  <div
+                    v-for="(h, hi) in bcRecentStatsSnapshot.send_history"
+                    :key="`bc-recent-hist-${hi}-${h.batch_id ?? hi}`"
+                    class="border-b border-white/[0.06] pb-2 last:border-b-0 last:pb-0"
+                  >
+                    <p class="text-[11px] font-semibold text-zinc-200">
+                      {{ fmtBroadcastShortTime(h.started_at || h.ended_at) || '—' }}
+                    </p>
+                    <ul v-if="(h.groups || []).length" class="mt-1 space-y-0.5 pl-3 text-[11px] leading-snug text-slate-400">
+                      <li v-for="(g, gi) in h.groups" :key="`bc-rhg-${hi}-${g.chat_id}-${gi}`">
+                        <span class="text-zinc-300">{{ g.title || g.chat_id }}</span>
+                        <span v-if="Number(g.ok) > 0" class="text-emerald-400/90"> · ✓ {{ g.ok }}</span>
+                        <span v-if="Number(g.fail) > 0" class="text-rose-300/90"> · ✕ {{ g.fail }}</span>
+                      </li>
+                    </ul>
+                    <p v-else-if="Number(h.bots?.total) > 0" class="mt-1 text-[10px] text-slate-400">
+                      {{ tt('admin.broadcast_shell.send_history_bots', { ok: Number(h.bots?.ok || 0), n: Number(h.bots?.total || 0) }) }}
+                    </p>
+                    <p v-else class="mt-1 text-[10px] text-slate-400">
+                      {{
+                        tt('admin.broadcast_shell.send_history_summary', {
+                          ok: Number(h.recipient_ok || 0),
+                          fail: Number(h.recipient_fail || 0),
+                        })
+                      }}
+                    </p>
+                    <p v-if="bcRecentSendHistoryHasSuccess(h) && bcFormatPerSendEngagementLine(h.per_send_engagement)" class="mt-1.5 text-[10px] leading-snug text-slate-400">
+                      {{ bcFormatPerSendEngagementLine(h.per_send_engagement) }}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </template>
+            <p v-else class="py-8 text-center text-sm text-rose-300/90">{{ tt('admin.broadcast_shell.stats_load_failed') }}</p>
+          </div>
+          <div class="shrink-0 border-t border-white/10 px-4 py-3 pb-[max(0.75rem,calc(0.35rem+env(safe-area-inset-bottom,0px)))]">
+            <div class="flex gap-2">
+              <button
+                type="button"
+                class="flex-1 rounded-xl border border-white/12 bg-white/[0.06] py-3 text-[14px] font-semibold text-zinc-100 shadow-sm hover:bg-white/[0.1] disabled:cursor-not-allowed disabled:opacity-50"
+                :disabled="bcRecentStatsLoading"
+                @click="bcRecentStatsGoToBroadcastsTab"
+              >
+                {{ tt('admin.broadcast_shell.btn_to_broadcasts_tab') }}
+              </button>
+              <button
+                type="button"
+                class="flex-1 rounded-xl bg-gradient-to-r from-violet-600 to-sky-500 py-3 text-[14px] font-bold text-white shadow-lg shadow-indigo-900/30 hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-50"
+                :disabled="bcRecentStatsLoading || !bcRecentStatsBroadcastId"
+                @click="bcRecentStatsRepeatBroadcast"
+              >
+                {{ tt('admin.broadcast_shell.btn_repeat_broadcast') }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+      </GuardTeleport>
 
       <div
         v-if="false && cabinetMode === 'delegated'"
@@ -7737,7 +10303,7 @@ watch(
         <button
           type="button"
           class="rounded-xl border border-white/[0.1] bg-zinc-800/90 px-3 py-1.5 text-xs font-semibold text-zinc-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] ring-1 ring-white/[0.05] backdrop-blur-md transition hover:bg-zinc-700/90"
-          @click="createBcDraft"
+          @click="() => createBcDraft('oneshot')"
         >
           + Черновик
         </button>
@@ -7883,9 +10449,8 @@ watch(
                 <button type="button" class="bc-tool-btn" :class="bcFormatState.strike ? 'bc-tool-active' : ''" title="Зачёркнутый" @mousedown.prevent @click="bcFormatStrike"><s>З</s></button>
                 <button type="button" class="bc-tool-btn text-[11px]" :class="bcFormatState.spoiler ? 'bc-tool-active' : ''" title="Скрытый" @mousedown.prevent @click="bcFormatSpoiler">🙈 Скрытый</button>
                 <button type="button" class="bc-tool-btn text-[11px]" title="Моноширинный блок" @mousedown.prevent @click="bcFormatPre">⌨ PRE</button>
-                <button type="button" class="bc-tool-btn font-mono text-[11px]" title="Код" @mousedown.prevent @click="bcFormatCode">{ }</button>
                 <button type="button" class="bc-tool-btn text-[11px]" :class="bcFormatState.link ? 'bc-tool-active' : ''" title="Ссылка" @mousedown.prevent @click="bcFormatLink">🔗 Ссылка</button>
-                <button type="button" class="bc-tool-btn text-[11px]" title="Цитата" @mousedown.prevent @click="bcFormatBlockquote">❝ Цитата</button>
+                <button type="button" class="bc-tool-btn text-[11px]" :class="bcFormatState.quote ? 'bc-tool-active' : ''" title="Цитата" @mousedown.prevent @click="bcFormatBlockquote">❝ Цитата</button>
                 <button type="button" class="bc-tool-btn text-[11px]" title="Убрать форматирование" @mousedown.prevent @click="bcClearFormatting">✕ Сбросить все</button>
                 <button
                   type="button"
@@ -7963,10 +10528,12 @@ watch(
             </p>
             <div
               ref="bcBodyRef"
-              class="bc-editor mt-1.5 h-48 overflow-y-auto rounded-xl border border-white/[0.1] bg-zinc-950 px-3 py-2.5 text-sm leading-relaxed focus-within:border-cyan-500/45 focus-within:ring-1 focus-within:ring-cyan-500/25"
+              class="bc-editor mt-1.5 h-48 min-h-[12rem] shrink-0 overflow-y-auto rounded-xl border border-white/[0.1] bg-zinc-950 px-3 py-2.5 text-sm leading-relaxed focus-within:border-cyan-500/45 focus-within:ring-1 focus-within:ring-cyan-500/25"
               contenteditable="true"
               :data-placeholder="tt('admin.broadcast_ui.message_body_ph')"
               @input="onBcEditorInput"
+              @paste="bcOnEditorPaste"
+              @keydown="bcOnEditorKeydown"
               @click="onBcEditorClick"
               @mouseup="bcUpdateFormatState"
               @keyup="bcUpdateFormatState"
@@ -8194,10 +10761,10 @@ watch(
     </div>
     </template>
 
-    <GuardTeleport>
+    <GuardTeleport guard-to="body">
       <div
         v-if="bcCampaignUxOpen"
-        class="fixed inset-0 z-[95000] flex h-[100dvh] min-w-0 flex-col overflow-hidden bg-[#0b0d14] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] text-white"
+        class="fixed inset-0 z-[100200] flex h-[100dvh] min-w-0 flex-col overflow-hidden bg-[#0b0d14] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] text-white"
       >
         <div class="flex items-center justify-between border-b border-white/10 bg-[#12141c] px-4 py-3">
           <button type="button" class="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/[0.03] text-white/90 transition hover:bg-white/[0.08] active:scale-[0.98]" @click="bcCampaignUxBack">←</button>
@@ -8205,31 +10772,38 @@ watch(
             <p class="truncate text-[19px] font-extrabold tracking-tight">{{ bcCampaignUxScreen === 'list' ? tt('admin.bc_campaign.title_list') : bcCampaignUxScreen === 'manage' ? (bcCampaignUxManageItem?.title || tt('admin.bc_campaign.title_manage')) : bcCampaignUxScreen === 'stats' ? tt('admin.bc_campaign.title_stats') : tt('admin.bc_campaign.title_new') }}</p>
             <p v-if="bcCampaignUxScreen === 'wizard'" class="text-[11px] font-medium text-slate-400">{{ tt('admin.bc_campaign.wizard_step', { n: bcCampaignUxStep, max: 5 }) }}</p>
           </div>
-          <button type="button" class="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/[0.03] text-white/90 transition hover:bg-white/[0.08] active:scale-[0.98]" @click="bcCampaignUxOpen = false">✕</button>
+          <button type="button" class="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/[0.03] text-white/90 transition hover:bg-white/[0.08] active:scale-[0.98]" @click="bcCampaignUxCloseScheduleModal(); bcCampaignUxRecipientsModalOpen = false; if (bcCampaignUxCampaignPostsModalOpen) bcCampaignUxCloseCampaignPostsModal(); bcCampaignUxOpen = false">✕</button>
         </div>
 
         <div v-if="bcCampaignUxScreen === 'list'" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 pb-[max(5.5rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))]">
           <p class="text-[13px] text-slate-300">{{ tt('admin.bc_campaign.list_intro') }}</p>
-          <button type="button" class="mt-3 w-full rounded-2xl border border-indigo-400/50 bg-gradient-to-r from-[#6d3ef7] via-[#4f46e5] to-[#355dff] px-4 py-3 text-[15px] font-extrabold shadow-[0_20px_44px_-18px_rgba(79,70,229,0.95)] transition hover:brightness-110 active:scale-[0.995]" @click="openBcCampaignUxWizard">{{ tt('admin.bc_campaign.btn_new') }}</button>
+          <button type="button" class="mt-3 w-full rounded-2xl border border-emerald-400/40 bg-gradient-to-r from-[#27b35f] to-[#36D67A] px-4 py-3 text-[15px] font-extrabold text-[#04130a] shadow-[0_18px_34px_-18px_rgba(54,214,122,0.75)] transition hover:brightness-110 active:scale-[0.995]" @click="openBcCampaignUxWizard">{{ tt('admin.bc_campaign.btn_new') }}</button>
           <div class="mt-4 space-y-2.5">
-            <button
+            <div
               v-for="camp in bcAutopostCampaigns"
               :key="`ux-camp-${camp.id}`"
-              type="button"
-              class="w-full rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_16px_30px_-24px_rgba(15,23,42,0.9)] transition hover:border-indigo-300/35 hover:bg-[#151A22]"
+              role="button"
+              tabindex="0"
+              class="w-full cursor-pointer rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_16px_30px_-24px_rgba(15,23,42,0.9)] transition hover:border-indigo-300/35 hover:bg-[#151A22]"
               @click="openBcCampaignUxManage(camp)"
+              @keydown.enter.prevent="openBcCampaignUxManage(camp)"
+              @keydown.space.prevent="openBcCampaignUxManage(camp)"
             >
               <div class="flex items-center justify-between gap-2">
                 <p class="truncate text-[16px] font-bold">{{ camp.title || tt('admin.bc_campaign.campaign_named', { id: camp.id }) }}</p>
-                <span class="rounded-md border border-emerald-400/25 bg-emerald-500/10 px-2 py-0.5 text-[11px] text-emerald-300">{{ bcCampaignUxStatusLabel(camp) }}</span>
+                <span class="rounded-md px-2 py-0.5 text-[11px]" :class="bcCampaignUxStatusBadgeClass(camp)">{{ bcCampaignUxStatusLabel(camp) }}</span>
               </div>
               <div class="mt-2 grid grid-cols-2 gap-1 text-[11px] text-slate-300">
                 <span>{{ tt('admin.bc_campaign.row_recipients_label') }}: {{ Number((camp?.autopost?.group_chat_ids || []).length || 0) + Number((camp?.autopost?.channel_chat_ids || []).length || 0) }}</span>
-                <span>{{ tt('admin.bc_campaign.row_posts_label') }}: {{ Number((camp?.autopost?.broadcast_ids || []).length || 0) || (camp?.autopost?.use_all_broadcasts ? tt('admin.bc_campaign.word_all') : 0) }}</span>
+                <span>{{ tt('admin.bc_campaign.row_posts_label') }}: {{ bcCampaignUxPostsCountLabelForCamp(camp) }}</span>
                 <span>{{ tt('admin.bc_campaign.row_today_label') }}: {{ bcCampaignUxTodaySent(camp) }}</span>
-                <span>CTR: {{ fmtPctTrim(Number(camp?.ctr || 0)) }}</span>
+                <span>CTR: {{ fmtPctTrim(bcCampaignUxListCtrPct(camp)) }}</span>
               </div>
-            </button>
+              <div v-if="bcCampaignUxDestinationsIsEmpty(camp)" class="mt-1.5 rounded-lg border border-indigo-500/20 bg-indigo-500/8 px-2 py-2">
+                <p class="text-[10px] leading-snug text-slate-400">{{ tt('admin.bc_campaign.destinations_empty_hint') }}</p>
+              </div>
+              <p v-else class="mt-1.5 line-clamp-2 text-[10px] leading-snug text-slate-500">{{ bcCampaignUxDestinationsPreviewLines(camp) }}</p>
+            </div>
             <div v-if="!bcAutopostCampaigns.length" class="rounded-2xl border border-dashed border-white/15 bg-[#11151C]/85 px-3 py-5 text-center">
               <p class="text-[14px] font-semibold text-slate-200">{{ tt('admin.bc_campaign.empty_title') }}</p>
               <p class="mt-1 text-[12px] text-slate-400">{{ tt('admin.bc_campaign.empty_sub') }}</p>
@@ -8237,31 +10811,77 @@ watch(
           </div>
         </div>
 
-        <div v-else-if="bcCampaignUxScreen === 'wizard'" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 pb-[max(5.5rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))]">
+        <div v-else-if="bcCampaignUxScreen === 'wizard'" class="flex min-h-0 flex-1 flex-col">
+          <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4">
           <template v-if="bcCampaignUxStep === 1">
             <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.step_n_of_5', { n: 1 }) }}</p>
             <label class="mt-2 block text-[12px] font-semibold text-slate-300">{{ tt('admin.bc_campaign.name_label') }}</label>
-            <input v-model="bcCampaignUxWizard.title" type="text" maxlength="255" class="mt-1 w-full rounded-2xl border border-white/10 bg-[#11151C] px-3 py-2.5 text-sm text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] focus:border-indigo-400/45 focus:outline-none focus:ring-1 focus:ring-indigo-400/30" :placeholder="tt('admin.bc_campaign.name_ph')" />
+            <input
+              ref="bcCampaignUxWizardTitleInputRef"
+              v-model="bcCampaignUxWizard.title"
+              type="text"
+              maxlength="255"
+              class="mt-1 w-full rounded-2xl border border-white/10 bg-[#11151C] px-3 py-2.5 text-sm text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] focus:border-indigo-400/45 focus:outline-none focus:ring-1 focus:ring-indigo-400/30"
+              :placeholder="tt('admin.bc_campaign.name_ph')"
+            />
             <p class="mt-3 text-[12px] font-semibold text-slate-300">{{ tt('admin.bc_campaign.posts_heading') }}</p>
-            <div class="mt-2 grid grid-cols-2 gap-2">
-              <button type="button" class="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxOpenPostEditor(0)">{{ tt('admin.bc_campaign.btn_create_post') }}</button>
-              <button type="button" class="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxWizard.postIds = [...new Set([...(bcCampaignUxWizard.postIds || []), ...broadcasts.map((b)=>Number(b.id||0)).filter((x)=>x>0)])]">{{ tt('admin.bc_campaign.btn_from_templates') }}</button>
+            <button
+              type="button"
+              class="mt-2 w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold transition hover:bg-white/[0.08]"
+              @click="bcCampaignUxOpenPostEditor(0)"
+            >
+              {{ tt('admin.bc_campaign.btn_create_post') }}
+            </button>
+            <div class="mt-2">
+              <button
+                type="button"
+                class="w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold transition hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-45"
+                :disabled="!bcCampaignUxHasDraftPostsSelected"
+                @click="bcCampaignUxClearDraftPostSelection"
+              >
+                {{ tt('admin.bc_campaign.btn_clear_post_selection') }}
+              </button>
             </div>
-            <div class="mt-2 max-h-44 space-y-1 overflow-y-auto rounded-2xl border border-white/10 bg-[#11151C] p-2">
-              <label v-for="b in broadcasts" :key="`wiz-post-${b.id}`" class="flex items-center gap-2 rounded-lg px-2 py-1.5 text-[12px] transition hover:bg-white/[0.06]">
-                <input type="checkbox" :checked="bcCampaignUxWizard.postIds.includes(Number(b.id))" @change="bcCampaignUxTogglePost(b.id)" />
-                <span class="truncate">{{ b.title || tt('admin.bc_campaign.post_named', { id: b.id }) }}</span>
-              </label>
-            </div>
-            <div class="mt-2 space-y-1.5 rounded-2xl border border-white/10 bg-[#11151C] p-2">
-              <div v-for="(p, pi) in bcCampaignUxWizardPosts" :key="`wiz-cpost-${p.id}`" class="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-2 py-1.5">
-                <span class="w-5 text-center text-[11px] text-slate-400">{{ pi + 1 }}</span>
-                <span class="text-sm">{{ bcCampaignUxPostMeta(p) }}</span>
-                <span class="min-w-0 flex-1 truncate text-[12px] text-slate-200">{{ stripHtml(p?.body_text || '') || p?.title || tt('admin.bc_campaign.post_named', { id: p.id }) }}</span>
-                <button type="button" class="rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 text-[10px]" @click="bcCampaignUxOpenPostEditor(p.id)">✎</button>
-                <button type="button" class="rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 text-[10px]" @click="bcCampaignUxMovePost(p.id, -1)">↑</button>
-                <button type="button" class="rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 text-[10px]" @click="bcCampaignUxMovePost(p.id, 1)">↓</button>
-                <button type="button" class="rounded-md border border-rose-500/35 bg-rose-900/35 px-1.5 py-0.5 text-[10px] text-rose-100" @click="bcCampaignUxRemovePost(p.id)">✕</button>
+            <button
+              type="button"
+              class="mt-2 w-full rounded-xl border border-rose-500/35 bg-rose-950/40 px-3 py-2 text-xs font-semibold text-rose-100 transition hover:bg-rose-950/55 disabled:cursor-not-allowed disabled:opacity-45"
+              :disabled="!bcDraftBroadcastsForAutopost.length"
+              @click="bcCampaignUxDeleteAllDraftPosts"
+            >
+              {{ tt('admin.bc_campaign.btn_delete_all_post_drafts') }}
+            </button>
+            <div ref="bcCampaignUxWizardPostsListRef" class="mt-2 max-h-56 space-y-1 overflow-y-auto rounded-2xl border border-white/10 bg-[#11151C] p-2">
+              <div
+                v-for="b in bcDraftBroadcastsForAutopost"
+                :key="`wiz-post-${b.id}`"
+                class="flex items-center gap-2 rounded-lg px-2 py-1.5 text-[12px] transition hover:bg-white/[0.06]"
+              >
+                <input
+                  class="shrink-0 rounded border-white/30"
+                  type="checkbox"
+                  :checked="bcCampaignUxWizard.postIds.includes(Number(b.id))"
+                  @change="bcCampaignUxTogglePost(b.id)"
+                />
+                <div class="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+                  <span class="shrink-0 whitespace-nowrap text-[13px] leading-none" :title="tt('admin.bc_campaign.post_type_hint')">{{ bcCampaignUxPostMeta(b) }}</span>
+                  <span class="min-w-0 truncate">{{ b.title || tt('admin.bc_campaign.post_named', { id: b.id }) }}</span>
+                </div>
+                <button
+                  type="button"
+                  class="shrink-0 rounded-md border border-white/10 bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-slate-200"
+                  :title="tt('admin.bc_campaign.edit_post_draft')"
+                  @click.stop="bcCampaignUxOpenPostEditor(b.id)"
+                >
+                  ✎
+                </button>
+                <button
+                  type="button"
+                  class="shrink-0 rounded-md border border-rose-500/35 bg-rose-900/35 px-2 py-0.5 text-[11px] font-semibold text-rose-100"
+                  :title="tt('admin.bc_campaign.delete_one_post_draft')"
+                  @click.stop="deleteBcDraftItem(b)"
+                >
+                  ✕
+                </button>
               </div>
             </div>
             <p class="mt-2 text-[11px] text-slate-500">{{ tt('admin.bc_campaign.posts_tip') }}</p>
@@ -8270,19 +10890,9 @@ watch(
           <template v-else-if="bcCampaignUxStep === 2">
             <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.step_n_of_5', { n: 2 }) }}</p>
             <p class="mt-2 text-[16px] font-bold">{{ tt('admin.bc_campaign.type_heading') }}</p>
-            <div class="mt-3 space-y-2">
-              <button type="button" class="w-full rounded-2xl border px-3 py-3 text-left transition" :class="bcCampaignUxWizard.campaignType === 'progress' ? 'border-violet-400 bg-violet-500/12 shadow-[0_0_30px_-16px_rgba(139,92,246,0.75)]' : 'border-white/10 bg-[#11151C] hover:bg-[#151A22]'" @click="bcCampaignUxWizard.campaignType = 'progress'">
-                <p class="font-semibold">{{ tt('admin.bc_campaign.type_progress') }}</p>
-                <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.type_progress_sub') }}</p>
-              </button>
-              <button type="button" class="w-full rounded-2xl border px-3 py-3 text-left transition" :class="bcCampaignUxWizard.campaignType === 'rotation' ? 'border-violet-400 bg-violet-500/12 shadow-[0_0_30px_-16px_rgba(139,92,246,0.75)]' : 'border-white/10 bg-[#11151C] hover:bg-[#151A22]'" @click="bcCampaignUxWizard.campaignType = 'rotation'">
-                <p class="font-semibold">{{ tt('admin.bc_campaign.type_rotation') }}</p>
-                <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.type_rotation_sub') }}</p>
-              </button>
-              <button type="button" class="w-full rounded-2xl border px-3 py-3 text-left transition" :class="bcCampaignUxWizard.campaignType === 'simple' ? 'border-violet-400 bg-violet-500/12 shadow-[0_0_30px_-16px_rgba(139,92,246,0.75)]' : 'border-white/10 bg-[#11151C] hover:bg-[#151A22]'" @click="bcCampaignUxWizard.campaignType = 'simple'">
-                <p class="font-semibold">{{ tt('admin.bc_campaign.type_simple') }}</p>
-                <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.type_simple_sub') }}</p>
-              </button>
+            <div class="mt-3 rounded-2xl border border-violet-400/35 bg-violet-500/10 px-3 py-3 text-[13px] leading-relaxed text-slate-200">
+              <p class="font-semibold text-violet-100">{{ tt('admin.bc_campaign.type_simple') }}</p>
+              <p class="mt-1 text-[12px] text-slate-400">{{ tt('admin.bc_campaign.type_simple_sub') }}</p>
             </div>
           </template>
 
@@ -8290,34 +10900,82 @@ watch(
             <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.step_n_of_5', { n: 3 }) }}</p>
             <p class="mt-2 text-[16px] font-bold">{{ tt('admin.bc_campaign.schedule_heading') }}</p>
             <div class="mt-3 space-y-2 rounded-2xl border border-white/10 bg-[#11151C] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+              <label class="text-[12px] text-slate-300">{{ tt('admin.bc_campaign.period_start_label') }}</label>
+              <div class="flex flex-wrap items-center gap-2">
+                <input v-model="bcCampaignUxWizard.startDate" type="date" class="min-w-[10rem] flex-1 rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
+                <button type="button" class="shrink-0 rounded-xl border border-violet-400/40 bg-violet-600/25 px-3 py-2 text-[11px] font-semibold text-violet-100 transition hover:bg-violet-600/35" @click="bcCampaignUxSetStartDateTodayFromTz">{{ tt('admin.bc_campaign.btn_today_tz') }}</button>
+              </div>
+              <label class="pt-1 text-[12px] text-slate-300">{{ tt('admin.bc_campaign.period_end_label') }}</label>
+              <input v-model="bcCampaignUxWizard.endDate" type="date" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
+              <p class="text-[10px] text-slate-500">{{ tt('admin.bc_campaign.period_end_hint') }}</p>
               <label class="text-[12px] text-slate-300">{{ tt('admin.bc_campaign.freq_label') }}</label>
               <select v-model="bcCampaignUxWizard.scheduleMode" class="mt-1 w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none">
                 <option value="every_day">{{ tt('admin.bc_campaign.freq_every_day') }}</option>
                 <option value="weekdays">{{ tt('admin.bc_campaign.freq_weekdays') }}</option>
-                <option value="interval">{{ tt('admin.bc_campaign.freq_interval') }}</option>
-                <option value="custom">{{ tt('admin.bc_campaign.freq_custom') }}</option>
               </select>
               <div v-if="bcCampaignUxWizard.scheduleMode === 'weekdays'" class="flex flex-wrap gap-1.5 pt-1">
                 <button v-for="d in BC_WEEKDAY_OPTS" :key="`wiz-wd-${d.v}`" type="button" class="rounded-lg border px-2 py-1 text-[11px] transition" :class="bcCampaignUxWizard.weekdays.includes(d.v) ? 'border-violet-400 bg-violet-500/20 text-violet-100' : 'border-white/15 bg-black/20 hover:bg-white/[0.06]'" @click="bcCampaignUxToggleWeekday(d.v)">{{ d.label }}</button>
               </div>
-              <div v-else-if="bcCampaignUxWizard.scheduleMode === 'interval'" class="grid grid-cols-[auto_1fr] items-center gap-2 pt-1">
-                <span class="text-[11px] text-slate-400">{{ tt('admin.bc_campaign.every_prefix') }}</span>
-                <input v-model.number="bcCampaignUxWizard.intervalDays" type="number" min="1" max="365" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
+              <label class="mt-2 text-[12px] text-slate-300">{{ tt('admin.bc_campaign.multi_send_windows_heading') }}</label>
+              <p class="text-[10px] leading-snug text-slate-500">{{ tt('admin.bc_campaign.multi_send_windows_help') }}</p>
+              <div v-for="(seg, si) in bcCampaignUxWizard.sendWindows" :key="`wiz-sw-${si}`" class="mt-2 space-y-2 rounded-xl border border-white/[0.08] bg-black/25 p-2.5">
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-[11px] font-semibold text-slate-400">{{ tt('admin.bc_campaign.slot_n', { n: si + 1 }) }}</span>
+                  <div class="flex shrink-0 gap-1">
+                    <button
+                      type="button"
+                      class="rounded-lg border border-emerald-500/35 px-2 py-0.5 text-[12px] font-bold text-emerald-200 disabled:cursor-not-allowed disabled:opacity-40"
+                      :disabled="(bcCampaignUxWizard.sendWindows || []).length >= 24"
+                      @click="bcCampaignUxWizardAddScheduleSegment"
+                    >
+                      +
+                    </button>
+                    <button
+                      type="button"
+                      class="rounded-lg border border-rose-500/35 px-2 py-0.5 text-[12px] font-bold text-rose-100 disabled:cursor-not-allowed disabled:opacity-40"
+                      :disabled="(bcCampaignUxWizard.sendWindows || []).length <= 1"
+                      @click="bcCampaignUxWizardRemoveScheduleSegment(si)"
+                    >
+                      −
+                    </button>
+                  </div>
+                </div>
+                <div class="grid grid-cols-2 gap-2">
+                  <div>
+                    <p class="text-[10px] text-slate-500">{{ tt('admin.bc_campaign.slot_from') }}</p>
+                    <input v-model="seg.windowStart" type="time" class="mt-1 w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
+                  </div>
+                  <div>
+                    <p class="text-[10px] text-slate-500">{{ tt('admin.bc_campaign.slot_to') }}</p>
+                    <input v-model="seg.windowEnd" type="time" class="mt-1 w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
+                  </div>
+                </div>
+                <div>
+                  <p class="text-[10px] text-slate-500">{{ tt('admin.bc_campaign.posts_in_slot') }}</p>
+                  <input
+                    v-model.number="seg.posts"
+                    type="number"
+                    min="1"
+                    max="288"
+                    class="hide-num-spin mt-1 w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none"
+                    @blur="bcCampaignUxWizardSegmentPostsEdited()"
+                  />
+                </div>
+                <div
+                  v-if="(bcCampaignUxWizardSlotTimePreview[si] || []).length"
+                  class="rounded-lg border border-white/[0.06] bg-black/20 px-2 py-2"
+                >
+                  <p class="text-[10px] font-semibold text-slate-500">{{ tt('admin.bc_campaign.schedule_slot_times_preview') }}</p>
+                  <p class="mt-1 break-words font-mono text-[11px] leading-relaxed text-slate-200">
+                    {{ bcCampaignUxWizardSlotTimePreview[si].join(' · ') }}
+                  </p>
+                </div>
               </div>
-              <div v-else-if="bcCampaignUxWizard.scheduleMode === 'custom'" class="pt-1">
-                <input v-model="bcCampaignUxWizard.customDays" type="text" :placeholder="tt('admin.bc_campaign.custom_days_ph')" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
-              </div>
-              <label class="text-[12px] text-slate-300">{{ tt('admin.bc_campaign.send_time') }}</label>
-              <input v-model="bcCampaignUxWizard.sendTime" type="time" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
-              <label class="text-[12px] text-slate-300">{{ tt('admin.bc_campaign.send_window') }}</label>
-              <div class="grid grid-cols-2 gap-2">
-                <input v-model="bcCampaignUxWizard.windowStart" type="time" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
-                <input v-model="bcCampaignUxWizard.windowEnd" type="time" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
-              </div>
+              <p v-if="(bcCampaignUxWizard.sendWindows || []).length >= 2" class="mt-2 text-[11px] font-medium text-slate-400">
+                {{ tt('admin.bc_campaign.slots_daily_total') }}: {{ bcCampaignUxWizardPostsPerDayTotal }}
+              </p>
               <label class="text-[12px] text-slate-300">{{ tt('admin.bc_campaign.timezone') }}</label>
               <input v-model="bcCampaignUxWizard.timezone" type="text" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
-              <label class="text-[12px] text-slate-300">{{ tt('admin.bc_campaign.posts_per_day') }}</label>
-              <input v-model.number="bcCampaignUxWizard.postsPerDay" type="number" min="1" max="288" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
               <label class="flex items-center gap-2 text-[12px] text-slate-300"><input v-model="bcCampaignUxWizard.spreadInWindow" type="checkbox" /> {{ tt('admin.bc_campaign.spread_even') }}</label>
             </div>
           </template>
@@ -8326,13 +10984,17 @@ watch(
             <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.step_n_of_5', { n: 4 }) }}</p>
             <p class="mt-2 text-[16px] font-bold">{{ tt('admin.bc_campaign.where_heading') }}</p>
             <div class="mt-3 space-y-2">
-              <label class="flex items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-sm transition hover:bg-[#151A22]"><span>{{ tt('admin.bc_campaign.target_channels') }}</span><input v-model="bcCampaignUxWizard.targetChannels" type="checkbox" /></label>
-              <label class="flex items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-sm transition hover:bg-[#151A22]"><span>{{ tt('admin.bc_campaign.target_groups') }}</span><input v-model="bcCampaignUxWizard.targetGroups" type="checkbox" /></label>
-              <label class="flex items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-sm transition hover:bg-[#151A22]"><span>{{ tt('admin.bc_campaign.target_bots') }}</span><input v-model="bcCampaignUxWizard.targetBots" type="checkbox" /></label>
+              <label class="flex cursor-pointer items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-sm transition hover:bg-[#151A22]"><span>{{ tt('admin.bc_campaign.target_channels') }}</span><input :checked="bcCampaignUxWizard.targetChannels" type="checkbox" @change="bcCampaignUxToggleWizardTargetChannels" /></label>
+              <label class="flex cursor-pointer items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-sm transition hover:bg-[#151A22]"><span>{{ tt('admin.bc_campaign.target_groups') }}</span><input :checked="bcCampaignUxWizard.targetGroups" type="checkbox" @change="bcCampaignUxToggleWizardTargetGroups" /></label>
+              <label
+                v-if="showFullAdminShell && !isBroadcastShellLite"
+                class="flex items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-sm transition hover:bg-[#151A22]"
+                ><span>{{ tt('admin.bc_campaign.target_bots') }}</span><input v-model="bcCampaignUxWizard.targetBots" type="checkbox"
+              /></label>
             </div>
             <div class="mt-3 rounded-2xl border border-white/10 bg-[#11151C] px-3 py-2 text-[12px] text-slate-300">
               <p>{{ tt('admin.bc_campaign.selected_heading') }}</p>
-              <p class="mt-1">{{ tt('admin.bc_campaign.selected_counts', { ch: bcCampaignUxSelectedSummary.channels, gr: bcCampaignUxSelectedSummary.groups, bt: bcCampaignUxSelectedSummary.bots }) }}</p>
+              <p class="mt-1">{{ tt('admin.bc_campaign.selected_counts', { ch: bcCampaignUxSelectedSummary.channels, gr: bcCampaignUxSelectedSummary.groups }) }}</p>
             </div>
             <div class="mt-2 flex gap-2">
               <button type="button" class="flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxOpenRecipientPicker('channels')">{{ tt('admin.bc_campaign.pick_channels') }}</button>
@@ -8340,8 +11002,16 @@ watch(
             </div>
           </template>
 
-          <div class="sticky bottom-0 mt-5 border-t border-white/10 bg-[#05070B] pt-3">
-            <button type="button" class="w-full rounded-2xl border border-indigo-400/45 bg-gradient-to-r from-[#6d3ef7] via-[#4f46e5] to-[#355dff] px-4 py-3 text-[14px] font-bold shadow-[0_18px_36px_-18px_rgba(79,70,229,0.95)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:brightness-100" :disabled="!bcCampaignUxWizardCanNext" @click="bcCampaignUxNextStep">{{ tt('admin.bc_campaign.btn_next') }}</button>
+          </div>
+          <div class="shrink-0 border-t border-white/10 bg-[#05070B] px-4 pt-3 pb-[max(0.75rem,calc(0.5rem+env(safe-area-inset-bottom,0px)))]">
+            <button
+              type="button"
+              class="w-full rounded-2xl border border-indigo-400/45 bg-gradient-to-r from-[#6d3ef7] via-[#4f46e5] to-[#355dff] px-4 py-3 text-[14px] font-bold shadow-[0_18px_36px_-18px_rgba(79,70,229,0.95)] transition hover:brightness-110"
+              :class="!bcCampaignUxWizardCanNext ? 'cursor-not-allowed opacity-45' : ''"
+              @click="bcCampaignUxNextStepAttempt"
+            >
+              {{ tt('admin.bc_campaign.btn_next') }}
+            </button>
           </div>
         </div>
 
@@ -8351,10 +11021,26 @@ watch(
           <div class="mt-3 space-y-2 rounded-2xl border border-white/10 bg-[#11151C] p-3 text-[13px] text-slate-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
             <p>{{ tt('admin.bc_campaign.rv_name') }}: <b>{{ bcCampaignUxWizard.title }}</b></p>
             <p>{{ tt('admin.bc_campaign.rv_type') }}: <b>{{ bcCampaignUxWizard.campaignType === 'progress' ? tt('admin.bc_campaign.type_progress') : bcCampaignUxWizard.campaignType === 'rotation' ? tt('admin.bc_campaign.type_rotation') : tt('admin.bc_campaign.type_simple') }}</b></p>
-            <p>{{ tt('admin.bc_campaign.rv_schedule') }}: <b>{{ bcCampaignUxWizard.sendTime }} · {{ bcCampaignUxWizard.timezone }}</b></p>
-            <p>{{ tt('admin.bc_campaign.rv_recipients') }}: <b>{{ tt('admin.bc_campaign.selected_counts', { ch: bcCampaignUxSelectedSummary.channels, gr: bcCampaignUxSelectedSummary.groups, bt: bcCampaignUxSelectedSummary.bots }) }}</b></p>
+            <p>{{ tt('admin.bc_campaign.rv_daily_window') }}: <b>{{ bcCampaignUxWizardReviewTimingPreview }} · {{ bcCampaignUxWizard.timezone }}</b></p>
+            <p>
+              {{ tt('admin.bc_campaign.rv_dates') }}:
+              <b
+                ><template v-if="bcCampaignUxWizard.startDate">{{ bcCampaignUxWizard.startDate }}</template
+                ><template v-else>{{ tt('admin.bc_campaign.from_immediately') }}</template>
+                —
+                <template v-if="bcCampaignUxWizard.endDate">{{ bcCampaignUxWizard.endDate }}</template>
+                <template v-else>{{ tt('admin.bc_campaign.open_end_inline') }}</template></b
+              >
+            </p>
+            <p>{{ tt('admin.bc_campaign.rv_recipients') }}: <b>{{ tt('admin.bc_campaign.selected_counts', { ch: bcCampaignUxSelectedSummary.channels, gr: bcCampaignUxSelectedSummary.groups }) }}</b></p>
             <p>{{ tt('admin.bc_campaign.rv_posts_count') }}: <b>{{ bcCampaignUxWizard.postIds.length }}</b></p>
-            <p>{{ tt('admin.bc_campaign.rv_slot_cost') }}: <b class="text-amber-300">{{ bcCampaignUxEstimatedCost }} AURUM</b></p>
+            <p>{{ tt('admin.bc_campaign.rv_slot_cost') }}: <b class="text-amber-300">{{ bcCampaignUxSlotAurumCharge }} AURUM</b></p>
+            <p>
+              {{ tt('admin.bc_campaign.rv_period_sends') }}: <b>{{ fmtIntSpace(bcCampaignUxPeriodScheduledSends) }}</b>
+              <span v-if="bcCampaignUxPeriodSendingOpenEnded" class="text-slate-500"> {{ tt('admin.bc_campaign.open_end_notice_short') }}</span>
+            </p>
+            <p>{{ tt('admin.bc_campaign.rv_period_aurum') }}: <b class="text-amber-300">{{ fmtIntSpace(bcCampaignUxPeriodAurumEstimate) }} AURUM</b></p>
+            <p class="text-[11px] text-slate-500">{{ tt('admin.bc_campaign.debit_per_send_note') }}</p>
             <p>{{ tt('admin.bc_campaign.rv_balance') }}: <b class="text-amber-200">{{ fmtBcTokens(meAdminProfile?.aurum_tokens || 0) }}</b></p>
           </div>
           <p class="mt-3 text-[12px] text-slate-400">{{ tt('admin.bc_campaign.after_launch_note') }}</p>
@@ -8367,7 +11053,8 @@ watch(
         <div v-else-if="bcCampaignUxScreen === 'success'" class="flex min-h-0 flex-1 flex-col items-center justify-center px-4 py-6 text-center">
           <div class="flex h-28 w-28 items-center justify-center rounded-full border border-emerald-300/45 bg-emerald-500/20 text-5xl text-emerald-300 shadow-[0_0_64px_-12px_rgba(54,214,122,0.7),inset_0_0_20px_rgba(255,255,255,0.12)]">✓</div>
           <p class="mt-4 text-[26px] font-extrabold">{{ tt('admin.bc_campaign.success_title') }}</p>
-          <p class="mt-1 text-[13px] text-slate-300">{{ tt('admin.bc_campaign.success_sub', { when: bcCampaignUxSuccessInfo.nextAt || tt('admin.bc_campaign.success_when_fallback') }) }}</p>
+          <p v-if="bcCampaignUxSuccessInfo.needsStart" class="mt-1 text-[13px] text-amber-100/95">{{ tt('admin.bc_campaign.success_sub_stopped') }}</p>
+          <p v-else class="mt-1 text-[13px] text-slate-300">{{ tt('admin.bc_campaign.success_sub', { when: bcCampaignUxSuccessInfo.nextAt || tt('admin.bc_campaign.success_when_fallback') }) }}</p>
           <div class="mt-5 w-full max-w-sm space-y-2">
             <button type="button" class="w-full rounded-2xl border border-emerald-400/45 bg-gradient-to-r from-[#27b35f] to-[#36D67A] px-4 py-3 font-bold text-[#04130a] shadow-[0_18px_34px_-18px_rgba(54,214,122,0.95)] transition hover:brightness-110" @click="bcCampaignUxScreen = 'manage'">{{ tt('admin.bc_campaign.btn_to_campaign') }}</button>
             <button type="button" class="w-full rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxScreen = 'list'">{{ tt('admin.bc_campaign.btn_to_list') }}</button>
@@ -8377,94 +11064,226 @@ watch(
         <div v-else-if="bcCampaignUxScreen === 'manage' && bcCampaignUxManageItem" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 pb-[max(5.5rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))]">
           <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.manage_status') }} <span class="text-slate-200">{{ bcCampaignUxStatusLabel(bcCampaignUxManageItem) }}</span></p>
           <div class="mt-3 grid grid-cols-2 gap-2">
-            <button type="button" class="rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left transition hover:bg-[#151A22]" @click="openBcCampaignUxEditCampaign(bcCampaignUxManageItem)">
+            <button type="button" class="rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left transition hover:bg-[#151A22]" @click="bcCampaignUxManageOpenPostEditor">
               <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.card_posts') }}</p>
-              <p class="mt-1 text-sm font-semibold text-white">{{ Number((bcCampaignUxManageItem?.autopost?.broadcast_ids || []).length || 0) || (bcCampaignUxManageItem?.autopost?.use_all_broadcasts ? tt('admin.bc_campaign.word_all') : 0) }}</p>
+              <p class="mt-1 line-clamp-3 text-sm font-semibold leading-snug text-white">{{ bcCampaignUxManagePostsCardLabel }}</p>
             </button>
-            <button type="button" class="rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left transition hover:bg-[#151A22]" @click="openBcCampaignUxEditCampaign(bcCampaignUxManageItem)">
+            <button
+              type="button"
+              class="rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left transition hover:bg-[#151A22]"
+              @click="bcCampaignUxOpenScheduleModal(bcCampaignUxManageItem)"
+            >
               <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.card_schedule') }}</p>
-              <p class="mt-1 text-sm font-semibold text-white">{{ String(bcCampaignUxManageItem?.autopost?.windowStart || '—') }}</p>
+              <p class="mt-1 text-sm font-semibold text-white">{{ bcCampaignUxScheduleSubtitleFromAutopost(bcCampaignUxManageItem.autopost) }}</p>
             </button>
-            <button type="button" class="rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left transition hover:bg-[#151A22]" @click="openBcCampaignUxEditCampaign(bcCampaignUxManageItem)">
-              <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.card_recipients') }}</p>
-              <p class="mt-1 text-sm font-semibold text-white">{{ Number((bcCampaignUxManageItem?.autopost?.group_chat_ids || []).length || 0) + Number((bcCampaignUxManageItem?.autopost?.channel_chat_ids || []).length || 0) }}</p>
+            <button
+              type="button"
+              class="rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left transition hover:bg-[#151A22]"
+              @click="bcCampaignUxOpenScheduleModal(bcCampaignUxManageItem)"
+            >
+              <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.card_period') }}</p>
+              <p class="mt-1 line-clamp-3 text-[13px] font-semibold leading-snug text-white">{{ bcCampaignUxPeriodLabelFromCamp(bcCampaignUxManageItem) }}</p>
             </button>
             <button type="button" class="rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left transition hover:bg-[#151A22]" @click="bcCampaignUxOpenStats(bcCampaignUxManageItem)">
               <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.card_statistics') }}</p>
               <p class="mt-1 text-sm font-semibold text-emerald-300">{{ tt('admin.bc_campaign.stat_open') }}</p>
             </button>
           </div>
+          <p
+            v-if="bcCampaignUxManageAurumUi && bcCampaignUxManageAurumUi.usersOnly"
+            class="mt-2 rounded-xl border border-white/10 bg-[#11151C] px-3 py-2 text-[11px] text-slate-400"
+          >
+            {{ tt('admin.bc_campaign.manage_aurum_dm_skip') }}
+          </p>
+          <p
+            v-else-if="bcCampaignUxManageAurumUi && !bcCampaignUxManageAurumUi.usersOnly"
+            class="mt-2 rounded-xl border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-[12px] text-amber-100/95"
+          >
+            {{ tt('admin.bc_campaign.manage_aurum_period', { total: fmtIntSpace(bcCampaignUxManageAurumUi.total), slot: fmtIntSpace(bcCampaignUxManageAurumUi.slot), sends: fmtIntSpace(bcCampaignUxManageAurumUi.sends) }) }}
+            <span v-if="bcCampaignUxManageAurumUi.openEnded" class="text-amber-200/70"> {{ tt('admin.bc_campaign.open_end_notice_short') }}</span>
+          </p>
+          <div class="mt-3 rounded-2xl border border-white/10 bg-[#11151C] p-3 text-[11px] text-slate-300">
+            <button type="button" class="flex w-full items-center justify-between text-left text-[11px] font-semibold text-slate-400 transition hover:text-slate-200" @click="bcCampaignUxOpenRecipientsModal">
+              <span>{{ tt('admin.bc_campaign.manage_dest_heading') }}</span>
+              <span class="text-slate-500">›</span>
+            </button>
+            <template v-if="bcCampaignUxManageDestinations.usersOnly">
+              <p class="mt-1">{{ tt('admin.bc_campaign.targets_dm_autopost') }}</p>
+            </template>
+            <template v-else>
+              <ul v-if="bcCampaignUxManageDestinations.channels.length" class="mt-1 list-inside list-disc space-y-0.5">
+                <li v-for="row in bcCampaignUxManageDestinations.channels" :key="`m-ch-${row.id}`">{{ row.label }}</li>
+              </ul>
+              <ul v-if="bcCampaignUxManageDestinations.groups.length" class="mt-1 list-inside list-disc space-y-0.5">
+                <li v-for="row in bcCampaignUxManageDestinations.groups" :key="`m-gr-${row.id}`">{{ row.label }}</li>
+              </ul>
+              <p v-if="!bcCampaignUxManageDestinations.channels.length && !bcCampaignUxManageDestinations.groups.length" class="mt-1 text-slate-500">
+                {{ tt('admin.bc_campaign.destinations_fallback') }}
+              </p>
+            </template>
+          </div>
           <div class="mt-3 flex flex-wrap gap-2">
             <button v-if="bcCampaignRunState(bcCampaignUxManageItem) === 'running'" type="button" class="rounded-xl border border-amber-400/40 bg-amber-900/50 px-3 py-2 text-xs font-semibold text-amber-100 transition hover:bg-amber-900/70" @click="bcCampaignPause(bcCampaignUxManageItem)">{{ tt('admin.bc_campaign.pause') }}</button>
             <button v-else type="button" class="rounded-xl border border-emerald-400/45 bg-emerald-700/85 px-3 py-2 text-xs font-semibold text-emerald-50 transition hover:brightness-110" @click="bcCampaignStartOrResume(bcCampaignUxManageItem)">{{ tt('admin.bc_campaign.start') }}</button>
             <button type="button" class="rounded-xl border border-white/15 bg-white/[0.04] px-3 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignStop(bcCampaignUxManageItem)">{{ tt('admin.bc_campaign.stop') }}</button>
-            <button type="button" class="rounded-xl border border-indigo-400/45 bg-indigo-900/40 px-3 py-2 text-xs font-semibold transition hover:bg-indigo-900/60" @click="bcCampaignUxOpenStats(bcCampaignUxManageItem)">{{ tt('admin.bc_campaign.statistics') }}</button>
-            <button type="button" class="rounded-xl border border-cyan-400/45 bg-cyan-900/35 px-3 py-2 text-xs font-semibold transition hover:bg-cyan-900/55" @click="bcCampaignUxScreen = 'progress'">{{ tt('admin.bc_campaign.sending_progress') }}</button>
+            <button type="button" class="rounded-xl border border-emerald-400/35 bg-emerald-950/40 px-3 py-2 text-xs font-semibold text-emerald-100 transition hover:bg-emerald-950/55" @click="bcCampaignUxScreen = 'progress'">{{ tt('admin.bc_campaign.sending_progress') }}</button>
           </div>
           <div class="mt-4 space-y-2">
-            <button type="button" class="flex w-full items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left transition hover:bg-[#151A22]" @click="openBcCampaignUxEditCampaign(bcCampaignUxManageItem)"><span>{{ tt('admin.bc_campaign.edit') }}</span><span>›</span></button>
-            <button type="button" class="flex w-full items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-left transition hover:bg-[#151A22]" @click="bcCampaignUxHydrateWizardFromCampaign(bcCampaignUxManageItem); bcCampaignUxEditingCampaignId = 0; bcCampaignUxStep = 1; bcCampaignUxScreen = 'wizard'"><span>{{ tt('admin.bc_campaign.duplicate') }}</span><span>›</span></button>
             <button type="button" class="flex w-full items-center justify-between rounded-2xl border border-rose-500/45 bg-rose-950/40 px-3 py-3 text-left text-rose-100 transition hover:bg-rose-950/60" @click="deleteBcAutopostCampaign(bcCampaignUxManageItem)"><span>{{ tt('admin.bc_campaign.delete_campaign') }}</span><span>›</span></button>
           </div>
         </div>
 
-        <div v-else-if="bcCampaignUxScreen === 'postEditor'" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 pb-[max(5.5rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))]">
-          <p class="text-[12px] text-slate-400">{{ bcCampaignUxPostEditorMode === 'edit' ? tt('admin.bc_campaign.post_editor_edit') : tt('admin.bc_campaign.post_editor_new') }}</p>
-          <label class="mt-2 block text-[12px] font-semibold text-slate-300">{{ tt('admin.bc_campaign.post_text') }}</label>
-          <div class="mt-1 flex flex-wrap gap-1.5">
-            <button type="button" class="bc-tool-btn text-[11px]" :class="bcFormatState.bold ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatBold"><b>{{ tt('admin.bc_campaign.fmt_bold') }}</b></button>
-            <button type="button" class="bc-tool-btn text-[11px]" :class="bcFormatState.italic ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatItalic"><i>{{ tt('admin.bc_campaign.fmt_italic') }}</i></button>
-            <button type="button" class="bc-tool-btn text-[11px]" :class="bcFormatState.underline ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatUnderline"><u>{{ tt('admin.bc_campaign.fmt_underline') }}</u></button>
-            <button type="button" class="bc-tool-btn text-[11px]" :class="bcFormatState.strike ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatStrike"><s>{{ tt('admin.bc_campaign.fmt_strike') }}</s></button>
-            <button type="button" class="bc-tool-btn text-[11px]" @mousedown.prevent @click="bcFormatLink">🔗</button>
+        <div v-if="bcCampaignUxScreen === 'postEditor'" class="relative min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 pb-[max(5.5rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))]">
+          <div
+            v-if="bcCampaignUxPostEditorLoading"
+            class="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 rounded-xl bg-[#0b0d14]/90 px-4 backdrop-blur-[2px]"
+            role="status"
+            aria-live="polite"
+          >
+            <p class="text-sm font-semibold text-slate-200">{{ tt('admin.bc_campaign.post_editor_loading') }}</p>
           </div>
+          <div :class="bcCampaignUxPostEditorLoading ? 'pointer-events-none select-none opacity-35' : ''">
+          <p class="text-[12px] text-slate-400">{{ bcCampaignUxPostEditorMode === 'edit' ? tt('admin.bc_campaign.post_editor_edit') : tt('admin.bc_campaign.post_editor_new') }}</p>
+          <label class="mt-2 block text-[12px] font-semibold text-slate-300">{{ tt('admin.bc_campaign.post_draft_title_label') }}</label>
+          <div class="mt-1 flex min-w-0 items-center gap-1.5">
+            <input
+              v-model="bcTitle"
+              type="text"
+              maxlength="255"
+              class="min-w-0 flex-1 rounded-xl border border-white/10 bg-[#11151C] px-3 py-2 text-sm text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] placeholder:text-slate-500 focus:border-indigo-400/45 focus:outline-none focus:ring-1 focus:ring-indigo-400/30"
+              :placeholder="tt('admin.broadcast_ui.draft_title_ph')"
+              :disabled="Number(bcSavingTitleId || 0) === Number(bcSelectedId || 0) && Number(bcSelectedId || 0) > 0"
+              @keydown.enter.prevent="applyBcQuickDraftTitle"
+            />
+            <button
+              v-show="bcQuickTitleDirty"
+              type="button"
+              class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-emerald-500/40 bg-emerald-500/20 text-[13px] font-bold text-emerald-200 shadow-[0_0_20px_-4px_rgba(16,185,129,0.35)] transition active:scale-95 hover:border-emerald-400/55 hover:bg-emerald-500/30 disabled:opacity-50"
+              :disabled="Number(bcSavingTitleId || 0) === Number(bcSelectedId || 0) && Number(bcSelectedId || 0) > 0"
+              :title="tt('admin.broadcast_ui.apply_title')"
+              @click="applyBcQuickDraftTitle"
+            >
+              ✓
+            </button>
+          </div>
+          <p class="mt-2 text-[12px] font-semibold text-zinc-300">{{ tt('admin.broadcast_ui.message_text') }}</p>
           <div
             ref="bcBodyRef"
-            class="bc-editor mt-1.5 h-48 overflow-y-auto rounded-xl border border-white/[0.1] bg-zinc-950 px-3 py-2.5 text-sm leading-relaxed focus-within:border-cyan-500/45 focus-within:ring-1 focus-within:ring-cyan-500/25"
+            class="bc-editor mt-2 h-40 min-h-[10rem] shrink-0 overflow-y-auto rounded-xl border border-white/[0.08] bg-zinc-950 px-3 py-2.5 text-sm leading-relaxed focus-within:border-white/20 focus-within:ring-0"
             contenteditable="true"
             :data-placeholder="tt('admin.broadcast_ui.message_body_ph')"
             @input="onBcEditorInput"
+            @paste="bcOnEditorPaste"
+            @keydown="bcOnEditorKeydown"
             @click="onBcEditorClick"
             @mouseup="bcUpdateFormatState"
             @keyup="bcUpdateFormatState"
           />
-          <p class="mt-1 text-[11px]" :class="bcCurrentLen() > bcCurrentMaxLen() ? 'text-rose-400' : 'text-slate-500'">{{ bcCurrentLen() }} / {{ bcCurrentMaxLen() }} {{ tt('admin.bc_campaign.chars_count_short') }}</p>
+          <div class="mt-2 flex flex-wrap gap-1.5">
+            <button type="button" class="bc-tool-btn min-w-[2.1rem] !px-2" :class="bcFormatState.bold ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatBold"><b>B</b></button>
+            <button type="button" class="bc-tool-btn min-w-[2.1rem] !px-2" :class="bcFormatState.italic ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatItalic"><i>I</i></button>
+            <button type="button" class="bc-tool-btn min-w-[2.1rem] !px-2" :class="bcFormatState.underline ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatUnderline"><u>U</u></button>
+            <button type="button" class="bc-tool-btn min-w-[2.1rem] !px-2" :class="bcFormatState.strike ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatStrike"><s>S</s></button>
+            <button type="button" class="bc-tool-btn min-w-[2.1rem] !px-2 !text-[11px]" :class="bcFormatState.quote ? 'bc-tool-active' : ''" title="Цитата" @mousedown.prevent @click="bcFormatBlockquote">❝</button>
+            <button type="button" class="bc-tool-btn min-w-[2.1rem] !px-2 !text-[11px]" :class="bcFormatState.spoiler ? 'bc-tool-active' : ''" title="Скрытый" @mousedown.prevent @click="bcFormatSpoiler">🙈</button>
+            <button type="button" class="bc-tool-btn min-w-[2.1rem] !px-2 !text-[11px]" :class="bcFormatState.link ? 'bc-tool-active' : ''" title="Ссылка" @mousedown.prevent @click="bcFormatLink">🔗</button>
+            <button type="button" class="bc-tool-btn font-mono min-w-[2.1rem] !px-2 !text-[11px]" title="Моноширинный блок" @mousedown.prevent @click="bcFormatPre">⌨</button>
+            <button type="button" class="bc-tool-btn !px-2 !text-[11px]" :class="!bcCanUndo() ? 'opacity-40' : ''" :disabled="!bcCanUndo()" @mousedown.prevent @click="bcUndo">↶</button>
+            <button type="button" class="bc-tool-btn !px-2 !text-[11px]" :class="!bcCanRedo() ? 'opacity-40' : ''" :disabled="!bcCanRedo()" @mousedown.prevent @click="bcRedo">↷</button>
+          </div>
+          <p class="mt-1 text-[11px]" :class="bcCurrentLen() > bcCurrentMaxLen() ? 'text-rose-400' : 'text-slate-500'">
+            {{ tt('admin.broadcast_ui.chars_count', { current: bcCurrentLen(), max: bcCurrentMaxLen() }) }}
+          </p>
+          <div v-if="bcQuickButtonPreview.length" class="mt-2 space-y-1">
+            <p class="text-[11px] font-semibold text-slate-400">{{ tt('admin.broadcast_ui.buttons_block') }}</p>
+            <div v-for="(btn, bi) in bcQuickButtonPreview.slice(0, 8)" :key="`camp-pe-btn-${bi}-${btn.text}`" class="rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-1.5">
+              <p class="truncate text-[12px] font-semibold text-zinc-100">{{ btn.text }}</p>
+              <p v-if="btn.url" class="truncate text-[11px] text-zinc-400">{{ btn.url }}</p>
+            </div>
+          </div>
           <div class="mt-3 grid grid-cols-2 gap-2">
             <button type="button" class="bc-tool-btn !w-full !justify-center text-[12px]" @click="bcAuxModal = 'keyboard'">{{ tt('admin.broadcast_ui.add_post_buttons') }}</button>
             <button type="button" class="bc-tool-btn !w-full !justify-center text-[12px]" @click="bcAuxModal = 'media'">{{ tt('admin.broadcast_ui.file_and_media') }}</button>
           </div>
-          <div class="mt-4 flex gap-2">
-            <button type="button" class="flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm font-semibold" @click="bcCampaignUxScreen = 'wizard'">{{ tt('admin.bc_campaign.back') }}</button>
-            <button type="button" class="flex-1 rounded-xl border border-emerald-400/45 bg-gradient-to-r from-[#27b35f] to-[#36D67A] px-3 py-2 text-sm font-bold text-[#04130a]" @click="bcCampaignUxSavePostEditor">{{ tt('admin.bc_campaign.btn_save_post') }}</button>
+          <div v-if="bcMediaHistory.length" class="mt-2 flex flex-wrap gap-2">
+            <div v-for="(m, mi) in bcMediaHistory.slice(0, 8)" :key="`camp-pe-m-${mi}-${m.id || mi}`" class="relative shrink-0">
+              <button
+                v-if="m.previewUrl && (String(m.kind || '').toLowerCase().includes('photo') || String(m.kind || '').toLowerCase().includes('video') || String(m.kind || '').toLowerCase() === 'animation')"
+                type="button"
+                class="group relative block h-14 w-14 overflow-hidden rounded-lg border border-white/15 bg-slate-950/80 shadow-md ring-1 ring-white/[0.06] transition hover:border-cyan-400/35 hover:ring-cyan-400/25"
+                :title="tt('admin.broadcast_ui.open_large')"
+                @click="openBcMediaViewer(m)"
+              >
+                <img
+                  v-if="String(m.kind || '').toLowerCase().includes('photo')"
+                  :src="m.previewUrl"
+                  class="h-full w-full object-cover"
+                  alt=""
+                />
+                <video
+                  v-else
+                  :src="m.previewUrl"
+                  class="h-full w-full object-cover"
+                  muted
+                  playsinline
+                />
+              </button>
+              <div
+                v-else
+                class="flex h-14 w-14 flex-col items-center justify-center gap-0.5 rounded-lg border border-white/10 bg-slate-950/75 p-1 text-center shadow-inner ring-1 ring-white/[0.04]"
+              >
+                <span class="text-base leading-none">{{ bcMediaIcon(m.kind) }}</span>
+              </div>
+            </div>
+          </div>
+          <div class="mt-6 flex gap-2">
+            <button type="button" class="bc-tool-btn flex-1 !justify-center py-2.5 text-sm font-semibold" @click="bcCampaignUxBack">{{ tt('admin.bc_campaign.back') }}</button>
+            <button
+              type="button"
+              class="flex-1 rounded-xl border border-indigo-400/40 bg-gradient-to-r from-indigo-600/95 to-blue-700/95 px-3 py-2 text-sm font-extrabold text-white shadow-[0_14px_30px_-16px_rgba(59,130,246,0.8)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-45"
+              :disabled="bcSaving"
+              @click="bcCampaignUxSavePostEditor"
+            >
+              {{ tt('admin.bc_campaign.btn_save_post') }}
+            </button>
+          </div>
           </div>
         </div>
 
-        <div v-else-if="bcCampaignUxScreen === 'progress'" class="flex min-h-0 flex-1 flex-col items-center justify-center px-4 py-6 text-center">
-          <p class="self-start text-[28px] font-bold">{{ tt('admin.bc_campaign.progress_title') }}</p>
-          <div class="relative mt-8 h-44 w-44">
+        <div v-if="bcCampaignUxScreen === 'progress'" class="relative flex min-h-0 flex-1 flex-col px-4 pb-6 pt-1">
+          <p class="absolute left-4 top-2 z-10 max-w-[78%] text-left text-[13px] font-semibold leading-tight text-slate-200">
+            {{ tt('admin.bc_campaign.progress_title') }}
+          </p>
+          <div class="flex flex-1 flex-col items-center justify-center pt-9 text-center">
+          <div class="relative mt-2 h-44 w-44">
             <svg class="absolute inset-0 h-full w-full -rotate-90" viewBox="0 0 120 120" aria-hidden="true">
               <defs>
-                <linearGradient id="bcSendNeonRing" x1="0%" y1="30%" x2="100%" y2="100%">
-                  <stop offset="0%" stop-color="#7c83ff" />
-                  <stop offset="52%" stop-color="#6366f1" />
-                  <stop offset="100%" stop-color="#7c3aed" />
+                <linearGradient id="bcApProgressRing" x1="0%" y1="30%" x2="100%" y2="100%">
+                  <stop offset="0%" stop-color="#27b35f" />
+                  <stop offset="52%" stop-color="#36D67A" />
+                  <stop offset="100%" stop-color="#8fd41a" />
                 </linearGradient>
               </defs>
               <circle cx="60" cy="60" r="52" fill="none" stroke="rgba(148,163,184,0.16)" stroke-width="8" />
-              <circle cx="60" cy="60" r="52" fill="none" stroke="url(#bcSendNeonRing)" stroke-width="8" stroke-linecap="round" :stroke-dasharray="bcSendCircleDash" />
+              <circle cx="60" cy="60" r="52" fill="none" stroke="url(#bcApProgressRing)" stroke-width="8" stroke-linecap="round" :stroke-dasharray="bcCampaignAutopostProgressRingDash" />
             </svg>
             <div class="absolute inset-0 flex items-center justify-center">
-              <img :src="bcTelegramPlaneIconUrl" class="h-11 w-11 object-contain drop-shadow-[0_0_22px_rgba(99,102,241,0.85)]" alt="" />
+              <img :src="bcTelegramPlaneIconUrl" class="h-11 w-11 object-contain drop-shadow-[0_0_22px_rgba(54,214,122,0.75)]" alt="" />
             </div>
-            <span class="absolute bottom-1 -right-10 text-[34px] font-bold tabular-nums">{{ bcSendProgressPercent }}%</span>
+            <span class="pointer-events-none absolute -bottom-0.5 -right-[0.55rem] text-[18px] font-bold tabular-nums leading-none sm:-right-[0.4rem] sm:text-[19px]">{{ bcCampaignAutopostProgressPct }}%</span>
           </div>
           <p class="mt-4 text-[12px] uppercase tracking-[0.14em] text-slate-500">{{ tt('admin.bc_campaign.progress_sent') }}</p>
-          <p class="text-3xl font-bold tabular-nums">{{ fmtIntSpace(bcSendProgressDone) }} <span class="text-xl text-slate-400">{{ tt('admin.bc_campaign.progress_of') }}</span> {{ fmtIntSpace(bcSendProgressTotal) }}</p>
-          <p class="mt-2 text-sm text-rose-300">{{ tt('admin.bc_campaign.errors_label') }} {{ Number(bcSendLiveRow?.recipient_fail || 0) }}</p>
+          <p class="text-3xl font-bold tabular-nums">
+            {{ fmtIntSpace(bcCampaignAutopostProgressDone) }}
+            <span class="text-xl text-slate-400">{{ tt('admin.bc_campaign.progress_of') }}</span>
+            {{ fmtIntSpace(bcCampaignAutopostProgressTotal) }}
+          </p>
+          <p v-if="bcCampaignAutopostProgressFail > 0" class="mt-2 text-sm text-rose-300">{{ tt('admin.bc_campaign.errors_label') }} {{ bcCampaignAutopostProgressFail }}</p>
           <button type="button" class="mt-8 w-full max-w-sm rounded-2xl border border-rose-500/45 bg-rose-950/45 px-4 py-3 text-[15px] font-semibold text-rose-100 transition hover:bg-rose-900/55" @click="bcCampaignUxScreen = 'manage'">{{ tt('admin.bc_campaign.btn_stop_sending') }}</button>
+          </div>
         </div>
 
-        <div v-else-if="bcCampaignUxScreen === 'stats'" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 pb-[max(5.5rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))]">
+        <div v-if="bcCampaignUxScreen === 'stats'" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 pb-[max(5.5rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))]">
           <div class="flex items-center gap-2">
             <label class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.stats_period') }}</label>
             <select v-model.number="bcCampaignUxStatsPeriod" class="rounded-lg border border-white/10 bg-white/[0.05] px-2 py-1 text-xs focus:border-indigo-400/45 focus:outline-none" @change="bcCampaignUxOpenStats(bcCampaignUxManageItem)">
@@ -8474,24 +11293,352 @@ watch(
               <option :value="90">{{ tt('admin.bc_campaign.period_all') }}</option>
             </select>
           </div>
-          <div class="mt-3 grid grid-cols-2 gap-2">
-            <div class="rounded-xl border border-white/10 bg-[#11151C] p-2.5"><p class="text-[10px] text-slate-500">{{ tt('admin.bc_campaign.metric_delivered') }}</p><p class="text-lg font-bold">{{ Number(bcCampaignUxStatsData?.groups?.recipient_ok || 0) }}</p></div>
-            <div class="rounded-xl border border-white/10 bg-[#11151C] p-2.5"><p class="text-[10px] text-slate-500">{{ tt('admin.bc_campaign.metric_clicks') }}</p><p class="text-lg font-bold">{{ Number(bcCampaignUxStatsData?.groups?.clicks || 0) }}</p></div>
-            <div class="rounded-xl border border-white/10 bg-[#11151C] p-2.5"><p class="text-[10px] text-slate-500">{{ tt('admin.bc_campaign.metric_transitions') }}</p><p class="text-lg font-bold">{{ Number(bcCampaignUxStatsData?.groups?.transitions || 0) }}</p></div>
-            <div class="rounded-xl border border-white/10 bg-[#11151C] p-2.5"><p class="text-[10px] text-slate-500">CTR</p><p class="text-lg font-bold text-emerald-300">{{ fmtPctTrim(Number(bcCampaignUxStatsData?.groups?.ctr || 0)) }}</p></div>
+          <p
+            v-if="bcCampaignUxStatsData && bcCampaignUxStatsData.broadcast_url_tracking_configured === false"
+            class="mb-2 rounded-lg border border-amber-500/25 bg-amber-500/8 px-2.5 py-1.5 text-[10px] leading-snug text-amber-100/90"
+          >
+            {{ tt('admin.broadcast_shell.tracking_off_hint') }}
+          </p>
+          <div class="mt-1 grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              class="rounded-xl border border-white/10 bg-[#11151C] p-2.5 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] ring-2 ring-transparent transition hover:border-emerald-400/30 hover:bg-[#141a24] hover:ring-emerald-500/15 focus-visible:outline-none focus-visible:ring-emerald-400/35"
+              @click="bcCampaignUxStatsDeliverModalOpen = true"
+            >
+              <p class="text-[10px] text-slate-500">{{ tt('admin.bc_campaign.metric_delivered_posts') }}</p>
+              <p class="text-lg font-bold tabular-nums">{{ fmtIntSpace(bcCampaignUxStatsDeliveredOk) }}</p>
+              <p class="mt-1 text-[9px] text-slate-500">{{ tt('admin.bc_campaign.stats_delivery_tap_hint') }}</p>
+              <div class="mt-2 space-y-1.5 border-t border-white/[0.08] pt-2">
+                <div class="flex items-center justify-between gap-2 text-[11px]">
+                  <span class="text-slate-500">{{ tt('admin.bc_campaign.metric_reactions') }}</span>
+                  <span class="font-semibold tabular-nums text-white">{{ fmtIntSpace(Number(bcCampaignUxStatsData?.real_reactions_total || 0)) }}</span>
+                </div>
+                <div class="flex items-center justify-between gap-2 text-[11px]">
+                  <span class="text-slate-500">{{ tt('admin.bc_campaign.metric_link_clicks') }}</span>
+                  <span class="font-semibold tabular-nums text-white">{{ fmtIntSpace(Number(bcCampaignUxStatsData?.real_link_clicks_total || 0)) }}</span>
+                </div>
+                <div class="flex items-center justify-between gap-2 text-[11px]">
+                  <span class="text-slate-500">{{ tt('admin.bc_campaign.metric_button_clicks') }}</span>
+                  <span class="font-semibold tabular-nums text-white">{{ fmtIntSpace(Number(bcCampaignUxStatsData?.real_callback_clicks_total || 0)) }}</span>
+                </div>
+              </div>
+            </button>
+            <div class="rounded-xl border border-white/10 bg-[#11151C] p-2.5">
+              <p class="text-[10px] text-slate-500">
+                <abbr :title="tt('admin.broadcast_shell.ctr_hint_title')" class="cursor-help underline decoration-dotted decoration-slate-500 underline-offset-2">{{
+                  tt('admin.broadcast_shell.ctr_abbr')
+                }}</abbr>
+              </p>
+              <p class="text-lg font-bold tabular-nums text-emerald-300">{{ fmtPctTrim(bcCampaignUxStatsCtrPct) }}</p>
+              <p class="mt-0.5 text-[10px] leading-tight text-slate-500">{{ bcCampaignUxStatsCtrSub }}</p>
+            </div>
           </div>
           <p class="mt-3 text-[12px] text-slate-400">
-            {{ Number(bcCampaignUxStatsData?.groups?.ctr || 0) >= 8 ? tt('admin.bc_campaign.ctr_above') : tt('admin.bc_campaign.ctr_try') }}
+            {{ Number(bcCampaignUxStatsData?.stats_ctr_percent ?? bcCampaignUxStatsData?.groups?.ctr ?? 0) >= 8 ? tt('admin.bc_campaign.ctr_above') : tt('admin.bc_campaign.ctr_try') }}
           </p>
-          <button type="button" class="mt-4 w-full rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-sm font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxScreen = 'manage'">{{ tt('admin.bc_campaign.btn_to_campaign') }}</button>
+          <div class="mt-4 rounded-xl border border-white/10 bg-[#11151C] p-3 text-[11px] text-slate-300">
+            <p class="font-semibold text-slate-400">{{ tt('admin.bc_campaign.manage_dest_heading') }}</p>
+            <template v-if="bcCampaignUxManageDestinations.usersOnly">
+              <p class="mt-1">{{ tt('admin.bc_campaign.targets_dm_autopost') }}</p>
+            </template>
+            <template v-else-if="bcCampaignUxManageItem">
+              <ul v-if="bcCampaignUxManageDestinations.channels.length" class="mt-1 list-inside list-disc space-y-0.5">
+                <li v-for="row in bcCampaignUxManageDestinations.channels" :key="`st-ch-${row.id}`">{{ row.label }}</li>
+              </ul>
+              <ul v-if="bcCampaignUxManageDestinations.groups.length" class="mt-1 list-inside list-disc space-y-0.5">
+                <li v-for="row in bcCampaignUxManageDestinations.groups" :key="`st-gr-${row.id}`">{{ row.label }}</li>
+              </ul>
+              <p v-if="!bcCampaignUxManageDestinations.channels.length && !bcCampaignUxManageDestinations.groups.length" class="mt-1 text-slate-500">
+                {{ tt('admin.bc_campaign.destinations_fallback') }}
+              </p>
+            </template>
+          </div>
+          <button
+            type="button"
+            class="mt-4 w-full rounded-xl border border-indigo-400/35 bg-indigo-500/12 px-4 py-2.5 text-sm font-semibold text-indigo-100 transition hover:bg-indigo-500/20"
+            @click="bcCampaignUxStatsOpenPostEditor"
+          >{{ tt('admin.bc_campaign.edit_post_draft') }}</button>
+          <button type="button" class="mt-2 w-full rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-sm font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxLeaveStatsToManage">{{ tt('admin.bc_campaign.btn_to_campaign') }}</button>
         </div>
       </div>
     </GuardTeleport>
 
-    <GuardTeleport>
+    <GuardTeleport guard-to="body">
+      <!-- Вынесены из оболочки кампании: фиксированный z-index в body, иначе вложенные absolute оказывались ниже параллельных teleport-слоёв. -->
       <div
-        v-if="bcCampaignUxRecipientPickerOpen"
-        class="fixed inset-0 z-[95000] flex h-[100dvh] min-w-0 flex-col overflow-hidden bg-[#0b0d14] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] text-white"
+        v-if="bcCampaignUxScheduleModalOpen && bcCampaignUxOpen"
+        class="fixed inset-0 z-[100230] flex items-end justify-center bg-black/72 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] backdrop-blur-[2px] md:items-center md:pb-6"
+        @click.self="bcCampaignUxCloseScheduleModal"
+      >
+        <div
+          class="flex max-h-[min(85vh,36rem)] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-white/12 bg-[#12161f] text-zinc-100 shadow-[0_24px_64px_-24px_rgba(0,0,0,0.92)]"
+          @click.stop
+        >
+          <div class="flex shrink-0 items-start justify-between gap-2 border-b border-white/10 px-4 py-3">
+            <div class="min-w-0">
+              <p class="truncate text-[16px] font-extrabold leading-snug text-white">{{ tt('admin.bc_campaign.schedule_modal_title') }}</p>
+            </div>
+            <button type="button" class="shrink-0 rounded-lg px-2 py-1 text-sm text-zinc-300 hover:bg-white/10" @click="bcCampaignUxCloseScheduleModal">✕</button>
+          </div>
+          <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3">
+            <div class="space-y-2 rounded-2xl border border-white/10 bg-[#11151C] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+              <label class="text-[12px] text-slate-300">{{ tt('admin.bc_campaign.period_start_label') }}</label>
+              <div class="flex flex-wrap items-center gap-2">
+                <input v-model="bcCampaignUxScheduleForm.startDate" type="date" class="min-w-[10rem] flex-1 rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
+                <button
+                  type="button"
+                  class="shrink-0 rounded-xl border border-violet-400/40 bg-violet-600/25 px-3 py-2 text-[11px] font-semibold text-violet-100 transition hover:bg-violet-600/35"
+                  @click="bcCampaignUxScheduleSetStartTodayFromTz"
+                >
+                  {{ tt('admin.bc_campaign.btn_today_tz') }}
+                </button>
+              </div>
+              <label class="pt-1 text-[12px] text-slate-300">{{ tt('admin.bc_campaign.period_end_label') }}</label>
+              <input v-model="bcCampaignUxScheduleForm.endDate" type="date" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
+              <p class="text-[10px] text-slate-500">{{ tt('admin.bc_campaign.period_end_hint') }}</p>
+              <label class="text-[12px] text-slate-300">{{ tt('admin.bc_campaign.freq_label') }}</label>
+              <select v-model="bcCampaignUxScheduleForm.scheduleMode" class="mt-1 w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none">
+                <option value="every_day">{{ tt('admin.bc_campaign.freq_every_day') }}</option>
+                <option value="weekdays">{{ tt('admin.bc_campaign.freq_weekdays') }}</option>
+              </select>
+              <div v-if="bcCampaignUxScheduleForm.scheduleMode === 'weekdays'" class="flex flex-wrap gap-1.5 pt-1">
+                <button
+                  v-for="d in BC_WEEKDAY_OPTS"
+                  :key="`sch-wd-${d.v}`"
+                  type="button"
+                  class="rounded-lg border px-2 py-1 text-[11px] transition"
+                  :class="bcCampaignUxScheduleForm.weekdays.includes(d.v) ? 'border-violet-400 bg-violet-500/20 text-violet-100' : 'border-white/15 bg-black/20 hover:bg-white/[0.06]'"
+                  @click="bcCampaignUxScheduleToggleWeekday(d.v)"
+                >
+                  {{ d.label }}
+                </button>
+              </div>
+              <label class="mt-2 text-[12px] text-slate-300">{{ tt('admin.bc_campaign.multi_send_windows_heading') }}</label>
+              <p class="text-[10px] leading-snug text-slate-500">{{ tt('admin.bc_campaign.multi_send_windows_help') }}</p>
+              <div v-for="(seg, si) in bcCampaignUxScheduleForm.sendWindows" :key="`sch-sw-${si}`" class="mt-2 space-y-2 rounded-xl border border-white/[0.08] bg-black/25 p-2.5">
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-[11px] font-semibold text-slate-400">{{ tt('admin.bc_campaign.slot_n', { n: si + 1 }) }}</span>
+                  <div class="flex shrink-0 gap-1">
+                    <button
+                      type="button"
+                      class="rounded-lg border border-emerald-500/35 px-2 py-0.5 text-[12px] font-bold text-emerald-200 disabled:cursor-not-allowed disabled:opacity-40"
+                      :disabled="(bcCampaignUxScheduleForm.sendWindows || []).length >= 24"
+                      @click="bcCampaignUxScheduleFormAddSegment"
+                    >
+                      +
+                    </button>
+                    <button
+                      type="button"
+                      class="rounded-lg border border-rose-500/35 px-2 py-0.5 text-[12px] font-bold text-rose-100 disabled:cursor-not-allowed disabled:opacity-40"
+                      :disabled="(bcCampaignUxScheduleForm.sendWindows || []).length <= 1"
+                      @click="bcCampaignUxScheduleFormRemoveSegment(si)"
+                    >
+                      −
+                    </button>
+                  </div>
+                </div>
+                <div class="grid grid-cols-2 gap-2">
+                  <div>
+                    <p class="text-[10px] text-slate-500">{{ tt('admin.bc_campaign.slot_from') }}</p>
+                    <input v-model="seg.windowStart" type="time" class="mt-1 w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
+                  </div>
+                  <div>
+                    <p class="text-[10px] text-slate-500">{{ tt('admin.bc_campaign.slot_to') }}</p>
+                    <input v-model="seg.windowEnd" type="time" class="mt-1 w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
+                  </div>
+                </div>
+                <div>
+                  <p class="text-[10px] text-slate-500">{{ tt('admin.bc_campaign.posts_in_slot') }}</p>
+                  <input v-model.number="seg.posts" type="number" min="1" max="288" class="hide-num-spin mt-1 w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
+                </div>
+                <div
+                  v-if="(bcCampaignUxScheduleModalSlotTimePreview[si] || []).length"
+                  class="rounded-lg border border-white/[0.06] bg-black/20 px-2 py-2"
+                >
+                  <p class="text-[10px] font-semibold text-slate-500">{{ tt('admin.bc_campaign.schedule_slot_times_preview') }}</p>
+                  <p class="mt-1 break-words font-mono text-[11px] leading-relaxed text-slate-200">
+                    {{ bcCampaignUxScheduleModalSlotTimePreview[si].join(' · ') }}
+                  </p>
+                </div>
+              </div>
+              <p v-if="(bcCampaignUxScheduleForm.sendWindows || []).length >= 2" class="mt-2 text-[11px] font-medium text-slate-400">
+                {{ tt('admin.bc_campaign.slots_daily_total') }}:
+                {{ (bcCampaignUxScheduleForm.sendWindows || []).reduce((a, s) => a + Math.max(1, Math.min(288, Number(s.posts || 1))), 0) }}
+              </p>
+              <label class="mt-3 text-[12px] text-slate-300">{{ tt('admin.bc_campaign.timezone') }}</label>
+              <input v-model="bcCampaignUxScheduleForm.timezone" type="text" class="w-full rounded-xl border border-white/10 bg-black/30 px-2 py-2 text-sm focus:border-indigo-400/45 focus:outline-none" />
+              <label class="flex items-center gap-2 text-[12px] text-slate-300"><input v-model="bcCampaignUxScheduleForm.spreadInWindow" type="checkbox" /> {{ tt('admin.bc_campaign.spread_even') }}</label>
+            </div>
+          </div>
+          <div class="shrink-0 border-t border-white/10 px-4 py-3 pb-[max(0.75rem,calc(0.35rem+env(safe-area-inset-bottom,0px)))]">
+            <div class="flex gap-2">
+              <button
+                type="button"
+                class="flex-1 rounded-xl border border-white/12 bg-white/[0.04] py-3 text-[14px] font-semibold text-zinc-100 transition hover:bg-white/[0.08] disabled:opacity-50"
+                :disabled="bcCampaignUxScheduleBusy"
+                @click="bcCampaignUxCloseScheduleModal"
+              >
+                {{ tt('common.cancel') }}
+              </button>
+              <button
+                type="button"
+                class="flex-1 rounded-xl bg-gradient-to-r from-[#27b35f] to-[#36D67A] py-3 text-[14px] font-bold text-[#04130a] shadow-[0_14px_30px_-14px_rgba(54,214,122,0.85)] hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-50"
+                :disabled="bcCampaignUxScheduleBusy"
+                @click="bcCampaignUxSaveScheduleModal"
+              >
+                {{ tt('common.save') }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div
+        v-if="bcCampaignUxRecipientsModalOpen && bcCampaignUxOpen"
+        class="fixed inset-0 z-[100230] flex items-end justify-center bg-black/72 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] backdrop-blur-[2px] md:items-center md:pb-6"
+        @click.self="bcCampaignUxCloseRecipientsModal"
+      >
+        <div
+          class="flex max-h-[min(80vh,28rem)] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-white/12 bg-[#12161f] text-zinc-100 shadow-[0_24px_64px_-24px_rgba(0,0,0,0.92)]"
+          role="dialog"
+          aria-modal="true"
+          @click.stop
+        >
+          <div class="flex shrink-0 items-center justify-between gap-2 border-b border-white/10 px-4 py-3">
+            <p class="text-[16px] font-extrabold text-white">{{ tt('admin.bc_campaign.modal_recipients_title') }}</p>
+            <button type="button" class="rounded-lg px-2 py-1 text-sm text-zinc-300 hover:bg-white/10" @click="bcCampaignUxCloseRecipientsModal">✕</button>
+          </div>
+          <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3">
+            <div class="mb-3 rounded-lg border border-white/10 bg-[#11151C] px-3 py-2">
+              <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{{ tt('admin.bc_campaign.modal_period_heading') }}</p>
+              <p class="mt-1 text-[13px] text-slate-200">{{ bcCampaignUxPeriodLabelFromCamp(bcCampaignUxManageItem) }}</p>
+            </div>
+            <template v-if="bcCampaignUxManageDestinations.usersOnly">
+              <p class="text-[13px] text-slate-300">{{ tt('admin.bc_campaign.targets_dm_autopost') }}</p>
+            </template>
+            <template v-else>
+              <template v-if="bcCampaignUxManageDestinations.channels.length">
+                <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-violet-300">{{ tt('admin.bc_campaign.target_channels') }}</p>
+                <ul class="mb-3 list-inside list-disc space-y-1 text-[13px] text-slate-200">
+                  <li v-for="row in bcCampaignUxManageDestinations.channels" :key="`mr-ch-${row.id}`">{{ row.label }}</li>
+                </ul>
+              </template>
+              <template v-if="bcCampaignUxManageDestinations.groups.length">
+                <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-cyan-300">{{ tt('admin.bc_campaign.target_groups') }}</p>
+                <ul class="list-inside list-disc space-y-1 text-[13px] text-slate-200">
+                  <li v-for="row in bcCampaignUxManageDestinations.groups" :key="`mr-gr-${row.id}`">{{ row.label }}</li>
+                </ul>
+              </template>
+              <p v-if="!bcCampaignUxManageDestinations.channels.length && !bcCampaignUxManageDestinations.groups.length" class="text-[13px] text-slate-500">
+                {{ tt('admin.bc_campaign.destinations_fallback') }}
+              </p>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <div
+        v-if="bcCampaignUxCampaignPostsModalOpen && bcCampaignUxOpen"
+        class="fixed inset-0 z-[100230] flex items-end justify-center bg-black/72 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] backdrop-blur-[2px] md:items-center md:pb-6"
+        @click.self="bcCampaignUxCloseCampaignPostsModal"
+      >
+        <div
+          class="flex max-h-[min(85vh,36rem)] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-white/12 bg-[#12161f] text-zinc-100 shadow-[0_24px_64px_-24px_rgba(0,0,0,0.92)]"
+          role="dialog"
+          aria-modal="true"
+          @click.stop
+        >
+          <div class="flex shrink-0 items-center justify-between gap-2 border-b border-white/10 px-4 py-3">
+            <p class="text-[16px] font-extrabold text-white">{{ bcCampaignUxCampaignPostsModalHeading }}</p>
+            <button type="button" class="rounded-lg px-2 py-1 text-sm text-zinc-300 hover:bg-white/10" @click="bcCampaignUxCloseCampaignPostsModal">✕</button>
+          </div>
+          <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3">
+            <template v-if="bcCampaignUxCampaignPostsModalItems.length">
+              <div v-for="post in bcCampaignUxCampaignPostsModalItems" :key="`camp-post-modal-${post.id}`" class="mb-3 rounded-xl border border-white/10 bg-[#11151C] p-3">
+                <p class="text-[12px] font-semibold text-white">
+                  {{ post.title || tt('admin.bc_campaign.post_named', { id: post.id }) }}
+                </p>
+                <div v-if="bcCampaignUxPostsModalMedia[post.id]?.previewUrl" class="mt-2 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    class="relative h-24 w-24 shrink-0 overflow-hidden rounded-xl border border-white/15 bg-zinc-950/80 ring-1 ring-white/[0.06] transition hover:border-cyan-400/35"
+                    @click="openBcMediaViewer(bcCampaignUxPostsModalMedia[post.id])"
+                  >
+                    <img
+                      v-if="bcCampaignUxPostsModalMedia[post.id].kind === 'photo'"
+                      :src="bcCampaignUxPostsModalMedia[post.id].previewUrl"
+                      class="h-full w-full object-cover"
+                      alt=""
+                    />
+                    <video v-else :src="bcCampaignUxPostsModalMedia[post.id].previewUrl" class="h-full w-full object-cover" muted playsinline />
+                  </button>
+                </div>
+                <div
+                  class="mt-2 max-h-48 overflow-y-auto rounded-lg border border-white/[0.08] bg-zinc-950/55 p-2.5 text-[13px] leading-relaxed text-zinc-100"
+                  v-html="bcNormalizeHtmlForTelegram(String(post.body_html || post.body_text || '')) || '—'"
+                />
+              </div>
+            </template>
+            <p v-else class="py-4 text-center text-[13px] text-slate-500">{{ tt('admin.bc_campaign.modal_posts_empty') }}</p>
+          </div>
+          <div class="flex shrink-0 gap-2 border-t border-white/10 px-4 py-3 pb-[max(0.65rem,calc(0.25rem+env(safe-area-inset-bottom,0px)))]">
+            <button type="button" class="bc-tool-btn flex-1 !justify-center py-2.5 text-sm" @click="bcCampaignUxCloseCampaignPostsModal">{{ tt('common.close') }}</button>
+          </div>
+        </div>
+      </div>
+
+        <div
+          v-if="bcCampaignUxStatsDeliverModalOpen && bcCampaignUxOpen"
+          class="fixed inset-0 z-[100235] flex items-end justify-center bg-black/75 px-3 pb-[max(1rem,calc(4.25rem+env(safe-area-inset-bottom,0px)))] pt-[env(safe-area-inset-top,0px)] backdrop-blur-[2px] md:items-center md:pb-12"
+          @click.self="bcCampaignUxStatsDeliverModalOpen = false"
+        >
+          <div
+            class="flex max-h-[min(82dvh,32rem)] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-white/12 bg-[#12161f] text-zinc-100 shadow-[0_24px_80px_-24px_rgba(0,0,0,0.95)]"
+            role="dialog"
+            aria-modal="true"
+            @click.stop
+          >
+            <div class="flex shrink-0 items-center justify-between gap-2 border-b border-white/10 px-4 py-3">
+              <p class="text-[15px] font-extrabold text-white">{{ tt('admin.bc_campaign.delivery_history_title') }}</p>
+              <button type="button" class="rounded-lg px-2 py-1 text-sm text-zinc-300 hover:bg-white/10" @click="bcCampaignUxStatsDeliverModalOpen = false">✕</button>
+            </div>
+            <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-3">
+              <template v-if="bcCampaignUxStatsSortedRuns.length">
+                <div
+                  v-for="run in bcCampaignUxStatsSortedRuns"
+                  :key="`camp-dlv-${run.id}-${run.broadcast_id}`"
+                  class="mb-2 rounded-xl border border-white/[0.08] bg-[#11151C] px-3 py-2.5 text-[12px] leading-snug text-zinc-200"
+                >
+                  <p class="font-semibold text-white">{{ run.broadcast_title || tt('admin.bc_campaign.post_named', { id: run.broadcast_id }) }}</p>
+                  <p class="mt-1 text-[11px] text-slate-400">
+                    {{ bcCampaignUxFormatCampStatInstant(run.sent_at || run.created_at) }}
+                    <span class="mx-1 text-slate-600">·</span>
+                    {{ tt('admin.bc_campaign.delivery_hist_ok', { n: fmtIntSpace(Math.max(0, Math.trunc(Number(run.recipient_ok || 0)))) }) }}
+                    <template v-if="Number(run.recipient_fail || 0) > 0">
+                      · {{ tt('admin.bc_campaign.delivery_hist_fail', { n: fmtIntSpace(Math.max(0, Math.trunc(Number(run.recipient_fail || 0)))) }) }}
+                    </template>
+                  </p>
+                  <p
+                    v-if="Math.max(0, Math.trunc(Number(run.recipient_ok || 0))) > 0 && bcFormatPerSendEngagementLine(run.per_send_engagement)"
+                    class="mt-2 text-[10px] leading-snug text-slate-500"
+                  >
+                    {{ bcFormatPerSendEngagementLine(run.per_send_engagement) }}
+                  </p>
+                </div>
+              </template>
+              <p v-else class="py-6 text-center text-[13px] text-slate-500">{{ tt('admin.bc_campaign.delivery_history_empty') }}</p>
+            </div>
+            <div class="shrink-0 border-t border-white/10 px-4 py-3">
+              <button type="button" class="w-full rounded-xl border border-white/12 bg-white/[0.06] py-2.5 text-sm font-semibold transition hover:bg-white/[0.09]" @click="bcCampaignUxStatsDeliverModalOpen = false">{{ tt('common.close') }}</button>
+            </div>
+          </div>
+        </div>
+    </GuardTeleport>
+
+    <GuardTeleport guard-to="body">
+      <div
+        v-if="bcCampaignUxRecipientPickerOpen && bcCampaignUxOpen"
+        class="fixed inset-0 z-[100240] flex h-[100dvh] min-w-0 flex-col overflow-hidden bg-[#0b0d14] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] text-white"
       >
         <div class="flex items-center justify-between border-b border-white/10 bg-[#12141c] px-4 py-3">
           <p class="text-[16px] font-bold">{{ bcCampaignUxRecipientPickerKind === 'channels' ? tt('admin.bc_campaign.picker_channels') : tt('admin.bc_campaign.picker_groups') }}</p>
@@ -8525,7 +11672,7 @@ watch(
 
     <div
       v-if="bcAutopostingModalOpen"
-      class="bc-autopost-modal-overlay fixed inset-0 z-[300] flex min-h-0 flex-col items-center justify-center overflow-y-auto overscroll-contain bg-[#0b0d14] px-3 py-4 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))]"
+      class="bc-autopost-modal-overlay fixed inset-0 z-[96000] flex min-h-0 flex-col items-center justify-center overflow-y-auto overscroll-contain bg-[#0b0d14] px-3 py-4 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))]"
       @click.self="bcAutopostingModalOpen = false"
     >
       <div
@@ -9077,6 +12224,31 @@ watch(
             <p v-if="!bcStatsData.per_groups.length" class="p-2 text-center text-xs text-slate-500">{{ tt('admin.broadcast_stats.per_group_empty') }}</p>
           </div>
         </div>
+        <div v-if="(bcStatsData.send_history || []).length" class="mt-3">
+          <p class="text-xs font-semibold text-slate-300">{{ tt('admin.broadcast_shell.send_history_title') }}</p>
+          <div class="mt-2 max-h-52 space-y-2 overflow-y-auto rounded-xl border border-slate-700 bg-slate-950/40 px-2 py-2">
+            <div
+              v-for="(h, hi) in bcStatsData.send_history"
+              :key="`bstat-hist-${hi}-${h.batch_id ?? hi}`"
+              class="border-b border-slate-700/60 pb-2 last:border-b-0 last:pb-0"
+            >
+              <p class="text-[11px] font-semibold text-slate-200">{{ fmtBroadcastShortTime(h.started_at || h.ended_at) || '—' }}</p>
+              <ul v-if="(h.groups || []).length" class="mt-1 space-y-0.5 pl-3 text-[11px] text-slate-400">
+                <li v-for="(g, gi) in h.groups" :key="`bsh-${hi}-${g.chat_id}-${gi}`">
+                  <span class="text-slate-200">{{ g.title || g.chat_id }}</span>
+                  <span v-if="Number(g.ok) > 0" class="text-emerald-400/90"> · ✓ {{ g.ok }}</span>
+                  <span v-if="Number(g.fail) > 0" class="text-rose-300/90"> · ✕ {{ g.fail }}</span>
+                </li>
+              </ul>
+              <p v-else-if="Number(h.bots?.total) > 0" class="mt-1 text-[10px] text-slate-400">
+                {{ tt('admin.broadcast_shell.send_history_bots', { ok: Number(h.bots?.ok || 0), n: Number(h.bots?.total || 0) }) }}
+              </p>
+              <p v-else class="mt-1 text-[10px] text-slate-400">
+                {{ tt('admin.broadcast_shell.send_history_summary', { ok: Number(h.recipient_ok || 0), fail: Number(h.recipient_fail || 0) }) }}
+              </p>
+            </div>
+          </div>
+        </div>
         <div class="mt-3 rounded-xl border border-slate-700 bg-slate-950/40 p-2">
           <p class="text-xs font-semibold text-slate-300">{{ tt('admin.broadcast_stats.errors_period') }}</p>
           <div class="mt-2 max-h-40 space-y-1 overflow-y-auto">
@@ -9152,7 +12324,7 @@ watch(
     <GuardTeleport>
     <div
       v-if="bcAuxModal === 'keyboard'"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:100250;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
       @click.self="bcAuxModal = ''"
     >
       <div
@@ -9216,7 +12388,7 @@ watch(
     <GuardTeleport>
     <div
       v-if="bcAuxModal === 'media'"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:100250;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
       @click.self="bcAuxModal = ''"
     >
       <div
@@ -10026,10 +13198,10 @@ watch(
       </div>
     </div>
 
-    <GuardTeleport>
+    <GuardTeleport guard-to="body">
       <div
         v-if="bcSendModalOpen"
-        class="fixed inset-0 z-[95000] flex min-h-[100dvh] min-w-0 flex-col bg-[#0b0d14] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
+        class="fixed inset-0 z-[100010] flex min-h-[100dvh] min-w-0 flex-col bg-[#0b0d14] pb-[env(safe-area-inset-bottom,0px)] pt-[max(0.25rem,calc(env(safe-area-inset-top,0px)+48px))]"
         @click.self="bcSendModalState === 'sending' ? null : closeBcSendModal()"
       >
         <div
@@ -10114,45 +13286,61 @@ watch(
 
         <div
           v-else-if="bcSendModalState === 'done'"
-          class="relative mx-auto flex w-full max-w-[22rem] flex-1 flex-col overflow-y-auto overscroll-contain px-4 pb-6 pt-4"
+          class="relative mx-auto flex w-full max-w-[22rem] flex-col overflow-hidden px-4 pb-5 pt-2"
         >
-          <p class="text-[17px] font-semibold leading-snug text-white">Рассылка отправлена!</p>
-          <div class="mt-5 flex flex-col items-center">
+          <p class="text-[16px] font-semibold leading-snug text-white">Рассылка отправлена!</p>
+          <div class="mt-3 flex flex-col items-center">
             <div
-              class="flex h-[108px] w-[108px] items-center justify-center rounded-full bg-emerald-500/18 shadow-[0_0_48px_-10px_rgba(52,211,153,0.7)] ring-2 ring-emerald-400/40"
+              class="flex h-[76px] w-[76px] items-center justify-center rounded-full bg-emerald-500/18 shadow-[0_0_36px_-10px_rgba(52,211,153,0.65)] ring-2 ring-emerald-400/35"
             >
-              <span class="text-4xl text-emerald-300">✓</span>
+              <span class="text-3xl leading-none text-emerald-300">✓</span>
             </div>
-            <p class="mt-3 text-[14px] text-slate-400">{{ bcSendCompletedAtLabel }}</p>
+            <p class="mt-2 text-[12px] text-slate-400">{{ bcSendCompletedAtLabel }}</p>
           </div>
 
-          <div class="mt-5 grid grid-cols-3 gap-2">
-            <div class="rounded-xl border border-white/[0.05] bg-white/[0.02] px-2 py-2.5 text-center">
-              <p class="text-[10px] text-slate-500">Доставлено</p>
-              <p class="mt-1 text-[15px] font-semibold tabular-nums text-white">{{ fmtIntSpace(bcSendDeliveredOk) }}</p>
-              <p class="mt-0.5 text-[12px] font-semibold tabular-nums text-emerald-400">
-                {{ fmtPctTrim(bcSendDeliveredPct) }}
-              </p>
+          <p v-if="bcSendResultLoading" class="mt-4 text-center text-xs text-slate-400">{{ tt('admin.broadcast_shell.stats_loading') }}</p>
+          <template v-else-if="bcSendResultSnapshot">
+            <p
+              v-if="bcSendResultSnapshot.broadcast_url_tracking_configured === false"
+              class="mt-3 rounded-lg border border-amber-500/25 bg-amber-500/8 px-2 py-1 text-[10px] leading-snug text-amber-100/90"
+            >
+              {{ tt('admin.broadcast_shell.tracking_off_hint') }}
+            </p>
+            <div class="mt-3 rounded-xl border border-white/10 bg-[#11151C] p-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+              <div class="grid grid-cols-2 gap-x-2 gap-y-0.5">
+                <div>
+                  <p class="text-[9px] font-semibold uppercase tracking-wide text-slate-500">{{ tt('admin.bc_campaign.metric_delivered') }}</p>
+                  <p class="text-[17px] font-bold tabular-nums leading-tight text-white">{{ fmtIntSpace(bcSendDeliveredOk) }}</p>
+                </div>
+                <div>
+                  <p class="text-[9px] font-semibold uppercase tracking-wide text-slate-500">
+                    <abbr :title="tt('admin.broadcast_shell.ctr_hint_title')" class="cursor-help underline decoration-dotted decoration-slate-500 underline-offset-2">{{
+                      tt('admin.broadcast_shell.ctr_abbr')
+                    }}</abbr>
+                  </p>
+                  <p class="text-[17px] font-bold tabular-nums leading-tight text-emerald-300">{{ fmtPctTrim(bcSendCtrPct) }}</p>
+                  <p class="mt-0.5 text-[9px] leading-tight text-slate-500">{{ bcSendStatCtrSub }}</p>
+                </div>
+              </div>
+              <div class="mt-2 border-t border-white/[0.06] pt-2">
+                <div class="flex flex-wrap gap-x-3 gap-y-1 text-[11px] tabular-nums text-slate-200">
+                  <span
+                    ><span class="text-slate-500">{{ tt('admin.bc_campaign.metric_reactions') }}</span>
+                    {{ fmtIntSpace(bcSendDoneReactions) }}</span
+                  >
+                  <span
+                    ><span class="text-slate-500">{{ tt('admin.bc_campaign.metric_link_clicks') }}</span>
+                    {{ fmtIntSpace(Number(bcSendResultSnapshot.real_link_clicks_total || 0)) }}</span
+                  >
+                  <span
+                    ><span class="text-slate-500">{{ tt('admin.bc_campaign.metric_button_clicks') }}</span>
+                    {{ fmtIntSpace(Number(bcSendResultSnapshot.real_callback_clicks_total || 0)) }}</span
+                  >
+                </div>
+              </div>
             </div>
-            <div class="rounded-xl border border-white/[0.05] bg-white/[0.02] px-2 py-2.5 text-center">
-              <p class="text-[10px] text-slate-500">Клики · в ЛС</p>
-              <p class="mt-1 text-[15px] font-semibold tabular-nums text-white">{{ fmtIntSpace(bcSendClicks) }}</p>
-              <p class="mt-0.5 text-[12px] font-semibold tabular-nums text-emerald-400">
-                {{ fmtPctTrim(bcSendClicksPct) }}
-              </p>
-            </div>
-            <div class="rounded-xl border border-white/[0.05] bg-white/[0.02] px-2 py-2.5 text-center">
-              <p class="text-[10px] text-slate-500">Переходы · в чаты</p>
-              <p class="mt-1 text-[15px] font-semibold tabular-nums text-white">{{ fmtIntSpace(bcSendTransitions) }}</p>
-              <p class="mt-0.5 text-[12px] font-semibold tabular-nums text-emerald-400">
-                {{ fmtPctTrim(bcSendTransitionsPct) }}
-              </p>
-            </div>
-          </div>
-          <div class="mt-2 rounded-xl border border-white/[0.05] bg-white/[0.02] px-3 py-3 text-center">
-            <p class="text-[10px] text-slate-500">CTR · охват базы</p>
-            <p class="mt-1 text-2xl font-semibold tabular-nums text-emerald-400">{{ fmtPctTrim(bcSendCtrPct) }}</p>
-          </div>
+          </template>
+
           <div class="mt-4 grid grid-cols-2 gap-2">
             <button
               type="button"
@@ -10191,9 +13379,10 @@ watch(
       </div>
     </GuardTeleport>
 
+    <GuardTeleport guard-to="body">
     <div
       v-if="bcMediaViewerOpen && bcMediaViewerItem"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/88 p-3 pt-[max(0.5rem,calc(env(safe-area-inset-top,0px)+48px))] pb-[max(0.75rem,calc(4.5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-md"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:100260;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/88 p-3 pt-[max(0.5rem,calc(env(safe-area-inset-top,0px)+48px))] pb-[max(0.75rem,calc(4.5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-md"
       @click.self="closeBcMediaViewer"
     >
       <div
@@ -10225,11 +13414,12 @@ watch(
         </p>
       </div>
     </div>
+    </GuardTeleport>
 
     <GuardTeleport>
     <div
       v-if="bcShowGroupsPicker"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
+          class="fixed inset-0 z-[95450] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
       @click.self="bcShowGroupsPicker = false"
     >
       <div
@@ -10243,7 +13433,7 @@ watch(
           </div>
           <p class="mt-2 text-[14px] text-slate-300">Выберите группы для рассылки</p>
           <div class="mt-2 flex items-center justify-between gap-2 text-[14px]">
-            <span class="text-slate-300">Выбрано: {{ selectedGroupTitles().length }}</span>
+            <span class="text-slate-300">Выбрано: {{ bcSelectedGroupIds.length }}</span>
             <div class="flex items-center gap-3">
               <button type="button" class="font-semibold text-indigo-300" @click="bcSelectedGroupIds = bcBroadcastGroups.map((x) => bcNormalizeChatId(x))">Выбрать все</button>
               <button type="button" class="font-semibold text-indigo-300" @click="bcSelectedGroupIds = []">Очистить</button>
@@ -10267,7 +13457,13 @@ watch(
               :checked="bcSelectedGroupIds.includes(bcNormalizeChatId(c))"
               @change="toggleGroupSelection(bcNormalizeChatId(c))"
             />
-            <span class="text-sm text-slate-200">{{ c.title || c.username || bcNormalizeChatId(c) }}</span>
+            <span class="min-w-0 flex-1 text-sm text-slate-200">{{ c.title || c.username || bcNormalizeChatId(c) }}</span>
+            <span
+              v-if="c.is_paused && !bcCurrentBroadcastIsOneshot"
+              class="shrink-0 rounded-md border border-amber-400/35 bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-amber-200"
+            >
+              {{ tt('admin.broadcast_shell.group_paused_badge') }}
+            </span>
           </label>
           <p v-if="!bcFilteredGroups.length" class="px-2 py-3 text-center text-xs text-slate-500">Нет подходящих групп</p>
         </div>
@@ -10281,7 +13477,7 @@ watch(
     <GuardTeleport>
     <div
       v-if="bcShowChannelsPicker"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
+      class="fixed inset-0 z-[95450] flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
       @click.self="bcShowChannelsPicker = false"
     >
       <div
@@ -10295,7 +13491,7 @@ watch(
           </div>
           <p class="mt-2 text-[14px] text-slate-300">Выберите каналы для рассылки</p>
           <div class="mt-2 flex items-center justify-between gap-2 text-[14px]">
-            <span class="text-slate-300">Выбрано: {{ selectedChannelTitles().length }}</span>
+            <span class="text-slate-300">Выбрано: {{ bcSelectedChannelIds.length }}</span>
             <div class="flex items-center gap-3">
               <button type="button" class="font-semibold text-indigo-300" @click="bcSelectedChannelIds = bcBroadcastChannels.map((x) => bcNormalizeChatId(x))">Выбрать все</button>
               <button type="button" class="font-semibold text-indigo-300" @click="bcSelectedChannelIds = []">Очистить</button>
@@ -10449,29 +13645,35 @@ watch(
       </div>
     </div>
 
-    <div
-      v-if="bcEditModalOpen"
-      class="bc-modal-tg-host fixed inset-0 z-50 flex items-start justify-center bg-black/60 md:items-center"
-      @click.self="bcEditModalOpen = false"
-    >
-      <div class="w-full max-w-2xl rounded-2xl border border-violet-400/50 bg-slate-900 p-4 shadow-2xl">
+    <GuardTeleport guard-to="body">
+      <div
+        v-if="bcEditModalOpen"
+        class="fixed inset-0 z-[100260] flex items-start justify-center bg-black/60 p-3 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+12px))] pb-[env(safe-area-inset-bottom,0px)] md:items-center"
+        @click.self="bcEditModalOpen = false"
+      >
+      <div class="w-full max-w-2xl rounded-2xl border border-emerald-400/35 bg-slate-900 p-4 shadow-2xl" @click.stop>
         <div class="mb-2 flex items-center justify-between">
-          <p class="text-base font-semibold text-white">Исправить пост</p>
+          <p class="text-base font-semibold text-white">{{ tt('admin.broadcast_ui.edit_post_title') }}</p>
           <button type="button" class="bc-tool-btn" @click="bcEditModalOpen = false">✕</button>
         </div>
         <input
           v-model="bcEditTitle"
           type="text"
           class="bc-post-input w-full rounded-xl border border-slate-600 bg-slate-950 px-3 py-2 text-sm"
-          placeholder="Название поста"
+          :placeholder="tt('admin.broadcast_ui.draft_title_ph')"
         />
         <div class="mt-2 flex flex-wrap gap-1">
-          <button type="button" class="bc-tool-btn" @mousedown.prevent @click="bcEditBold"><b>Ж</b></button>
-          <button type="button" class="bc-tool-btn" @mousedown.prevent @click="bcEditItalic"><i>К</i></button>
-          <button type="button" class="bc-tool-btn" @mousedown.prevent @click="bcEditUnderline"><u>Ч</u></button>
-          <button type="button" class="bc-tool-btn" @mousedown.prevent @click="bcEditStrike"><s>З</s></button>
-          <button type="button" class="bc-tool-btn" @mousedown.prevent @click="bcEditLink">🔗 Ссылка</button>
-          <button type="button" class="bc-tool-btn" @mousedown.prevent @click="bcToggleEmojiOpen">😀 Смайлы</button>
+          <button type="button" class="bc-tool-btn" @mousedown.prevent @click="bcFormatBold"><b>Ж</b></button>
+          <button type="button" class="bc-tool-btn" @mousedown.prevent @click="bcFormatItalic"><i>К</i></button>
+          <button type="button" class="bc-tool-btn" @mousedown.prevent @click="bcFormatUnderline"><u>Ч</u></button>
+          <button type="button" class="bc-tool-btn" @mousedown.prevent @click="bcFormatStrike"><s>З</s></button>
+          <button type="button" class="bc-tool-btn" :class="bcFormatState.quote ? 'bc-tool-active' : ''" @mousedown.prevent @click="bcFormatBlockquote">❝ {{ tt('admin.bc_campaign.fmt_quote') }}</button>
+          <button type="button" class="bc-tool-btn" @mousedown.prevent @click="bcFormatSpoiler">🙈 {{ tt('admin.bc_campaign.fmt_spoiler') }}</button>
+          <button type="button" class="bc-tool-btn" @mousedown.prevent @click="bcFormatLink">🔗 {{ tt('admin.bc_campaign.fmt_link') }}</button>
+          <button type="button" class="bc-tool-btn font-mono text-[11px]" title="Моноширинный блок" @mousedown.prevent @click="bcFormatPre">⌨ {{ tt('admin.bc_campaign.fmt_mono_short') }}</button>
+          <button type="button" class="bc-tool-btn text-[11px]" :class="!bcCanUndo() ? 'opacity-40' : ''" :disabled="!bcCanUndo()" @mousedown.prevent @click="bcUndo">↶ {{ tt('admin.bc_campaign.history_back') }}</button>
+          <button type="button" class="bc-tool-btn text-[11px]" :class="!bcCanRedo() ? 'opacity-40' : ''" :disabled="!bcCanRedo()" @mousedown.prevent @click="bcRedo">↷ {{ tt('admin.bc_campaign.history_forward') }}</button>
+          <button type="button" class="bc-tool-btn" @mousedown.prevent @click="bcToggleEmojiOpen">😀</button>
         </div>
         <div v-show="bcEmojiOpen" class="bc-emoji-popover mt-2">
           <emoji-picker
@@ -10486,22 +13688,29 @@ watch(
           contenteditable="true"
           :data-placeholder="tt('admin.broadcast_ui.message_body_ph')"
           @input="onBcEditInput"
+          @paste="bcOnEditorPaste"
+          @keydown="bcOnEditorKeydown"
+          @click="onBcEditorClick"
+          @mouseup="bcUpdateFormatState"
+          @keyup="bcUpdateFormatState"
         />
         <div class="mt-3 flex gap-2">
-          <button type="button" class="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white" :disabled="bcSaving" @click="saveBcEditModal">{{ tt('common.locale_code') === 'en' ? 'Save' : 'Сохранить' }}</button>
-          <button type="button" class="bc-tool-btn" @click="bcEditModalOpen = false">{{ tt('common.locale_code') === 'en' ? 'Cancel' : 'Отмена' }}</button>
+          <button type="button" class="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white" :disabled="bcSaving" @click="saveBcEditModal">{{ tt('common.save') }}</button>
+          <button type="button" class="bc-tool-btn" @click="bcEditModalOpen = false">{{ tt('common.close') }}</button>
         </div>
       </div>
-    </div>
+      </div>
+    </GuardTeleport>
 
-    <div
-      v-if="bcLinkModalOpen"
-      class="bc-modal-tg-host fixed inset-0 z-50 flex items-start justify-center bg-black/60 md:items-center"
-      @click.self="bcLinkModalOpen = false"
-    >
-      <div class="w-full max-w-md rounded-2xl border border-violet-400/50 bg-slate-900 p-4 shadow-2xl">
+    <GuardTeleport guard-to="body">
+      <div
+        v-if="bcLinkModalOpen"
+        class="fixed inset-0 z-[100270] flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+12px))] pb-[env(safe-area-inset-bottom,0px)]"
+        @click.self="bcLinkModalOpen = false"
+      >
+      <div class="w-full max-w-md rounded-2xl border border-violet-400/50 bg-slate-900 p-4 shadow-2xl" @click.stop>
         <div class="mb-2 flex items-center justify-between">
-          <p class="text-base font-semibold text-white">Добавить ссылку</p>
+          <p class="text-base font-semibold text-white">{{ tt('admin.broadcast_ui.link_modal_title') }}</p>
           <button type="button" class="bc-tool-btn" @click="bcLinkModalOpen = false">✕</button>
         </div>
         <input
@@ -10511,11 +13720,25 @@ watch(
           class="bc-post-input w-full rounded-xl border border-slate-600 bg-slate-950 px-3 py-2 text-sm"
         />
         <div class="mt-3 flex gap-2">
-          <button type="button" class="rounded-xl bg-violet-600 px-4 py-2 text-sm font-semibold text-white" @click="bcApplyLinkModal">Применить</button>
-          <button type="button" class="bc-tool-btn" @click="bcLinkModalOpen = false">{{ tt('common.locale_code') === 'en' ? 'Cancel' : 'Отмена' }}</button>
+          <button type="button" class="rounded-xl bg-violet-600 px-4 py-2 text-sm font-semibold text-white" @click="bcApplyLinkModal">{{ tt('common.apply') }}</button>
+          <button type="button" class="bc-tool-btn" @click="bcLinkModalOpen = false">{{ tt('common.close') }}</button>
         </div>
       </div>
-    </div>
+      </div>
+    </GuardTeleport>
+
+    <GuardTeleport guard-to="body">
+      <div
+        v-if="bcEditorHintOpen"
+        class="fixed inset-0 z-[100275] flex items-center justify-center bg-black/60 p-4 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+12px))] pb-[env(safe-area-inset-bottom,0px)]"
+        @click.self="bcEditorHintOpen = false"
+      >
+        <div class="w-full max-w-sm rounded-2xl border border-amber-400/45 bg-[#161b26] p-4 shadow-2xl ring-1 ring-white/10" @click.stop>
+          <p class="text-sm leading-snug text-zinc-100">{{ bcEditorHintText }}</p>
+          <button type="button" class="bc-tool-btn mt-4 w-full !py-2.5 font-semibold" @click="bcEditorHintOpen = false">{{ tt('common.close') }}</button>
+        </div>
+      </div>
+    </GuardTeleport>
 
     <div
       v-if="partnerHelpOpen"
@@ -10562,6 +13785,7 @@ watch(
     </div>
   </div>
 
+  <GuardTeleport guard-to="body">
   <SecurityPinGateModal
     :open="pinGateOpen"
     :busy="pinGateBusy"
@@ -10571,6 +13795,7 @@ watch(
     @submit="submitPinGate"
     @cancel="cancelPinGate"
   />
+  </GuardTeleport>
 </template>
 
 <style scoped>
@@ -10604,6 +13829,27 @@ watch(
   0% { transform: rotate(0deg) scale(1); opacity: 0.92; }
   50% { transform: rotate(180deg) scale(1.08); opacity: 1; }
   100% { transform: rotate(360deg) scale(1); opacity: 0.92; }
+}
+@keyframes bc-shake-x {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  18% {
+    transform: translateX(-6px);
+  }
+  36% {
+    transform: translateX(6px);
+  }
+  54% {
+    transform: translateX(-4px);
+  }
+  72% {
+    transform: translateX(4px);
+  }
+}
+.bc-shake-x {
+  animation: bc-shake-x 0.42s ease-out;
 }
 .bc-send-icon-pulse {
   animation: bc-send-icon-pulse 3s ease-in-out infinite;
@@ -10650,6 +13896,11 @@ watch(
   color: #f8fafc !important;
   -webkit-text-fill-color: #f8fafc;
 }
+.bc-editor :deep(u) {
+  text-decoration: underline !important;
+  text-decoration-color: rgba(226, 232, 240, 0.9);
+  text-underline-offset: 2px;
+}
 .bc-editor:empty:before {
   content: attr(data-placeholder);
   color: #94a3b8 !important;
@@ -10682,14 +13933,57 @@ watch(
   text-decoration: underline;
   text-underline-offset: 2px;
 }
-.bc-editor :deep(blockquote) {
-  margin: 0.35rem 0;
-  padding: 0.35rem 0.65rem;
-  border-left: 3px solid rgba(59, 130, 246, 0.85);
-  background: rgba(59, 130, 246, 0.10);
-  border-radius: 0.4rem;
+.bc-editor :deep(code) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  font-size: 0.92em;
+  padding: 0.05rem 0.25rem;
+  border-radius: 0.25rem;
+  background: rgba(148, 163, 184, 0.14);
   color: #e2e8f0 !important;
   -webkit-text-fill-color: #e2e8f0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.bc-editor :deep(pre) {
+  display: block;
+  max-width: 100%;
+  box-sizing: border-box;
+  margin: 0.35rem 0;
+  padding: 0.35rem 0.5rem;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  font-size: 0.92em;
+  border-radius: 0.35rem;
+  background: rgba(148, 163, 184, 0.12);
+  color: #e2e8f0 !important;
+  -webkit-text-fill-color: #e2e8f0;
+}
+.bc-editor :deep(blockquote) {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  margin: 0.35rem 0;
+  padding: 0.35rem 1.35rem 0.35rem 0.65rem;
+  border-left: 3px solid rgba(56, 189, 248, 0.88);
+  background: rgba(59, 130, 246, 0.12);
+  border-radius: 0.4rem;
+  position: relative;
+  color: #e2e8f0 !important;
+  -webkit-text-fill-color: #e2e8f0;
+}
+.bc-editor :deep(blockquote)::after {
+  content: '\201d';
+  position: absolute;
+  top: 0.12rem;
+  right: 0.38rem;
+  font-size: 0.95rem;
+  line-height: 1;
+  font-weight: 600;
+  color: rgba(56, 189, 248, 0.72);
+  pointer-events: none;
 }
 .bc-editor code {
   background: rgba(148, 163, 184, 0.2);
@@ -10703,6 +13997,16 @@ watch(
 }
 .bc-autopost-modal-card .min-h-0.flex-1.overflow-y-auto {
   -webkit-overflow-scrolling: touch;
+}
+.hide-num-spin {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.hide-num-spin::-webkit-outer-spin-button,
+.hide-num-spin::-webkit-inner-spin-button {
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
 }
 .bc-modal-tg-host {
   padding-left: max(0.75rem, env(safe-area-inset-left, 0px));

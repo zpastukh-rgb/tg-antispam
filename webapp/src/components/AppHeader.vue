@@ -11,7 +11,7 @@ import { useDashboardSection } from '../composables/useDashboardSection'
 const router = useRouter()
 const route = useRoute()
 const { api, fetchSilent, hasInitData } = useApi()
-const { dashboardSection, setDashboardSection } = useDashboardSection()
+const { setDashboardSection } = useDashboardSection()
 const { t } = useI18n()
 const PREMIUM_CACHE_KEY = 'guard.me.is_premium.v1'
 const me = ref(null)
@@ -28,9 +28,6 @@ const props = defineProps({
 
 const emit = defineEmits(['menu-click', 'subscription-back'])
 
-/** Публичные файлы (logo) через BASE_URL (в проде обычно '/') */
-const logoSrc = `${import.meta.env.BASE_URL}logo.png`
-
 const showBack = computed(() => props.subscriptionScreen || (route.path !== '/' && route.name !== 'Dashboard'))
 const canSeeAdmin = computed(() => canOpenAdminEntry(me.value))
 const isBlueAdmActive = computed(() => route.path.startsWith('/admin') && cabinetMode.value !== 'delegated')
@@ -39,16 +36,6 @@ const isPurpleAdmActive = computed(() => {
   if (route.path === '/chats' && String(route.query?.cabinet || '').toLowerCase() === 'delegated') return true
   if (route.path.startsWith('/admin')) return true
   return false
-})
-
-/** Малая аватарка в шапке: скрыта на главном аккаунте, партнёрке, оплате токенов и подписки — чтобы не дублировать герой-блоки */
-const hideHeaderLogo = computed(() => {
-  const name = String(route.name || '')
-  if (name === 'Tokens') return true
-  if (name === 'Referral') return true
-  if (name !== 'Dashboard') return false
-  const sec = String(dashboardSection.value || 'account')
-  return ['account', 'partner', 'tokens', 'subscription'].includes(sec)
 })
 
 async function loadMeProfile() {
@@ -155,16 +142,6 @@ function goBack() {
         <NavIcon name="menu" class="h-4 w-4 md:h-5 md:w-5" />
       </button>
       <a href="#" class="flex min-w-0 items-center gap-2" @click.prevent="goDashboardAccount">
-        <img
-          v-show="!hideHeaderLogo"
-          :src="logoSrc"
-          alt="AntiSpam Guard"
-          width="40"
-          height="40"
-          draggable="false"
-          class="h-8 w-8 shrink-0 object-contain object-center drop-shadow-[0_0_10px_rgba(143,212,26,0.35)] dark:drop-shadow-[0_0_12px_rgba(143,212,26,0.25)]"
-          @dragstart.prevent
-        />
         <span class="flex min-w-0 flex-col leading-tight">
           <span class="truncate text-sm font-bold tracking-tight md:text-[0.95rem]">
             <span class="text-white">AntiSpam </span><span class="text-lime-400">Guard</span>

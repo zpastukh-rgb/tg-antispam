@@ -319,20 +319,24 @@ async def _send_welcome_after_captcha(bot, chat_id: int, user_id: int) -> bool:
         )
         kb = _welcome_keyboard_from_json(getattr(rule, "welcome_buttons_json", None))
         sent_msg = None
+        photo_fid = str(getattr(rule, "welcome_photo_file_id", "") or "").strip()
         photo_rel = str(getattr(rule, "welcome_photo_path", "") or "").strip()
-        if photo_rel:
+        photo_src = None
+        if photo_fid:
+            photo_src = photo_fid
+        elif photo_rel:
             fp = (_welcome_media_root() / photo_rel).resolve()
             root = _welcome_media_root().resolve()
             if (root in fp.parents or fp == root) and fp.exists() and fp.is_file():
-                sent_msg = await bot.send_photo(
-                    int(chat_id),
-                    BufferedInputFile(fp.read_bytes(), filename=fp.name),
-                    caption=txt[:1024],
-                    parse_mode="HTML",
-                    reply_markup=kb,
-                )
-            else:
-                sent_msg = await bot.send_message(int(chat_id), txt[:4000], parse_mode="HTML", reply_markup=kb)
+                photo_src = BufferedInputFile(fp.read_bytes(), filename=fp.name)
+        if photo_src:
+            sent_msg = await bot.send_photo(
+                int(chat_id),
+                photo_src,
+                caption=txt[:1024],
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
         else:
             sent_msg = await bot.send_message(int(chat_id), txt[:4000], parse_mode="HTML", reply_markup=kb)
         return bool(int(getattr(sent_msg, "message_id", 0) or 0) > 0)
