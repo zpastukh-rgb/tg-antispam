@@ -229,11 +229,18 @@ def _wrap_tracked_url(
     broadcast_id: int,
     target_kind: str,
     target_id: int,
+    for_html_body: bool = False,
 ) -> str:
     src = str(url or "").strip()
     if not src:
         return src
-    if broadcast_click_tracking_skipped_url(src):
+    if for_html_body:
+        low = src.split(":", 1)[0].lower()
+        if low in _BROADCAST_SKIP_OPEN_URL_SCHEMES:
+            return src
+        if not (src.startswith("http://") or src.startswith("https://")):
+            return src
+    elif broadcast_click_tracking_skipped_url(src):
         return src
     if not (src.startswith("http://") or src.startswith("https://")):
         return src
@@ -249,6 +256,38 @@ def _wrap_tracked_url(
         }
     )
     return f"{base}/api/public/broadcast/click?{qs}"
+
+
+_ANCHOR_HREF_RE = re.compile(
+    r'(<a\b[^>]*?\bhref\s*=\s*)(["\'])([^"\']+)(\2)',
+    re.IGNORECASE,
+)
+
+
+def wrap_broadcast_html_body(
+    html: str,
+    *,
+    broadcast_id: int,
+    target_kind: str,
+    target_id: int,
+) -> str:
+    """Оборачивает href в <a> для учёта переходов (текст/подпись). t.me в тексте тоже считаем."""
+    raw = str(html or "")
+    if not raw or not broadcast_url_tracking_configured():
+        return raw
+
+    def _sub(m: re.Match[str]) -> str:
+        prefix, quote, url, end_quote = m.group(1), m.group(2), m.group(3), m.group(4)
+        wrapped = _wrap_tracked_url(
+            url,
+            broadcast_id=int(broadcast_id),
+            target_kind=str(target_kind),
+            target_id=int(target_id),
+            for_html_body=True,
+        )
+        return f"{prefix}{quote}{wrapped}{end_quote}"
+
+    return _ANCHOR_HREF_RE.sub(_sub, raw)
 
 
 def _track_keyboard_markup(
@@ -1314,6 +1353,32 @@ async def run_broadcast_job(
                         target_kind=str(target_kind),
                         target_id=int(tid),
                     )
+                    text_for_send = wrap_broadcast_html_body(
+                        text_msg,
+                        broadcast_id=int(row.id),
+                        target_kind=str(target_kind),
+                        target_id=int(tid),
+                    )
+                    cap_for_send = (
+                        wrap_broadcast_html_body(
+                            cap,
+                            broadcast_id=int(row.id),
+                            target_kind=str(target_kind),
+                            target_id=int(tid),
+                        )
+                        if cap
+                        else None
+                    )
+                    remainder_for_send = (
+                        wrap_broadcast_html_body(
+                            media_remainder,
+                            broadcast_id=int(row.id),
+                            target_kind=str(target_kind),
+                            target_id=int(tid),
+                        )
+                        if media_remainder.strip()
+                        else ""
+                    )
                     target_audience = 1
                     if str(target_kind) == "group":
                         try:
@@ -1326,7 +1391,7 @@ async def run_broadcast_job(
                         sent_message_id = await _send_text_with_fallback(
                             bot,
                             tid,
-                            text_msg,
+                            text_for_send,
                             parse_mode=pm,
                             reply_markup=kb_target,
                         )
@@ -1338,8 +1403,8 @@ async def run_broadcast_job(
                                 bot,
                                 tid,
                                 m,
-                                caption=cap or None,
-                                parse_mode=pm if cap else None,
+                                caption=cap_for_send or None,
+                                parse_mode=pm if cap_for_send else None,
                                 reply_markup=kb_target,
                             )
                         else:
@@ -1347,15 +1412,15 @@ async def run_broadcast_job(
                                 bot,
                                 tid,
                                 prepared_media,
-                                caption=cap or None,
-                                parse_mode=pm if cap else None,
+                                caption=cap_for_send or None,
+                                parse_mode=pm if cap_for_send else None,
                                 reply_markup=kb_target,
                             )
-                        if media_remainder.strip():
+                        if remainder_for_send.strip():
                             await _send_broadcast_remainder_after_media(
                                 bot,
                                 tid,
-                                remainder=media_remainder,
+                                remainder=remainder_for_send,
                                 parse_mode=pm,
                             )
                     if sent_message_id > 0:

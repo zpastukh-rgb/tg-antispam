@@ -10177,6 +10177,12 @@ watch(
               >
                 {{ tt('admin.broadcast_shell.tracking_off_hint') }}
               </p>
+              <p
+                v-else
+                class="mb-2 rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1.5 text-[10px] leading-snug text-slate-400"
+              >
+                {{ tt('admin.broadcast_shell.tracking_on_hint') }}
+              </p>
               <div class="grid grid-cols-2 gap-2">
                 <div class="rounded-xl border border-white/10 bg-[#11151C] p-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
                   <p class="text-[10px] text-slate-500">{{ tt('admin.bc_campaign.metric_delivered_posts') }}</p>
@@ -11310,6 +11316,12 @@ watch(
             class="mb-2 rounded-lg border border-amber-500/25 bg-amber-500/8 px-2.5 py-1.5 text-[10px] leading-snug text-amber-100/90"
           >
             {{ tt('admin.broadcast_shell.tracking_off_hint') }}
+          </p>
+          <p
+            v-else-if="bcCampaignUxStatsData"
+            class="mb-2 rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1.5 text-[10px] leading-snug text-slate-400"
+          >
+            {{ tt('admin.broadcast_shell.tracking_on_hint') }}
           </p>
           <div class="mt-1 grid grid-cols-2 gap-2">
             <button

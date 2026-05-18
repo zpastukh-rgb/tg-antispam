@@ -2806,7 +2806,10 @@ export default {
       button_breakdown_title: 'Нажатия по кнопкам',
       breakdown_empty: 'Пока нет данных.',
       breakdown_split: 'ЛС {u} · чаты {g}',
-      tracking_off_hint: 'Отслеживание URL в боте не настроено — счётчик переходов может не совпадать с ожиданиями.',
+      tracking_off_hint:
+        'На сервисе API не задан BROADCAST_TRACK_BASE_URL (или GUARD_API_BASE_URL) — переходы по ссылкам в тексте и внешним URL-кнопкам не считаются. Реакции считаются отдельно, если бот видит message_reaction.',
+      tracking_on_hint:
+        'Считаются: клики по ссылкам в тексте (в т.ч. t.me), по внешним https-кнопкам. Кнопки t.me/telegram открываются напрямую и в «переходы» не попадают. «По кнопке» — callback-кнопки бота (без URL). Реакции — только на отправленные посты.',
       delivered_by_chat_title: 'Доставлено по чатам',
       send_history_title: 'История отправок',
       send_history_bots: 'Личные сообщения: успешно {ok} из {n}',

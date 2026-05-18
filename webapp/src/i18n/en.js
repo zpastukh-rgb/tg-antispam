@@ -2807,7 +2807,10 @@ export default {
       button_breakdown_title: 'Button clicks',
       breakdown_empty: 'No data yet.',
       breakdown_split: 'DM {u} · chats {g}',
-      tracking_off_hint: 'Bot URL tracking is not configured — click counts may not match expectations.',
+      tracking_off_hint:
+        'API service is missing BROADCAST_TRACK_BASE_URL (or GUARD_API_BASE_URL) — link clicks in text and external URL buttons are not counted. Reactions are tracked separately when the bot receives message_reaction.',
+      tracking_on_hint:
+        'Counted: link clicks in message text (incl. t.me), external https URL buttons. t.me/telegram buttons open directly and are not in link clicks. “Button clicks” = bot callback buttons (no URL). Reactions only on sent posts.',
       delivered_by_chat_title: 'Delivered by chat',
       send_history_title: 'Send history',
       send_history_bots: 'Direct messages: {ok} succeeded of {n}',
