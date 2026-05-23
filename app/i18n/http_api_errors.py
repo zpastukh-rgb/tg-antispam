@@ -110,6 +110,10 @@ RU: dict[str, str] = {
     ),
     "no_groups_to_send": "Нет групп для отправки (проверьте выбор или подключите группу к боту)",
     "broadcast_already_running": "Рассылка уже выполняется",
+    "broadcast_schedule_invalid_time": "Некорректное время отложенной отправки",
+    "broadcast_schedule_too_soon": "Отложенная отправка должна быть минимум через 2 минуты",
+    "broadcast_schedule_pending_exists": "У этого черновика уже есть запланированная отправка",
+    "broadcast_schedule_not_found": "Отложенная рассылка не найдена",
     "need_text_or_media": "Нужен текст или загруженное медиа",
     "broadcast_aurum_insufficient": (
         "Недостаточно AURUM для рассылки: нужно {need} ✨ "
@@ -296,6 +300,10 @@ EN: dict[str, str] = {
     "invalid_group_chat_ids": "Invalid chat ids: for groups use supergroup chat_id (usually negative)",
     "no_groups_to_send": "No groups to send to (check selection or connect a group to the bot)",
     "broadcast_already_running": "A broadcast is already running",
+    "broadcast_schedule_invalid_time": "Invalid scheduled send time",
+    "broadcast_schedule_too_soon": "Scheduled send must be at least 2 minutes from now",
+    "broadcast_schedule_pending_exists": "This draft already has a scheduled send",
+    "broadcast_schedule_not_found": "Scheduled broadcast not found",
     "need_text_or_media": "Text or uploaded media is required",
     "bot_token_not_configured": "BOT_TOKEN is not set",
     "broadcast_aurum_insufficient": (

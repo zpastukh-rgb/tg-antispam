@@ -7,7 +7,7 @@
 //  - один общий ref `lockState` хранит текущую открытую фичу и её локализованные
 //    параметры (title / description).
 //  - useDashboardMe() (опционально) подмешивает свежий me для решения, какую CTA
-//    показывать: «🚀 Попробовать 10 дней бесплатно» (trial_eligible) или
+//    показывать: «🚀 Попробовать 7 дней бесплатно» (trial_eligible) или
 //    «👑 Оформить Premium» (платное продление).
 //  - PremiumLockModal.vue (один экземпляр в App.vue) подписывается на `lockState`.
 //  - `usePremiumLock()` экспортирует API openLock / closeLock / isLockedFor.

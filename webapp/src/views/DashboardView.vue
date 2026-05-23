@@ -21,6 +21,7 @@ import {
   telegramVerticalSwipeGestureEnd,
   telegramVerticalSwipeGestureResetAll,
 } from '../utils/telegramVerticalSwipeLock.js'
+import { useModalScrollLock } from '../composables/useModalScrollLock'
 
 const router = useRouter()
 const route = useRoute()
@@ -156,7 +157,7 @@ function onCompareCarouselPointerMove(e) {
     const threshold = 5
     if (Math.abs(totalDx) < threshold && Math.abs(totalDy) < threshold) return
     // Тач: вертикаль только если явно доминирует (страница скроллится).
-    if (Math.abs(totalDy) >= Math.abs(totalDx) * 1.35 && Math.abs(totalDy) > 8) {
+    if (Math.abs(totalDy) >= Math.abs(totalDx) * 1.85 && Math.abs(totalDy) > 14) {
       compareCarouselCancelDrag(el, pid)
       return
     }
@@ -286,7 +287,7 @@ let activitySummaryFetchGen = 0
 /** Время успешного ответа activity summary (для пропуска лишнего refetch при возврате на вкладку). */
 let lastActivitySummaryOkAt = 0
 
-/** Период для блока «Статистика» на главной (не путать с верхним рядом — там всегда «сегодня» из summary). */
+/** Период для блока «Статистика» на главной и верхнего ряда «Удалено / Сэкономлено». */
 const dashboardStatsPeriod = ref('today')
 const dashboardPeriodBreakdown = ref(null)
 const dashboardPeriodLoading = ref(false)
@@ -338,6 +339,11 @@ let homeHeroLastMoveClientX = 0
 let homeHeroLastMovePerfT = 0
 const homeHeroProgress = ref(0)
 let homeHeroProgressRaf = null
+/** Карусель в зоне видимости (IntersectionObserver). */
+const homeHeroCarouselInView = ref(false)
+/** Первый автозапуск после появления карусели на экране — сброс на 1-й слайд. */
+let homeHeroStartedAfterVisible = false
+let homeHeroVisibilityObserver = null
 
 function clearHomeHeroProgressRaf() {
   if (homeHeroProgressRaf != null) {
@@ -501,7 +507,10 @@ function onHomeHeroRailPointerUp(e) {
   const flickR = vx > 0.32 && dx > 10
   if (dx < -th || flickL) bumpHomeHeroSlide(1)
   else if (dx > th || flickR) bumpHomeHeroSlide(-1)
-  else restartHomeHeroAutoplay()
+  else {
+    restartHomeHeroAutoplay()
+    if (Math.abs(dx) < 12) onHomeHeroLeadSlideTap()
+  }
 }
 
 function onHomeHeroRailPointerCancel(e) {
@@ -512,12 +521,33 @@ function onHomeHeroRailLostPointerCapture(e) {
   telegramVerticalSwipeGestureEnd(e.pointerId)
 }
 
+function homeHeroShouldAutoplay() {
+  if (dashCtx.dashboardSection.value !== 'account') return false
+  if (!homeHeroCarouselInView.value) return false
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return false
+  return true
+}
+
+function resetHomeHeroToFirstSlide() {
+  cancelHeroCloneResetTok()
+  clearHomeHeroProgressRaf()
+  homeHeroProgress.value = 0
+  homeHeroTrackIndex.value = 1
+  homeHeroDragDx.value = 0
+  homeHeroDragging.value = false
+  homeUpdatesPremiumInstant.value = false
+}
+
 function restartHomeHeroAutoplay() {
   clearHomeHeroProgressRaf()
   homeHeroProgress.value = 0
-  if (dashCtx.dashboardSection.value !== 'account') return
+  if (!homeHeroShouldAutoplay()) return
   const start = performance.now()
   const loop = (now) => {
+    if (!homeHeroShouldAutoplay()) {
+      clearHomeHeroProgressRaf()
+      return
+    }
     const elapsed = now - start
     homeHeroProgress.value = Math.min(1, elapsed / HOME_HERO_ADVANCE_MS)
     if (elapsed >= HOME_HERO_ADVANCE_MS) {
@@ -527,6 +557,65 @@ function restartHomeHeroAutoplay() {
     homeHeroProgressRaf = requestAnimationFrame(loop)
   }
   homeHeroProgressRaf = requestAnimationFrame(loop)
+}
+
+function syncHomeHeroAutoplay() {
+  if (!homeHeroShouldAutoplay()) {
+    clearHomeHeroProgressRaf()
+    return
+  }
+  restartHomeHeroAutoplay()
+}
+
+function teardownHomeHeroVisibilityObserver() {
+  if (homeHeroVisibilityObserver) {
+    homeHeroVisibilityObserver.disconnect()
+    homeHeroVisibilityObserver = null
+  }
+}
+
+function setupHomeHeroVisibilityObserver() {
+  teardownHomeHeroVisibilityObserver()
+  const el = homeHeroCarouselViewportRef.value
+  if (!el) return
+  if (typeof IntersectionObserver === 'undefined') {
+    homeHeroCarouselInView.value = true
+    if (!homeHeroStartedAfterVisible) {
+      homeHeroStartedAfterVisible = true
+      resetHomeHeroToFirstSlide()
+    }
+    syncHomeHeroAutoplay()
+    return
+  }
+  let wasIntersecting = false
+  homeHeroVisibilityObserver = new IntersectionObserver(
+    (entries) => {
+      const entry = entries[0]
+      const visible = !!(entry?.isIntersecting && entry.intersectionRatio > 0)
+      homeHeroCarouselInView.value = visible
+      if (visible && !wasIntersecting) {
+        if (!homeHeroStartedAfterVisible) {
+          homeHeroStartedAfterVisible = true
+          resetHomeHeroToFirstSlide()
+        }
+        syncHomeHeroAutoplay()
+      } else if (!visible && wasIntersecting) {
+        clearHomeHeroProgressRaf()
+      }
+      wasIntersecting = visible
+    },
+    { threshold: [0, 0.12] },
+  )
+  homeHeroVisibilityObserver.observe(el)
+}
+
+function onHomeHeroDocumentVisibilityChange() {
+  if (typeof document === 'undefined') return
+  if (document.visibilityState === 'hidden') {
+    clearHomeHeroProgressRaf()
+    return
+  }
+  syncHomeHeroAutoplay()
 }
 
 function stepStatBroadcast(delta) {
@@ -894,30 +983,99 @@ const totalTokens = computed(() => {
   return String(Math.max(0, Math.round(total)))
 })
 const tariffIsPremium = computed(() => ['premium', 'pro', 'business'].includes((me.value?.tariff || 'free').toLowerCase()))
+/** 7-дневный Premium-триал: можно ли активировать (FREE + ни разу не активировал + окно открыто). */
+const trialEligible = computed(() => !!me.value && !!me.value.trial_eligible)
+/** Триал сейчас идёт (юзер активировал, осталось N дней Premium бесплатно). */
+const trialActive = computed(() => !!me.value && !!me.value.trial_active)
+/** Кнопка-замена «Усилить защиту»: показывать ли «🚀 Попробовать 7 дней бесплатно». */
+const showTrialCta = computed(() => !tariffIsPremium.value && trialEligible.value)
+/** Сколько дней осталось в активном Premium-триале. */
+const trialRemainingDays = computed(() => Number(me.value?.trial_remaining_days || 0))
+
+const PREMIUM_EXPIRING_SOON_DAYS = 7
+
+function subscriptionDaysRemaining(untilIso) {
+  const raw = String(untilIso || '').trim()
+  if (!raw) return null
+  const until = Date.parse(raw)
+  if (!Number.isFinite(until)) return null
+  const diffMs = until - Date.now()
+  if (diffMs <= 0) return 0
+  return Math.ceil(diffMs / 86400000)
+}
+
+/** Календарные сутки до subscription_until (null — без срока). */
+const subscriptionDaysLeft = computed(() => subscriptionDaysRemaining(me.value?.subscription_until))
+
+/** Premium заканчивается в ближайшие 7 суток — показываем баннер «Продлить защиту». */
+const premiumExpiringSoon = computed(() => {
+  if (!tariffIsPremium.value) return false
+  const days = subscriptionDaysLeft.value
+  if (days == null || days <= 0 || days > PREMIUM_EXPIRING_SOON_DAYS) return false
+  return true
+})
 
 const dashboardBroadcastAccess = computed(() => userCanUseBroadcasts(me.value))
 const broadcastMiniPremiumBadgeInlineClass =
   'inline-flex shrink-0 items-center gap-0.5 rounded-md border border-amber-400/40 bg-gradient-to-r from-amber-400/95 via-yellow-300/90 to-amber-500/95 px-1 py-[1px] text-[7px] font-extrabold uppercase tracking-wide text-amber-950 shadow-sm sm:px-1.5 sm:text-[8px]'
 
-/** Промо-слайды (PNG) + финальный слайд: Free — premium.svg (исправленная разметка), Premium — premium-active-banner.png */
+/** Промо-слайды (PNG): lead — триал / апселл / premium-active / скоро закончится; далее промо-картинки. */
 const HOME_HERO_SLIDES = computed(() => {
   const b = import.meta.env.BASE_URL || '/'
   const u = (name) => `${b.replace(/\/?$/, '/')}${name}`
-  const closingSrc = tariffIsPremium.value ? u('hero-home/premium-active-banner.png') : u('hero-home/premium.svg')
-  return [
-    { src: u('hero-home/hero-channels-discussions.png') },
-    { src: u('hero-home/hero-reports-analytics.png') },
-    { src: u('hero-home/hero-channel-posts.png') },
-    { src: u('hero-home/hero-violator-actions.png') },
-    { src: u('hero-home/hero-broadcast-autopost.png') },
-    { src: u('hero-home/hero-team-management.png') },
-    { src: u('hero-home/hero-rich-content.png') },
-    { src: u('hero-home/hero-casino-spam-filter.png') },
-    { src: u('hero-home/hero-spam-wave-alert.png') },
-    { src: u('hero-home/hero-bilingual-interface.png') },
-    { src: closingSrc },
+  let lead
+  if (tariffIsPremium.value) {
+    if (premiumExpiringSoon.value) {
+      lead = { src: u('hero-home/hero-premium-expiring-soon.png'), action: 'renew' }
+    } else {
+      lead = { src: u('hero-home/premium-active-banner.png'), action: 'subscription' }
+    }
+  } else if (trialEligible.value) {
+    lead = { src: u('hero-home/hero-trial-gift-7d.png'), action: 'trial' }
+  } else {
+    lead = { src: u('hero-home/hero-strengthen-protection.png'), action: 'upsell' }
+  }
+  const promo = [
+    { src: u('hero-home/hero-channels-discussions.png'), action: null },
+    { src: u('hero-home/hero-reports-analytics.png'), action: null },
+    { src: u('hero-home/hero-channel-posts.png'), action: null },
+    { src: u('hero-home/hero-violator-actions.png'), action: null },
+    { src: u('hero-home/hero-broadcast-autopost.png'), action: null },
+    { src: u('hero-home/hero-team-management.png'), action: null },
+    { src: u('hero-home/hero-rich-content.png'), action: null },
+    { src: u('hero-home/hero-casino-spam-filter.png'), action: null },
+    { src: u('hero-home/hero-spam-wave-alert.png'), action: null },
+    { src: u('hero-home/hero-bilingual-interface.png'), action: null },
   ]
+  return [lead, ...promo]
 })
+
+function homeHeroLogicalSlideIndex() {
+  const nBase = HOME_HERO_SLIDES.value?.length ?? 0
+  if (!nBase) return -1
+  const ti = Number(homeHeroTrackIndex.value) || 0
+  if (ti === 0) return nBase - 1
+  if (ti === nBase + 1) return 0
+  return ti - 1
+}
+
+function onHomeHeroLeadSlideTap() {
+  const idx = homeHeroLogicalSlideIndex()
+  if (idx !== 0) return
+  const lead = HOME_HERO_SLIDES.value?.[0]
+  if (!lead?.action) return
+  if (lead.action === 'trial') {
+    void openTrialActivateModalAndRun()
+  } else if (lead.action === 'renew' || lead.action === 'upsell') {
+    openBillingSection({ scrollLanding: true })
+  } else if (lead.action === 'subscription') {
+    openSubscriptionStatusModal()
+  }
+}
+
+function openSubscriptionStatusModal() {
+  showSubscriptionInfo.value = true
+}
 
 /** Расширенная дорожка для wrap без рывка: [последний клон] [слайды…] [первый клон]. */
 const HOME_HERO_TRACK_SLIDES = computed(() => {
@@ -929,19 +1087,25 @@ const HOME_HERO_TRACK_SLIDES = computed(() => {
   return [lastCl, ...s.map((row) => ({ ...row })), firstCl]
 })
 
+watch(
+  () => HOME_HERO_SLIDES.value.map((s) => s.src).join('\0'),
+  () => {
+    homeHeroStartedAfterVisible = false
+    resetHomeHeroToFirstSlide()
+    if (dashCtx.dashboardSection.value === 'account' && me.value) {
+      void nextTick(() => {
+        setupHomeHeroVisibilityObserver()
+        syncHomeHeroAutoplay()
+      })
+    }
+  },
+)
+
 /** Тонкая полоска: белая часть заполняет дорожку за HOME_HERO_ADVANCE_MS на каждом слайде, сбрасывается при автосмене. */
 const homeHeroBarFillPct = computed(() =>
   Math.max(0, Math.min(1, Number(homeHeroProgress.value) || 0)) * 100,
 )
 
-/** 10-дневный Premium-триал: можно ли активировать (FREE + ни разу не активировал + окно открыто). */
-const trialEligible = computed(() => !!me.value && !!me.value.trial_eligible)
-/** Триал сейчас идёт (юзер активировал, осталось N дней Premium бесплатно). */
-const trialActive = computed(() => !!me.value && !!me.value.trial_active)
-/** Кнопка-замена «Усилить защиту»: показывать ли «🚀 Попробовать 10 дней бесплатно». */
-const showTrialCta = computed(() => !tariffIsPremium.value && trialEligible.value)
-/** Сколько дней осталось в активном Premium-триале. */
-const trialRemainingDays = computed(() => Number(me.value?.trial_remaining_days || 0))
 /** Карточка «Рассылки» на главной: показываем всем авторизованным (маркетинг); доступ по-прежнему через Premium/делегирование. */
 const accountShowBroadcastMiniCard = computed(() => !!me.value)
 const dashboardAvatarSrc = computed(() => {
@@ -952,7 +1116,7 @@ const dashboardAvatarSrc = computed(() => {
 const protCheckGradId = `prot-ok-${Math.random().toString(36).slice(2, 11)}`
 const protOffGradId = `prot-off-${Math.random().toString(36).slice(2, 11)}`
 const activityChatsCount = computed(() => Number(activitySummary.value?.chats_count || 0))
-/** Группы с включённым Guard (не каналы, не на паузе) — строка «Защищено сегодня». */
+/** Группы с включённым Guard и активным подключением (не на паузе) — «Защищено сегодня». */
 const activityProtectedGroupsCount = computed(() =>
   Math.max(0, Math.round(Number(activitySummary.value?.protected_groups_count ?? 0))),
 )
@@ -969,7 +1133,7 @@ const protectionStatusNoChats = computed(() => activityChatsCount.value === 0)
 
 /** Оценка «сэкономлено админам» (₽): ~25 ₽ на обработанное удаление за сегодня (ориентир времени модератора). */
 const dashboardEstimatedSavedRub = computed(() => {
-  const d = Math.max(0, Math.round(Number(activitySummary.value?.today?.deleted || 0)))
+  const d = statsCardDeleted.value
   return d * 25
 })
 
@@ -989,7 +1153,7 @@ const dashboardProtectionLevelMeta = computed(() => {
   const n = activityProtectedGroupsCount.value
   if (n <= 0) return empty
 
-  const del = Math.max(0, Math.round(Number(activitySummary.value?.today?.deleted || 0)))
+  const del = statsCardDeleted.value
   const tariffCode = String(activitySummary.value?.tariff || 'free').toLowerCase()
   const premium = ['premium', 'pro', 'business'].includes(tariffCode)
   const protOn = !!activitySummary.value?.protection_active
@@ -1045,13 +1209,21 @@ const dashboardProtectionLevelMeta = computed(() => {
 /** Оценка часов, сэкономленных админам (25 ₽/удаление, ориентир 1500 ₽/ч модератора). */
 const dashboardSavedHoursLabel = computed(() => {
   const isEn = t('common.locale_code') === 'en'
-  const d = Math.max(0, Math.round(Number(activitySummary.value?.today?.deleted || 0)))
+  const d = statsCardDeleted.value
   if (d === 0) return isEn ? '0 h' : '0 ч'
   const hours = (d * 25) / 1500
   if (hours < 0.05) return isEn ? '< 0.1 h' : '< 0,1 ч'
   return isEn
     ? `${hours.toFixed(1)} h`
     : `${hours.toFixed(1).replace('.', ',')} ч`
+})
+
+const statsCardUsesPeriod = computed(() => dashboardStatsPeriod.value !== 'today')
+const statsCardDeleted = computed(() => {
+  if (!statsCardUsesPeriod.value) {
+    return Math.max(0, Math.round(Number(activitySummary.value?.today?.deleted ?? 0)))
+  }
+  return Math.max(0, Math.round(Number(dashboardPeriodBreakdown.value?.total_deleted ?? 0)))
 })
 
 /** Сравнение с предыдущим днём (понятные формулировки, не «к вчера»). */
@@ -1084,19 +1256,13 @@ const statTrendJoins = computed(() => {
   return t('dashboard.hero.vs_yesterday_less', { n: Math.abs(diff) })
 })
 
-const statsCardUsesPeriod = computed(() => dashboardStatsPeriod.value !== 'today')
-const statsCardDeleted = computed(() => {
-  if (!statsCardUsesPeriod.value) {
-    return Math.max(0, Math.round(Number(activitySummary.value?.today?.deleted ?? 0)))
-  }
-  return Math.max(0, Math.round(Number(dashboardPeriodBreakdown.value?.total_deleted ?? 0)))
-})
 const statsCardJoins = computed(() => {
   if (!statsCardUsesPeriod.value) {
     return Math.max(0, Math.round(Number(activitySummary.value?.today?.joins ?? 0)))
   }
   return Math.max(0, Math.round(Number(dashboardPeriodBreakdown.value?.total_joined ?? 0)))
 })
+
 const statsCardSavedHoursLabel = computed(() => {
   const isEn = t('common.locale_code') === 'en'
   const d = statsCardDeleted.value
@@ -1575,6 +1741,8 @@ function stopPaymentActivationFastPolling() {
   premiumActivationCheckQueued = false
 }
 
+let dashboardScrollLockMainTop = 0
+
 function updateBodyScrollLock() {
   if (typeof document === 'undefined') return
   const lock = !!(
@@ -1586,13 +1754,36 @@ function updateBodyScrollLock() {
     showPremiumAurumShowcaseModal.value ||
     showUpdatesRoadmapModal.value ||
     showPartnerBonusTransferConfirm.value ||
-    showPartnerPayoutModal.value
+    showPartnerPayoutModal.value ||
+    showTokensInfoModal.value
   )
   const body = document.body
   const html = document.documentElement
+  const main = document.querySelector('main')
   if (!body || !html) return
-  body.style.overflow = lock ? 'hidden' : ''
-  html.style.overflow = lock ? 'hidden' : ''
+  if (lock) {
+    if (!body.dataset.guardScrollLocked) {
+      dashboardScrollLockMainTop = main?.scrollTop || 0
+      body.dataset.guardScrollLocked = '1'
+    }
+    body.style.overflow = 'hidden'
+    html.style.overflow = 'hidden'
+    if (main) {
+      main.style.overflow = 'hidden'
+      main.style.overscrollBehavior = 'none'
+      main.style.touchAction = 'none'
+    }
+    return
+  }
+  delete body.dataset.guardScrollLocked
+  body.style.overflow = ''
+  html.style.overflow = ''
+  if (main) {
+    main.style.overflow = ''
+    main.style.overscrollBehavior = ''
+    main.style.touchAction = ''
+    main.scrollTop = dashboardScrollLockMainTop
+  }
 }
 
 async function loadMeInitial() {
@@ -1673,7 +1864,7 @@ onMounted(async () => {
     } catch { /* */ }
   }
   // Открыть лендинг биллинга и автоматически активировать триал из ?trial=1
-  // (DM-кнопка «🚀 Попробовать 10 дней бесплатно» из reminders).
+  // (DM-кнопка «🚀 Попробовать 7 дней бесплатно» из reminders).
   if (String(route.query?.trial || '') === '1') {
     try {
       const q = { ...route.query }
@@ -1708,11 +1899,11 @@ onMounted(async () => {
   startActivityAutoRefresh()
   restartUpdatesRotation()
   restartStatBroadcastNudge()
-  restartHomeHeroAutoplay()
   if (spikeAlertTimer) clearInterval(spikeAlertTimer)
   spikeAlertTimer = setInterval(loadSpikeAlertsState, 30000)
   await tryOpenProtectionReportFromRoute()
   document.addEventListener('visibilitychange', onVisibilityPaymentCheck)
+  document.addEventListener('visibilitychange', onHomeHeroDocumentVisibilityChange)
   if (typeof window !== 'undefined') {
     window.addEventListener('focus', onWindowFocusPremiumCheck)
   }
@@ -1742,8 +1933,22 @@ watch(
   () => {
     scheduleBroadcastMiniSnapshot()
     restartStatBroadcastNudge()
-    if (dashCtx.dashboardSection.value === 'account') restartHomeHeroAutoplay()
-    else clearHomeHeroAutoplayFull()
+    if (dashCtx.dashboardSection.value !== 'account') clearHomeHeroAutoplayFull()
+  },
+  { immediate: true },
+)
+
+watch(
+  () => [dashCtx.dashboardSection.value, !!me.value],
+  async ([section, hasMe]) => {
+    if (section !== 'account' || !hasMe) {
+      teardownHomeHeroVisibilityObserver()
+      homeHeroCarouselInView.value = false
+      clearHomeHeroAutoplayFull()
+      return
+    }
+    await nextTick()
+    setupHomeHeroVisibilityObserver()
   },
   { immediate: true },
 )
@@ -1763,6 +1968,7 @@ watch(
     showUpdatesRoadmapModal.value,
     showPartnerBonusTransferConfirm.value,
     showPartnerPayoutModal.value,
+    showTokensInfoModal.value,
   ],
   () => updateBodyScrollLock(),
 )
@@ -1970,15 +2176,24 @@ onBeforeUnmount(() => {
   }
   if (statBroadcastJustDraggedClear) clearTimeout(statBroadcastJustDraggedClear)
   clearHomeHeroAutoplayFull()
+  teardownHomeHeroVisibilityObserver()
   if (paymentRedirectTimer) clearInterval(paymentRedirectTimer)
   stopPaymentActivationFastPolling()
   document.removeEventListener('visibilitychange', onVisibilityPaymentCheck)
+  document.removeEventListener('visibilitychange', onHomeHeroDocumentVisibilityChange)
   if (typeof window !== 'undefined') {
     window.removeEventListener('focus', onWindowFocusPremiumCheck)
   }
   if (typeof document !== 'undefined') {
+    const main = document.querySelector('main')
+    delete document.body.dataset.guardScrollLocked
     document.body.style.overflow = ''
     document.documentElement.style.overflow = ''
+    if (main) {
+      main.style.overflow = ''
+      main.style.overscrollBehavior = ''
+      main.style.touchAction = ''
+    }
   }
   telegramVerticalSwipeGestureResetAll()
   tokenLandingOrbitPreloadImg = null
@@ -2379,6 +2594,30 @@ const partnerConfirmedTokensTotal = computed(() =>
 const paidFullRefs = computed(() => (referralPeople.value?.full_list || []).filter((x) => !!x?.is_paid))
 const paidActiveRefs = computed(() => (referralPeople.value?.top_active || []).filter((x) => !!x?.is_paid))
 const partnerActiveUntilLabel = computed(() => formatDateTimeRu(partnerData.value?.active_until))
+const partnerSubscriptionActive = computed(() => {
+  if (partnerData.value?.subscription_active != null) return !!partnerData.value.subscription_active
+  if (me.value?.is_premium) return true
+  const dl = partnerData.value?.days_left
+  return dl != null && Number(dl) > 0
+})
+const partnerPremiumForever = computed(() => !!partnerData.value?.subscription_forever)
+const partnerShowPremiumDates = computed(
+  () =>
+    partnerSubscriptionActive.value
+    && !partnerPremiumForever.value
+    && partnerData.value?.active_until,
+)
+const partnerPremiumStatusLine = computed(() => {
+  if (!partnerSubscriptionActive.value) return ''
+  if (partnerPremiumForever.value) return t('partner.premium_forever')
+  const code = String(partnerData.value?.subscription_promo_code || '').trim()
+  const days = partnerData.value?.days_left
+  if (code && days != null && partnerData.value?.premium_kind === 'promo') {
+    return t('partner.premium_promo_line', { code, days })
+  }
+  if (days != null && partnerShowPremiumDates.value) return null
+  return t('partner.premium_active_line')
+})
 
 async function copyPartnerLink() {
   const link = String(partnerData.value?.ref_link || '')
@@ -2734,8 +2973,17 @@ function openBillingSection(opts = {}) {
 }
 
 const trialActivating = ref(false)
+const showTrialActivateModal = ref(false)
+useModalScrollLock(showTrialActivateModal)
+useModalScrollLock(showSubscriptionInfo)
 
-async function activateTrialClick() {
+async function openTrialActivateModalAndRun() {
+  if (trialActivating.value) return
+  showTrialActivateModal.value = true
+  await activateTrialClick({ closeModalOnDone: true })
+}
+
+async function activateTrialClick(opts = {}) {
   if (trialActivating.value) return
   trialActivating.value = true
   try {
@@ -2743,7 +2991,7 @@ async function activateTrialClick() {
     if (res?.already_active) {
       showToast(t('dashboard.trial.already_active_toast'))
     } else {
-      showToast(t('dashboard.trial.activated_toast', { n: Number(res?.trial_remaining_days || 10) }))
+      showToast(t('dashboard.trial.activated_toast', { n: Number(res?.trial_remaining_days || 7) }))
     }
     try {
       const fresh = await rawApi.me()
@@ -2766,6 +3014,9 @@ async function activateTrialClick() {
     showToast(t(key))
   } finally {
     trialActivating.value = false
+    if (opts.closeModalOnDone) {
+      showTrialActivateModal.value = false
+    }
   }
 }
 
@@ -3306,7 +3557,7 @@ async function submitReceipt() {
                     <div class="flex min-w-0 flex-1 flex-col items-center px-1.5 text-center sm:px-2">
                       <p class="w-full text-[9px] font-semibold uppercase tracking-wide text-white sm:text-[10px]">{{ t('dashboard.hero.col_deleted') }}</p>
                       <p class="mt-0.5 w-full text-[16px] font-extrabold tabular-nums leading-none text-white sm:text-[17px]">
-                        {{ activitySummary?.today?.deleted ?? 0 }}
+                        {{ statsCardDeleted }}
                       </p>
                       <p class="mt-0.5 w-full text-[10px] font-medium leading-tight text-lime-400/95 sm:text-[11px]">{{ t('dashboard.hero.col_deleted_sub') }}</p>
                     </div>
@@ -3321,9 +3572,9 @@ async function submitReceipt() {
                       <p class="w-full whitespace-nowrap text-[9px] font-semibold uppercase leading-tight tracking-wide text-white sm:text-[10px]">
                         {{ t('dashboard.hero.col_level') }}
                       </p>
-                      <div class="mt-0.5 flex w-full min-w-0 flex-col items-stretch gap-1">
+                      <div class="mt-0.5 flex w-full min-w-0 flex-col items-stretch gap-1 pl-1.5 sm:pl-2">
                         <p
-                          class="text-center text-[14px] font-extrabold leading-tight sm:text-[15px]"
+                          class="text-left text-[14px] font-extrabold leading-tight sm:text-[15px]"
                           :class="dashboardProtectionLevelMeta.labelClass"
                         >
                           {{ dashboardProtectionLevelMeta.label }}
@@ -3730,7 +3981,7 @@ async function submitReceipt() {
             </div>
           </div>
 
-          <!-- Карусель промо: только картинки + полоска таймера (клики по премиум — позже) -->
+          <!-- Карусель промо: lead-картинка кликабельна (триал / биллинг) -->
           <div
             class="guard-hero-carousel mb-3 mt-0 w-full min-w-0 overflow-hidden border-0 shadow-none ring-0 outline-none ring-offset-0 sm:mb-4 sm:mt-0"
           >
@@ -3759,6 +4010,7 @@ async function submitReceipt() {
                     v-for="(slide, idx) in HOME_HERO_TRACK_SLIDES"
                     :key="`hero-track-${idx}-${slide.src}`"
                     class="relative h-full min-w-0 shrink-0 grow-0 overflow-hidden border-0 bg-black shadow-none ring-0 outline-none ring-offset-0"
+                    :class="slide.action ? 'cursor-pointer' : ''"
                     :style="{ flex: `0 0 ${100 / Math.max(1, HOME_HERO_TRACK_SLIDES.length)}%` }"
                   >
                     <img
@@ -3836,16 +4088,21 @@ async function submitReceipt() {
           <div class="space-y-1.5">
             <p>
               {{ t('partner.access', { label: partnerData.access_label || '—' }) }}<br>
-              ├ {{ t('partner.days_left') }} <b>{{ partnerData.days_left ?? 0 }}</b><br>
-              └ {{ t('partner.active_until') }} <b>{{ partnerActiveUntilLabel }}</b>
+              <template v-if="partnerShowPremiumDates">
+                ├ {{ t('partner.days_left') }} <b>{{ partnerData.days_left ?? 0 }}</b><br>
+                └ {{ t('partner.active_until') }} <b>{{ partnerActiveUntilLabel }}</b>
+              </template>
+              <template v-else-if="partnerPremiumStatusLine">
+                └ <span class="text-emerald-300/90">{{ partnerPremiumStatusLine }}</span>
+              </template>
+              <template v-else-if="partnerUiMaxLevels < 3">
+                └ <span class="text-slate-400">{{ t('partner.levels_free_hint') }}</span>
+              </template>
             </p>
             <p>
               {{ t('partner.balance_header') }}<br>
               ├ {{ t('partner.aurum_line', { amt: partnerAurumTokens }) }}<br>
               └ {{ t('partner.bonus_line', { amt: partnerBonusTokens }) }}
-            </p>
-            <p class="text-xs leading-relaxed text-slate-400">
-              {{ t('partner.balance_hint') }}
             </p>
             <!-- Трёхуровневая сеть и счётчики комиссий (проценты с бэка, токены ⚡ как в балансе) -->
             <div class="mt-3 space-y-3 rounded-xl border border-slate-600/55 bg-black/35 p-3 text-[12px] leading-relaxed text-slate-200">
@@ -3863,10 +4120,6 @@ async function submitReceipt() {
                   </template>
                   <template v-else>
                   └ {{ t('partner.tier_net_l1', { n: partnerNetworkCounts.l1 }) }}<br>
-                  └ {{
-                    t('partner.tier_net_total_direct', { n: partnerNetworkCounts.l1 })
-                  }}
-                  <br>
                   <span class="font-sans text-[10px] text-slate-500">{{ t('partner.tier_network_premium_hint') }}</span>
                   </template>
                 </p>
@@ -4047,9 +4300,14 @@ async function submitReceipt() {
             <p class="mt-2 text-sm leading-relaxed text-slate-300">
               {{ t('partner.docs_reward_for') }}
             </p>
-            <p class="mt-1 text-sm leading-relaxed text-slate-400">
-              {{ t('partner.docs_token_rate_line') }}
-            </p>
+          </div>
+          <div class="rounded-2xl border border-lime-400/30 bg-[#0f1115]/95 p-4 text-slate-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+            <p class="text-lg font-extrabold text-lime-400/95">{{ t('partner.docs_q_balances') }}</p>
+            <ul class="mt-2 list-disc space-y-1.5 pl-4 text-sm leading-relaxed text-slate-300">
+              <li>{{ t('partner.docs_balances_aurum') }}</li>
+              <li>{{ t('partner.docs_balances_partner') }}</li>
+              <li>{{ t('partner.docs_balances_convert') }}</li>
+            </ul>
           </div>
           <div class="rounded-2xl border border-lime-400/30 bg-[#0f1115]/95 p-4 text-slate-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
             <p class="text-lg font-extrabold text-lime-400/95">{{ t('partner.docs_q_accrual') }}</p>
@@ -4824,7 +5082,7 @@ async function submitReceipt() {
                 @click="activateTrialClick"
               >
                 <span aria-hidden="true" class="mr-1.5">🚀</span>
-                {{ trialActivating ? t('dashboard.trial.activating') : t('dashboard.trial.activate_btn') }}
+                {{ trialActivating ? t('dashboard.trial.activating') : t('dashboard.trial.try_free_btn') }}
               </button>
               <button
                 v-else
@@ -4876,7 +5134,7 @@ async function submitReceipt() {
 
               <div
                 ref="billingCompareScrollerRef"
-                class="mt-2 flex gap-3 overflow-x-auto scroll-auto pb-3 select-none [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden max-md:[touch-action:pan-y] max-md:overscroll-x-contain max-md:pl-[calc(50vw_-_min(18rem,82vw)/2)] max-md:pr-[calc(50vw_-_min(18rem,82vw)/2)] max-md:[-webkit-overflow-scrolling:touch] md:mx-auto md:mt-6 md:max-w-4xl md:grid md:grid-cols-2 md:gap-5 md:overflow-visible md:px-0 md:pb-0 md:cursor-default md:snap-none"
+                class="mt-2 flex gap-3 overflow-x-auto scroll-auto pb-3 select-none [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden max-md:[touch-action:pan-x_pan-y] max-md:overscroll-x-contain max-md:pl-[calc(50vw_-_min(18rem,82vw)/2)] max-md:pr-[calc(50vw_-_min(18rem,82vw)/2)] max-md:[-webkit-overflow-scrolling:touch] md:mx-auto md:mt-6 md:max-w-4xl md:grid md:grid-cols-2 md:gap-5 md:overflow-visible md:px-0 md:pb-0 md:cursor-default md:snap-none"
                 :class="
                   compareCarouselDragging
                     ? 'snap-none max-md:cursor-grabbing'
@@ -4986,7 +5244,7 @@ async function submitReceipt() {
                 @click="activateTrialClick"
               >
                 <span aria-hidden="true" class="mr-1.5">🚀</span>
-                {{ trialActivating ? t('dashboard.trial.activating') : t('dashboard.trial.activate_btn') }}
+                {{ trialActivating ? t('dashboard.trial.activating') : t('dashboard.trial.try_free_btn') }}
               </button>
               <p
                 v-if="showTrialCta"
@@ -5280,6 +5538,92 @@ async function submitReceipt() {
         </p>
       </div>
     </div>
+
+    <Teleport to="body">
+      <Transition
+        enter-active-class="transition duration-150 ease-out"
+        enter-from-class="opacity-0"
+        enter-to-class="opacity-100"
+        leave-active-class="transition duration-150 ease-in"
+        leave-from-class="opacity-100"
+        leave-to-class="opacity-0"
+      >
+        <div
+          v-if="showSubscriptionInfo"
+          class="fixed inset-0 z-[2147483500] flex items-end justify-center bg-black/60 p-3 pb-[calc(4.5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-md md:items-center md:pb-6"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="t('subscription.status_title')"
+          @click.self="showSubscriptionInfo = false"
+          @touchmove.prevent
+        >
+          <div
+            ref="subscriptionInfoWrapRef"
+            class="flex max-h-[min(88vh,calc(100dvh-5rem))] w-full max-w-md flex-col overflow-hidden rounded-[22px] border border-lime-500/15 bg-[#0b0f18]/92 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.88)] ring-1 ring-white/[0.08] backdrop-blur-2xl"
+            @click.stop
+          >
+            <div class="flex shrink-0 items-center justify-between border-b border-white/[0.08] px-4 py-3">
+              <h2 class="text-[17px] font-bold text-white">{{ t('subscription.status_title') }}</h2>
+              <button
+                type="button"
+                class="flex h-8 w-8 items-center justify-center rounded-full text-white/55 transition hover:bg-white/[0.08]"
+                :aria-label="t('common.close')"
+                @click="showSubscriptionInfo = false"
+              >
+                <span aria-hidden="true" class="text-[18px] leading-none">✕</span>
+              </button>
+            </div>
+            <div class="min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-3 py-3 [-webkit-overflow-scrolling:touch]">
+              <SubscriptionManagementPanel
+                v-if="me"
+                :profile="me"
+                variant="embedded"
+                hide-embedded-hint
+                @update:profile="applyMeState"
+                @open-tariff="() => { showSubscriptionInfo = false; openBillingSection({ scrollLanding: true }) }"
+              />
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <Teleport to="body">
+      <Transition
+        enter-active-class="transition duration-150 ease-out"
+        enter-from-class="opacity-0"
+        enter-to-class="opacity-100"
+        leave-active-class="transition duration-150 ease-in"
+        leave-from-class="opacity-100"
+        leave-to-class="opacity-0"
+      >
+        <div
+          v-if="showTrialActivateModal"
+          class="fixed inset-0 z-[2147484000] flex items-center justify-center bg-black/60 p-4 backdrop-blur-md"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="t('dashboard.trial.modal_title')"
+          @touchmove.prevent
+        >
+          <div
+            class="relative w-full max-w-sm overflow-hidden rounded-[22px] border border-emerald-400/25 bg-[#0b0f18]/85 p-6 text-center text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.88)] ring-1 ring-emerald-300/20 backdrop-blur-2xl"
+            @click.stop
+          >
+            <div
+              class="pointer-events-none absolute -right-8 -top-8 h-36 w-36 rounded-full bg-[radial-gradient(circle_at_center,rgba(16,185,129,0.22),transparent_65%)] blur-2xl"
+              aria-hidden="true"
+            />
+            <div class="relative z-[1] mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-500/15 ring-1 ring-emerald-400/35">
+              <span class="inline-block h-7 w-7 animate-spin rounded-full border-2 border-emerald-300/30 border-t-emerald-300" aria-hidden="true" />
+            </div>
+            <h2 class="relative z-[1] text-[18px] font-bold text-white">{{ t('dashboard.trial.modal_title') }}</h2>
+            <p class="relative z-[1] mt-2 text-[13px] leading-snug text-white/65">
+              {{ trialActivating ? t('dashboard.trial.activating') : t('dashboard.trial.modal_body') }}
+            </p>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
 
     <Teleport to="body">
     <div
@@ -6242,8 +6586,9 @@ async function submitReceipt() {
 
     <div
       v-if="showTokensInfoModal"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/70 p-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-[3px] md:items-center md:pb-6"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:96050;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/70 p-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-[3px] md:items-center md:pb-6"
       @click.self="showTokensInfoModal = false"
+      @touchmove.prevent
     >
       <div
         class="w-full max-w-lg overflow-hidden rounded-[1.25rem] border border-white/[0.14] bg-gradient-to-b from-zinc-900/75 to-zinc-950/92 p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.9)] ring-1 ring-inset ring-white/[0.06] backdrop-blur-2xl"
@@ -6269,6 +6614,7 @@ async function submitReceipt() {
       v-if="showPremiumPayMethodModal"
       style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/70 p-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-[3px] md:items-center md:pb-6"
       @click.self="closePremiumPayMethodModal"
+      @touchmove.prevent
     >
       <div
         class="w-full max-w-md overflow-hidden rounded-[1.25rem] border border-white/[0.14] bg-gradient-to-b from-zinc-900/90 to-zinc-950/95 p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.9)] ring-1 ring-inset ring-white/[0.06] backdrop-blur-2xl"

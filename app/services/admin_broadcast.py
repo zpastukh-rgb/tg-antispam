@@ -42,6 +42,29 @@ from app.services.broadcast_send_plan import _delegated_broadcast_chat_ids_stmt
 
 log = logging.getLogger(__name__)
 
+_BC_INLINE_BUTTON_STYLES = frozenset({"primary", "success", "danger"})
+
+
+def normalize_button_style(raw: Any) -> str | None:
+    s = str(raw or "").strip().lower()
+    if s in ("", "default", "none", "normal", "standard"):
+        return None
+    if s in _BC_INLINE_BUTTON_STYLES:
+        return s
+    return None
+
+
+def _inline_btn(text: str, *, style: str | None = None, **kwargs: Any) -> InlineKeyboardButton:
+    kw: dict[str, Any] = {"text": text, **kwargs}
+    st = normalize_button_style(style)
+    if st:
+        kw["style"] = st
+    return InlineKeyboardButton(**kw)
+
+
+def _inline_btn_style_from_obj(b: Any) -> str | None:
+    return normalize_button_style(getattr(b, "style", None))
+
 _MAX_UPLOAD_BYTES = int(os.getenv("BROADCAST_MAX_UPLOAD_MB", "50")) * 1024 * 1024
 _SEND_DELAY_SEC = float(os.getenv("BROADCAST_SEND_DELAY_SEC", "0.005"))
 _PROGRESS_COMMIT_EVERY = int(os.getenv("BROADCAST_PROGRESS_COMMIT_EVERY", "10"))
@@ -61,6 +84,47 @@ def broadcast_upload_root() -> Path:
     return p
 
 
+def _normalize_hidden_continuation(raw: Any) -> dict[str, str] | None:
+    if not isinstance(raw, dict):
+        return None
+    non_member = str(raw.get("non_member_text") or "").strip()
+    member = str(raw.get("member_text") or "").strip()
+    if not non_member and not member:
+        return None
+    return {
+        "non_member_text": non_member[:4096],
+        "member_text": member[:4096],
+    }
+
+
+def keyboard_json_rows(keyboard_json: str | None) -> list[list[dict[str, Any]]]:
+    if not keyboard_json:
+        return []
+    try:
+        data = json.loads(keyboard_json)
+    except Exception:
+        return []
+    rows = data.get("rows") or []
+    if not isinstance(rows, list):
+        return []
+    out: list[list[dict[str, Any]]] = []
+    for row in rows:
+        if isinstance(row, list):
+            out.append([b for b in row if isinstance(b, dict)])
+    return out
+
+
+def list_hidden_continuation_configs(keyboard_json: str | None) -> list[dict[str, str]]:
+    """Порядок совпадает с индексами в callback bcHC:{bid}:{cid}:{idx}."""
+    out: list[dict[str, str]] = []
+    for row in keyboard_json_rows(keyboard_json):
+        for b in row:
+            hc = _normalize_hidden_continuation(b.get("hidden_continuation"))
+            if hc:
+                out.append(hc)
+    return out
+
+
 def normalize_keyboard_rows(raw_rows: Any) -> str | None:
     if not raw_rows:
         return None
@@ -78,7 +142,10 @@ def normalize_keyboard_rows(raw_rows: Any) -> str | None:
             if not text:
                 continue
             item: dict[str, Any] = {"text": text}
-            if b.get("url"):
+            hc = _normalize_hidden_continuation(b.get("hidden_continuation"))
+            if hc:
+                item["hidden_continuation"] = hc
+            elif b.get("url"):
                 item["url"] = str(b["url"]).strip()
             elif b.get("web_app_url"):
                 item["web_app"] = {"url": str(b["web_app_url"]).strip()}
@@ -86,6 +153,9 @@ def normalize_keyboard_rows(raw_rows: Any) -> str | None:
                 item["callback_data"] = str(b["callback_data"])[:64]
             else:
                 continue
+            st = normalize_button_style(b.get("style"))
+            if st:
+                item["style"] = st
             btns.append(item)
         if btns:
             rows_out.append(btns)
@@ -109,12 +179,15 @@ def keyboard_markup_from_json(s: str | None) -> InlineKeyboardMarkup | None:
             text = b.get("text")
             if not text:
                 continue
+            st = normalize_button_style(b.get("style"))
             if b.get("url"):
-                line.append(InlineKeyboardButton(text=text, url=b["url"]))
+                line.append(_inline_btn(text, style=st, url=b["url"]))
             elif b.get("web_app") and isinstance(b["web_app"], dict) and b["web_app"].get("url"):
-                line.append(InlineKeyboardButton(text=text, web_app=WebAppInfo(url=b["web_app"]["url"])))
+                line.append(_inline_btn(text, style=st, web_app=WebAppInfo(url=b["web_app"]["url"])))
             elif b.get("callback_data"):
-                line.append(InlineKeyboardButton(text=text, callback_data=str(b["callback_data"])[:64]))
+                line.append(_inline_btn(text, style=st, callback_data=str(b["callback_data"])[:64]))
+            elif _normalize_hidden_continuation(b.get("hidden_continuation")):
+                line.append(_inline_btn(text, style=st, callback_data="bcHC:0:0:0"))
         if line:
             kb.append(line)
     return InlineKeyboardMarkup(inline_keyboard=kb) if kb else None
@@ -122,6 +195,8 @@ def keyboard_markup_from_json(s: str | None) -> InlineKeyboardMarkup | None:
 
 # Префикс трекинга callback-кнопок рассылки (до 64 байт: bcM:{id}:{idx})
 BROADCAST_TRACKED_CALLBACK_PREFIX = "bcM:"
+# Скрытое продолжение: разный текст для подписчиков канала/группы и остальных.
+BROADCAST_HIDDEN_CONTINUATION_PREFIX = "bcHC:"
 
 
 def list_broadcast_callback_payloads_for_layout(keyboard_json: str | None, *, layout_group: bool) -> list[str]:
@@ -143,7 +218,7 @@ def list_broadcast_callback_payloads_for_layout(keyboard_json: str | None, *, la
             if getattr(b, "url", None):
                 continue
             cb = getattr(b, "callback_data", None)
-            if cb:
+            if cb and not str(cb).startswith(BROADCAST_HIDDEN_CONTINUATION_PREFIX):
                 out.append(str(cb)[:64])
     return out
 
@@ -161,19 +236,108 @@ def keyboard_for_target(base: InlineKeyboardMarkup | None, target_kind: str) -> 
             txt = str(getattr(b, "text", "") or "").strip()
             if not txt:
                 continue
+            st = _inline_btn_style_from_obj(b)
             wa = getattr(b, "web_app", None)
             if wa and getattr(wa, "url", None):
-                line.append(InlineKeyboardButton(text=txt, url=str(wa.url)))
+                line.append(_inline_btn(text=txt, style=st, url=str(wa.url)))
                 continue
             if getattr(b, "url", None):
-                line.append(InlineKeyboardButton(text=txt, url=str(b.url)))
+                line.append(_inline_btn(text=txt, style=st, url=str(b.url)))
                 continue
             if getattr(b, "callback_data", None):
-                line.append(InlineKeyboardButton(text=txt, callback_data=str(b.callback_data)[:64]))
+                line.append(_inline_btn(text=txt, style=st, callback_data=str(b.callback_data)[:64]))
                 continue
         if line:
             rows.append(line)
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+
+def build_tracked_keyboard_markup(
+    keyboard_json: str | None,
+    *,
+    broadcast_id: int,
+    target_kind: str,
+    target_id: int,
+    autopost_campaign_id: int | None = None,
+) -> InlineKeyboardMarkup | None:
+    """Собирает inline-клавиатуру с трекингом URL/callback и токенами скрытого продолжения."""
+    rows_raw = keyboard_json_rows(keyboard_json)
+    if not rows_raw:
+        return None
+    is_group = str(target_kind or "") == "group"
+    rows_out: list[list[InlineKeyboardButton]] = []
+    cb_flat = 0
+    hc_flat = 0
+    cid = int(autopost_campaign_id or 0)
+    bid = int(broadcast_id)
+    tid = int(target_id)
+    tk = str(target_kind or "")
+    for row in rows_raw:
+        line: list[InlineKeyboardButton] = []
+        for b in row:
+            txt = str(b.get("text") or "").strip()
+            if not txt:
+                continue
+            st = normalize_button_style(b.get("style"))
+            hc = _normalize_hidden_continuation(b.get("hidden_continuation"))
+            if hc:
+                idx = hc_flat
+                hc_flat += 1
+                token = f"{BROADCAST_HIDDEN_CONTINUATION_PREFIX}{bid}:{cid}:{idx}"
+                if len(token) > 64:
+                    log.warning(
+                        "broadcast hidden continuation token > 64, button skipped bid=%s idx=%s",
+                        bid,
+                        idx,
+                    )
+                    continue
+                line.append(_inline_btn(text=txt, style=st, callback_data=token))
+                continue
+            if b.get("url"):
+                line.append(
+                    _inline_btn(
+                        text=txt,
+                        style=st,
+                        url=_wrap_tracked_url(
+                            str(b["url"]),
+                            broadcast_id=bid,
+                            target_kind=tk,
+                            target_id=tid,
+                            click_source="btn",
+                            autopost_campaign_id=autopost_campaign_id,
+                        ),
+                    )
+                )
+                continue
+            if b.get("web_app") and isinstance(b["web_app"], dict) and b["web_app"].get("url"):
+                wa_url = str(b["web_app"]["url"])
+                tracked = _wrap_tracked_url(
+                    wa_url,
+                    broadcast_id=bid,
+                    target_kind=tk,
+                    target_id=tid,
+                    click_source="btn",
+                    autopost_campaign_id=autopost_campaign_id,
+                )
+                if is_group:
+                    line.append(_inline_btn(text=txt, style=st, url=tracked))
+                else:
+                    line.append(_inline_btn(text=txt, style=st, web_app=WebAppInfo(url=tracked)))
+                continue
+            if b.get("callback_data"):
+                idx = cb_flat
+                cb_flat += 1
+                token = f"{BROADCAST_TRACKED_CALLBACK_PREFIX}{bid}:{cid}:{idx}"
+                inner = str(b["callback_data"])[:64]
+                if len(token) > 64:
+                    log.warning("broadcast callback token > 64, tracking disabled for this button bid=%s", bid)
+                    line.append(_inline_btn(text=txt, style=st, callback_data=inner))
+                else:
+                    line.append(_inline_btn(text=txt, style=st, callback_data=token))
+                continue
+        if line:
+            rows_out.append(line)
+    return InlineKeyboardMarkup(inline_keyboard=rows_out) if rows_out else None
 
 
 def _broadcast_click_track_base() -> str:
@@ -193,13 +357,27 @@ def broadcast_url_tracking_configured() -> bool:
     return bool(_broadcast_click_track_base())
 
 
-# tg:/mailto:/tel: и t.me — без редиректа: в Telegram кнопка открывает целевой URL, а не /api/public/broadcast/click.
-_BROADCAST_SKIP_TRACK_HOSTS = frozenset({"t.me", "telegram.me", "telegram.dog"})
+# tg:/mailto:/tel: — без обёртки. t.me/telegram.me — без обёртки (открываются в клиенте Telegram).
 _BROADCAST_SKIP_OPEN_URL_SCHEMES = frozenset({"tg", "mailto", "tel"})
+_BROADCAST_TELEGRAM_HTTP_HOSTS = frozenset({"t.me", "telegram.me", "telegram.dog"})
+
+
+def is_broadcast_telegram_http_url(url: str) -> bool:
+    """https://t.me/… и telegram.me — открываются в приложении, не через браузер."""
+    src = str(url or "").strip()
+    if not (src.startswith("http://") or src.startswith("https://")):
+        return False
+    try:
+        host = (urlparse(src).hostname or "").lower().strip(".")
+    except Exception:
+        return False
+    if host.startswith("www."):
+        host = host[4:]
+    return host in _BROADCAST_TELEGRAM_HTTP_HOSTS
 
 
 def broadcast_click_tracking_skipped_url(url: str) -> bool:
-    """True — передать URL в Telegram как есть (deep link или веб telegram)."""
+    """True — не оборачивать в трекинг (не-HTTP, tg://, t.me/telegram.me)."""
     src = str(url or "").strip()
     if not src:
         return True
@@ -208,19 +386,53 @@ def broadcast_click_tracking_skipped_url(url: str) -> bool:
         return True
     if not (src.startswith("http://") or src.startswith("https://")):
         return True
-    try:
-        host = (urlparse(src).hostname or "").lower().split("@")[-1]
-    except Exception:
-        return False
-    if not host:
-        return False
-    if host in _BROADCAST_SKIP_TRACK_HOSTS:
-        return True
-    if host.endswith(".t.me"):
-        return True
-    if host.endswith(".telegram.org") or host == "telegram.org":
+    if is_broadcast_telegram_http_url(src):
         return True
     return False
+
+
+def broadcast_open_url_for_click(url: str) -> str:
+    """Куда редиректить после /click: t.me → tg:// (в приложение), остальное — как есть."""
+    src = str(url or "").strip()
+    if not src:
+        return src
+    tg = http_telegram_url_to_tg_scheme(src)
+    return tg or src
+
+
+def http_telegram_url_to_tg_scheme(url: str) -> str | None:
+    """Преобразует https://t.me/… в tg:// для открытия внутри Telegram (старые обёрнутые ссылки)."""
+    src = str(url or "").strip()
+    if not is_broadcast_telegram_http_url(src):
+        return None
+    try:
+        parsed = urlparse(src)
+    except Exception:
+        return None
+    path = (parsed.path or "").strip("/")
+    query = parsed.query or ""
+    if not path and query:
+        # https://t.me/user?id=123
+        return f"tg://user?{query}" if query else None
+    if path.startswith("+"):
+        invite = path[1:].split("/", 1)[0]
+        return f"tg://join?invite={invite}" if invite else None
+    parts = [p for p in path.split("/") if p]
+    if not parts:
+        return None
+    if parts[0] == "c" and len(parts) >= 3:
+        try:
+            channel = int(parts[1])
+            post = int(parts[2])
+        except (TypeError, ValueError):
+            return None
+        return f"tg://privatepost?channel={channel}&post={post}"
+    if parts[0] == "user":
+        return f"tg://user?{query}" if query else None
+    domain = parts[0]
+    if len(parts) >= 2 and parts[1].isdigit():
+        return f"tg://resolve?domain={domain}&post={parts[1]}"
+    return f"tg://resolve?domain={domain}"
 
 
 def _wrap_tracked_url(
@@ -229,32 +441,31 @@ def _wrap_tracked_url(
     broadcast_id: int,
     target_kind: str,
     target_id: int,
-    for_html_body: bool = False,
+    click_source: str = "link",
+    autopost_campaign_id: int | None = None,
 ) -> str:
     src = str(url or "").strip()
     if not src:
         return src
-    if for_html_body:
-        low = src.split(":", 1)[0].lower()
-        if low in _BROADCAST_SKIP_OPEN_URL_SCHEMES:
-            return src
-        if not (src.startswith("http://") or src.startswith("https://")):
-            return src
-    elif broadcast_click_tracking_skipped_url(src):
+    if broadcast_click_tracking_skipped_url(src):
         return src
     if not (src.startswith("http://") or src.startswith("https://")):
         return src
     base = _broadcast_click_track_base()
     if not base:
         return src
-    qs = urlencode(
-        {
-            "b": int(broadcast_id),
-            "k": str(target_kind or "user")[:16],
-            "t": int(target_id),
-            "u": src,
-        }
-    )
+    params: dict[str, str | int] = {
+        "b": int(broadcast_id),
+        "k": str(target_kind or "user")[:16],
+        "t": int(target_id),
+        "u": src,
+    }
+    if str(click_source or "").strip().lower() == "btn":
+        params["s"] = "btn"
+    cid = int(autopost_campaign_id or 0)
+    if cid > 0:
+        params["c"] = cid
+    qs = urlencode(params)
     return f"{base}/api/public/broadcast/click?{qs}"
 
 
@@ -262,6 +473,34 @@ _ANCHOR_HREF_RE = re.compile(
     r'(<a\b[^>]*?\bhref\s*=\s*)(["\'])([^"\']+)(\2)',
     re.IGNORECASE,
 )
+_ANCHOR_BLOCK_RE = re.compile(
+    r'(<a\b[^>]*>)(.*?)(</a>)',
+    re.IGNORECASE | re.DOTALL,
+)
+_UNDERLINE_TAG_RE = re.compile(r'</?(?:u|ins)\b[^>]*>', re.IGNORECASE)
+_SPAN_UNDERLINE_STYLE_RE = re.compile(
+    r'<span\b[^>]*\btext-decoration[^>]*underline[^>]*>(.*?)</span>',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def strip_underline_inside_html_links(html: str) -> str:
+    """Telegram text_link без entity underline; браузерный редактор часто вкладывает <u> в <a>."""
+    raw = str(html or "")
+    if not raw or "<a" not in raw.lower():
+        return raw
+
+    def _clean_inner(inner: str) -> str:
+        cleaned = inner
+        for _ in range(8):
+            nxt = _UNDERLINE_TAG_RE.sub("", cleaned)
+            nxt = _SPAN_UNDERLINE_STYLE_RE.sub(r"\1", nxt)
+            if nxt == cleaned:
+                break
+            cleaned = nxt
+        return cleaned
+
+    return _ANCHOR_BLOCK_RE.sub(lambda m: f"{m.group(1)}{_clean_inner(m.group(2))}{m.group(3)}", raw)
 
 
 def wrap_broadcast_html_body(
@@ -270,9 +509,10 @@ def wrap_broadcast_html_body(
     broadcast_id: int,
     target_kind: str,
     target_id: int,
+    autopost_campaign_id: int | None = None,
 ) -> str:
-    """Оборачивает href в <a> для учёта переходов (текст/подпись). t.me в тексте тоже считаем."""
-    raw = str(html or "")
+    """Оборачивает href в <a> для учёта переходов (текст/подпись); t.me/telegram.me не оборачиваются."""
+    raw = strip_underline_inside_html_links(str(html or ""))
     if not raw or not broadcast_url_tracking_configured():
         return raw
 
@@ -283,7 +523,7 @@ def wrap_broadcast_html_body(
             broadcast_id=int(broadcast_id),
             target_kind=str(target_kind),
             target_id=int(target_id),
-            for_html_body=True,
+            autopost_campaign_id=autopost_campaign_id,
         )
         return f"{prefix}{quote}{wrapped}{end_quote}"
 
@@ -296,6 +536,7 @@ def _track_keyboard_markup(
     broadcast_id: int,
     target_kind: str,
     target_id: int,
+    autopost_campaign_id: int | None = None,
 ) -> InlineKeyboardMarkup | None:
     if not base:
         return None
@@ -307,29 +548,36 @@ def _track_keyboard_markup(
             txt = str(getattr(b, "text", "") or "").strip()
             if not txt:
                 continue
+            st = _inline_btn_style_from_obj(b)
             wa = getattr(b, "web_app", None)
             if wa and getattr(wa, "url", None):
                 line.append(
-                    InlineKeyboardButton(
+                    _inline_btn(
                         text=txt,
+                        style=st,
                         url=_wrap_tracked_url(
                             str(wa.url),
                             broadcast_id=int(broadcast_id),
                             target_kind=str(target_kind),
                             target_id=int(target_id),
+                            click_source="btn",
+                            autopost_campaign_id=autopost_campaign_id,
                         ),
                     )
                 )
                 continue
             if getattr(b, "url", None):
                 line.append(
-                    InlineKeyboardButton(
+                    _inline_btn(
                         text=txt,
+                        style=st,
                         url=_wrap_tracked_url(
                             str(b.url),
                             broadcast_id=int(broadcast_id),
                             target_kind=str(target_kind),
                             target_id=int(target_id),
+                            click_source="btn",
+                            autopost_campaign_id=autopost_campaign_id,
                         ),
                     )
                 )
@@ -337,12 +585,13 @@ def _track_keyboard_markup(
             if getattr(b, "callback_data", None):
                 idx = cb_flat
                 cb_flat += 1
-                token = f"{BROADCAST_TRACKED_CALLBACK_PREFIX}{int(broadcast_id)}:{idx}"
+                cid = int(autopost_campaign_id or 0)
+                token = f"{BROADCAST_TRACKED_CALLBACK_PREFIX}{int(broadcast_id)}:{cid}:{idx}"
                 if len(token) > 64:
                     log.warning("broadcast callback token > 64, tracking disabled for this button bid=%s", broadcast_id)
-                    line.append(InlineKeyboardButton(text=txt, callback_data=str(b.callback_data)[:64]))
+                    line.append(_inline_btn(text=txt, style=st, callback_data=str(b.callback_data)[:64]))
                 else:
-                    line.append(InlineKeyboardButton(text=txt, callback_data=token))
+                    line.append(_inline_btn(text=txt, style=st, callback_data=token))
                 continue
         if line:
             rows.append(line)
@@ -598,19 +847,33 @@ def sanitize_autopost_state(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
     out: dict[str, Any] = {}
-    for k in ("day", "next_slot", "rot_i", "plan_sig"):
+    for k in ("day", "next_slot", "rot_i", "plan_sig", "run_catch_up_until"):
         if k not in raw:
             continue
         v = raw[k]
-        if k == "day" and isinstance(v, str):
-            out[k] = v[:16]
-        elif k == "plan_sig" and isinstance(v, str):
-            out[k] = v[:120]
+        if k in ("day", "plan_sig", "run_catch_up_until") and isinstance(v, str):
+            out[k] = v[:64 if k == "day" else 120]
         elif k in ("next_slot", "rot_i"):
             try:
                 out[k] = int(v)
             except (TypeError, ValueError):
                 pass
+    for k in ("skipped_slots", "sent_slots"):
+        if k not in raw:
+            continue
+        v = raw[k]
+        if not isinstance(v, list):
+            continue
+        idxs: list[int] = []
+        for x in v[:288]:
+            try:
+                i = int(x)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= i < 288 and i not in idxs:
+                idxs.append(i)
+        if idxs:
+            out[k] = sorted(idxs)
     return out
 
 
@@ -820,19 +1083,54 @@ async def finalize_autopost_json_for_owner(
     if str(ap.get("runState") or "").lower() == "stopped":
         ap.pop("_state", None)
     elif str(ap.get("runState") or "").lower() == "running" and prev_run_state in ("stopped", "paused"):
-        from datetime import datetime, timezone
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
 
-        catch_marker = datetime.now(timezone.utc).isoformat()
+        from app.services.autopost_loop import _resolve_schedule_calendar_day
+
+        tz_name = str(ap.get("timezone") or "Europe/Moscow")
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = ZoneInfo("Europe/Moscow")
+        now_local = datetime.now(tz)
+        today_key = _resolve_schedule_calendar_day(ap, now_local, tz).isoformat()
         if prev_run_state == "stopped":
-            ap["_state"] = {"run_catch_up_until": catch_marker}
+            ap["_state"] = {
+                "day": today_key,
+                "next_slot": 0,
+                "skipped_slots": [],
+                "sent_slots": [],
+            }
         elif prev_state and isinstance(prev_state, dict):
             st_resume = sanitize_autopost_state(prev_state)
-            st_resume["run_catch_up_until"] = catch_marker
+            if st_resume.get("day") != today_key:
+                st_resume["day"] = today_key
+                st_resume["next_slot"] = 0
+                st_resume["skipped_slots"] = []
+                st_resume["sent_slots"] = []
             ap["_state"] = st_resume
         else:
-            ap["_state"] = {"run_catch_up_until": catch_marker}
+            ap["_state"] = {
+                "day": today_key,
+                "next_slot": 0,
+                "skipped_slots": [],
+                "sent_slots": [],
+            }
     elif prev_state:
         ap["_state"] = sanitize_autopost_state(prev_state)
+    newly_running = str(ap.get("runState") or "").lower() == "running" and prev_run_state in (
+        "stopped",
+        "paused",
+        "",
+    )
+    if newly_running and isinstance(ap.get("_state"), dict):
+        from app.services.autopost_loop import advance_autopost_state_skip_past_slots_today
+
+        advance_autopost_state_skip_past_slots_today(
+            ap,
+            abandon_rest_of_day_if_late_start=False,
+        )
     raw_g = ap.get("group_chat_ids")
     raw_ch = ap.get("channel_chat_ids")
     ap["group_chat_ids"] = await filter_group_chat_ids_for_broadcast(
@@ -1143,6 +1441,7 @@ async def run_broadcast_job(
     *,
     keep_draft_after: bool = False,
     run_source: str = "manual",
+    autopost_campaign_id: int | None = None,
 ) -> None:
     from app.db.session import get_session
     from app.services.broadcast_reactions import register_broadcast_sent_message
@@ -1218,7 +1517,6 @@ async def run_broadcast_job(
                 return
 
             pm = parse_mode_or_none(row.parse_mode)
-            kb = keyboard_markup_from_json(row.keyboard_json)
             text = row.body_text or ""
             text_msg = _truncate(text, _BROADCAST_BODY_HTML_MAX)
             cap: str | None = None
@@ -1276,6 +1574,7 @@ async def run_broadcast_job(
             audience_ok = 0
             first_fail: str | None = None
             batch_id = uuid.uuid4().hex
+            track_cid = int(autopost_campaign_id or 0) or None
             delivery_enabled = False
             delivery_has_batch_id = False
             delivery_has_target_id = False
@@ -1346,18 +1645,19 @@ async def run_broadcast_job(
             commit_every = max(1, _PROGRESS_COMMIT_EVERY)
             for tid, target_kind in recipients:
                 try:
-                    kb_target = keyboard_for_target(kb, target_kind)
-                    kb_target = _track_keyboard_markup(
-                        kb_target,
+                    kb_target = build_tracked_keyboard_markup(
+                        row.keyboard_json,
                         broadcast_id=int(row.id),
                         target_kind=str(target_kind),
                         target_id=int(tid),
+                        autopost_campaign_id=track_cid,
                     )
                     text_for_send = wrap_broadcast_html_body(
                         text_msg,
                         broadcast_id=int(row.id),
                         target_kind=str(target_kind),
                         target_id=int(tid),
+                        autopost_campaign_id=track_cid,
                     )
                     cap_for_send = (
                         wrap_broadcast_html_body(
@@ -1365,6 +1665,7 @@ async def run_broadcast_job(
                             broadcast_id=int(row.id),
                             target_kind=str(target_kind),
                             target_id=int(tid),
+                            autopost_campaign_id=track_cid,
                         )
                         if cap
                         else None
@@ -1375,6 +1676,7 @@ async def run_broadcast_job(
                             broadcast_id=int(row.id),
                             target_kind=str(target_kind),
                             target_id=int(tid),
+                            autopost_campaign_id=track_cid,
                         )
                         if media_remainder.strip()
                         else ""
@@ -1430,7 +1732,23 @@ async def run_broadcast_job(
                             chat_id=int(tid),
                             message_id=int(sent_message_id),
                             target_kind=str(target_kind),
+                            autopost_campaign_id=track_cid,
                         )
+                        # Реакции приходят в отдельной сессии — без commit mapping не виден до конца job.
+                        try:
+                            await session.commit()
+                        except Exception as reg_commit_err:
+                            try:
+                                await session.rollback()
+                            except Exception:
+                                pass
+                            log.warning(
+                                "broadcast sent_message map commit failed id=%s chat=%s msg=%s: %s",
+                                int(row.id),
+                                int(tid),
+                                int(sent_message_id),
+                                reg_commit_err,
+                            )
                     ok += 1
                     audience_ok += int(target_audience)
                     await _insert_delivery(True, None, int(tid))
@@ -1488,6 +1806,7 @@ async def run_broadcast_job(
                     audience_ok=int(audience_ok),
                     sent_at=sent_now,
                     run_source=str(run_source or "manual")[:16],
+                    autopost_campaign_id=track_cid,
                 )
                 try:
                     session.add(run_row)

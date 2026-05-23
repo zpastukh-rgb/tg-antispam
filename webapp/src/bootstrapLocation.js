@@ -18,7 +18,7 @@ if (typeof window !== 'undefined') {
       targetPath = '/'
       nextParams.set('section', 'billing')
     } else if (rawStart === 'trial') {
-      // DM-кнопка «🚀 Попробовать 10 дней бесплатно» → лендинг биллинга с
+      // DM-кнопка «🚀 Попробовать 7 дней бесплатно» → лендинг биллинга с
       // флагом trial=1, который вью обработает и автоматически вызовет активацию.
       targetPath = '/'
       nextParams.set('section', 'billing')

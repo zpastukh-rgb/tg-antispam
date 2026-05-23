@@ -83,6 +83,86 @@ async def get_activity_summary_chat_ids(session: AsyncSession, user_id: int) -> 
     return sorted(ids)
 
 
+async def count_accessible_chats_by_kind(session: AsyncSession, user_id: int) -> tuple[int, int]:
+    """Группы и каналы в кабинете: свои + делегированные, в т.ч. на паузе (is_active=False)."""
+    chats = await get_accessible_chats_any_active(session, int(user_id))
+    groups = 0
+    channels = 0
+    for c in chats:
+        if bool(getattr(c, "is_log_chat", False)):
+            continue
+        k = str(getattr(c, "chat_kind", None) or "group").strip().lower()
+        if k == "channel":
+            channels += 1
+        else:
+            groups += 1
+    return groups, channels
+
+
+def _row_chat_kind_for_count(ch: Chat) -> str:
+    k = str(getattr(ch, "chat_kind", None) or "group").strip().lower() or "group"
+    return k if k in ("channel", "group", "supergroup") else "group"
+
+
+async def count_protected_groups_for_dashboard(
+    session: AsyncSession,
+    user_id: int,
+    *,
+    user: User | None = None,
+    is_premium_now: bool | None = None,
+) -> tuple[int, bool]:
+    """Группы с включённым Guard — как «Активна» в модалке «Выбор чата» (без каналов)."""
+    from app.services.chat_owner_premium import user_effective_miniapp_premium
+    from app.services.user_service import Tariff, TARIFF_CHAT_LIMITS, get_or_create_user
+
+    uid = int(user_id)
+    u = user
+    if u is None:
+        u = await get_or_create_user(session, uid)
+    premium = bool(is_premium_now) if is_premium_now is not None else user_effective_miniapp_premium(
+        u, datetime.now(timezone.utc)
+    )
+
+    chats = await get_accessible_chats_any_active(session, uid)
+    if not chats:
+        return 0, False
+
+    over_limit_ids: set[int] = set()
+    if not premium:
+        owned_all = sorted(
+            [c for c in chats if int(getattr(c, "owner_user_id", 0) or 0) == uid],
+            key=lambda c: (getattr(c, "created_at", None) or datetime.min.replace(tzinfo=timezone.utc), int(c.id)),
+        )
+        free_limit = int(TARIFF_CHAT_LIMITS.get(Tariff.FREE.value, 3) or 3)
+        keep_ids = {int(c.id) for c in owned_all[:free_limit]}
+        over_limit_ids = {int(c.id) for c in owned_all if int(c.id) not in keep_ids}
+
+    chat_ids = [int(c.id) for c in chats if not bool(getattr(c, "is_log_chat", False))]
+    rules_by_chat: dict[int, Rule] = {}
+    if chat_ids:
+        rres = await session.execute(select(Rule).where(Rule.chat_id.in_(chat_ids)))
+        for rule in rres.scalars().all():
+            rules_by_chat[int(rule.chat_id)] = rule
+
+    def guard_on(cid: int) -> bool:
+        if int(cid) in over_limit_ids:
+            return False
+        ru = rules_by_chat.get(int(cid))
+        return bool(ru.master_anti_spam) if ru else True
+
+    protected = 0
+    protection_active = False
+    for c in chats:
+        if bool(getattr(c, "is_log_chat", False)):
+            continue
+        if _row_chat_kind_for_count(c) == "channel":
+            continue
+        if guard_on(int(c.id)):
+            protected += 1
+            protection_active = True
+    return int(protected), bool(protection_active)
+
+
 async def count_chat_ids_by_kind(session: AsyncSession, chat_ids: list[int]) -> tuple[int, int]:
     """Число групп и каналов среди id — та же логика, что у полей `groups_count` / `channels_count` в `/api/activity/summary`."""
     if not chat_ids:

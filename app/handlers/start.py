@@ -676,8 +676,8 @@ async def cmd_start(message: Message):
     # До любых await: маркировка повторного голого /start и лёгкое обновление панели (см. lock в panel_dm._edit_panel).
     if plain_start_only and _should_skip_duplicate_start(message.from_user.id):
         try:
-            from app.handlers.panel_dm import show_panel
-            await show_panel(message.bot, message.from_user.id, send_quick_reply_keyboard=True)
+            from app.handlers.panel_dm import reset_and_show_private_panel
+            await reset_and_show_private_panel(message.bot, message.from_user.id)
         except Exception:
             pass
         return
@@ -819,8 +819,8 @@ async def cmd_start(message: Message):
         return
 
     # Первый /start: запоминаем момент для воронки напоминаний (12ч/24ч/3д «нет группы»
-    # и серии Premium-trial DM 1..10). Тариф остаётся FREE — триал активируется явно
-    # через Mini App (кнопка «Попробовать 10 дней бесплатно»).
+    # и серии Premium-trial DM 1..{TRIAL_WINDOW_DAYS}). Тариф остаётся FREE — триал активируется явно
+    # через Mini App (кнопка «Попробовать 7 дней бесплатно»).
     connected_shared_cabinets = 0
     try:
         from app.db.session import get_session
@@ -849,33 +849,20 @@ async def cmd_start(message: Message):
     ):
         await _send_welcome_banner_if_any(message.bot, message.chat.id)
     try:
-        from app.handlers.panel_dm import show_panel
-        await show_panel(message.bot, message.from_user.id, send_quick_reply_keyboard=True)
+        from app.handlers.panel_dm import reset_and_show_private_panel
+
+        await reset_and_show_private_panel(
+            message.bot,
+            message.from_user.id,
+            cabinet_added_count=int(connected_shared_cabinets or 0),
+        )
     except Exception:
         await _edit_or_send(message, await _start_text_for(message), start_kb(dm_lang))
         try:
             from app.handlers.panel_dm import ensure_dm_quick_reply_keyboard
 
-            await ensure_dm_quick_reply_keyboard(message.bot, message.from_user.id)
-        except Exception:
-            pass
-    if connected_shared_cabinets > 0:
-        try:
-            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-            me = await message.bot.get_me()
-            await message.answer(
-                _i18n_t(dm_lang, "bot.start.cabinet_added").format(n=connected_shared_cabinets),
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            InlineKeyboardButton(
-                                text=_i18n_t(dm_lang, "bot.start.cabinet_open_btn"),
-                                url=_mini_app_chats_startapp_link(me.username or "bot"),
-                            )
-                        ]
-                    ]
-                ),
+            await ensure_dm_quick_reply_keyboard(
+                message.bot, message.from_user.id, force_refresh=True
             )
         except Exception:
             pass
@@ -958,8 +945,8 @@ async def cb_panel(cb: CallbackQuery):
     await cb.answer()
 
     try:
-        from app.handlers.panel_dm import show_panel
-        await show_panel(cb.bot, cb.from_user.id)
+        from app.handlers.panel_dm import reset_and_show_private_panel
+        await reset_and_show_private_panel(cb.bot, cb.from_user.id)
     except Exception as e:
         try:
             lang = await _lang_from_update(cb)

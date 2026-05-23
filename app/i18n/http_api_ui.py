@@ -55,6 +55,8 @@ RU: dict[str, str] = {
     "ops_diag_ok": "Система работает стабильно. Критичных отклонений не обнаружено.",
     "referral_access_months": "{months} мес.",
     "referral_access_no_period": "без активного периода",
+    "referral_partner_levels_free": "{levels} уровень — начисления с прямых рефералов",
+    "referral_partner_levels_full": "{levels} уровня — полная партнёрская сеть",
     "promo_purpose_with_days": "Активация {tariff} на {days} дн.",
     "promo_purpose_no_expiry": "Активация {tariff} без срока",
     "manager_invite_dm": (
@@ -194,6 +196,8 @@ EN: dict[str, str] = {
     "ops_diag_ok": "System looks healthy. No critical anomalies detected.",
     "referral_access_months": "{months} mo.",
     "referral_access_no_period": "no active period",
+    "referral_partner_levels_free": "Level {levels} — rewards from direct referrals only",
+    "referral_partner_levels_full": "Levels {levels} — full partner network",
     "promo_purpose_with_days": "{tariff} activated for {days} days",
     "promo_purpose_no_expiry": "{tariff} activated with no fixed end date",
     "manager_invite_dm": (

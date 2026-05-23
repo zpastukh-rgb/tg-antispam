@@ -97,7 +97,7 @@ export default {
     badge_aria: 'Premium feature',
     badge_title: 'Available with Premium',
     activating: 'Activating…',
-    cta_trial: '10 days of Premium — free',
+    cta_trial: '7 days of Premium — free',
     cta_billing: 'Get Premium',
     cta_dismiss: 'Not now',
     lock_broadcast_nav_title: 'Broadcasts — Premium Guard',
@@ -115,6 +115,9 @@ export default {
     lock_owner_protection_reports_title: 'Protection / Reports — full insight',
     lock_owner_protection_reports_body:
       'The home tile shows basics; full protection and reports without Free placeholders unlock with Premium Guard. Subscribe or start a trial.',
+    lock_pdf_export_title: 'Export to PDF',
+    lock_pdf_export_body:
+      'PDF reports with preview, filters and file download are available only with Premium Guard.',
     bullets: {
       l1: 'Broadcasts, auto campaigns and channel autopost',
       l2: 'Full stats, reporting and real AURUM ✨ balances (Free shows placeholders)',
@@ -123,7 +126,7 @@ export default {
     },
     feature_desc: {
       generic:
-        'This feature is available with Premium. You can turn on full Premium free for 10 days — no card, no payment.',
+        'This feature is available with Premium. You can turn on full Premium free for 7 days — no card, no payment.',
       welcome_custom: 'Custom welcome with image, buttons and anti-RAID mode — Premium only.',
       rules_autopost: 'Scheduled rules autopost with image and old-pin deletion — Premium only.',
       granular_filters: 'Granular filters for media, mentions, buttons and channel posts — Premium only.',
@@ -141,6 +144,7 @@ export default {
       chat_managers: 'Chat admins section and delegate access — Premium owner subscription required.',
       chat_activation_limit: 'Raise Free active-chat limits and wake chats locked by the cap — Premium only.',
       guardian_interval: 'Custom Guardian periodic message interval in the group — Premium only.',
+      copy_settings: 'Copy protection settings to other chats — Premium only.',
       spam_spike_managers: 'Spam-spike DMs to all admins and no one-DM-per-day cap for the owner — Premium chat owner required.',
       spam_spike:
         'Deletion-spike detector: removal threshold and alerts — Premium on the chat owner (or your Premium when managing delegated chats).',
@@ -166,6 +170,7 @@ export default {
       chat_managers: 'Chat admins & delegation — Premium on the chat owner required.',
       chat_activation_limit: 'Raise active-chat limits & wake chats over the Free cap — Premium-only.',
       guardian_interval: 'Custom Guardian periodic message interval — Premium-only.',
+      copy_settings: 'Copy settings across chats — Premium-only.',
       spam_spike_managers:
         'Spam-spike alerts to all admins without the one-day DM cap — requires Premium chat owner.',
       spam_spike:
@@ -694,7 +699,7 @@ export default {
     partner_ui: {
       link_copied: 'Link copied',
       link_copy_manual: 'Copy the link manually',
-      share_text: 'Guard protects chats from spam. Join with my link.',
+      share_text: 'Guard protects chats from spam and schedules broadcasts. Join with my link.',
       user_fallback: 'User',
       payout_too_low: 'Amount is below the minimum payout',
       payout_sent: 'Withdrawal request sent',
@@ -1048,12 +1053,14 @@ export default {
       },
     },
     trial: {
-      try_free_btn: '10 days of Premium — free',
-      activate_btn: 'Turn on Premium for 10 days — free',
+      try_free_btn: '7 days of Premium — free',
+      activate_btn: 'Turn on Premium for 7 days — free',
       activating: 'Turning on…',
-      hint_landing: 'No card, no payment. After 10 days — back to Free.',
+      hint_landing: 'No card, no payment. After 7 days — back to Free.',
+      modal_title: 'Activating Premium',
+      modal_body: 'Turning on your free 7-day Premium…',
       activated_toast: 'Premium is on for {n} days',
-      already_active_toast: 'Your free 10 days of Premium are already active',
+      already_active_toast: 'Your free 7 days of Premium are already active',
       error_generic: 'Could not start the free period. Try again later.',
       error_already_used: 'Free period already used — subscription only.',
       error_window_closed: 'The window for free activation has closed.',
@@ -2187,14 +2194,17 @@ export default {
     tab_refs: 'My referrals',
     tab_docs: 'Documentation',
     loading: 'One moment…',
-    access: 'Access: ✅ {label}',
-    days_left: 'Days left:',
+    access: 'Partner tiers: {label}',
+    access_premium_active: 'Premium active',
+    days_left: 'Premium days left:',
     active_until: 'Active until:',
+    levels_free_hint: 'Levels 2–3 unlock with Premium',
+    premium_forever: 'Premium with no expiry',
+    premium_promo_line: 'Premium via promo {code}, {days} days left',
+    premium_active_line: 'Premium active',
     balance_header: 'Balance:',
-    aurum_line: 'AURUM: {amt} ✨ (broadcasts & AI)',
-    bonus_line: 'Partner pool: {amt} ⚡ (1 ⚡ = 2 ₽)',
-    balance_hint:
-      'AURUM is topped up via Premium gifts and packs. Partner ⚡ can be converted to AURUM below. Broadcasts spend AURUM.',
+    aurum_line: 'AURUM: {amt} ✨',
+    bonus_line: 'Partner pool: {amt} ⚡',
     your_link: 'Your referral link:',
     invited: 'Invited people:',
     invited_total: 'Total:',
@@ -2251,7 +2261,13 @@ export default {
     docs_payouts_note:
       'Payouts are processed manually in RUB. Requests are accepted once a week (Mondays) to reduce fraud risk.',
     docs_reward_for: '💸 Rewards accrue for subscription payments and AI token purchases.',
-    docs_token_rate_line: '💱 Fixed rate: 1 partner token = 2 ₽.',
+    docs_q_balances: '❓ AURUM and partner ⚡',
+    docs_balances_aurum:
+      'AURUM ✨ is for broadcasts and AI. It is topped up via Premium gifts and token packs.',
+    docs_balances_partner:
+      'Partner ⚡ is referral rewards. Rate: 1 ⚡ = 2 ₽.',
+    docs_balances_convert:
+      'In Balance you can convert partner ⚡ to AURUM; broadcasts spend AURUM.',
     docs_q_accrual: '❓ How are rewards calculated?',
     docs_accrual_example:
       'Example: your level‑1 referral pays 10 000 ₽ — you earn 1 500 ₽. If their referral pays 10 000 ₽ — you get 1 000 ₽ (level 2). At level 3 — 500 ₽.',
@@ -2278,7 +2294,6 @@ export default {
     tier_net_l2: 'L2 (referrals of your referrals): {n}',
     tier_net_l3: 'L3 (third tier): {n}',
     tier_net_total: '└ Total in network: {n} users',
-    tier_net_total_direct: '└ For partner rewards only direct invites count: {n} users',
     tier_network_premium_hint: 'Levels 2–3 unlock with a Premium subscription.',
     tier_accruals_title: 'Confirmed accruals',
     tier_accruals_sub:
@@ -2562,6 +2577,10 @@ export default {
       send_progress_note:
         'A started send keeps running on the server; you can close the progress overlay when you want.',
       status_partial: 'Partial',
+      schedule_time_required: 'Pick date and time for the send',
+      schedule_time_too_soon: 'Scheduled send must be at least 2 minutes from now',
+      schedule_ok: 'Broadcast scheduled',
+      schedule_failed: 'Could not schedule broadcast',
     },
     autopost: {
       status_running: 'Running',
@@ -2789,6 +2808,12 @@ export default {
       recent_empty: 'No broadcast runs yet.',
       recent_kind_campaign: 'Campaign',
       recent_kind_oneshot: 'One-time',
+      recent_kind_oneshot_scheduled: 'One-time · scheduled',
+      recent_preset_all: 'All',
+      recent_preset_oneshot: 'One-time',
+      recent_preset_scheduled: 'Scheduled',
+      status_scheduled: 'Scheduled',
+      scheduled_for: 'for {when}',
       recent_metric_channel_reach: 'Channel reach',
       recent_metric_interactions: 'Link & button taps',
       recent_metric_delivered_runs: 'Delivered',
@@ -2800,7 +2825,7 @@ export default {
       repeat_need_refresh: 'This broadcast is no longer in the list. Refresh the page.',
       ctr_abbr: 'CTR',
       ctr_hint_title:
-        'CTR is tracked interactions (links, buttons, reactions) divided by successfully delivered messages. If click tracking is not available yet, the value shows deliveries versus your connected chat/bot base.',
+        'CTR is link and button clicks (reactions excluded) divided by successfully delivered messages. If click tracking is not available yet, the value shows deliveries versus your connected chat/bot base.',
       ctr_sub_clicks: '{clicks} interactions / {delivered} delivered',
       ctr_sub_reach: '{delivered} delivered / {base} base (connected chats and active bot dialogs)',
       link_breakdown_title: 'Link clicks',
@@ -2810,7 +2835,7 @@ export default {
       tracking_off_hint:
         'API service is missing BROADCAST_TRACK_BASE_URL (or GUARD_API_BASE_URL) — link clicks in text and external URL buttons are not counted. Reactions are tracked separately when the bot receives message_reaction.',
       tracking_on_hint:
-        'Counted: link clicks in message text (incl. t.me), external https URL buttons. t.me/telegram buttons open directly and are not in link clicks. “Button clicks” = bot callback buttons (no URL). Reactions only on sent posts.',
+        'Counted: external http(s) links in text or URL buttons (websites, Play Store, App Store, etc.) and bot callback buttons. t.me/telegram.me links open in Telegram and are not tracked. Reactions are separate.',
       delivered_by_chat_title: 'Delivered by chat',
       send_history_title: 'Send history',
       send_history_bots: 'Direct messages: {ok} succeeded of {n}',
@@ -2921,6 +2946,7 @@ export default {
     },
     broadcast_ui: {
       quick_new_broadcast: 'New broadcast',
+      btn_saved: 'Saved',
       draft_title_ph: 'Draft title',
       message_body_ph: 'Write a message…',
       apply_title: 'Apply title',
@@ -2958,6 +2984,16 @@ export default {
       cost: 'Cost',
       sending: 'Sending…',
       send: 'Send',
+      schedule: 'Schedule',
+      timing_title: 'When to send',
+      timing_sub: 'Send now or pick a date and time',
+      timing_now: 'Now',
+      timing_now_sub: 'Send right after confirmation',
+      timing_scheduled: 'Schedule',
+      timing_scheduled_sub: 'Pick date and time for delivery',
+      timing_datetime_label: 'Date and time',
+      row_scheduled_at: 'Send at',
+      ready_sub_scheduled: 'Review settings and confirm the scheduled broadcast',
       all_recent_title: 'All recent broadcasts',
       delegated_strip: 'Violet ADM: broadcast and autopost only to delegated groups and channels.',
       drafts_in_list: 'Drafts in list:',
@@ -2969,6 +3005,49 @@ export default {
       stats: 'Statistics',
       edit_post_title: 'Edit post',
       link_modal_title: 'Add link',
+      keyboard_modal_title: 'Buttons below post',
+      keyboard_info_btn_title: 'Button hints',
+      keyboard_info_btn_aria: 'Hints for buttons below post',
+      keyboard_info_modal_title: 'Hints',
+      btn_style_label: 'Button color',
+      btn_style_default: 'Default (grey in Telegram)',
+      btn_style_primary: 'Blue',
+      btn_style_success: 'Green',
+      btn_style_danger: 'Red',
+      btn_style_hint: 'Button colors appear in newer Telegram clients; older apps show the default style.',
+      btn_text_ph: 'Button label',
+      btn_url_ph: 'Link https://… (browser URL)',
+      btn_webapp_ph: 'Mini App URL (Web App)',
+      btn_callback_ph: 'Bot callback data',
+      btn_row_label: 'Row {n}',
+      btn_remove_row: 'Remove row',
+      btn_remove: 'Remove button',
+      btn_add_in_row: '+ Button in this row',
+      btn_add_row: '+ New button row',
+      hidden_continuation_add: '+ Hidden continuation',
+      hidden_continuation_badge: 'Hidden continuation',
+      hidden_continuation_hint:
+        'The hidden continuation button shows different text to channel/group members vs everyone else. Works in channel and group posts.',
+      hidden_continuation_non_member_ph: 'Text for users who are not subscribed / not in the group',
+      hidden_continuation_non_member_hint: 'Shown on tap if the user is not a member of this chat.',
+      hidden_continuation_member_ph: 'Text for channel subscribers / group members',
+      hidden_continuation_member_hint:
+        'Shown to members in a Telegram popup (with an OK button) — up to 200 characters. Longer text is sent in a private message from the bot.',
+      keyboard_layout_label: 'Layout:',
+      keyboard_layout_inline: 'Single row',
+      keyboard_layout_stacked: 'Stacked',
+      keyboard_layout_preview: 'As in Telegram',
+      keyboard_layout_preview_hint: 'Add at least two labeled buttons to see the layout difference.',
+      keyboard_layout_hint:
+        'Each editor row = one button line in Telegram. “+ in this row” = side by side; “+ new row” = below. Quick buttons above rearrange all at once.',
+      prefilled_dm_add: '+ Prefilled DM text',
+      prefilled_dm_badge: 'Prefilled DM',
+      prefilled_dm_hint:
+        'The prefilled DM button opens a chat with a bot or account and inserts ready-made text into the compose field — like Quickhire.',
+      prefilled_dm_username_ph: 'Bot or account (@MyBot or MyBot)',
+      prefilled_dm_username_hint: 'Where to open the chat: bot or user username, no full URL needed.',
+      prefilled_dm_text_ph: 'Text to pre-fill in the message field',
+      prefilled_dm_text_hint: 'The user taps Send themselves. The link is built automatically.',
     },
     bc_campaign: {
       title_list: 'Auto campaigns',
@@ -3061,6 +3140,42 @@ export default {
         'Add intervals with «+». Set how many posts go to each window; total per day is capped at 288.',
       schedule_slot_times_preview:
         'Scheduled send times in this window (one active calendar day preview with Even spread — first aligns to “First send time” above)',
+      schedule_slot_times_preview_day: 'Window slots for {day} (campaign active calendar day)',
+      schedule_night_day_hint:
+        'Overnight window: schedule day {day} runs until {end} on the next calendar day ({tz}). Calendar today is {today} — expected until the window ends.',
+      schedule_slot_preview_draft_hint:
+        'You changed the window or post count — below is only the new slot plan. Sent/skipped colors appear after you save.',
+      schedule_timing_precision:
+        'Actual sends are within ~10–15 s of the listed time (scheduler polls about every 10 s). Telegram chat list shows hours:minutes only — a post at 14:54:50 may appear as 14:55. Multiple channels receive the post within a few seconds.',
+      schedule_past_slots_hint:
+        'Red — slot skipped or time passed (including ~15 min send grace). White — still queued. If nothing sends, see the warning below.',
+      schedule_block_insufficient_aurum:
+        'Slot {next} not sent: not enough AURUM (need {need_tokens}, balance {have_aurum}). Top up — send is still possible for ~15 min after slot time.',
+      schedule_block_rotation_busy_sending:
+        'Slot {next} waiting: a previous broadcast is still sending. Usually clears in a few minutes.',
+      schedule_block_no_destinations:
+        'No groups or channels selected in the campaign — autopost has nowhere to send.',
+      schedule_block_no_recipients:
+        'No available recipients (groups removed from Guard or inaccessible).',
+      schedule_block_recipients_filtered:
+        'Selected chats failed validation — refresh the campaign recipient list.',
+      schedule_block_empty_rotation:
+        'No posts in campaign rotation — add broadcast drafts.',
+      schedule_block_empty_content:
+        'Rotation post is empty (no text or media).',
+      schedule_block_bot_token_missing:
+        'BOT_TOKEN is not configured on the server — autopost cannot send. Contact support.',
+      schedule_block_unknown:
+        'Slot {next} not sent yet ({reason}). Check AURUM balance, recipients, and post status.',
+      schedule_slot_sent: 'Sent',
+      schedule_slot_pending: 'Pending',
+      schedule_slot_skipped: 'Skipped or error',
+      schedule_slot_planned_stopped: 'Planned (campaign stopped)',
+      schedule_not_running_hint:
+        'Campaign is stopped — autopost is not running. Go back to manage and tap Start, or scheduled posts will not be sent.',
+      schedule_scheduler_not_running:
+        'Autopost scheduler on the server is not ticking. Check API Deploy Logs (zealous-bravery) for autopost_loop started. Verify BOT_TOKEN and DATABASE_URL on the API service, then restart it.',
+      schedule_slot_preview: 'Planned slot',
       slot_n: 'Window {n}',
       slot_from: 'From',
       slot_to: 'To',
@@ -3096,6 +3211,7 @@ export default {
       success_sub: 'First sends are scheduled for {when}',
       success_sub_stopped:
         'Campaign saved but not started yet. Open manage and tap “Start” — groups will not receive posts until then.',
+      success_start_now: 'Start campaign',
       err_recipients_filtered:
         'None of the selected groups/channels were saved (bot rights or access). Check your chat list and pick again.',
       success_when_fallback: 'the next window',
@@ -3290,6 +3406,15 @@ export default {
       row_left: 'Left',
       row_net: 'Net growth',
       row_messages: 'Messages',
+      modal_title_joined: 'Joined',
+      modal_title_left: 'Left',
+      modal_title_net: 'Net growth',
+      modal_empty: 'No events for the selected period',
+      modal_loading: 'Loading…',
+      modal_chat_channel: 'Channel',
+      modal_chat_group: 'Group',
+      event_joined: 'joined',
+      event_left: 'left',
     },
     protection: {
       filter_hits: 'Filter triggers',
@@ -3462,6 +3587,7 @@ export default {
       reports: 'Reports',
       reports_done: 'Reports ✓',
       group_reports: 'Reports by groups',
+      auto_approve: '✓ Requests',
     },
     perms: {
       protection: 'Protection',
@@ -3472,6 +3598,15 @@ export default {
     delegate_access_label: 'Access:',
     delegate_access_none: 'no permissions granted for this chat',
     delegate_access_legacy: 'full actions on this chat (legacy admin record)',
+    auto_approve: {
+      title: 'Auto-approval',
+      modal_subtitle: 'Auto-approval',
+      desc_channel:
+        'Automatically approves channel join requests. No need to open Telegram and accept everyone manually — the bot does it for you.',
+      desc_group:
+        'Automatically approves group join requests. No need to open Telegram and accept everyone manually — the bot does it for you.',
+      bot_rights_hint: 'Requires “join by request” in Telegram and the bot must be allowed to invite users.',
+    },
     role: {
       mine: 'My cabinet',
     },
@@ -3620,6 +3755,7 @@ export default {
       pin_required: 'PIN required from "Settings → Security"',
       pick_perms: 'Pick at least one permission for the admin.',
       add_admin_failed: 'Could not add admin',
+      auto_approve_failed: 'Could not save auto-approval setting',
     },
     confirm: {
       remove_kind_channel: 'channel',
@@ -3666,6 +3802,7 @@ export default {
   referral: {
     title: 'Referral program',
     invite_text: 'Share invite',
+    share_text: 'Guard protects chats from spam and schedules broadcasts. Join with my link.',
     earnings: 'Earned',
     level: 'Level {n}',
   },

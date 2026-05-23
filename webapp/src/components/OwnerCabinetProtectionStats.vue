@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { api } from '../api/client'
 
@@ -56,7 +56,78 @@ const hoverIndex = ref(-1)
 const threatOpen = ref(false)
 const threatLoadingId = ref('')
 const threatDetails = ref({})
+const growthModalOpen = ref(false)
+const growthModalKind = ref('joined')
+const growthModalLoading = ref(false)
+const growthModalItems = ref([])
+const growthModalPeriod = ref({ from: '', to: '' })
 let silentRefreshTimer = null
+
+/** Какая pill сейчас грузится по клику пользователя (не тихое автообновление). */
+const filterBusyKey = ref('')
+
+function isPillBusy(kind, isActive) {
+  if (!isActive) return false
+  if (kind === 'period') return Boolean(props.loading) || filterBusyKey.value === 'period'
+  return filterBusyKey.value === kind
+}
+
+function growthApiPeriod() {
+  const k = String(statsPeriod.value || 'today')
+  if (k === '6m') return '180d'
+  if (k === '1y') return '365d'
+  return k
+}
+
+function growthUserLabel(row) {
+  const un = String(row?.username || '').trim().replace(/^@/, '')
+  if (un) return `@${un}`
+  const uid = Number(row?.user_id || 0)
+  return uid > 0 ? `id ${uid}` : '—'
+}
+
+function growthChatKindLabel(kind) {
+  const k = String(kind || 'group').toLowerCase()
+  if (k === 'channel') return tt('cabinet_stats.growth.modal_chat_channel')
+  return tt('cabinet_stats.growth.modal_chat_group')
+}
+
+const growthModalTitle = computed(() => {
+  const k = String(growthModalKind.value || 'joined')
+  if (k === 'left') return tt('cabinet_stats.growth.modal_title_left')
+  if (k === 'net') return tt('cabinet_stats.growth.modal_title_net')
+  return tt('cabinet_stats.growth.modal_title_joined')
+})
+
+async function openGrowthEventsModal(kind) {
+  const k = String(kind || 'joined')
+  growthModalKind.value = k
+  growthModalOpen.value = true
+  growthModalLoading.value = true
+  growthModalItems.value = []
+  growthModalPeriod.value = { from: '', to: '' }
+  try {
+    const chatId = selectedChatId.value === 'all' ? null : Number(selectedChatId.value || 0)
+    const r = await api.activityGrowthEvents(
+      growthApiPeriod(),
+      statsScope.value,
+      chatId,
+      k,
+      k === 'net' ? 300 : 250,
+    )
+    growthModalItems.value = Array.isArray(r?.items) ? r.items : []
+    growthModalPeriod.value = { from: String(r?.period_from || ''), to: String(r?.period_to || '') }
+  } catch {
+    growthModalItems.value = []
+  } finally {
+    growthModalLoading.value = false
+  }
+}
+
+function closeGrowthEventsModal() {
+  growthModalOpen.value = false
+  growthModalItems.value = []
+}
 
 watch(() => props.periodKey, (k) => {
   if (k && k !== statsPeriod.value) statsPeriod.value = k
@@ -99,7 +170,6 @@ const chatsCount = computed(() => Math.max(0, Math.round(Number((props.summary?.
 const joinsTotal = computed(() => Math.max(0, Math.round(Number(totals.value?.joins || 0))))
 const isGrowthMode = computed(() => String(props.mode || 'protection') === 'growth')
 
-const breakdownLoading = ref(false)
 const breakdownData = ref(null)
 function isChannelChat(c) {
   const kind = String(c?.chat_kind || c?.kind || 'group').toLowerCase()
@@ -212,8 +282,8 @@ function reasonColor(reason) {
   return COLOR_POOL[Math.abs(hash) % COLOR_POOL.length]
 }
 
-async function loadBreakdown() {
-  breakdownLoading.value = true
+async function loadBreakdown(opts = {}) {
+  const silent = Boolean(opts?.silent)
   try {
     const period = statsPeriod.value === '6m' ? '180d' : statsPeriod.value === '1y' ? '365d' : statsPeriod.value
     const chatIdRaw = selectedChatId.value === 'all' ? null : Number(selectedChatId.value || 0)
@@ -247,7 +317,7 @@ async function loadBreakdown() {
   } catch {
     breakdownData.value = null
   } finally {
-    breakdownLoading.value = false
+    if (!silent) filterBusyKey.value = ''
   }
 }
 watch(statsScope, () => {
@@ -261,7 +331,11 @@ watch(availableScopeChats, (rows) => {
   const ok = rows.some((c) => String(c?.id) === String(selectedChatId.value))
   if (!ok) selectedChatId.value = 'all'
 })
-watch([statsPeriod, statsScope, selectedChatId], () => void loadBreakdown(), { immediate: true })
+watch(
+  [statsPeriod, statsScope, selectedChatId],
+  () => void loadBreakdown({ silent: filterBusyKey.value === '' }),
+  { immediate: true },
+)
 watch([statsPeriod, statsScope, selectedChatId], () => {
   threatOpen.value = false
   threatDetails.value = {}
@@ -658,8 +732,23 @@ function pillActiveClass(on) {
     : 'border border-white/10 bg-white/[0.06] text-slate-300'
 }
 function onPeriodPick(key) {
+  filterBusyKey.value = 'period'
   statsPeriod.value = key
   emit('period-change', { key })
+}
+function onTypePick(key) {
+  filterBusyKey.value = 'type'
+  statsType.value = key
+  void nextTick(() => {
+    if (filterBusyKey.value === 'type') filterBusyKey.value = ''
+  })
+}
+function onSubViewPick(key) {
+  filterBusyKey.value = 'subview'
+  statsSubView.value = key
+  void nextTick(() => {
+    if (filterBusyKey.value === 'subview') filterBusyKey.value = ''
+  })
 }
 function emitReportContextNow() {
   emit('report-context-change', {
@@ -675,14 +764,17 @@ function emitReportContextNow() {
   })
 }
 function pickStatsScope(scopeKey) {
+  filterBusyKey.value = 'scope'
   statsScope.value = String(scopeKey || 'all')
   emitReportContextNow()
 }
 function pickScopeAllChats() {
+  filterBusyKey.value = 'chat'
   selectedChatId.value = 'all'
   emitReportContextNow()
 }
 function pickScopeChat(chatId) {
+  filterBusyKey.value = 'chat'
   selectedChatId.value = String(chatId || 'all')
   emitReportContextNow()
 }
@@ -698,13 +790,13 @@ function onTouchEnd(e) {
   if (Math.abs(dx) < 48) return
   const order = TYPE_TABS.value.map((t) => t.key)
   const i = order.indexOf(statsType.value)
-  if (dx < 0 && i < order.length - 1) statsType.value = order[i + 1]
-  else if (dx > 0 && i > 0) statsType.value = order[i - 1]
+  if (dx < 0 && i < order.length - 1) onTypePick(order[i + 1])
+  else if (dx > 0 && i > 0) onTypePick(order[i - 1])
 }
 
 onMounted(() => {
   silentRefreshTimer = setInterval(() => {
-    void loadBreakdown()
+    void loadBreakdown({ silent: true })
   }, 3000)
 })
 
@@ -720,28 +812,33 @@ onUnmounted(() => {
   <div class="owner-protection-stats -mx-1 flex min-h-0 flex-col font-display sm:-mx-0">
     <div class="sticky top-0 z-10 space-y-2 border-b border-white/10 bg-zinc-950/80 px-1 py-2.5 backdrop-blur-xl supports-[backdrop-filter]:bg-zinc-950/65">
       <div class="flex gap-2 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        <button v-for="p in PERIOD_ROWS" :key="p.key" type="button" class="shrink-0 rounded-full px-3.5 py-2 text-[12px] font-semibold transition active:scale-[0.98]" :class="pillActiveClass(statsPeriod === p.key)" @click="onPeriodPick(p.key)">
-          {{ p.label }}
+        <button v-for="p in PERIOD_ROWS" :key="p.key" type="button" class="shrink-0 rounded-full px-3.5 py-2 text-[12px] font-semibold transition active:scale-[0.98]" :class="pillActiveClass(statsPeriod === p.key)" :disabled="isPillBusy('period', statsPeriod === p.key)" @click="onPeriodPick(p.key)">
+          <span v-if="isPillBusy('period', statsPeriod === p.key)" class="hourglass-flip inline-block" aria-hidden="true">⏳</span>
+          <span v-else>{{ p.label }}</span>
         </button>
       </div>
       <div class="flex gap-2 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        <button v-for="t in typeTabs" :key="t.key" type="button" class="shrink-0 rounded-full px-3.5 py-2 text-[12px] font-semibold transition active:scale-[0.98]" :class="pillActiveClass(statsType === t.key)" @click="statsType = t.key">
-          {{ t.label }}
+        <button v-for="t in typeTabs" :key="t.key" type="button" class="shrink-0 rounded-full px-3.5 py-2 text-[12px] font-semibold transition active:scale-[0.98]" :class="pillActiveClass(statsType === t.key)" :disabled="isPillBusy('type', statsType === t.key)" @click="onTypePick(t.key)">
+          <span v-if="isPillBusy('type', statsType === t.key)" class="hourglass-flip inline-block" aria-hidden="true">⏳</span>
+          <span v-else>{{ t.label }}</span>
         </button>
       </div>
       <div v-if="statsType === 'deletions'" class="flex gap-2 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        <button v-for="s in SUB_TABS" :key="s.key" type="button" class="shrink-0 rounded-full px-3.5 py-1.5 text-[11px] font-semibold transition active:scale-[0.98]" :class="pillActiveClass(statsSubView === s.key)" @click="statsSubView = s.key">
-          {{ s.label }}
+        <button v-for="s in SUB_TABS" :key="s.key" type="button" class="shrink-0 rounded-full px-3.5 py-1.5 text-[11px] font-semibold transition active:scale-[0.98]" :class="pillActiveClass(statsSubView === s.key)" :disabled="isPillBusy('subview', statsSubView === s.key)" @click="onSubViewPick(s.key)">
+          <span v-if="isPillBusy('subview', statsSubView === s.key)" class="hourglass-flip inline-block" aria-hidden="true">⏳</span>
+          <span v-else>{{ s.label }}</span>
         </button>
       </div>
       <div class="grid grid-cols-3 gap-2">
-        <button v-for="s in SCOPE_TABS" :key="s.key" type="button" class="rounded-xl border px-2.5 py-2 text-[11px] font-semibold transition" :class="statsScope === s.key ? 'border-[#7dff3a]/80 bg-[rgba(125,255,58,0.14)] text-[#deffbf]' : 'border-white/10 bg-white/[0.04] text-slate-300'" @click="pickStatsScope(s.key)">
-          {{ s.label }}
+        <button v-for="s in SCOPE_TABS" :key="s.key" type="button" class="rounded-xl border px-2.5 py-2 text-[11px] font-semibold transition" :class="statsScope === s.key ? 'border-[#7dff3a]/80 bg-[rgba(125,255,58,0.14)] text-[#deffbf]' : 'border-white/10 bg-white/[0.04] text-slate-300'" :disabled="isPillBusy('scope', statsScope === s.key)" @click="pickStatsScope(s.key)">
+          <span v-if="isPillBusy('scope', statsScope === s.key)" class="hourglass-flip inline-block" aria-hidden="true">⏳</span>
+          <span v-else>{{ s.label }}</span>
         </button>
       </div>
       <div v-if="statsScope !== 'all' && availableScopeChats.length" class="flex gap-2 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        <button type="button" class="shrink-0 rounded-full px-3 py-1.5 text-[11px] font-semibold transition" :class="pillActiveClass(selectedChatId === 'all')" @click="pickScopeAllChats()">
-          {{ tt('cabinet_stats.all_groups') }}
+        <button type="button" class="shrink-0 rounded-full px-3 py-1.5 text-[11px] font-semibold transition" :class="pillActiveClass(selectedChatId === 'all')" :disabled="isPillBusy('chat', selectedChatId === 'all')" @click="pickScopeAllChats()">
+          <span v-if="isPillBusy('chat', selectedChatId === 'all')" class="hourglass-flip inline-block" aria-hidden="true">⏳</span>
+          <span v-else>{{ tt('cabinet_stats.all_groups') }}</span>
         </button>
         <button
           v-for="c in availableScopeChats"
@@ -749,12 +846,14 @@ onUnmounted(() => {
           type="button"
           class="shrink-0 rounded-full px-3 py-1.5 text-[11px] font-semibold transition"
           :class="pillActiveClass(String(selectedChatId) === String(c.id))"
+          :disabled="isPillBusy('chat', String(selectedChatId) === String(c.id))"
           @click="pickScopeChat(c.id)"
         >
-          {{ c.title || c.id }}
+          <span v-if="isPillBusy('chat', String(selectedChatId) === String(c.id))" class="hourglass-flip inline-block" aria-hidden="true">⏳</span>
+          <span v-else>{{ c.title || c.id }}</span>
         </button>
       </div>
-      <p v-if="false && (loading || breakdownLoading)" class="px-0.5 text-[11px] text-emerald-300/80">{{ tt('cabinet_stats.updating') }}</p>
+      <p v-if="false && loading" class="px-0.5 text-[11px] text-emerald-300/80">{{ tt('cabinet_stats.updating') }}</p>
     </div>
 
     <div class="min-h-0 flex-1 touch-pan-y overflow-y-auto overscroll-contain px-1 pb-4 pt-3" @touchstart.passive="onTouchStart" @touchend="onTouchEnd">
@@ -763,22 +862,34 @@ onUnmounted(() => {
           <div class="rounded-2xl border border-white/10 bg-[#10141a]/95 p-4 backdrop-blur-md">
             <p class="text-[12px] font-semibold text-white">{{ tt('cabinet_stats.growth.audience_title') }}</p>
             <div class="mt-3 grid grid-cols-2 gap-2">
-              <div class="rounded-xl border border-white/10 bg-black/20 p-2.5">
+              <button
+                type="button"
+                class="rounded-xl border border-white/10 bg-black/20 p-2.5 text-left transition hover:border-emerald-400/45 hover:bg-emerald-950/25 active:scale-[0.99]"
+                @click="openGrowthEventsModal('joined')"
+              >
                 <p class="text-[10px] text-emerald-200/85">{{ tt('cabinet_stats.growth.joined') }}</p>
                 <p class="mt-0.5 text-lg font-black tabular-nums text-white">{{ growthJoined }}</p>
-              </div>
-              <div class="rounded-xl border border-white/10 bg-black/20 p-2.5">
+              </button>
+              <button
+                type="button"
+                class="rounded-xl border border-white/10 bg-black/20 p-2.5 text-left transition hover:border-orange-400/40 hover:bg-orange-950/20 active:scale-[0.99]"
+                @click="openGrowthEventsModal('left')"
+              >
                 <p class="text-[10px] text-orange-200/85">{{ tt('cabinet_stats.growth.left') }}</p>
                 <p class="mt-0.5 text-lg font-black tabular-nums text-white">{{ growthLeft }}</p>
-              </div>
+              </button>
             </div>
-            <div class="mt-2 rounded-xl border border-violet-400/25 bg-violet-950/20 p-2.5">
+            <button
+              type="button"
+              class="mt-2 w-full rounded-xl border border-violet-400/25 bg-violet-950/20 p-2.5 text-left transition hover:border-emerald-400/40 hover:bg-violet-950/35 active:scale-[0.99]"
+              @click="openGrowthEventsModal('net')"
+            >
               <p class="text-[10px] text-violet-200/85">{{ tt('cabinet_stats.growth.net') }}</p>
               <p class="mt-0.5 text-lg font-black tabular-nums" :class="growthNet >= 0 ? 'text-emerald-200' : 'text-rose-200'">
                 {{ growthNet >= 0 ? '+' : '' }}{{ growthNet }}
               </p>
               <p class="mt-1 text-[10px] text-violet-100/80">{{ tt('cabinet_stats.growth.messages_n', { n: growthMessages }) }}</p>
-            </div>
+            </button>
           </div>
           <div class="rounded-2xl border border-white/10 bg-[#10141a]/95 p-4 backdrop-blur-md">
             <p class="text-[12px] font-semibold text-white">{{ tt('cabinet_stats.growth.top_chat_title') }}</p>
@@ -824,30 +935,18 @@ onUnmounted(() => {
             </div>
             <div class="flex items-end justify-between gap-3">
               <div>
-                <p class="text-3xl font-extrabold leading-none text-white">{{ audienceGenderCard.malePct }}%</p>
-                <p class="text-sm font-semibold text-cyan-200">{{ Math.round(audienceGenderCard.maleCount) }}</p>
+                <p class="text-3xl font-extrabold leading-none text-emerald-300">{{ audienceGenderCard.malePct }}%</p>
                 <p class="text-[12px] text-slate-300">{{ tt('cabinet_stats.growth.men') }}</p>
               </div>
               <div class="text-right">
-                <p class="text-3xl font-extrabold leading-none text-white">{{ audienceGenderCard.femalePct }}%</p>
-                <p class="text-sm font-semibold text-rose-200">{{ Math.round(audienceGenderCard.femaleCount) }}</p>
+                <p class="text-3xl font-extrabold leading-none text-sky-300">{{ audienceGenderCard.femalePct }}%</p>
                 <p class="text-[12px] text-slate-300">{{ tt('cabinet_stats.growth.women') }}</p>
               </div>
             </div>
             <div class="mt-3 h-8 overflow-hidden rounded-lg border border-white/10 bg-black/35">
               <div class="flex h-full w-full">
-                <div
-                  class="flex h-full items-center justify-center bg-cyan-500/75 text-sm font-bold text-white"
-                  :style="{ width: `${audienceGenderCard.malePct}%` }"
-                >
-                  {{ audienceGenderCard.malePct }}%
-                </div>
-                <div
-                  class="flex h-full items-center justify-center bg-rose-500/80 text-sm font-bold text-white"
-                  :style="{ width: `${audienceGenderCard.femalePct}%` }"
-                >
-                  {{ audienceGenderCard.femalePct }}%
-                </div>
+                <div class="h-full bg-emerald-500/80" :style="{ width: `${audienceGenderCard.malePct}%` }" />
+                <div class="h-full bg-sky-500/80" :style="{ width: `${audienceGenderCard.femalePct}%` }" />
               </div>
             </div>
             <p class="mt-2 text-[11px] text-slate-400">
@@ -1073,4 +1172,69 @@ onUnmounted(() => {
       </div>
     </div>
   </div>
+  <Teleport to="body">
+    <div
+      v-if="growthModalOpen"
+      class="fixed inset-0 z-[96000] flex items-end justify-center bg-black/75 p-3 pb-[max(1rem,env(safe-area-inset-bottom))] backdrop-blur-sm sm:items-center"
+      @click.self="closeGrowthEventsModal"
+    >
+      <div
+        class="flex max-h-[min(88vh,640px)] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-emerald-400/30 bg-[#0b0e11] shadow-[0_28px_80px_-24px_rgba(16,185,129,0.45)] ring-1 ring-emerald-400/20"
+        @click.stop
+      >
+        <div class="flex shrink-0 items-start justify-between gap-2 border-b border-white/10 px-4 py-3">
+          <div class="min-w-0">
+            <p class="text-sm font-semibold text-white">{{ growthModalTitle }}</p>
+            <p v-if="growthModalPeriod.from" class="mt-0.5 text-[10px] text-slate-400">{{ growthModalPeriod.from }} — {{ growthModalPeriod.to }}</p>
+          </div>
+          <button type="button" class="guard-green-soft shrink-0 rounded-lg px-3 py-1.5 text-[11px] font-semibold" @click="closeGrowthEventsModal">{{ tt('common.close') }}</button>
+        </div>
+        <div v-if="growthModalLoading" class="px-4 py-10 text-center text-sm text-slate-400">
+          <span class="hourglass-flip mr-1 inline-block" aria-hidden="true">⏳</span>{{ tt('cabinet_stats.growth.modal_loading') }}
+        </div>
+        <div v-else class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-2">
+          <p v-if="!growthModalItems.length" class="py-6 text-center text-[12px] text-slate-500">{{ tt('cabinet_stats.growth.modal_empty') }}</p>
+          <div
+            v-for="(row, idx) in growthModalItems"
+            :key="`gr-${idx}-${row.user_id}-${row.at}`"
+            class="mb-2 rounded-xl border border-white/10 bg-[#11151C] px-3 py-2.5"
+          >
+            <div class="flex items-start justify-between gap-2">
+              <p class="text-[13px] font-semibold text-emerald-200">{{ growthUserLabel(row) }}</p>
+              <span
+                class="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold"
+                :class="row.event === 'left' ? 'bg-orange-500/20 text-orange-200' : 'bg-emerald-500/20 text-emerald-200'"
+              >
+                {{ row.event === 'left' ? tt('cabinet_stats.growth.event_left') : tt('cabinet_stats.growth.event_joined') }}
+              </span>
+            </div>
+            <p class="mt-1 text-[11px] text-slate-400">{{ row.at }}</p>
+            <p class="mt-0.5 text-[11px] text-slate-300">
+              {{ growthChatKindLabel(row.chat_kind) }}: <span class="text-zinc-100">{{ row.chat_title }}</span>
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </Teleport>
+
 </template>
+
+<style scoped>
+@keyframes hourglassFlip {
+  0% {
+    transform: rotate(0deg);
+  }
+  50% {
+    transform: rotate(180deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+.hourglass-flip {
+  animation: hourglassFlip 0.9s ease-in-out infinite;
+  transform-origin: 50% 50%;
+}
+</style>

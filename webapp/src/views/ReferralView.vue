@@ -20,6 +20,23 @@ const movingBonus = ref(false)
 const referralBanner = `${import.meta.env.BASE_URL}referral_banner.png`
 
 const activeUntilLabel = computed(() => formatDateTimeRu(referral.value?.active_until))
+const referralSubscriptionActive = computed(() => {
+  if (referral.value?.subscription_active != null) return !!referral.value.subscription_active
+  const dl = referral.value?.days_left
+  return dl != null && Number(dl) > 0
+})
+const referralPremiumForever = computed(() => !!referral.value?.subscription_forever)
+const referralShowPremiumDates = computed(
+  () =>
+    referralSubscriptionActive.value
+    && !referralPremiumForever.value
+    && referral.value?.active_until,
+)
+const referralPartnerMaxLevels = computed(() => {
+  const n = Number(referral.value?.partner_ui_max_levels)
+  if (Number.isFinite(n) && n >= 1 && n <= 3) return Math.floor(n)
+  return 1
+})
 const bonusCreditsLabel = computed(() => {
   const v = Number(referral.value?.bonus_credits || 0)
   return Number.isInteger(v) ? String(v) : v.toFixed(2)
@@ -58,9 +75,7 @@ function shareReferral() {
   const link = referral.value?.ref_link || ''
   if (!link) return
   fetchSilent(() => api.referralShareHit()).catch(() => {})
-  const text = isEn.value
-    ? 'Guard protects Telegram chats from spam. Add and configure in minutes.'
-    : 'Guard защищает чаты от спама. Подключай и настраивай за минуты.'
+  const text = t('referral.share_text')
   const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(text)}`
   const tg = window.Telegram?.WebApp
   if (typeof tg?.openTelegramLink === 'function') {
@@ -143,9 +158,23 @@ watch(
         <h2 class="mb-3 text-base font-semibold text-slate-900 dark:text-white">🎁 {{ isEn ? 'Guard referral program' : 'Реферальная программа Guard' }}</h2>
         <div class="space-y-3 text-[15px] text-slate-800 dark:text-slate-200">
           <p>
-            {{ isEn ? 'Access' : 'Доступ' }}: ✅ {{ referral.access_label }}<br>
-            ├ {{ isEn ? 'Days left' : 'Осталось дней' }}: <b>{{ referral.days_left }}</b><br>
-            └ {{ isEn ? 'Active until' : 'Активен до' }}: <b>{{ activeUntilLabel }}</b>
+            {{ isEn ? 'Partner tiers' : 'Партнёрка' }}: {{ referral.access_label }}<br>
+            <template v-if="referralShowPremiumDates">
+              ├ {{ isEn ? 'Premium days left' : 'Premium, осталось дней' }}: <b>{{ referral.days_left }}</b><br>
+              └ {{ isEn ? 'Active until' : 'Активен до' }}: <b>{{ activeUntilLabel }}</b>
+            </template>
+            <template v-else-if="referralPremiumForever">
+              └ <span class="text-emerald-400">{{ isEn ? 'Premium with no expiry' : 'Premium без срока' }}</span>
+            </template>
+            <template v-else-if="referralSubscriptionActive && referral.premium_kind === 'promo' && referral.subscription_promo_code">
+              └ <span class="text-emerald-400">{{ isEn ? 'Premium via promo' : 'Premium по промокоду' }} {{ referral.subscription_promo_code }}</span>
+            </template>
+            <template v-else-if="referralSubscriptionActive">
+              └ <span class="text-emerald-400">{{ isEn ? 'Premium active' : 'Premium активен' }}</span>
+            </template>
+            <template v-else-if="referralPartnerMaxLevels < 3">
+              └ <span class="text-slate-500">{{ isEn ? 'Levels 2–3 unlock with Premium' : 'Уровни 2–3 откроются с Premium' }}</span>
+            </template>
           </p>
           <p>
             {{ isEn ? 'Balance' : 'Баланс' }}:<br>

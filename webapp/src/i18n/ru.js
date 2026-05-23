@@ -100,7 +100,7 @@ export default {
     badge_aria: 'Premium-функция',
     badge_title: 'Доступно только в Premium',
     activating: 'Активируем…',
-    cta_trial: '10 дней Premium бесплатно',
+    cta_trial: '7 дней Premium бесплатно',
     cta_billing: 'Оформить Premium',
     cta_dismiss: 'Не сейчас',
     lock_broadcast_nav_title: 'Рассылки — Premium Guard',
@@ -118,6 +118,9 @@ export default {
     lock_owner_protection_reports_title: 'Защита / Отчёты — без «пустых» заглушек',
     lock_owner_protection_reports_body:
       'Карточка на главной показывает базовые метрики; полная сводка по защите и отчётам без ограничений Free открывается с Premium Guard. Оформите тариф или активируйте пробный период.',
+    lock_pdf_export_title: 'Экспорт в PDF',
+    lock_pdf_export_body:
+      'Выгрузка отчётов в PDF с превью, фильтрами и открытием файла доступна только в Premium Guard.',
     bullets: {
       l1: 'Рассылки, автокампании и автопост каналов',
       l2: 'Полная статистика, отчёты и AURUM ✨ без «заглушек» Free',
@@ -126,7 +129,7 @@ export default {
     },
     feature_desc: {
       generic:
-        'Эта функция доступна в Premium. Можно включить полный Premium на 10 дней бесплатно — без карты и без оплат.',
+        'Эта функция доступна в Premium. Можно включить полный Premium на 7 дней бесплатно — без карты и без оплат.',
       welcome_custom: 'Кастомное приветствие новичков с картинкой, кнопками и анти-RAID режимом — только в Premium.',
       rules_autopost: 'Автопостинг правил группы по расписанию, с картинкой и удалением старого пина — только в Premium.',
       granular_filters: 'Гранулярные фильтры медиа, упоминаний, кнопок и сообщений от каналов — только в Premium.',
@@ -169,6 +172,7 @@ export default {
       chat_managers: 'Раздел «Админы чата» и делегирование — нужен Premium у владельца чата.',
       chat_activation_limit: 'Больше активных чатов и включение групп сверх лимита — только в Premium.',
       guardian_interval: 'Свой интервал дежурных сообщений Guardian — только в Premium.',
+      copy_settings: 'Перенос настроек между чатами — только в Premium.',
       spam_spike_managers:
         'Уведомления о всплеске всем админам без лимита одного DM в сутки — только если Premium есть у владельца.',
       spam_spike:
@@ -700,7 +704,7 @@ export default {
     partner_ui: {
       link_copied: 'Ссылка скопирована',
       link_copy_manual: 'Скопируйте ссылку вручную',
-      share_text: 'Guard защищает чаты от спама. Подключайся по моей ссылке.',
+      share_text: 'Guard защищает чаты от спама и планирует рассылки. Подключайся по моей ссылке.',
       user_fallback: 'Пользователь',
       payout_too_low: 'Сумма недостаточна для вывода',
       payout_sent: 'Заявка на вывод отправлена',
@@ -1055,12 +1059,14 @@ export default {
       },
     },
     trial: {
-      try_free_btn: '10 дней Premium бесплатно',
-      activate_btn: 'Включить Premium на 10 дней без оплаты',
+      try_free_btn: '7 дней Premium бесплатно',
+      activate_btn: 'Включить Premium на 7 дней без оплаты',
       activating: 'Подключаем…',
-      hint_landing: 'Без карты и оплат. После 10 дней — снова Free.',
+      hint_landing: 'Без карты и оплат. После 7 дней — снова Free.',
+      modal_title: 'Активация Premium',
+      modal_body: 'Подключаем бесплатный Premium на 7 дней…',
       activated_toast: 'Premium подключён на {n} дней',
-      already_active_toast: 'Бесплатные 10 дней Premium уже активны',
+      already_active_toast: 'Бесплатные 7 дней Premium уже активны',
       error_generic: 'Не удалось включить бесплатный период. Попробуйте позже.',
       error_already_used: 'Бесплатный период уже использован — доступна только подписка.',
       error_window_closed: 'Время для бесплатного подключения истекло.',
@@ -2197,14 +2203,17 @@ export default {
     tab_refs: 'Мои рефералы',
     tab_docs: 'Документация',
     loading: 'Секундочку…',
-    access: 'Доступ: ✅ {label}',
-    days_left: 'Осталось дней:',
+    access: 'Партнёрка: {label}',
+    access_premium_active: 'Premium активен',
+    days_left: 'Premium, осталось дней:',
     active_until: 'Активен до:',
+    levels_free_hint: 'Уровни 2–3 откроются с Premium',
+    premium_forever: 'Premium без срока',
+    premium_promo_line: 'Premium по промокоду {code}, осталось {days} дн.',
+    premium_active_line: 'Premium активен',
     balance_header: 'Баланс:',
-    aurum_line: 'AURUM: {amt} ✨ (рассылки и ИИ)',
-    bonus_line: 'Партнёрские: {amt} ⚡ (1 ⚡ = 2 ₽)',
-    balance_hint:
-      'AURUM пополняется подарком с Premium и покупкой пакетов. Партнёрские ⚡ можно перевести в AURUM кнопкой ниже. При рассылке списание идёт с AURUM.',
+    aurum_line: 'AURUM: {amt} ✨',
+    bonus_line: 'Партнёрские: {amt} ⚡',
     your_link: 'Ваша партнёрская ссылка:',
     invited: 'Приглашённых людей:',
     invited_total: 'Всего:',
@@ -2262,7 +2271,13 @@ export default {
     docs_payouts_note:
       'Выплаты выполняются вручную в RUB. Заявки принимаются раз в неделю (по понедельникам), чтобы снизить риск мошенничества.',
     docs_reward_for: '💸 Вознаграждение начисляется за оплату подписки и за покупку токенов ИИ.',
-    docs_token_rate_line: '💱 Фиксированный курс: 1 партнёрский токен = 2 ₽.',
+    docs_q_balances: '❓ AURUM и партнёрские ⚡',
+    docs_balances_aurum:
+      'AURUM ✨ — для рассылок и ИИ. Пополняется подарком с Premium и покупкой пакетов.',
+    docs_balances_partner:
+      'Партнёрские ⚡ — реферальное вознаграждение. Курс: 1 ⚡ = 2 ₽.',
+    docs_balances_convert:
+      'В разделе «Баланс» партнёрские ⚡ можно перевести в AURUM; при рассылке списание идёт с AURUM.',
     docs_q_accrual: '❓ Как начисляется вознаграждение?',
     docs_accrual_example:
       'Пример: ваш реферал 1-го уровня оплатил 10 000 ₽ — начисление 1 500 ₽. Если его реферал оплатил 10 000 ₽ — вам 1 000 ₽ (2-й уровень). На 3-м уровне — 500 ₽.',
@@ -2289,7 +2304,6 @@ export default {
     tier_net_l2: 'L2 (рефералы ваших рефералов): {n}',
     tier_net_l3: 'L3 (третий уровень): {n}',
     tier_net_total: '└ Всего в сети: {n} чел.',
-    tier_net_total_direct: '└ С учётом вознаграждения учитываются только прямые приглашения: {n} чел.',
     tier_network_premium_hint: 'Уровни 2–3 становятся доступны при подписке Premium.',
     tier_accruals_title: 'Подтверждённые начисления',
     tier_accruals_sub:
@@ -2564,6 +2578,10 @@ export default {
       send_progress_note:
         'Запущенная отправка на сервере не останавливается, но прогресс можно скрыть, закрыв оверлей.',
       status_partial: 'Частично',
+      schedule_time_required: 'Укажите дату и время отправки',
+      schedule_time_too_soon: 'Отложенная отправка — минимум через 2 минуты',
+      schedule_ok: 'Рассылка запланирована',
+      schedule_failed: 'Не удалось запланировать рассылку',
     },
     autopost: {
       status_running: 'Запущена',
@@ -2788,6 +2806,12 @@ export default {
       recent_empty: 'Пока нет запусков рассылок.',
       recent_kind_campaign: 'Кампания',
       recent_kind_oneshot: 'Одноразовая',
+      recent_kind_oneshot_scheduled: 'Одноразовая · отложена',
+      recent_preset_all: 'Все',
+      recent_preset_oneshot: 'Одноразовые',
+      recent_preset_scheduled: 'Отложенные',
+      status_scheduled: 'Запланирована',
+      scheduled_for: 'на {when}',
       recent_metric_channel_reach: 'Охват каналов',
       recent_metric_interactions: 'Переходы по ссылкам и кнопкам',
       recent_metric_delivered_runs: 'Доставлено',
@@ -2799,7 +2823,7 @@ export default {
       repeat_need_refresh: 'Этой рассылки нет в списке. Обновите страницу.',
       ctr_abbr: 'CTR',
       ctr_hint_title:
-        'CTR — отношение всех отслеживаемых переходов (ссылки, кнопки, реакции) к успешно доставленным сообщениям. Если учёта переходов ещё нет, показывается доля доставок от подключённой базы чатов/ботов.',
+        'CTR — отношение переходов по ссылке и по кнопке (без реакций) к успешно доставленным сообщениям. Если учёта переходов ещё нет, показывается доля доставок от подключённой базы чатов/ботов.',
       ctr_sub_clicks: 'переходов {clicks} / доставок {delivered}',
       ctr_sub_reach: 'доставок {delivered} / база {base} (подключённые чаты и активные диалоги с ботом)',
       link_breakdown_title: 'Переходы по ссылкам',
@@ -2809,7 +2833,7 @@ export default {
       tracking_off_hint:
         'На сервисе API не задан BROADCAST_TRACK_BASE_URL (или GUARD_API_BASE_URL) — переходы по ссылкам в тексте и внешним URL-кнопкам не считаются. Реакции считаются отдельно, если бот видит message_reaction.',
       tracking_on_hint:
-        'Считаются: клики по ссылкам в тексте (в т.ч. t.me), по внешним https-кнопкам. Кнопки t.me/telegram открываются напрямую и в «переходы» не попадают. «По кнопке» — callback-кнопки бота (без URL). Реакции — только на отправленные посты.',
+        'Считаются переходы по внешним http(s)-ссылкам в тексте и на кнопках (сайты, Google Play, App Store и т.д.), а также нажатия callback-кнопок бота. Ссылки t.me/telegram.me открываются сразу в Telegram и в статистику не попадают. Реакции — отдельно.',
       delivered_by_chat_title: 'Доставлено по чатам',
       send_history_title: 'История отправок',
       send_history_bots: 'Личные сообщения: успешно {ok} из {n}',
@@ -2921,6 +2945,7 @@ export default {
     },
     broadcast_ui: {
       quick_new_broadcast: 'Новая рассылка',
+      btn_saved: 'Сохранено',
       draft_title_ph: 'Название черновика',
       message_body_ph: 'Напиши сообщение…',
       apply_title: 'Применить название',
@@ -2958,6 +2983,16 @@ export default {
       cost: 'Стоимость',
       sending: 'Отправка...',
       send: 'Отправить',
+      schedule: 'Запланировать',
+      timing_title: 'Когда отправить',
+      timing_sub: 'Сейчас или отложить на выбранное время',
+      timing_now: 'Сейчас',
+      timing_now_sub: 'Отправить сразу после подтверждения',
+      timing_scheduled: 'Отложить',
+      timing_scheduled_sub: 'Выберите дату и время отправки',
+      timing_datetime_label: 'Дата и время',
+      row_scheduled_at: 'Отправка',
+      ready_sub_scheduled: 'Проверьте настройки и подтвердите отложенную рассылку',
       all_recent_title: 'Все последние рассылки',
       delegated_strip: 'Фиолетовый ADM: рассылка и автопост только по делегированным группам/каналам.',
       drafts_in_list: 'Черновики в списке:',
@@ -2969,6 +3004,49 @@ export default {
       stats: 'Статистика',
       edit_post_title: 'Исправить пост',
       link_modal_title: 'Добавить ссылку',
+      keyboard_modal_title: 'Кнопки под постом',
+      keyboard_info_btn_title: 'Подсказки по кнопкам',
+      keyboard_info_btn_aria: 'Подсказки по кнопкам под постом',
+      keyboard_info_modal_title: 'Подсказки',
+      btn_style_label: 'Цвет кнопки',
+      btn_style_default: 'Обычный (серый в Telegram)',
+      btn_style_primary: 'Синий',
+      btn_style_success: 'Зелёный',
+      btn_style_danger: 'Красный',
+      btn_style_hint: 'Цвета кнопок поддерживают новые клиенты Telegram; в старых — обычный вид.',
+      btn_text_ph: 'Текст на кнопке',
+      btn_url_ph: 'Ссылка https://… (из браузера)',
+      btn_webapp_ph: 'URL мини-приложения (Web App)',
+      btn_callback_ph: 'Данные для бота (callback)',
+      btn_row_label: 'Ряд {n}',
+      btn_remove_row: 'Убрать ряд',
+      btn_remove: 'Удалить кнопку',
+      btn_add_in_row: '+ Кнопка в этот ряд',
+      btn_add_row: '+ Новый ряд кнопок',
+      hidden_continuation_add: '+ Скрытое продолжение',
+      hidden_continuation_badge: 'Скрытое продолжение',
+      hidden_continuation_hint:
+        'Кнопка «Скрытое продолжение» показывает разный текст подписчикам канала/группы и остальным. Работает в постах каналов и групп.',
+      hidden_continuation_non_member_ph: 'Текст для тех, кто не подписан на канал / не состоит в группе',
+      hidden_continuation_non_member_hint: 'Показывается при нажатии, если пользователь не участник этого чата.',
+      hidden_continuation_member_ph: 'Текст для подписчиков канала / участников группы',
+      hidden_continuation_member_hint:
+        'Подписчикам показывается во всплывающем окне Telegram (как на скрине с «OK») — до 200 символов. Длиннее уйдёт в личку бота.',
+      keyboard_layout_label: 'Расположение:',
+      keyboard_layout_inline: 'В один ряд',
+      keyboard_layout_stacked: 'Друг под другом',
+      keyboard_layout_preview: 'Как в Telegram',
+      keyboard_layout_preview_hint: 'Чтобы увидеть разницу, добавьте минимум две кнопки с текстом.',
+      keyboard_layout_hint:
+        '«Ряд» в редакторе = одна строка кнопок в Telegram. Кнопки «+ в этот ряд» — рядом; «+ новый ряд» — ниже. Быстрые кнопки выше переставляют все сразу.',
+      prefilled_dm_add: '+ Текст в личке',
+      prefilled_dm_badge: 'Текст в личке',
+      prefilled_dm_hint:
+        'Кнопка «Текст в личке» открывает чат с ботом или аккаунтом и подставляет готовый текст в поле ввода — как у Quickhire.',
+      prefilled_dm_username_ph: 'Бот или аккаунт (@MyBot или MyBot)',
+      prefilled_dm_username_hint: 'Куда открыть личку: username бота или пользователя без ссылки.',
+      prefilled_dm_text_ph: 'Текст, который подставится в поле сообщения',
+      prefilled_dm_text_hint: 'Пользователь сам нажмёт «Отправить». Ссылка собирается автоматически.',
     },
     bc_campaign: {
       title_list: 'Автокампании',
@@ -3060,6 +3138,42 @@ export default {
       multi_send_windows_help: 'Несколько интервалов — нажмите «+». Укажите, сколько постов в каждом окне; сумма ограничена 288 в сутки.',
       schedule_slot_times_preview:
         'Время отправок в этом окне (расчёт на один активный календарный день при «Равномерно»: первое — около времени первого поста ниже)',
+      schedule_slot_times_preview_day: 'Слоты окна на {day} (активный календарный день кампании)',
+      schedule_night_day_hint:
+        'Окно через полночь: день расписания {day} длится до {end} следующего календарного дня ({tz}). Сейчас на календаре {today} — это нормально, пока окно не закончилось.',
+      schedule_slot_preview_draft_hint:
+        'Вы изменили окно или число постов — ниже только план новых слотов. Цвета «отправлено/пропущено» появятся после сохранения.',
+      schedule_timing_precision:
+        'Фактическая отправка — в пределах ~10–15 с от указанного времени (проверка расписания каждые ~10 с). В списке чатов Telegram показывает только часы:минуты — пост в 14:54:50 может отображаться как 14:55. Несколько каналов получают пост подряд за несколько секунд.',
+      schedule_past_slots_hint:
+        'Красным — слот пропущен или время прошло (с учётом ~15 мин на отправку). Белым — ещё в очереди. Если пост не уходит — смотрите предупреждение ниже.',
+      schedule_block_insufficient_aurum:
+        'Слот {next} не отправлен: не хватает AURUM (нужно {need_tokens}, на балансе {have_aurum}). Пополните баланс — в течение ~15 мин после времени слота отправка ещё возможна.',
+      schedule_block_rotation_busy_sending:
+        'Слот {next} ждёт: предыдущая рассылка ещё в статусе «отправляется». Обычно освобождается через несколько минут.',
+      schedule_block_no_destinations:
+        'В кампании не выбраны группы или каналы — автопост некуда отправлять.',
+      schedule_block_no_recipients:
+        'Нет доступных получателей (группы сняты с Guard или недоступны).',
+      schedule_block_recipients_filtered:
+        'Выбранные чаты не прошли проверку — обновите список получателей кампании.',
+      schedule_block_empty_rotation:
+        'Нет постов в ротации кампании — добавьте черновики рассылки.',
+      schedule_block_empty_content:
+        'Пост в ротации пустой (нет текста и медиа).',
+      schedule_block_bot_token_missing:
+        'На сервере не настроен BOT_TOKEN — автопост не может отправлять. Обратитесь в поддержку.',
+      schedule_block_unknown:
+        'Слот {next} пока не отправлен ({reason}). Проверьте баланс AURUM, получателей и статус постов.',
+      schedule_slot_sent: 'Отправлено',
+      schedule_slot_pending: 'Ожидает',
+      schedule_slot_skipped: 'Пропущено или ошибка',
+      schedule_slot_planned_stopped: 'Запланировано (кампания остановлена)',
+      schedule_not_running_hint:
+        'Кампания остановлена — автопост не идёт. Вернитесь в управление и нажмите «Запустить», иначе посты по расписанию не отправятся.',
+      schedule_scheduler_not_running:
+        'Планировщик автопоста на сервере не отвечает (нет тиков). Откройте Deploy Logs сервиса API (zealous-bravery): должны быть строки autopost_loop started. Проверьте BOT_TOKEN и DATABASE_URL на API, затем перезапустите сервис.',
+      schedule_slot_preview: 'План слота',
       slot_n: 'Окно {n}',
       slot_from: 'С',
       slot_to: 'По',
@@ -3095,6 +3209,7 @@ export default {
       success_sub: 'Первые отправки запланированы на {when}',
       success_sub_stopped:
         'Кампания сохранена, но ещё не запущена. Откройте управление и нажмите «Запустить» — без этого группы не получат посты.',
+      success_start_now: 'Запустить кампанию',
       err_recipients_filtered:
         'Ни одна из выбранных групп/каналов не сохранилась (нет прав бота или чат недоступен). Проверьте список чатов и выберите снова.',
       success_when_fallback: 'ближайшее окно',
@@ -3289,6 +3404,15 @@ export default {
       row_left: 'Отписались',
       row_net: 'Чистый рост',
       row_messages: 'Сообщения',
+      modal_title_joined: 'Подписались',
+      modal_title_left: 'Отписались',
+      modal_title_net: 'Чистый рост',
+      modal_empty: 'Нет событий за выбранный период',
+      modal_loading: 'Загрузка…',
+      modal_chat_channel: 'Канал',
+      modal_chat_group: 'Группа',
+      event_joined: 'вступил',
+      event_left: 'вышел',
     },
     protection: {
       filter_hits: 'Срабатывания фильтров',
@@ -3461,6 +3585,7 @@ export default {
       reports: 'Отчёты',
       reports_done: 'Отчёты ✓',
       group_reports: 'Отчёты по группам',
+      auto_approve: '✓ Заявки',
     },
     perms: {
       protection: 'Защита',
@@ -3471,6 +3596,15 @@ export default {
     delegate_access_label: 'Доступ:',
     delegate_access_none: 'нет выданных прав по этому чату',
     delegate_access_legacy: 'все действия по этому чату (запись без списка прав)',
+    auto_approve: {
+      title: 'Авто-подтверждение',
+      modal_subtitle: 'Авто-подтверждение',
+      desc_channel:
+        'Автоматически одобряет заявки на подписку на канал. Не нужно заходить в Telegram и принимать каждого вручную — бот делает это сам.',
+      desc_group:
+        'Автоматически одобряет заявки на вступление в группу. Не нужно заходить в Telegram и принимать каждого вручную — бот делает это сам.',
+      bot_rights_hint: 'Нужен режим «по заявке» в Telegram и право бота приглашать пользователей.',
+    },
     role: {
       mine: 'Мой кабинет',
     },
@@ -3619,6 +3753,7 @@ export default {
       pin_required: 'Нужен код из «Настройки → Безопасность»',
       pick_perms: 'Выберите хотя бы одно право для админа.',
       add_admin_failed: 'Не удалось добавить админа',
+      auto_approve_failed: 'Не удалось сохранить авто-подтверждение',
     },
     confirm: {
       remove_kind_channel: 'канал',
@@ -3665,6 +3800,7 @@ export default {
   referral: {
     title: 'Реферальная программа',
     invite_text: 'Поделиться приглашением',
+    share_text: 'Guard защищает чаты от спама и планирует рассылки. Подключайся по моей ссылке.',
     earnings: 'Заработано',
     level: 'Уровень {n}',
   },

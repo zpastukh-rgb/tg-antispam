@@ -743,6 +743,8 @@ MESSAGES: dict[str, dict] = {
             "• link clutter\n"
             "• raids\n"
             "• bots\n\n"
+            "🎁 Gift: 7 days of Premium free — turn it on in the app "
+            "(no card, no payment), then connect a group.\n\n"
             "Connecting takes about 10 seconds."
         ),
         "no_group_24h": (
@@ -810,7 +812,7 @@ MESSAGES: dict[str, dict] = {
         "btn_connect_group_shield": "🛡 Connect group",
         "btn_reports_connect": "📊 Connect reports chat",
         "btn_open_guard_premium": "🛡 Open Guard Premium",
-        "btn_trial_activate": "🚀 Try 10 days free",
+        "btn_trial_activate": "🚀 Try 7 days free",
         "btn_trial_billing": "👑 Get Premium",
         "trial_window_left": {
             "generic": (
@@ -839,9 +841,9 @@ MESSAGES: dict[str, dict] = {
                 "and bot raids. Activate now — it's free."
             ),
             "6": (
-                "⚡ 6 days — halfway through your trial window.\n\n"
-                "If you haven't tried Premium yet — now is the time. No payment, "
-                "just turn it on for 10 days and see how it works."
+                "⚡ 6 days left to claim the free gift.\n\n"
+                "If you haven't tried Premium yet — now is the time. No payment: "
+                "activate the gift and get Premium for 7 days."
             ),
             "5": (
                 "⏳ 5 days already gone.\n\n"
@@ -968,6 +970,10 @@ MESSAGES: dict[str, dict] = {
                 "Partner tokens *{bonus}* ⚡\n\n"
                 "Everything is easy to set up in the app via the buttons below 👇🏻"
             ),
+            "trial_gift_hint": (
+                "🎁 *Gift:* 7 days of Premium free — turn it on in the app, "
+                "no card, no payment."
+            ),
         },
         "kb": {
             "chats": "📂 Connected chats",
@@ -989,6 +995,7 @@ MESSAGES: dict[str, dict] = {
             "quick_open_menu": "⚙️ Main menu",
             "quick_change_lang": "🌍 Language",
             "quick_support_tip": "🤝 Support the bot",
+            "footer": "⬇️ Quick actions — below the input bar",
         },
         "cmd": {
             "private_only": "This command only works in a private chat with the bot.",
@@ -1105,16 +1112,23 @@ MESSAGES: dict[str, dict] = {
         },
         "referral": {
             "link_fail": "Could not build the link. Try again later.",
-            "share_text": "Guard protects chats from spam. Connect and tune in minutes.",
+            "share_text": "Guard protects chats from spam and schedules broadcasts. Connect and set up in minutes.",
             "access_months": "{months} mo.",
             "access_none": "no active period",
+            "access_levels_free": "Level {levels} — direct referrals only",
+            "access_levels_full": "Levels {levels} — full network",
+            "premium_extra": "├ Premium days left: *{days_left}*\n└ Active until: *{active_until}*\n",
+            "premium_extra_promo": "├ Premium via promo *{code}*, *{days_left}* days left\n└ Active until: *{active_until}*\n",
+            "premium_extra_forever": "└ Premium with no expiry (promo / forever access)\n",
+            "premium_extra_active": "└ Premium active\n",
+            "premium_extra_none": "└ Levels 2–3 unlock with Premium\n",
             "body": (
                 "🎁 *Guard referral program*\n\n"
-                "Access: ✅ {access_line}\n"
-                "├ Days left: *{days_left}*\n"
-                "└ Active until: *{active_until}*\n\n"
+                "Partner tiers: {access_line}\n"
+                "{premium_extra}\n"
                 "Balance:\n"
-                "└ AURUM (broadcasts / AI): *{aurum}* ✨\n\n"
+                "├ AURUM: *{aurum}* ✨\n"
+                "└ Partner pool: *{bonus}* ⚡\n\n"
                 "{partner_breakdown}\n\n"
                 "Your partner link:\n"
                 "└ `{ref_link}`\n\n"
@@ -1125,7 +1139,6 @@ MESSAGES: dict[str, dict] = {
             "partner": {
                 "network_head": "👥 *Your network*",
                 "net_l1_solo": "└ L1 (direct invites): *{n}*",
-                "net_total_direct": "└ Partner rewards count direct invites only: *{n}* users",
                 "network_levels_premium_hint": "_Network levels 2–3 and commissions from those tiers unlock with Premium._",
                 "net_l1": "├ L1 (direct invites): *{n}*",
                 "net_l2": "├ L2 (invites by your referrals): *{n}*",

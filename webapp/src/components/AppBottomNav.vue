@@ -31,8 +31,20 @@ const navActiveIndicatorStyle = ref({
   transitionDuration: '320ms',
 })
 const navActiveIndicatorAnimating = ref(false)
+const navActiveIndicatorDragging = ref(false)
+const navActiveIndicatorSettling = ref(false)
 let navIndicatorAnimTimer = null
+let navIndicatorSettleTimer = null
 let navResizeHandler = null
+let navSuppressClick = false
+const NAV_DRAG_THRESHOLD_PX = 8
+const navDragState = ref({
+  pending: false,
+  active: false,
+  pointerId: null,
+  startX: 0,
+  startLeft: 0,
+})
 
 const baseItems = computed(() => [
   { key: 'account', label: t('nav.account'), icon: 'account', to: '/' },
@@ -132,7 +144,7 @@ function updateActiveIndicator(withSqueeze = false) {
       left: `${Math.max(0, b.left - g.left)}px`,
       width: `${Math.max(0, b.width)}px`,
       opacity: 1,
-      transitionDuration: '360ms',
+      transitionDuration: navActiveIndicatorDragging.value ? '0ms' : '360ms',
     }
     if (!withSqueeze) return
     navActiveIndicatorAnimating.value = false
@@ -146,6 +158,118 @@ function updateActiveIndicator(withSqueeze = false) {
   })
 }
 
+function onNavPointerDown(ev) {
+  if (!ev || (ev.button != null && ev.button !== 0)) return
+  const grid = navGridRef.value
+  if (!grid) return
+  const curLeft = Number.parseFloat(String(navActiveIndicatorStyle.value.left || '0').replace('px', '')) || 0
+  navDragState.value = {
+    pending: true,
+    active: false,
+    pointerId: ev.pointerId ?? null,
+    startX: Number(ev.clientX || 0),
+    startLeft: curLeft,
+  }
+}
+
+function onNavPointerMove(ev) {
+  const st = navDragState.value
+  if (!st.pending && !st.active) return
+  if (st.pointerId != null && ev.pointerId !== st.pointerId) return
+  const grid = navGridRef.value
+  if (!grid) return
+  const dx = Number(ev.clientX || 0) - Number(st.startX || 0)
+  if (st.pending && !st.active) {
+    if (Math.abs(dx) < NAV_DRAG_THRESHOLD_PX) return
+    st.pending = false
+    st.active = true
+    navActiveIndicatorDragging.value = true
+    navActiveIndicatorAnimating.value = false
+    navActiveIndicatorSettling.value = false
+    if (navIndicatorSettleTimer) {
+      clearTimeout(navIndicatorSettleTimer)
+      navIndicatorSettleTimer = null
+    }
+    try {
+      grid.setPointerCapture?.(ev.pointerId)
+    } catch {
+      //
+    }
+  }
+  if (!st.active) return
+  const next = Number(st.startLeft || 0) + dx
+  const width = Number.parseFloat(String(navActiveIndicatorStyle.value.width || '0').replace('px', '')) || 0
+  const max = Math.max(0, grid.clientWidth - width)
+  const clamped = Math.max(0, Math.min(max, next))
+  navActiveIndicatorStyle.value = {
+    ...navActiveIndicatorStyle.value,
+    left: `${clamped}px`,
+    opacity: 1,
+    transitionDuration: '0ms',
+  }
+}
+
+function endIndicatorDrag() {
+  if (!navDragState.value.active) return
+  navDragState.value.active = false
+  navDragState.value.pending = false
+  navActiveIndicatorDragging.value = false
+  navActiveIndicatorSettling.value = true
+  const grid = navGridRef.value
+  const left = Number.parseFloat(String(navActiveIndicatorStyle.value.left || '0').replace('px', '')) || 0
+  const width = Number.parseFloat(String(navActiveIndicatorStyle.value.width || '0').replace('px', '')) || 0
+  const center = left + width / 2
+  if (!grid || !itemButtonRefs.value.length) {
+    updateActiveIndicator(true)
+    return
+  }
+  const g = grid.getBoundingClientRect()
+  let bestIdx = 0
+  let bestDist = Number.POSITIVE_INFINITY
+  itemButtonRefs.value.forEach((btn, idx) => {
+    if (!btn) return
+    const r = btn.getBoundingClientRect()
+    const c = (r.left - g.left) + r.width / 2
+    const d = Math.abs(c - center)
+    if (d < bestDist) {
+      bestDist = d
+      bestIdx = idx
+    }
+  })
+  const target = items.value[bestIdx]
+  if (target) void onTap(target)
+  updateActiveIndicator(true)
+  if (navIndicatorSettleTimer) clearTimeout(navIndicatorSettleTimer)
+  navIndicatorSettleTimer = setTimeout(() => {
+    navActiveIndicatorSettling.value = false
+  }, 260)
+}
+
+function onNavPointerUp(ev) {
+  const st = navDragState.value
+  if (!st.pending && !st.active) return
+  if (st.pointerId != null && ev.pointerId !== st.pointerId) return
+  if (st.active) {
+    navSuppressClick = true
+    setTimeout(() => {
+      navSuppressClick = false
+    }, 0)
+    endIndicatorDrag()
+  }
+  navDragState.value = {
+    pending: false,
+    active: false,
+    pointerId: null,
+    startX: 0,
+    startLeft: 0,
+  }
+  try {
+    navGridRef.value?.releasePointerCapture?.(ev.pointerId)
+  } catch {
+    //
+  }
+}
+
 function goBroadcastPremiumLock() {
   openLock({
     feature: 'broadcast_nav',
@@ -156,6 +280,7 @@ function goBroadcastPremiumLock() {
 }
 
 async function onTap(item) {
+  if (navSuppressClick) return
   if (item.to === 'support') {
     const url = 'https://t.me/Help_guard'
     const tg = window.Telegram?.WebApp
@@ -243,6 +368,9 @@ onMounted(async () => {
   navResizeHandler = () => updateActiveIndicator(false)
   if (typeof window !== 'undefined') {
     window.addEventListener('resize', navResizeHandler, { passive: true })
+    window.addEventListener('pointermove', onNavPointerMove, { passive: true })
+    window.addEventListener('pointerup', onNavPointerUp, { passive: true })
+    window.addEventListener('pointercancel', onNavPointerUp, { passive: true })
   }
 })
 
@@ -253,10 +381,15 @@ onUnmounted(() => {
   }
   if (navResizeHandler && typeof window !== 'undefined') {
     window.removeEventListener('resize', navResizeHandler)
+    window.removeEventListener('pointermove', onNavPointerMove)
+    window.removeEventListener('pointerup', onNavPointerUp)
+    window.removeEventListener('pointercancel', onNavPointerUp)
   }
   navResizeHandler = null
   if (navIndicatorAnimTimer) clearTimeout(navIndicatorAnimTimer)
   navIndicatorAnimTimer = null
+  if (navIndicatorSettleTimer) clearTimeout(navIndicatorSettleTimer)
+  navIndicatorSettleTimer = null
 })
 
 watch(
@@ -267,25 +400,34 @@ watch(
 
 <template>
   <nav
-    class="fixed bottom-3 left-6 right-6 z-40 mx-auto w-auto rounded-[1.65rem] border-0 bg-[linear-gradient(180deg,rgba(18,21,28,0.42),rgba(12,14,18,0.42))] pb-[calc(0.18rem+env(safe-area-inset-bottom,0px))] pt-0 shadow-[0_14px_28px_-14px_rgba(0,0,0,0.62)] backdrop-blur-[14px]"
+    class="fixed bottom-[calc(0.75rem+env(safe-area-inset-bottom,0px))] left-6 right-6 z-40 mx-auto w-auto rounded-[1.65rem] border-0 bg-[linear-gradient(180deg,rgba(18,21,28,0.42),rgba(12,14,18,0.42))] pb-1 pt-0 shadow-[0_14px_28px_-14px_rgba(0,0,0,0.62)] backdrop-blur-[14px]"
     :class="items.length > 4 ? 'max-w-[22.4rem]' : 'max-w-[17.8rem]'"
     style="font-family: 'Exo 2', 'Montserrat', sans-serif;"
   >
     <div
       ref="navGridRef"
-      class="relative mx-auto grid w-full gap-0 px-0 pt-[0.18rem] pb-[0.06rem]"
+      class="nav-grid relative mx-auto grid w-full gap-0 px-0 pt-[0.18rem] pb-[0.06rem]"
       :class="items.length > 4 ? 'max-w-[21.2rem] grid-cols-5' : 'max-w-[16.6rem] grid-cols-4'"
+      @pointerdown="onNavPointerDown"
     >
-      <!-- Важно: только декорация. Иначе z-[3] + pointerdown.prevent перехватывает тапы над табами в Telegram WebView -->
+      <!-- Декорация без pointer-events: drag на nav-grid, чтобы не ломать тапы по табам в Telegram WebView -->
       <span
         class="nav-active-indicator pointer-events-none absolute bottom-0 top-0 z-[3] rounded-full transition-[left,width,opacity,background-color,box-shadow,backdrop-filter,transform] duration-200 ease-out"
-        :class="navActiveIndicatorAnimating ? 'nav-active-indicator-squeeze' : ''"
+        :class="[
+          navActiveIndicatorAnimating ? 'nav-active-indicator-squeeze' : '',
+          navActiveIndicatorDragging ? 'nav-active-indicator-dragging' : '',
+          navActiveIndicatorSettling ? 'nav-active-indicator-settle' : '',
+        ]"
         :style="navActiveIndicatorStyle"
         aria-hidden="true"
       >
         <span
           class="nav-active-indicator-edge"
-          :class="navActiveIndicatorAnimating ? 'nav-active-indicator-edge-run' : ''"
+          :class="[
+            navActiveIndicatorAnimating ? 'nav-active-indicator-edge-run' : '',
+            navActiveIndicatorDragging ? 'nav-active-indicator-edge-drag' : '',
+            navActiveIndicatorSettling ? 'nav-active-indicator-edge-settle' : '',
+          ]"
           aria-hidden="true"
         />
       </span>
@@ -324,6 +466,15 @@ watch(
 </template>
 
 <style scoped>
+.nav-grid {
+  touch-action: pan-y;
+  cursor: grab;
+}
+
+.nav-grid:active {
+  cursor: grabbing;
+}
+
 .nav-active-indicator-squeeze {
   animation: navIndicatorSqueeze 520ms cubic-bezier(0.2, 0.74, 0.2, 1);
 }
@@ -345,6 +496,14 @@ watch(
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
   overflow: hidden;
+}
+
+.nav-active-indicator-dragging {
+  transform: scaleY(1.16);
+}
+
+.nav-active-indicator-settle {
+  animation: navIndicatorSettle 260ms cubic-bezier(0.2, 0.75, 0.22, 1);
 }
 
 .nav-active-indicator-edge {
@@ -371,6 +530,16 @@ watch(
   opacity: 0.92;
 }
 
+.nav-active-indicator-edge-drag {
+  animation: navEdgeFlow 900ms linear infinite;
+  opacity: 1;
+}
+
+.nav-active-indicator-edge-settle {
+  animation: navEdgeSettle 260ms ease-out;
+  opacity: 0.7;
+}
+
 @keyframes navEdgeFlow {
   0% {
     background-position: 0% 0, 0 0, 0 0;
@@ -384,5 +553,15 @@ watch(
     background-position: 100% 0, 0 0, 0 0;
     opacity: 0.68;
   }
+}
+
+@keyframes navIndicatorSettle {
+  0% { transform: scaleY(1.16); }
+  100% { transform: scaleY(1); }
+}
+
+@keyframes navEdgeSettle {
+  0% { opacity: 1; }
+  100% { opacity: 0; }
 }
 </style>

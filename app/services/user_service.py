@@ -33,9 +33,9 @@ TARIFF_CHANNEL_LIMITS = {
     Tariff.BUSINESS.value: 20,
 }
 
-# 10-дневный Premium-триал. Окно активации — 10 дней с first_start_at; после нажатия
+# 7-дневный Premium-триал. Окно активации — TRIAL_WINDOW_DAYS с first_start_at; после нажатия
 # «Активировать» юзер получает Premium на TRIAL_DAYS дней с момента активации (не с /start).
-TRIAL_DAYS = 10
+TRIAL_DAYS = 7
 TRIAL_WINDOW_DAYS = 10
 TRIAL_SUBSCRIPTION_SOURCE = "trial"
 
@@ -199,7 +199,7 @@ def trial_window_remaining_days(user: User, now: datetime | None = None) -> int:
 
 
 def is_trial_eligible(user: User, now: datetime | None = None) -> bool:
-    """Может ли юзер активировать 10-дневный триал прямо сейчас.
+    """Может ли юзер активировать 7-дневный триал прямо сейчас.
 
     Условия:
     1) `trial_used == False` (триал ещё не активировался);
@@ -220,7 +220,7 @@ def is_trial_eligible(user: User, now: datetime | None = None) -> bool:
 
 
 def is_trial_active(user: User, now: datetime | None = None) -> bool:
-    """Идёт ли сейчас 10-дневный Premium-триал (активированный пользователем)."""
+    """Идёт ли сейчас 7-дневный Premium-триал (активированный пользователем)."""
     now = now or datetime.now(timezone.utc)
     if not bool(getattr(user, "trial_used", False)):
         return False
@@ -423,10 +423,12 @@ async def can_add_chat(session: AsyncSession, telegram_id: int) -> tuple[bool, i
     Можно ли подключить ещё один чат.
     Returns: (can_add, current_count, limit).
     """
+    from app.api.service import count_accessible_chats_by_kind
+
     user = await get_or_create_user(session, telegram_id)
     await ensure_user_chat_limit_synced_for_tariff(session, user)
     await session.refresh(user)
-    groups_count, _channels_count = await count_managed_chats_by_kind(session, telegram_id)
+    groups_count, _channels_count = await count_accessible_chats_by_kind(session, telegram_id)
     count = int(groups_count)
     limit = effective_group_limit(user, telegram_id)
     return (count < limit, count, limit)
@@ -434,10 +436,12 @@ async def can_add_chat(session: AsyncSession, telegram_id: int) -> tuple[bool, i
 
 async def can_add_channel(session: AsyncSession, telegram_id: int) -> tuple[bool, int, int]:
     """Можно ли подключить ещё один канал."""
+    from app.api.service import count_accessible_chats_by_kind
+
     user = await get_or_create_user(session, telegram_id)
     await ensure_user_chat_limit_synced_for_tariff(session, user)
     await session.refresh(user)
-    _groups_count, channels_count = await count_managed_chats_by_kind(session, telegram_id)
+    _groups_count, channels_count = await count_accessible_chats_by_kind(session, telegram_id)
     limit = effective_channel_limit(user, telegram_id)
     return (int(channels_count) < limit, int(channels_count), int(limit))
 

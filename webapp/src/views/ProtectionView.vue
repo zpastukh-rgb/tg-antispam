@@ -63,6 +63,40 @@ const lastMeSnapshot = ref(null)
 const chat = ref(null)
 const selectedChatId = ref(null)
 const showChatPicker = ref(false)
+let protectionScrollLockMainTop = 0
+
+function setProtectionSheetScrollLock(lock) {
+  if (typeof document === 'undefined') return
+  const body = document.body
+  const html = document.documentElement
+  const main = document.querySelector('main')
+  if (!body || !html) return
+  if (lock) {
+    if (!body.dataset.protectionSheetScrollLocked) {
+      protectionScrollLockMainTop = main?.scrollTop || 0
+      body.dataset.protectionSheetScrollLocked = '1'
+    }
+    body.style.overflow = 'hidden'
+    html.style.overflow = 'hidden'
+    body.style.overscrollBehavior = 'none'
+    if (main) {
+      main.style.overflow = 'hidden'
+      main.style.overscrollBehavior = 'none'
+      main.style.touchAction = 'none'
+    }
+    return
+  }
+  delete body.dataset.protectionSheetScrollLocked
+  body.style.overflow = ''
+  html.style.overflow = ''
+  body.style.overscrollBehavior = ''
+  if (main) {
+    main.style.overflow = ''
+    main.style.overscrollBehavior = ''
+    main.style.touchAction = ''
+    main.scrollTop = protectionScrollLockMainTop
+  }
+}
 const saving = ref(false)
 const newStopword = ref('')
 const stopwordLoading = ref(false)
@@ -893,6 +927,7 @@ onBeforeUnmount(() => {
     postRulesGroupPreviewUrl.value = ''
   }
   document.removeEventListener('selectionchange', onWelcomeEditorSelectionChange)
+  setProtectionSheetScrollLock(false)
   if (document?.body?.style) document.body.style.overflow = ''
 })
 
@@ -955,6 +990,13 @@ function onWelcomeEditorSelectionChange() {
 }
 
 watch(
+  () => showChatPicker.value || showProtectionPinModal.value,
+  (anyOpen) => {
+    setProtectionSheetScrollLock(!!anyOpen)
+  },
+)
+
+watch(
   () => showWelcomeSettingsModal.value,
   (open) => {
     if (document?.body?.style) {
@@ -990,10 +1032,9 @@ const premiumSectionFrameClass = computed(() =>
     : '',
 )
 const premiumControlRowClass = computed(() => (premiumFeatureLocked.value ? 'opacity-[0.72]' : ''))
-/** «Перенести» в несколько чатов — только Premium; при 1 чате рамка не нужна */
+/** «Перенести» в другие чаты — только Premium */
 const copySectionPremiumClass = computed(() => {
   if (!premiumFeatureLocked.value) return ''
-  if ((chatsList.value || []).length <= 1) return ''
   return 'ring-1 ring-amber-400/35 ring-inset shadow-[0_0_24px_-10px_rgba(251,191,36,0.12)]'
 })
 /** Золотая подсветка гранулярных строк — только для Free (для Premium те же тёмные карточки, что и обычные). */
@@ -1083,6 +1124,11 @@ const pickerDelegatedChats = computed(() =>
 const pickerOwnChats = computed(() =>
   sortChatsByAvailability((chatsList.value || []).filter((c) => !c.is_shared && !isChannelListRow(c))),
 )
+const pickerGroupChats = computed(() => (chatsList.value || []).filter((c) => !isChannelListRow(c)))
+const pickerTotalChats = computed(() => Number(pickerGroupChats.value.length || 0))
+const pickerActiveChats = computed(() =>
+  Number(pickerGroupChats.value.filter((c) => pickerProtectionOn(c)).length || 0),
+)
 /** Цели для «Перенести настройки»: только свои группы, без делегированных и каналов; без текущего чата. */
 const copySettingsTargetChats = computed(() =>
   (pickerOwnChats.value || []).filter((c) => Number(c.id) !== Number(chat.value?.id || 0)),
@@ -1101,10 +1147,6 @@ function pickDefaultProtectionChatId(rows = []) {
   if (firstGroup?.id) return Number(firstGroup.id)
   return null
 }
-const pickerTotalChats = computed(() => Number((chatsList.value || []).length || 0))
-const pickerActiveChats = computed(() =>
-  Number((chatsList.value || []).filter((c) => !c?.locked_by_limit && !!c?.master_anti_spam).length || 0),
-)
 
 function silencePresetLabel(mins) {
   const m = Number(mins)
@@ -1323,8 +1365,8 @@ function onAntispamDbToggleClick() {
 }
 
 function onCopySettingsBarClick() {
-  if (!canUsePremiumForCurrentChat.value && (chatsList.value || []).length > 1) {
-    openPremiumLock('generic')
+  if (premiumFeatureLocked.value) {
+    openPremiumLock('copy_settings')
     return
   }
   doCopySettings()
@@ -4832,13 +4874,14 @@ const protCardIndigo =
       <GuardTeleport guard-to="body">
       <div
         v-if="showChatPicker"
-        class="guard-fullsheet-sheet pointer-events-auto fixed left-0 right-0 top-11 z-[2147483200] flex max-h-none w-full max-w-none flex-col overflow-x-hidden overscroll-none md:top-12"
+        class="guard-fullsheet-sheet pointer-events-auto fixed inset-x-0 bottom-0 top-11 z-[2147483200] flex max-h-none w-full max-w-none flex-col overflow-hidden overscroll-none md:top-12"
         aria-modal="true"
         role="dialog"
         aria-labelledby="protection-chat-picker-title"
+        @touchmove.prevent
       >
         <div
-          class="guard-protection-fullsheet-glass flex min-h-0 w-full flex-1 flex-col border-t border-white/[0.10] pb-0 pt-2 pl-[max(1.25rem,env(safe-area-inset-left))] pr-[max(1.25rem,env(safe-area-inset-right))] text-slate-100 sm:pl-[max(1.5rem,env(safe-area-inset-left))] sm:pr-[max(1.5rem,env(safe-area-inset-right))]"
+          class="guard-protection-fullsheet-glass flex min-h-0 w-full flex-1 flex-col overflow-hidden border-t border-white/[0.10] pb-0 pt-2 pl-[max(1.25rem,env(safe-area-inset-left))] pr-[max(1.25rem,env(safe-area-inset-right))] text-slate-100 sm:pl-[max(1.5rem,env(safe-area-inset-left))] sm:pr-[max(1.5rem,env(safe-area-inset-right))]"
           @click.stop
         >
           <div class="mx-auto mb-2 h-1 w-12 shrink-0 rounded-full bg-white/35 md:hidden" aria-hidden="true" />
@@ -5946,14 +5989,16 @@ const protCardIndigo =
 
       <!-- Перенести настройки (доступно при нескольких чатах / Premium) -->
       <section :class="[protCard, copySectionPremiumClass]">
-        <h2 class="mb-3 text-xs font-medium text-slate-200">{{ tt('protection.ui.copy_settings_title') }} <span v-if="premiumFeatureLocked && (chatsList || []).length > 1" class="text-amber-300">🔒 Premium</span></h2>
+        <h2 class="mb-3 text-xs font-medium text-slate-200">{{ tt('protection.ui.copy_settings_title') }} <span v-if="premiumFeatureLocked" class="text-amber-300">🔒 Premium</span></h2>
         <p class="mb-3 text-xs text-slate-400">
           {{ tt('protection.ui.copy_settings_body') }}
         </p>
         <div class="flex flex-wrap items-center gap-2">
           <select
             v-model="copyTargetId"
-            class="rounded-lg border border-white/15 bg-white/10 px-2.5 py-1.5 text-xs text-slate-100"
+            :disabled="premiumFeatureLocked"
+            class="rounded-lg border border-white/15 bg-white/10 px-2.5 py-1.5 text-xs text-slate-100 disabled:cursor-not-allowed disabled:opacity-55"
+            :class="premiumFeatureLocked ? 'pointer-events-none' : ''"
           >
             <option :value="null">{{ tt('protection.ui.copy_select_placeholder') }}</option>
             <option v-if="copySettingsTargetChats.length > 1" value="__all__">{{ tt('protection.ui.copy_all_chats') }}</option>
@@ -5968,7 +6013,7 @@ const protCardIndigo =
           <button
             type="button"
             class="guard-green-soft rounded-lg px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
-            :disabled="copyLoading || !copyTargetId || (copyTargetId !== '__all__' && String(copyTargetId) === String(chat?.id))"
+            :disabled="copyLoading || (!premiumFeatureLocked && (!copyTargetId || (copyTargetId !== '__all__' && String(copyTargetId) === String(chat?.id))))"
             @click="onCopySettingsBarClick"
           >
             {{ tt('protection.ui.copy_transfer') }}
@@ -6832,10 +6877,10 @@ const protCardIndigo =
       </div>
     </GuardTeleport>
 
-    <GuardTeleport>
+    <GuardTeleport guard-to="body">
       <div
         v-if="showProtectionPinModal"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/75 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] backdrop-blur-md md:items-center md:pb-6"
+        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483646;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/75 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] backdrop-blur-md md:items-center md:pb-6"
         role="dialog"
         aria-modal="true"
         @click.self="cancelProtectionPin"

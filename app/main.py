@@ -70,6 +70,7 @@ from app.db.ensure_defaults import (
     ensure_filter_media_captcha_schema,
     ensure_chat_reputation_schema,
     ensure_rules_post_rules_columns,
+    ensure_rules_auto_approve_join_column,
     ensure_channel_rule_drafts_schema,
     ensure_moderation_logs_detail_column,
     ensure_user_post_rules_drafts_json_column,
@@ -95,6 +96,7 @@ from app.handlers.moderation import router as moderation_router
 from app.handlers.whitelist import router as whitelist_router
 from app.handlers.stopwords import router as stopwords_router
 from app.handlers.join_captcha import router as join_captcha_router
+from app.handlers.join_requests import router as join_requests_router
 
 load_dotenv()
 
@@ -333,6 +335,7 @@ async def on_startup() -> None:
     await ensure_filter_media_captcha_schema(engine)
     await ensure_chat_reputation_schema(engine)
     await ensure_rules_post_rules_columns(engine)
+    await ensure_rules_auto_approve_join_column(engine)
     await ensure_channel_rule_drafts_schema(engine)
     await ensure_moderation_logs_detail_column(engine)
     await ensure_user_post_rules_drafts_json_column(engine)
@@ -436,6 +439,7 @@ async def main() -> None:
     # dp.include_router(first_message_captcha_router)  # капча на паузе
     dp.include_router(log_setup_router)
     dp.include_router(join_captcha_router)
+    dp.include_router(join_requests_router)
     dp.include_router(moderation_router)
     dp.include_router(panel_router)
     dp.include_router(log_actions_router)
@@ -454,12 +458,13 @@ async def main() -> None:
     from app.services.autopost_loop import autopost_loop
 
     asyncio.create_task(reminder_loop(bot, interval_sec=900))
-    asyncio.create_task(autopost_loop(interval_sec=30.0))
+    asyncio.create_task(autopost_loop())
 
     print("😈 AntiSpam Guard запущен / BUILD 777")
 
     try:
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        poll_updates = set(dp.resolve_used_update_types()) | {"message_reaction"}
+        await dp.start_polling(bot, allowed_updates=list(poll_updates))
     finally:
         await bot.session.close()
 

@@ -14,6 +14,7 @@
         class="backdrop-blur-md"
         role="presentation"
         @click.self="lock.closeLock()"
+        @touchmove.prevent
       >
         <div
           class="relative w-full max-w-sm overflow-hidden rounded-[22px] border border-white/[0.12] bg-[#0b0f18]/78 p-5 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.88)] ring-1 ring-white/[0.08] backdrop-blur-2xl backdrop-saturate-150 select-none"
@@ -110,6 +111,7 @@ import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { usePremiumLock } from '../composables/usePremiumLock'
+import { useModalScrollLock } from '../composables/useModalScrollLock'
 import { useToast } from '../composables/useToast'
 import { api as rawApi } from '../api/client'
 import { useDashboardSection } from '../composables/useDashboardSection'
@@ -119,6 +121,8 @@ const router = useRouter()
 const lock = usePremiumLock()
 const toast = useToast()
 const { setDashboardSection } = useDashboardSection()
+
+useModalScrollLock(lock.isOpen)
 
 const trialActivating = ref(false)
 
@@ -135,7 +139,7 @@ async function handleTrialClick() {
     if (res?.already_active) {
       toast.showToast(t('dashboard.trial.already_active_toast'))
     } else {
-      toast.showToast(t('dashboard.trial.activated_toast', { n: Number(res?.trial_remaining_days || 10) }))
+      toast.showToast(t('dashboard.trial.activated_toast', { n: Number(res?.trial_remaining_days || 7) }))
     }
     lock.closeLock()
     // Лёгкий refresh страницы — самый простой способ обновить me и снять блоки.

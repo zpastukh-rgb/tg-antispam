@@ -257,7 +257,7 @@ async def test_rule_and_stopwords(db_session):
     assert "spam" in words
 
 
-# === Premium-триал (10 дней): хелперы =========================================
+# === Premium-триал (7 дней): хелперы =========================================
 
 @pytest.mark.asyncio
 async def test_trial_eligible_fresh_after_first_start(db_session):

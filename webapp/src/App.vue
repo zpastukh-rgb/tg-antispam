@@ -171,7 +171,7 @@ function onSubscriptionBackFromHeader() {
       />
       <AppSidebar :open="sidebarOpen" @close="closeSidebar" />
       <main
-        class="min-h-0 flex-1 scroll-pb-[calc(7.35rem+env(safe-area-inset-bottom,0px))] bg-transparent pb-[calc(7.35rem+env(safe-area-inset-bottom,0px))] md:pb-40 md:pl-64"
+        class="min-h-0 flex-1 scroll-pb-[calc(6.25rem+env(safe-area-inset-bottom,0px))] bg-transparent pb-[calc(6.25rem+env(safe-area-inset-bottom,0px))] md:pb-40 md:pl-64"
         :class="
           lockDashboardAccountViewport
             ? 'overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]'
@@ -201,7 +201,7 @@ function onSubscriptionBackFromHeader() {
         <div
           v-if="routeTransitionOverlayActive"
           class="pointer-events-none fixed left-0 right-0 z-[1200] flex items-center justify-center bg-zinc-950/70 px-4 backdrop-blur-[3px] supports-[backdrop-filter]:bg-zinc-950/55 top-11 md:top-12"
-          style="bottom: calc(7.35rem + env(safe-area-inset-bottom, 0px))"
+          style="bottom: calc(6.25rem + env(safe-area-inset-bottom, 0px))"
           aria-hidden="true"
         >
           <div

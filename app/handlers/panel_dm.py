@@ -5,7 +5,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from urllib.parse import quote_plus
+from urllib.parse import quote
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple, List, Dict
@@ -34,7 +34,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select, or_, func, update
 
 from app.db.session import get_session
-from app.db.models import Chat, Rule, UserContext, StopWord, Payment, CreditLedger
+from app.db.models import Chat, Rule, UserContext, StopWord, Payment, CreditLedger, PromoCode, PromoCodeRedemption
 from app.db.ensure_defaults import DEFAULT_PREMIUM7_PROMO_CODE, DEFAULT_PREMIUM14_PROMO_CODE
 from app.services.group_connect_actor import resolve_guard_connect_actor_for_group, telegram_user_is_chat_creator
 from app.services.user_service import (
@@ -44,12 +44,17 @@ from app.services.user_service import (
     effective_channel_limit,
     effective_group_limit,
     ensure_user_chat_limit_synced_for_tariff,
+    is_trial_eligible,
 )
 from app.api.service import apply_promo_code, count_chat_ids_by_kind, get_activity_summary_chat_ids, get_managed_chats, miniapp_actor_has_global_antispam_access
 from app.services.admin_roles import is_full_admin_user
 from app.services.chat_owner_premium import chat_owner_has_miniapp_premium
 from app.services.user_locale import get_user_language, lang_from_update
-from app.services.referral_partner_dashboard import referral_partner_level_dashboard, referral_partner_ui_max_levels
+from app.services.referral_partner_dashboard import (
+    referral_partner_access_block,
+    referral_partner_level_dashboard,
+    referral_partner_ui_max_levels,
+)
 from app.i18n import t as i18n_t
 from app.texts.guardian_billing import PREMIUM_PLANS
 
@@ -130,8 +135,9 @@ def _cache_clear(user_id: int) -> None:
 # Reply-клавиатура (быстрые действия): подписи на языке пользователя → отдельные хендлеры (не литералы /команд в тексте кнопок).
 #
 
-_DM_QUICK_KB_LAYOUT_VER = 3  # bump: не удалять служебное сообщение — иначе reply-клава пропадает в ряде клиентов
+_DM_QUICK_KB_LAYOUT_VER = 6  # bump: видимый footer вместо \u2063; force_refresh на /start
 _DM_QUICK_KB_APPLIED_VER: Dict[int, int] = {}
+_DM_QUICK_KB_MSG_ID: Dict[int, int] = {}
 
 
 def _quick_reply_kb_label_set(leaf_key: str) -> frozenset[str]:
@@ -146,7 +152,9 @@ _DM_REPLY_LABEL_SUPPORT_TIP = _quick_reply_kb_label_set("quick_support_tip")
 
 def dm_quick_reply_kb_clear(user_id: int) -> None:
     """Разрешить снова прислать reply-клаву (язык/смена раскладки)."""
-    _DM_QUICK_KB_APPLIED_VER.pop(int(user_id), None)
+    uid = int(user_id)
+    _DM_QUICK_KB_APPLIED_VER.pop(uid, None)
+    _DM_QUICK_KB_MSG_ID.pop(uid, None)
 
 
 async def dm_reply_keyboard_removed_send(bot, user_id: int) -> None:
@@ -170,11 +178,12 @@ def reply_kb_dm_quick_commands(lang: str = "ru") -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         one_time_keyboard=False,
         selective=False,
+        is_persistent=True,
     )
 
 
 async def ensure_dm_quick_reply_keyboard(bot, user_id: int, *, silent: bool = True, force_refresh: bool = False) -> None:
-    """Отправить reply-клавиатуру быстрых действий; служебное сообщение не удаляем (см. комментарий ниже)."""
+    """Reply-клава быстрых действий. Служебное сообщение не удаляем — иначе клава пропадает в клиенте."""
     uid = int(user_id)
     if (
         not force_refresh
@@ -183,18 +192,34 @@ async def ensure_dm_quick_reply_keyboard(bot, user_id: int, *, silent: bool = Tr
         return
     try:
         lang = await _user_lang(uid)
+        kb = reply_kb_dm_quick_commands(lang)
+        footer = i18n_t(lang, "panel.reply_kb.footer")
+        old_mid = int(_DM_QUICK_KB_MSG_ID.get(uid) or 0)
+        if old_mid > 0:
+            try:
+                await bot.edit_message_text(
+                    chat_id=uid,
+                    message_id=old_mid,
+                    text=footer,
+                    reply_markup=kb,
+                )
+                _DM_QUICK_KB_APPLIED_VER[uid] = _DM_QUICK_KB_LAYOUT_VER
+                return
+            except Exception:
+                _DM_QUICK_KB_MSG_ID.pop(uid, None)
+
         kwargs = dict(
             chat_id=uid,
-            text="\u2063",
-            reply_markup=reply_kb_dm_quick_commands(lang),
+            text=footer,
+            reply_markup=kb,
         )
         if silent:
             kwargs["disable_notification"] = True
-        await bot.send_message(**kwargs)
+        m = await bot.send_message(**kwargs)
         _DM_QUICK_KB_APPLIED_VER[uid] = _DM_QUICK_KB_LAYOUT_VER
-        # Не удаляем это сообщение: в Telegram Desktop / Web при deleteMessage клавиатура,
-        # заданная этим сообщением, часто пропадает вместе с ним (пустая подложка под полем ввода).
-        # Текст «\u2063» в большинстве клиентов не отображается как заметный пузырь.
+        mid = int(getattr(m, "message_id", 0) or 0)
+        if mid > 0:
+            _DM_QUICK_KB_MSG_ID[uid] = mid
     except Exception:
         logger.debug("ensure_dm_quick_reply_keyboard failed uid=%s", uid, exc_info=True)
 
@@ -568,7 +593,7 @@ async def _edit_panel(bot, user_id: int, text: str, kb: InlineKeyboardMarkup) ->
                     )
                     return
                 except Exception:
-                    pass
+                    _cache_clear(user_id)
 
         m = await bot.send_message(user_id, text, parse_mode="Markdown", reply_markup=kb)
         _cache_set(user_id, m.message_id)
@@ -624,7 +649,6 @@ def _render_referral_partner_breakdown(lang: str, tier_dash: dict, bonus_balance
     lines.append(i18n_t(lang, "panel.referral.partner.network_head"))
     if ml == 1:
         lines.append(i18n_t(lang, "panel.referral.partner.net_l1_solo", n=int(net.get("l1") or 0)))
-        lines.append(i18n_t(lang, "panel.referral.partner.net_total_direct", n=int(net.get("l1") or 0)))
         lines.append("")
         lines.append(i18n_t(lang, "panel.referral.partner.network_levels_premium_hint"))
     else:
@@ -706,7 +730,7 @@ async def _build_referral_screen(bot, tg_user_id: int, from_user) -> tuple[str, 
         return i18n_t(lang, "panel.referral.link_fail"), _kb_back_to_main(lang=lang), None
     ref_link = f"https://t.me/{username}?start=ref_{tg_user_id}"
     share_text = i18n_t(lang, "panel.referral.share_text")
-    share_url = f"https://t.me/share/url?url={quote_plus(ref_link)}&text={quote_plus(share_text)}"
+    share_url = f"https://t.me/share/url?url={quote(ref_link, safe='')}&text={quote(share_text, safe='')}"
 
     async with await get_session() as session:
         user = await get_or_create_user(
@@ -720,29 +744,65 @@ async def _build_referral_screen(bot, tg_user_id: int, from_user) -> tuple[str, 
         aurum_balance = float(getattr(user, "aurum_credits", 0.0) or 0.0)
         bonus_balance = float(getattr(user, "bonus_credits", 0.0) or 0.0)
         tier_dash = await referral_partner_level_dashboard(session, user, int(tg_user_id))
-        sub_until = getattr(user, "subscription_until", None)
         now = datetime.now(timezone.utc)
-        partner_max_lv = referral_partner_ui_max_levels(user, now)
-        days_left = 0
-        if sub_until:
-            if sub_until.tzinfo is None:
-                sub_until = sub_until.replace(tzinfo=timezone.utc)
-            days_left = max(0, (sub_until.date() - now.date()).days)
-        # Берём период из последней успешной оплаты для строки "Доступ".
-        pr = await session.execute(
-            select(Payment.months).where(
-                Payment.user_id == user.id,
-                Payment.status == "succeeded",
-            ).order_by(Payment.created_at.desc()).limit(1)
-        )
-        last_months = pr.scalar_one_or_none()
+        from app.services.chat_owner_premium import user_premium_subscription_snapshot
 
-    access_line = (
-        i18n_t(lang, "panel.referral.access_months", months=last_months)
-        if last_months
-        else i18n_t(lang, "panel.referral.access_none")
-    )
-    active_until = sub_until.strftime("%d.%m.%Y %H:%M") if sub_until else "—"
+        sub_snap = user_premium_subscription_snapshot(user, now)
+        promo_code = None
+        pr_promo = await session.execute(
+            select(PromoCode.code)
+            .join(PromoCodeRedemption, PromoCode.id == PromoCodeRedemption.promo_code_id)
+            .where(PromoCodeRedemption.telegram_user_id == int(tg_user_id))
+            .order_by(PromoCodeRedemption.redeemed_at.desc())
+            .limit(1)
+        )
+        row_promo = pr_promo.scalar_one_or_none()
+        if row_promo:
+            promo_code = str(row_promo or "").strip().upper() or None
+
+        def _access_label(kind: str, *, levels: int) -> str:
+            if kind == "full":
+                return i18n_t(lang, "panel.referral.access_levels_full", levels=int(levels))
+            return i18n_t(lang, "panel.referral.access_levels_free", levels=int(levels))
+
+        def _fmt_dt(dt: datetime | None) -> str:
+            if not dt:
+                return "—"
+            return dt.strftime("%d.%m.%Y %H:%M")
+
+        access_block = referral_partner_access_block(
+            user,
+            now_utc=now,
+            access_label_fn=_access_label,
+            format_dt_fn=_fmt_dt,
+            subscription_snapshot=sub_snap,
+            promo_code=promo_code,
+        )
+        partner_max_lv = int(access_block.get("partner_ui_max_levels") or 1)
+
+    access_line = str(access_block.get("access_label") or "")
+    if access_block.get("subscription_active"):
+        if access_block.get("subscription_forever"):
+            premium_extra = i18n_t(lang, "panel.referral.premium_extra_forever")
+        elif access_block.get("premium_kind") == "promo" and access_block.get("days_left") is not None:
+            premium_extra = i18n_t(
+                lang,
+                "panel.referral.premium_extra_promo",
+                code=str(access_block.get("subscription_promo_code") or "—"),
+                days_left=int(access_block.get("days_left") or 0),
+                active_until=str(access_block.get("active_until") or "—"),
+            )
+        elif access_block.get("days_left") is not None:
+            premium_extra = i18n_t(
+                lang,
+                "panel.referral.premium_extra",
+                days_left=int(access_block.get("days_left") or 0),
+                active_until=str(access_block.get("active_until") or "—"),
+            )
+        else:
+            premium_extra = i18n_t(lang, "panel.referral.premium_extra_active")
+    else:
+        premium_extra = i18n_t(lang, "panel.referral.premium_extra_none")
     aurum_balance_str = str(int(aurum_balance)) if aurum_balance == int(aurum_balance) else f"{aurum_balance:.2f}"
     bonus_balance_str = str(int(bonus_balance)) if bonus_balance == int(bonus_balance) else f"{bonus_balance:.2f}"
     partner_breakdown = _render_referral_partner_breakdown(
@@ -752,8 +812,7 @@ async def _build_referral_screen(bot, tg_user_id: int, from_user) -> tuple[str, 
         lang,
         "panel.referral.body",
         access_line=access_line,
-        days_left=days_left,
-        active_until=active_until,
+        premium_extra=premium_extra,
         aurum=aurum_balance_str,
         bonus=bonus_balance_str,
         partner_breakdown=partner_breakdown,
@@ -1181,6 +1240,8 @@ async def render_main(bot, user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
             aurum=aurum_credits_str,
             bonus=bonus_credits_str,
         )
+        if not is_premium and is_trial_eligible(user):
+            txt += "\n\n" + i18n_t(lang, "panel.main.trial_gift_hint")
         me = await bot.get_me()
         return txt, _kb_main(getattr(me, "username", None), lang=lang)
 
@@ -1559,11 +1620,40 @@ async def render_chat_manage(bot, user_id: int) -> Tuple[str, InlineKeyboardMark
 # SHOW PANEL
 # =========================================================
 
-async def show_panel(bot, user_id: int, *, send_quick_reply_keyboard: bool = True) -> None:
+async def reset_and_show_private_panel(
+    bot,
+    user_id: int,
+    *,
+    cabinet_added_count: int = 0,
+) -> None:
+    """/start и /panel: сброс кэша панели, принудительная выдача reply-клавы (без сброса msg_id — сначала edit)."""
+    uid = int(user_id)
+    _cache_clear(uid)
+    _DM_QUICK_KB_APPLIED_VER.pop(uid, None)
+    await show_panel(
+        bot,
+        uid,
+        send_quick_reply_keyboard=False,
+        cabinet_added_count=int(cabinet_added_count or 0),
+    )
+    await ensure_dm_quick_reply_keyboard(bot, uid, force_refresh=True)
+
+
+async def show_panel(
+    bot,
+    user_id: int,
+    *,
+    send_quick_reply_keyboard: bool = False,
+    cabinet_added_count: int = 0,
+) -> None:
     import logging
     logger = logging.getLogger(__name__)
     try:
         text, kb = await render_main(bot, user_id)
+        n_cab = max(0, int(cabinet_added_count or 0))
+        if n_cab > 0:
+            lang = await _user_lang(int(user_id))
+            text = f"{text}\n\n{i18n_t(lang, 'bot.start.cabinet_added', n=n_cab)}"
         await _edit_panel(bot, user_id, text, kb)
         if send_quick_reply_keyboard:
             await ensure_dm_quick_reply_keyboard(bot, user_id)
@@ -1605,8 +1695,7 @@ async def panel_cmd(message: Message):
         return
     if not message.from_user:
         return
-    _cache_clear(message.from_user.id)
-    await show_panel(message.bot, message.from_user.id)
+    await reset_and_show_private_panel(message.bot, message.from_user.id)
 
 
 # ТЗ: Меню команд Telegram (синяя кнопка) — /group, /groups, /buy, /support
@@ -1990,9 +2079,7 @@ async def cb_guard_lang_set(cb: CallbackQuery):
             pass
     await cb.answer(toast)
     # Обновить подписи reply-клавы + главное сообщение с инлайн после смены языка (иначе остаётся старый текст/клавиатура).
-    dm_quick_reply_kb_clear(user_id)
-    _cache_clear(user_id)
-    await show_panel(cb.bot, user_id)
+    await reset_and_show_private_panel(cb.bot, user_id)
 
 
 @router.message(Command("guard_tip"))
@@ -2009,8 +2096,7 @@ async def dm_reply_quick_open_menu(message: Message):
     """Reply «Главное меню» → то же, что явный перезход к инлайн-панели (/panel без спама литералов в клавиатуре)."""
     if not message.from_user:
         return
-    _cache_clear(message.from_user.id)
-    await show_panel(message.bot, message.from_user.id)
+    await show_panel(message.bot, message.from_user.id, send_quick_reply_keyboard=False)
 
 
 @router.message(F.text.in_(_DM_REPLY_LABEL_CHANGE_LANG), F.chat.type == "private")
@@ -2108,10 +2194,8 @@ async def cb_main(cb: CallbackQuery):
             await cb.message.delete()
         except Exception:
             pass
-        await ensure_dm_quick_reply_keyboard(cb.bot, uid)
         return
     await _edit_or_send(cb, text, kb)
-    await ensure_dm_quick_reply_keyboard(cb.bot, uid)
 
 
 async def _render_protection_screen(bot, user_id: int, chat_id: int) -> tuple[str, InlineKeyboardMarkup]:

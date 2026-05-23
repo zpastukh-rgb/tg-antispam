@@ -418,6 +418,7 @@ class Rule(Base):
     all_captcha_minutes: Mapped[int] = mapped_column(Integer, default=0)
     delete_join_messages: Mapped[bool] = mapped_column(Boolean, default=True)
     delete_left_messages: Mapped[bool] = mapped_column(Boolean, default=True)
+    auto_approve_join_requests: Mapped[bool] = mapped_column(Boolean, default=False)
     silence_minutes: Mapped[int] = mapped_column(Integer, default=0)
     master_anti_spam: Mapped[bool] = mapped_column(Boolean, default=True)
 
@@ -1275,6 +1276,27 @@ class AdminBroadcastRun(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     run_source: Mapped[str | None] = mapped_column(String(16), nullable=True)  # manual | autopost
+    autopost_campaign_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+
+
+class AdminBroadcastSchedule(Base):
+    """Отложенная одноразовая рассылка (не автокампания)."""
+
+    __tablename__ = "admin_broadcast_schedules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    broadcast_id: Mapped[int] = mapped_column(Integer, ForeignKey("admin_broadcasts.id", ondelete="CASCADE"), index=True)
+    admin_telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    target_kind: Mapped[str] = mapped_column(String(16), default="groups")
+    chat_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    timezone_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    keep_draft_after: Mapped[bool] = mapped_column(Boolean, default=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    run_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class AdminBroadcastSentMessage(Base):
@@ -1288,6 +1310,7 @@ class AdminBroadcastSentMessage(Base):
     chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
     message_id: Mapped[int] = mapped_column(BigInteger, index=True)
     target_kind: Mapped[str] = mapped_column(String(16), default="group", index=True)
+    autopost_campaign_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
@@ -1300,6 +1323,7 @@ class AdminBroadcastClick(Base):
     target_id: Mapped[int] = mapped_column(BigInteger, index=True)
     url: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    autopost_campaign_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
 
 class AutopostCampaign(Base):

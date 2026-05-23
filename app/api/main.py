@@ -160,6 +160,7 @@ async def _pii_schema_background() -> None:
 
 async def _run_api_startup_ensures(app: FastAPI) -> None:
     if engine is None:
+        log.error("API DB engine is None — autopost_loop cannot persist state; check DATABASE_URL on zealous-bravery")
         return
     asyncio.create_task(_pii_schema_background())
     try:
@@ -223,18 +224,38 @@ async def _run_api_startup_ensures(app: FastAPI) -> None:
         await ensure_pdf_exports_schema(engine)
     except Exception:
         log.exception("API startup ensures failed")
-    else:
-        # Автопостинг раньше крутился только в процессе бота (app.main). На Railway API и бот часто
-        # раздельные сервисы — без тиков здесь рассылка никогда не стартовала. Нужен BOT_TOKEN для Telegram.
-        if (os.getenv("BOT_TOKEN") or "").strip():
-            from app.services.autopost_loop import autopost_loop
 
-            asyncio.create_task(autopost_loop(interval_sec=30.0))
-            log.info("autopost_loop started from API worker (BOT_TOKEN set; duplicate bot worker uses PG advisory lock)")
-        else:
-            log.warning(
-                "autopost_loop not started on API: BOT_TOKEN unset. Add BOT_TOKEN to this service or rely on bot process (python -m app.main)."
-            )
+
+def _start_autopost_loop_if_configured(app: FastAPI) -> None:
+    """Фоновый тик расписания кампаний. Стартуем сразу при boot API (не после долгих миграций)."""
+    existing = getattr(app.state, "autopost_loop_task", None)
+    if existing is not None and not existing.done():
+        return
+    from app.services.autopost_loop import autopost_loop
+
+    app.state.autopost_loop_task = asyncio.create_task(autopost_loop())
+    has_token = bool((os.getenv("BOT_TOKEN") or "").strip())
+    msg = (
+        f"autopost_loop task scheduled on API worker "
+        f"(interval ~{(os.getenv('AUTOPOST_TICK_SEC') or '10').strip() or '10'}s; bot_token={'yes' if has_token else 'NO'})"
+    )
+    print(msg, flush=True)
+    log.info(msg)
+    if not has_token:
+        log.warning(
+            "autopost_loop: BOT_TOKEN unset on API — тики идут, но отправка в Telegram будет блокироваться. "
+            "Добавьте BOT_TOKEN в сервис zealous-bravery или запустите процесс бота (python -m app.main)."
+        )
+
+
+def _start_scheduled_broadcast_loop_if_configured(app: FastAPI) -> None:
+    existing = getattr(app.state, "scheduled_broadcast_loop_task", None)
+    if existing is not None and not existing.done():
+        return
+    from app.services.scheduled_broadcast_loop import scheduled_broadcast_loop
+
+    app.state.scheduled_broadcast_loop_task = asyncio.create_task(scheduled_broadcast_loop())
+    log.info("scheduled_broadcast_loop task scheduled on API worker")
 
 
 @asynccontextmanager
@@ -243,7 +264,9 @@ async def lifespan(app: FastAPI):
     app.state.api_boot_at = datetime.now(timezone.utc)
     # Раньше api_ready=False до конца долгих миграций → Mini App ловил 503 на /api/me и оставался с нулями на главной.
     app.state.api_ready = True
-    asyncio.create_task(_run_api_startup_ensures(app))
+    _start_autopost_loop_if_configured(app)
+    _start_scheduled_broadcast_loop_if_configured(app)
+    app.state.api_startup_task = asyncio.create_task(_run_api_startup_ensures(app))
     yield
 
 
@@ -353,7 +376,9 @@ async def root():
 @app.get("/api/health")
 async def health():
     """Проверка доступности API (и /health для прокси/Railway)."""
-    return {"status": "ok"}
+    from app.services.autopost_loop import autopost_runtime_status
+
+    return {"status": "ok", "autopost_scheduler": autopost_runtime_status()}
 
 
 app.include_router(debug_webapp_client_log_router)

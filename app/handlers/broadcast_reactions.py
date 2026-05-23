@@ -10,7 +10,7 @@ from aiogram.types import MessageReactionUpdated
 from app.db.session import get_session
 from app.services.broadcast_reactions import (
     added_reaction_keys,
-    lookup_broadcast_id_for_message,
+    lookup_broadcast_meta_for_message,
     record_broadcast_reaction_clicks,
     reactor_target_kind_id,
 )
@@ -37,15 +37,23 @@ async def on_broadcast_message_reaction(event: MessageReactionUpdated) -> None:
     target_kind, target_id = reactor_target_kind_id(event)
 
     async with await get_session() as session:
-        bid = await lookup_broadcast_id_for_message(session, chat_id=chat_id, message_id=message_id)
-        if not bid:
+        meta = await lookup_broadcast_meta_for_message(session, chat_id=chat_id, message_id=message_id)
+        if not meta:
+            logger.debug(
+                "broadcast reaction ignored: no sent_message map chat=%s msg=%s chat_type=%s",
+                chat_id,
+                message_id,
+                getattr(chat, "type", None),
+            )
             return
+        bid, ap_cid = meta
         await record_broadcast_reaction_clicks(
             session,
             broadcast_id=int(bid),
             target_kind=target_kind,
             target_id=target_id,
             reaction_keys=added,
+            autopost_campaign_id=ap_cid,
         )
         await session.commit()
         logger.info(

@@ -9,6 +9,7 @@ import { useToast } from '../composables/useToast'
 import ChannelPostRulesModal from '../components/ChannelPostRulesModal.vue'
 import SecurityPinGateModal from '../components/SecurityPinGateModal.vue'
 import GuardTeleport from '../components/GuardTeleport.vue'
+import GuardAutoApproveJoinSetting from '../components/GuardAutoApproveJoinSetting.vue'
 import PremiumLockBadge from '../components/PremiumLockBadge.vue'
 import { useSecurityPinGate } from '../composables/useSecurityPinGate'
 import { usePremiumLock } from '../composables/usePremiumLock'
@@ -300,6 +301,45 @@ const channelPostRulesOpen = ref(false)
 const channelPostRulesDiscussionId = ref(0)
 const channelPostRulesChannelId = ref(0)
 const channelPostRulesChannelTitle = ref('')
+const autoApproveSavingId = ref(0)
+const autoApproveModalChat = ref(null)
+
+function canManageAutoApprove(chat) {
+  if (!chat || chat.locked_by_limit) return false
+  if (isChannelRow(chat)) return delegatedCan(chat, 'first_post_settings')
+  return delegatedCan(chat, 'protection')
+}
+
+async function toggleAutoApproveJoin(chat, next) {
+  const id = Number(chat?.id || 0)
+  if (!id || !hasInitData.value) return
+  const prev = !!chat.auto_approve_join_requests
+  chat.auto_approve_join_requests = !!next
+  autoApproveSavingId.value = id
+  try {
+    await fetchSilent(() => api.updateRule(id, { auto_approve_join_requests: !!next }))
+  } catch (e) {
+    chat.auto_approve_join_requests = prev
+    showToast(messageFromApiError(e) || t('chats.toasts.auto_approve_failed'))
+  } finally {
+    autoApproveSavingId.value = 0
+  }
+}
+
+function openAutoApproveModal(chat) {
+  if (!canManageAutoApprove(chat)) return
+  autoApproveModalChat.value = chat
+}
+
+function closeAutoApproveModal() {
+  autoApproveModalChat.value = null
+}
+
+function autoApproveButtonClass(chat) {
+  return chat?.auto_approve_join_requests
+    ? 'rounded-lg border border-emerald-400/35 bg-emerald-500/15 px-2 py-1 text-[11px] font-semibold leading-tight text-emerald-100'
+    : 'rounded-lg border border-violet-400/30 bg-violet-900/25 px-2 py-1 text-[11px] font-semibold leading-tight text-violet-200 hover:bg-violet-900/40'
+}
 
 async function openChannelPostRules(chat) {
   if (!chat || chat.locked_by_limit) return
@@ -364,7 +404,8 @@ const chatsInfoModalOpen = computed(
     auditModalOpen.value ||
     addManagerPermsOpen.value ||
     !!removeManagerConfirm.value ||
-    channelPostRulesOpen.value,
+    channelPostRulesOpen.value ||
+    !!autoApproveModalChat.value,
 )
 
 watch(
@@ -1411,6 +1452,12 @@ function openChannelBroadcast(chat) {
                   @click="openChannelPostRules(chat)"
                 >{{ t('chats.actions.settings') }}</button>
                 <button
+                  v-if="canManageAutoApprove(chat)"
+                  type="button"
+                  :class="autoApproveButtonClass(chat)"
+                  @click="openAutoApproveModal(chat)"
+                >{{ t('chats.actions.auto_approve') }}</button>
+                <button
                   v-if="chat.locked_by_limit"
                   type="button"
                   class="inline-flex items-center gap-1 rounded-lg border border-amber-400/40 bg-amber-900/30 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-100"
@@ -1442,6 +1489,12 @@ function openChannelBroadcast(chat) {
                   class="rounded-lg border border-violet-400/35 bg-violet-900/30 px-2 py-1 text-[11px] font-semibold leading-tight text-violet-200"
                   @click="openDelegatedBroadcast(chat.id)"
                 >{{ t('chats.actions.groups_broadcast') }}</button>
+                <button
+                  v-if="canManageAutoApprove(chat)"
+                  type="button"
+                  :class="autoApproveButtonClass(chat)"
+                  @click="openAutoApproveModal(chat)"
+                >{{ t('chats.actions.auto_approve') }}</button>
               </template>
               <button
                 v-if="canOpenManagers(chat)"
@@ -1511,6 +1564,12 @@ function openChannelBroadcast(chat) {
                 class="rounded-lg border border-slate-700/70 bg-zinc-900/75 px-2 py-1 text-[11px] font-semibold leading-tight text-slate-100 hover:bg-zinc-800/80"
                 @click="openChannelPostRules(chat)"
               >{{ t('chats.actions.settings') }}</button>
+              <button
+                v-if="canManageAutoApprove(chat)"
+                type="button"
+                :class="autoApproveButtonClass(chat)"
+                @click="openAutoApproveModal(chat)"
+              >{{ t('chats.actions.auto_approve') }}</button>
               <button
                 v-else
                 type="button"
@@ -1584,6 +1643,12 @@ function openChannelBroadcast(chat) {
                 class="guard-green-soft rounded-lg px-2 py-1 text-[11px] font-semibold leading-tight"
                 @click="goToProtection(chat.id)"
               >{{ t('chats.actions.protection') }} <span v-if="chatSpikeAlert(chat)">⚠</span></button>
+              <button
+                v-if="canManageAutoApprove(chat)"
+                type="button"
+                :class="autoApproveButtonClass(chat)"
+                @click="openAutoApproveModal(chat)"
+              >{{ t('chats.actions.auto_approve') }}</button>
               <button
                 v-else
                 type="button"
@@ -2283,6 +2348,43 @@ function openChannelBroadcast(chat) {
           <span class="font-semibold text-slate-300">{{ t('chats.help_managers.p3_title') }}</span>
           {{ t('chats.help_managers.p3_body') }}
         </p>
+      </div>
+    </div>
+    </GuardTeleport>
+
+    <GuardTeleport>
+    <div
+      v-if="autoApproveModalChat"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px"
+      class="flex items-end justify-center overscroll-none bg-black/70 px-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] pt-[max(12px,calc(env(safe-area-inset-top,0px)+48px))] md:items-center md:pb-6"
+      @click.self="closeAutoApproveModal"
+      @wheel.self.prevent
+      @touchmove.self.prevent
+    >
+      <div
+        class="w-full max-w-md overflow-hidden rounded-2xl border border-violet-400/30 bg-slate-950 shadow-2xl ring-1 ring-white/[0.06]"
+        @click.stop
+      >
+        <div class="flex items-center justify-between border-b border-white/10 px-4 py-3">
+          <div class="min-w-0 pr-3">
+            <p class="truncate text-sm font-semibold text-white">{{ autoApproveModalChat.title }}</p>
+            <p class="text-[10px] uppercase tracking-wide text-violet-300/90">{{ t('chats.auto_approve.modal_subtitle') }}</p>
+          </div>
+          <button
+            type="button"
+            class="shrink-0 rounded-lg px-2 py-1 text-sm text-slate-400 hover:bg-white/10"
+            @click="closeAutoApproveModal"
+          >✕</button>
+        </div>
+        <div class="px-3 py-3">
+          <GuardAutoApproveJoinSetting
+            embedded
+            :enabled="!!autoApproveModalChat.auto_approve_join_requests"
+            :loading="autoApproveSavingId === autoApproveModalChat.id"
+            :variant="isChannelRow(autoApproveModalChat) ? 'channel' : 'group'"
+            @toggle="toggleAutoApproveJoin(autoApproveModalChat, $event)"
+          />
+        </div>
       </div>
     </div>
     </GuardTeleport>

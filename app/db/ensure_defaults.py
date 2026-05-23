@@ -1245,6 +1245,8 @@ async def ensure_admin_broadcasts_schema(engine: AsyncEngine) -> None:
         # migrations/012: источник запуска (manual | autopost)
         "ALTER TABLE admin_broadcast_runs ADD COLUMN IF NOT EXISTS run_source VARCHAR(16)",
         "UPDATE admin_broadcast_runs SET run_source = 'manual' WHERE run_source IS NULL",
+        "ALTER TABLE admin_broadcast_runs ADD COLUMN IF NOT EXISTS autopost_campaign_id INTEGER",
+        "CREATE INDEX IF NOT EXISTS ix_admin_broadcast_runs_autopost_campaign_id ON admin_broadcast_runs (autopost_campaign_id) WHERE autopost_campaign_id IS NOT NULL",
         # migrations/020: аудитория и реальные клики по ссылкам
         "ALTER TABLE admin_broadcast_runs ADD COLUMN IF NOT EXISTS audience_total INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE admin_broadcast_runs ADD COLUMN IF NOT EXISTS audience_ok INTEGER NOT NULL DEFAULT 0",
@@ -1274,6 +1276,30 @@ async def ensure_admin_broadcasts_schema(engine: AsyncEngine) -> None:
         "CREATE INDEX IF NOT EXISTS ix_admin_broadcast_clicks_target_kind ON admin_broadcast_clicks (target_kind)",
         "CREATE INDEX IF NOT EXISTS ix_admin_broadcast_clicks_target_id ON admin_broadcast_clicks (target_id)",
         "CREATE INDEX IF NOT EXISTS ix_admin_broadcast_clicks_created_at ON admin_broadcast_clicks (created_at)",
+        "ALTER TABLE admin_broadcast_clicks ADD COLUMN IF NOT EXISTS autopost_campaign_id INTEGER",
+        "CREATE INDEX IF NOT EXISTS ix_admin_broadcast_clicks_autopost_campaign_id ON admin_broadcast_clicks (autopost_campaign_id) WHERE autopost_campaign_id IS NOT NULL",
+        "ALTER TABLE admin_broadcast_sent_messages ADD COLUMN IF NOT EXISTS autopost_campaign_id INTEGER",
+        "CREATE INDEX IF NOT EXISTS ix_admin_broadcast_sent_messages_autopost_campaign_id ON admin_broadcast_sent_messages (autopost_campaign_id) WHERE autopost_campaign_id IS NOT NULL",
+        """
+        CREATE TABLE IF NOT EXISTS admin_broadcast_schedules (
+            id SERIAL PRIMARY KEY,
+            broadcast_id INTEGER NOT NULL REFERENCES admin_broadcasts(id) ON DELETE CASCADE,
+            admin_telegram_id BIGINT NOT NULL,
+            target_kind VARCHAR(16) NOT NULL DEFAULT 'groups',
+            chat_ids_json TEXT NOT NULL DEFAULT '[]',
+            scheduled_at TIMESTAMPTZ NOT NULL,
+            timezone_name VARCHAR(64),
+            status VARCHAR(16) NOT NULL DEFAULT 'pending',
+            keep_draft_after BOOLEAN NOT NULL DEFAULT TRUE,
+            error_message TEXT,
+            run_id INTEGER,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_admin_broadcast_schedules_admin ON admin_broadcast_schedules (admin_telegram_id)",
+        "CREATE INDEX IF NOT EXISTS ix_admin_broadcast_schedules_status_at ON admin_broadcast_schedules (status, scheduled_at)",
+        "CREATE INDEX IF NOT EXISTS ix_admin_broadcast_schedules_broadcast_id ON admin_broadcast_schedules (broadcast_id)",
     )
     try:
         async with engine.begin() as conn:
@@ -1989,6 +2015,19 @@ async def ensure_chat_reputation_schema(engine: AsyncEngine) -> None:
                 await conn.execute(text(sql))
     except Exception as e:
         log.warning("ensure_chat_reputation_schema table skipped: %s", e)
+
+
+async def ensure_rules_auto_approve_join_column(engine: AsyncEngine) -> None:
+    sql_blocks = (
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS auto_approve_join_requests BOOLEAN DEFAULT FALSE",
+    )
+    try:
+        async with engine.begin() as conn:
+            for sql in sql_blocks:
+                await conn.execute(text(sql))
+        log.info("ensure_rules_auto_approve_join_column: ok")
+    except Exception as e:
+        log.warning("ensure_rules_auto_approve_join_column skipped: %s", e)
 
 
 async def ensure_rules_post_rules_columns(engine: AsyncEngine) -> None:

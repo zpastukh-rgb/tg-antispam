@@ -345,6 +345,20 @@ export const api = {
     if (chatId != null && chatId !== '') q.set('chat_id', String(chatId))
     return api.get(`/api/activity/slot-detail?${q.toString()}`)
   },
+  activityGrowthEvents: (period = 'today', scope = 'all', chatId = null, kind = 'joined', limit = 250) => {
+    const q = new URLSearchParams()
+    q.set('period', String(period || 'today'))
+    q.set('scope', ['all', 'own', 'delegated'].includes(String(scope)) ? String(scope) : 'all')
+    q.set('kind', String(kind || 'joined'))
+    q.set('limit', String(Math.max(1, Math.min(500, Number(limit) || 250))))
+    const cidStr = chatId != null && chatId !== '' ? String(chatId).trim() : ''
+    if (cidStr && /^-?\d+$/.test(cidStr)) q.set('chat_id', cidStr)
+    try {
+      const tz = -new Date().getTimezoneOffset()
+      if (Number.isFinite(tz)) q.set('tz_offset_min', String(tz))
+    } catch (_) {}
+    return api.get(`/api/activity/growth-events?${q.toString()}`)
+  },
   activityAudienceGender: (chatId = null) => {
     const q = new URLSearchParams()
     if (chatId != null && chatId !== '') q.set('chat_id', String(chatId))
@@ -506,6 +520,8 @@ export const api = {
     const tz = encodeURIComponent(String(ianaTz || 'Europe/Moscow').slice(0, 80))
     return api.get(`/api/admin/broadcasts/today-send-runs?tz=${tz}`)
   },
+  adminBroadcastRecentSendEvents: (limit = 80) =>
+    api.get(`/api/admin/broadcasts/recent-send-events?limit=${encodeURIComponent(String(Math.min(120, Math.max(1, Number(limit) || 80))))}`),
   adminBroadcastCreate: (body) => api.post('/api/admin/broadcasts', body),
   adminBroadcastPatch: (id, body) => api.patch(`/api/admin/broadcasts/${id}`, body),
   adminBroadcastDelete: (id) => api.delete(`/api/admin/broadcasts/${id}`),
@@ -515,6 +531,16 @@ export const api = {
       chat_ids: chatIds,
       keep_draft_after: Boolean(opts?.keepDraftAfter || opts?.keep_draft_after),
     }),
+  adminBroadcastSchedule: (id, target = 'users', chatIds = [], opts = {}) =>
+    api.post(`/api/admin/broadcasts/${id}/schedule`, {
+      target,
+      chat_ids: chatIds,
+      scheduled_at: String(opts?.scheduledAt || opts?.scheduled_at || ''),
+      timezone: String(opts?.timezone || opts?.timezone_name || '').slice(0, 64) || undefined,
+      keep_draft_after: Boolean(opts?.keepDraftAfter ?? opts?.keep_draft_after ?? true),
+    }),
+  adminBroadcastScheduleCancel: (scheduleId) =>
+    api.delete(`/api/admin/broadcasts/schedules/${encodeURIComponent(String(scheduleId))}`),
   adminBroadcastQuote: (id, target = 'users', chatIds = []) => api.post(`/api/admin/broadcasts/${id}/quote`, { target, chat_ids: chatIds }),
   adminAutopostCampaigns: () => api.get('/api/admin/autopost-campaigns'),
   adminAutopostCampaignCreate: (body) => api.post('/api/admin/autopost-campaigns', body),

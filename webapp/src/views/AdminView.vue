@@ -29,7 +29,7 @@ import OwnerCabinetProtectionStats from '../components/OwnerCabinetProtectionSta
 import CabinetPremiumTitleBar from '../components/CabinetPremiumTitleBar.vue'
 import SecurityPinGateModal from '../components/SecurityPinGateModal.vue'
 import GuardTeleport from '../components/GuardTeleport.vue'
-import { normalizeHtmlForTelegram, telegramHtmlToEditorInnerHtml } from '../utils/telegramHtmlForTg'
+import { normalizeHtmlForTelegram, sanitizeEditorLinksNoUnderline, telegramHtmlToEditorInnerHtml } from '../utils/telegramHtmlForTg'
 import {
   editorSplitBlockquoteAtCaret,
   editorSoftBreakInsideBlockquote,
@@ -266,6 +266,9 @@ const bcQuickDraftBaseline = ref(null)
 const bcOpeningQuickDraft = ref(false)
 const bcQuickDraftInitializing = ref(false)
 const bcSendTargetModalOpen = ref(false)
+const bcSendTimingModalOpen = ref(false)
+const bcSendTimingMode = ref('now')
+const bcSendScheduleAtLocal = ref('')
 /** Ошибка quote / валидации на шаге «Куда отправить» без нативного alert под стеком модалок */
 const bcSendQuoteError = ref('')
 const bcRecentPulseById = ref({})
@@ -298,6 +301,16 @@ const bcTitle = ref('')
 const bcQuickTitleDirty = computed(
   () => String(bcTitle.value ?? '').trim() !== String(bcQuickTitleBaseline.value ?? '').trim(),
 )
+const bcQuickSaveBtnLabel = computed(() => {
+  if (bcSaving.value) return tt('common.save')
+  if (bcSavedTick.value) return tt('admin.broadcast_ui.btn_saved')
+  return tt('common.save')
+})
+const bcQuickSaveBtnClass = computed(() => {
+  if (bcSaving.value) return 'text-zinc-400'
+  if (bcSavedTick.value) return 'text-emerald-300 shadow-[0_0_14px_-4px_rgba(52,211,153,0.65)]'
+  return 'text-[#70a8ff]'
+})
 const bcBodyHtml = ref('')
 const bcButtonRows = ref([[{ text: '', url: '', web_app_url: '', callback_data: '' }]])
 /** Тип для следующей загрузки файла */
@@ -337,6 +350,7 @@ function bcSetBodyEditorHtml(html) {
   const next = telegramHtmlToEditorInnerHtml(raw)
   for (const el of bcBodyEditors()) {
     el.innerHTML = next || ''
+    sanitizeEditorLinksNoUnderline(el)
   }
 }
 const bcEmojiHostRef = ref(null)
@@ -344,6 +358,7 @@ const bcEmojiOpen = ref(false)
 const bcShowMainHelp = ref(false)
 /** '' | 'keyboard' | 'media' — модалки редактирования кнопок и файла из блока «Оформление» */
 const bcAuxModal = ref('')
+const bcKeyboardInfoOpen = ref(false)
 const bcShowFormatHelp = ref(false)
 const bcShowAutopostHelp = ref(false)
 const BC_DELEGATED_PREF_KEY = 'guard.delegated.broadcast.chat_id'
@@ -367,8 +382,36 @@ const bcCurrentBroadcastIsOneshot = computed(() => {
   return String(row?.cabinet_draft_scope || '') === 'oneshot'
 })
 
-const bcRecentBroadcasts = computed(() =>
-  (broadcasts.value || [])
+const bcRecentSendEvents = ref([])
+const bcRecentListPreset = ref('all')
+
+const bcRecentBroadcasts = computed(() => {
+  const events = bcRecentSendEvents.value || []
+  if (events.length) {
+    return events.map((ev) => ({
+      id: Number(ev.broadcast_id || 0),
+      run_id: Number(ev.run_id || 0),
+      schedule_id: ev.schedule_id ? Number(ev.schedule_id) : null,
+      autopost_campaign_id: ev.autopost_campaign_id ? Number(ev.autopost_campaign_id) : null,
+      campaign_title: String(ev.campaign_title || '').trim(),
+      title: String(ev.broadcast_title || '').trim(),
+      sent_at: ev.sent_at || ev.created_at,
+      scheduled_at: ev.scheduled_at || null,
+      timezone_name: ev.timezone_name || null,
+      schedule_status: String(ev.schedule_status || ''),
+      created_at: ev.created_at,
+      recipient_ok: Number(ev.recipient_ok || 0),
+      recipient_total: Number(ev.recipient_total || 0),
+      recipient_fail: Number(ev.recipient_fail || 0),
+      audience_ok: Number(ev.audience_ok || 0),
+      last_target: String(ev.last_target || ''),
+      status: String(ev.status || 'sent'),
+      list_kind: String(ev.list_kind || ''),
+      run_source: String(ev.run_source || ''),
+      target_kind: String(ev.target_kind || ''),
+    }))
+  }
+  return (broadcasts.value || [])
     .filter((b) => {
       const status = String(b?.status || '').toLowerCase()
       const hasRuns = Number(b?.recipient_total || 0) > 0 || Number(b?.recipient_ok || 0) > 0 || Number(b?.recipient_fail || 0) > 0
@@ -378,18 +421,45 @@ const bcRecentBroadcasts = computed(() =>
       const ta = Date.parse(String(a?.sent_at || a?.created_at || 0)) || 0
       const tb = Date.parse(String(b?.sent_at || b?.created_at || 0)) || 0
       return tb - ta
-    }),
-)
-const bcRecentBroadcastsPreview = computed(() => bcRecentBroadcasts.value.slice(0, 3))
-const bcQuickButtonPreview = computed(() =>
+    })
+})
+const bcRecentBroadcastsFiltered = computed(() => {
+  const src = bcRecentBroadcasts.value || []
+  const preset = String(bcRecentListPreset.value || 'all')
+  if (preset === 'oneshot') {
+    return src.filter((item) => {
+      const lk = String(item?.list_kind || '').toLowerCase()
+      return lk === 'oneshot' || lk === 'oneshot_scheduled'
+    })
+  }
+  if (preset === 'scheduled') {
+    return src.filter((item) => String(item?.list_kind || '').toLowerCase() === 'oneshot_scheduled')
+  }
+  return src
+})
+const bcRecentBroadcastsPreview = computed(() => bcRecentBroadcastsFiltered.value.slice(0, 3))
+const bcQuickButtonPreviewRows = computed(() =>
   (bcButtonRows.value || [])
-    .flatMap((row) => (Array.isArray(row) ? row : []))
-    .map((btn) => ({
-      text: String(btn?.text || '').trim(),
-      url: String(btn?.url || btn?.web_app_url || '').trim(),
-    }))
-    .filter((btn) => btn.text),
+    .map((row) =>
+      (Array.isArray(row) ? row : [])
+        .map((btn) => ({
+          text: String(btn?.text || '').trim(),
+          url: String(btn?.url || btn?.web_app_url || '').trim(),
+          style: String(btn?.style || '').trim().toLowerCase(),
+          kind: String(btn?.kind || 'default').trim().toLowerCase(),
+        }))
+        .filter((btn) => btn.text),
+    )
+    .filter((row) => row.length),
 )
+const bcQuickButtonPreview = computed(() => bcQuickButtonPreviewRows.value.flat())
+const bcKeyboardLayoutActive = computed(() => {
+  const rows = bcQuickButtonPreviewRows.value
+  if (!rows.length) return 'inline'
+  if (rows.length === 1) return 'inline'
+  if (rows.length > 1 && rows.every((r) => r.length === 1)) return 'stacked'
+  return 'custom'
+})
 
 const bcSendTargetSummary = computed(() => {
   const rows = []
@@ -706,7 +776,41 @@ const bcSelectedTargetsCount = computed(
   () => bcActiveSendChannelIds.value.length + bcActiveSendGroupIds.value.length,
 )
 
+function bcDefaultScheduleLocalInput() {
+  const d = new Date(Date.now() + 60 * 60 * 1000)
+  return toLocalInputValue(d)
+}
+
+function bcFormatScheduledAtLabel(raw, tzName) {
+  const s = String(raw || '').trim()
+  if (!s) return tt('admin.broadcast_send.date_unknown')
+  const d = new Date(s)
+  if (!Number.isFinite(d.getTime())) return tt('admin.broadcast_send.date_unknown')
+  const opts = {
+    day: 'numeric',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }
+  const tz = String(tzName || '').trim()
+  try {
+    if (tz) {
+      return new Intl.DateTimeFormat(adminLocaleTag(), { ...opts, timeZone: tz }).format(d)
+    }
+  } catch {
+    //
+  }
+  return d.toLocaleString(adminLocaleTag(), opts)
+}
+
 function bcRecentWhenLabel(item) {
+  const lk = String(item?.list_kind || '').toLowerCase()
+  if (lk === 'oneshot_scheduled' && item?.scheduled_at) {
+    return tt('admin.broadcast_shell.scheduled_for', {
+      when: bcFormatScheduledAtLabel(item.scheduled_at, item.timezone_name),
+    })
+  }
   const raw = String(item?.sent_at || item?.created_at || '').trim()
   if (!raw) return tt('admin.broadcast_send.date_unknown')
   const d = new Date(raw)
@@ -721,6 +825,8 @@ function bcRecentWhenLabel(item) {
 }
 
 function bcRecentStatusLabel(item) {
+  const lk = String(item?.list_kind || '').toLowerCase()
+  if (lk === 'oneshot_scheduled') return tt('admin.broadcast_shell.status_scheduled')
   const st = String(item?.status || '').toLowerCase()
   const sentAt = String(item?.sent_at || '').trim()
   const okN = Number(item?.recipient_ok || 0)
@@ -736,6 +842,8 @@ function bcRecentStatusLabel(item) {
 }
 
 function bcRecentOneShotStatusClass(item) {
+  const lk = String(item?.list_kind || '').toLowerCase()
+  if (lk === 'oneshot_scheduled') return 'text-violet-300 font-medium'
   const st = String(item?.status || '').toLowerCase()
   if (st === 'draft') return 'text-rose-400 font-medium'
   if (st === 'failed') return 'text-rose-300'
@@ -746,12 +854,23 @@ function bcRecentOneShotStatusClass(item) {
 
 function bcRecentBroadcastDisplayTitle(item) {
   if (!item) return ''
-  const camp = bcCampaignForRecentBroadcast(item)
-  if (camp) {
-    const ct = String(camp.title || '').trim()
+  const lk = String(item?.list_kind || '').toLowerCase()
+  const draftTitle = String(item.title || item.broadcast_title || item.run_title || '').trim()
+  const cid = Number(item?.autopost_campaign_id || 0)
+  if (cid > 0 || lk === 'campaign') {
+    const ct = String(item.campaign_title || '').trim()
     if (ct) return ct
+    const camp =
+      (cid > 0 ? (bcAutopostCampaigns.value || []).find((c) => Number(c?.id || 0) === cid) : null) ||
+      bcCampaignForRecentBroadcast(item)
+    if (camp && String(camp.title || '').trim()) return String(camp.title || '').trim()
   }
-  const draftTitle = String(item.title || item.run_title || '').trim()
+  if (lk === 'oneshot' || !bcRecentBroadcastKindIsCampaign(item)) {
+    if (draftTitle) return draftTitle
+    return tt('admin.broadcast_shell.untitled', { id: item.id })
+  }
+  const camp = bcCampaignForRecentBroadcast(item)
+  if (camp && String(camp.title || '').trim()) return String(camp.title || '').trim()
   if (draftTitle) return draftTitle
   return tt('admin.broadcast_shell.untitled', { id: item.id })
 }
@@ -806,6 +925,25 @@ function bcApplyRecentStatsSnapshot(r) {
   }
 }
 
+function bcClearStatsPulseTimers() {
+  for (const t of bcStatsPulseTimers.value || []) {
+    clearTimeout(t)
+  }
+  bcStatsPulseTimers.value = []
+}
+
+function bcPulseBroadcastStats(loadFn, broadcastId, guardFn) {
+  const bid = Number(broadcastId || 0)
+  if (!bid || typeof loadFn !== 'function') return
+  bcClearStatsPulseTimers()
+  bcStatsPulseTimers.value = BC_STATS_PULSE_DELAYS_MS.map((ms) =>
+    window.setTimeout(() => {
+      if (typeof guardFn === 'function' && !guardFn()) return
+      void loadFn(bid, { silent: true })
+    }, ms),
+  )
+}
+
 async function bcLoadRecentBroadcastStats(broadcastId, opts = {}) {
   const bid = Number(broadcastId || 0)
   if (!bid) return
@@ -850,6 +988,19 @@ async function bcOpenRecentBroadcastStats(item) {
   } catch {
     //
   }
+  const cid = Number(item?.autopost_campaign_id || 0)
+  if (cid > 0) {
+    const camp =
+      (bcAutopostCampaigns.value || []).find((c) => Number(c?.id || 0) === cid) ||
+      (item.campaign_title ? { id: cid, title: item.campaign_title, autopost: {} } : null)
+    if (camp) {
+      bcShowAllRecentModal.value = false
+      bcCloseRecentBroadcastStats()
+      tab.value = 'broadcasts'
+      await openBcCampaignUxManage(camp)
+      return
+    }
+  }
   const camp = bcCampaignForRecentBroadcast(item)
   if (camp) {
     bcShowAllRecentModal.value = false
@@ -866,6 +1017,11 @@ async function bcOpenRecentBroadcastStats(item) {
   bcRecentStatsModalOpen.value = true
   bcRecentStatsSnapshot.value = null
   await bcLoadRecentBroadcastStats(id)
+  bcPulseBroadcastStats(
+    bcLoadRecentBroadcastStats,
+    id,
+    () => bcRecentStatsModalOpen.value && Number(bcRecentStatsBroadcastId.value || 0) === id,
+  )
 }
 
 function bcCloseRecentBroadcastStats() {
@@ -873,6 +1029,7 @@ function bcCloseRecentBroadcastStats() {
   bcRecentStatsBroadcastId.value = 0
   bcRecentStatsSnapshot.value = null
   bcRecentStatsBroadcastMeta.value = null
+  bcClearStatsPulseTimers()
 }
 
 function bcRecentStatsGoToBroadcastsTab() {
@@ -975,8 +1132,43 @@ async function openSendTargetModal() {
 async function proceedSendTargetModal() {
   if (!bcCanProceedSendTargets.value) return
   bcSendQuoteError.value = ''
+  bcSendTimingMode.value = 'now'
+  if (!String(bcSendScheduleAtLocal.value || '').trim()) {
+    bcSendScheduleAtLocal.value = bcDefaultScheduleLocalInput()
+  }
+  bcSendTargetModalOpen.value = false
+  bcSendTimingModalOpen.value = true
+}
+
+async function proceedSendTimingModal() {
+  bcSendQuoteError.value = ''
+  if (bcSendTimingMode.value === 'scheduled') {
+    const raw = String(bcSendScheduleAtLocal.value || '').trim()
+    if (!raw) {
+      bcSendQuoteError.value = tt('admin.broadcast_send.schedule_time_required')
+      return
+    }
+    const t = new Date(raw).getTime()
+    if (!Number.isFinite(t) || t < Date.now() + 2 * 60 * 1000) {
+      bcSendQuoteError.value = tt('admin.broadcast_send.schedule_time_too_soon')
+      return
+    }
+  }
+  bcSendTimingModalOpen.value = false
   await openBcConfirmModal()
 }
+
+const bcConfirmSubmitLabel = computed(() => {
+  if (bcConfirmSending.value) return tt('admin.broadcast_ui.sending')
+  if (bcSendTimingMode.value === 'scheduled') return tt('admin.broadcast_ui.schedule')
+  return tt('admin.broadcast_ui.send')
+})
+
+const bcConfirmReadySub = computed(() =>
+  bcSendTimingMode.value === 'scheduled'
+    ? tt('admin.broadcast_ui.ready_sub_scheduled')
+    : tt('admin.broadcast_ui.ready_sub'),
+)
 
 function bcConfirmBuildPayload() {
   const channelIds = [...bcActiveSendChannelIds.value]
@@ -1082,6 +1274,7 @@ async function openBcConfirmModal() {
     const resN = Number(q?.n_groups ?? 0)
     if (need > 0 && q?.can_afford === false) {
       bcSendQuoteError.value = tt('admin.broadcast_send.aurum_short', { need, have: Number(q?.spendable_credits || 0) })
+      bcSendTimingModalOpen.value = true
       return
     }
     if (payload.ids.length && resN < reqN) {
@@ -1089,7 +1282,10 @@ async function openBcConfirmModal() {
         requested: reqN,
         resolved: resN,
       })
-      if (resN <= 0) return
+      if (resN <= 0) {
+        bcSendTimingModalOpen.value = true
+        return
+      }
     } else {
       bcSendQuoteError.value = ''
     }
@@ -1123,10 +1319,10 @@ async function openBcConfirmModal() {
       }
     }
     bcConfirmQuoteTokens.value = need
-    bcSendTargetModalOpen.value = false
     bcConfirmModalOpen.value = true
   } catch (e) {
     bcSendQuoteError.value = String(e?.body?.detail || e?.message || tt('admin.broadcast_send.quote_failed'))
+    bcSendTimingModalOpen.value = true
   } finally {
     bcConfirmLoading.value = false
   }
@@ -1143,11 +1339,30 @@ async function submitBcConfirmedSend() {
   bcConfirmSending.value = true
   try {
     await persistCurrentBroadcast()
-    bcDismissBroadcastSendPrefaceOverlays()
     const sendPayload = bcConfirmBuildPayload()
     if (!sendPayload) {
       throw new Error(tt('admin.broadcast_ui.nothing_selected'))
     }
+    const chatIdsPayload =
+      sendPayload.mode === 'groups' || sendPayload.mode === 'all' ? sendPayload.ids : []
+    if (bcSendTimingMode.value === 'scheduled') {
+      const tz =
+        typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Moscow' : 'Europe/Moscow'
+      await fetch(() =>
+        api.adminBroadcastSchedule(bid, sendPayload.mode, chatIdsPayload, {
+          scheduledAt: new Date(String(bcSendScheduleAtLocal.value || '')).toISOString(),
+          timezone: tz,
+          keepDraftAfter: true,
+        }),
+      )
+      bcDismissBroadcastSendPrefaceOverlays()
+      bcSendTimingModalOpen.value = false
+      await loadRecentSendEvents({ silent: true })
+      await closeQuickBroadcastDraft()
+      alert(tt('admin.broadcast_send.schedule_ok'))
+      return
+    }
+    bcDismissBroadcastSendPrefaceOverlays()
     const sendTargetKind =
       sendPayload.mode === 'users'
         ? 'users'
@@ -1158,8 +1373,6 @@ async function submitBcConfirmedSend() {
             : 'mixed'
     upsertBroadcastInList({ id: bid, status: 'sending' })
     await startBroadcastProgressPolling(bid, sendTargetKind)
-    const chatIdsPayload =
-      sendPayload.mode === 'groups' || sendPayload.mode === 'all' ? sendPayload.ids : []
     await fetch(() =>
       api.adminBroadcastSend(bid, sendPayload.mode, chatIdsPayload, {
         keepDraftAfter: true,
@@ -1172,9 +1385,13 @@ async function submitBcConfirmedSend() {
       //
     }
   } catch (e) {
-    bcSendModalState.value = 'failed'
-    bcSendModalText.value = String(e?.body?.detail || e?.message || tt('admin.broadcast_send.send_failed'))
-    stopBroadcastProgressPolling()
+    if (bcSendTimingMode.value === 'scheduled') {
+      alert(String(e?.body?.detail || e?.message || tt('admin.broadcast_send.schedule_failed')))
+    } else {
+      bcSendModalState.value = 'failed'
+      bcSendModalText.value = String(e?.body?.detail || e?.message || tt('admin.broadcast_send.send_failed'))
+      stopBroadcastProgressPolling()
+    }
   } finally {
     bcConfirmSending.value = false
   }
@@ -2433,6 +2650,10 @@ const bcLastSendTargetByPost = ref({})
 /** Тихое автообновление статистики одноразовой рассылки (bcRecentStatsModalOpen) и экрана «отправлено». */
 const bcStatsPollTimer = ref(null)
 const bcSendResultPollTimer = ref(null)
+/** Быстрые догрузки метрик после отправки / открытия статистики */
+const bcStatsPulseTimers = ref([])
+const BC_STATS_POLL_MS = 1500
+const BC_STATS_PULSE_DELAYS_MS = [0, 600, 1200, 2500, 4500, 7000]
 /** Тихое автообновление списка «последние рассылки» пока открыта вкладка broadcasts. */
 const bcBroadcastsListPollTimer = ref(null)
 /** Тихий опрос статистики в модалке «Статистика рассылки». */
@@ -2571,6 +2792,7 @@ const bcCampaignUxSuccessInfo = ref({ id: 0, nextAt: '' })
 
 const bcCampaignUxScheduleModalOpen = ref(false)
 const bcCampaignUxScheduleCampId = ref(0)
+const bcCampaignUxScheduleSavedSig = ref('')
 const bcCampaignUxScheduleBusy = ref(false)
 const bcCampaignUxScheduleForm = ref({
   scheduleMode: 'every_day',
@@ -2770,6 +2992,8 @@ const bcCampaignUxSelectedSummary = computed(() => {
 })
 /** Лимит AURUM за один слот как в broadcast_charge_tokens на бэке. */
 const BC_AUTOPOST_SLOT_AURUM_CAP = 2500
+/** Согласовано с _AUTOPOST_FIRE_GRACE в autopost_loop.py — слот ещё можно отправить после планового времени. */
+const BC_AUTOPOST_SLOT_FIRE_GRACE_MIN = 15
 const bcCampaignUxEstimatedCost = computed(() => {
   const s = bcCampaignUxSelectedSummary.value
   return Math.max(0, Math.trunc((s.channels || 0) + (s.groups || 0)))
@@ -2827,7 +3051,122 @@ const bcCampaignUxWizardPostsPerDayTotal = computed(() => {
   return Math.max(1, Math.min(288, Math.trunc(Number(w.postsPerDay || 1))))
 })
 const bcCampaignUxWizardSlotTimePreview = computed(() => bcCampaignUxSlotPreviewLines(bcCampaignUxWizard.value))
+const bcCampaignUxWizardSlotEntries = computed(() => {
+  const previews = bcCampaignUxWizardSlotTimePreview.value || []
+  const w = bcCampaignUxWizard.value
+  const tz = String(w.timezone || 'Europe/Moscow')
+  const schedDay = String(w.startDate || '').trim() || bcCampaignUxTodayIsoInTimezone(tz)
+  const markPast = bcCampaignUxShouldMarkPastSlotsSkipped(schedDay, tz)
+  return previews.map((labels) =>
+    (labels || []).map((label) => ({
+      label,
+      status: bcCampaignUxResolveSlotDisplayStatus(label, {
+        scheduleDay: schedDay,
+        tz,
+        sent: null,
+        markPastAsSkipped: markPast,
+      }),
+    })),
+  )
+})
 const bcCampaignUxScheduleModalSlotTimePreview = computed(() => bcCampaignUxSlotPreviewLines(bcCampaignUxScheduleForm.value))
+const bcCampaignUxScheduleModalCamp = computed(() =>
+  bcCampaignUxScheduleCampId.value
+    ? (bcAutopostCampaigns.value || []).find((c) => Number(c?.id || 0) === Number(bcCampaignUxScheduleCampId.value))
+    : null,
+)
+const bcCampaignUxScheduleModalSlotStatusApplicable = computed(() =>
+  bcCampaignUxScheduleFormMatchesSaved(bcCampaignUxScheduleModalCamp.value, bcCampaignUxScheduleForm.value),
+)
+const bcCampaignUxScheduleModalSlotDay = computed(() => {
+  const st = bcCampaignUxScheduleModalCamp.value?.slot_status_today
+  return st?.day ? String(st.day) : ''
+})
+const bcCampaignUxScheduleModalNightDayHint = computed(() => {
+  const form = bcCampaignUxScheduleForm.value
+  const day = bcCampaignUxScheduleModalSlotDay.value
+  if (!day || !form) return ''
+  const rows = form.sendWindows || []
+  const nightSeg = rows.find((r) => bcCampaignUxWindowCrossesMidnight(r.windowStart, r.windowEnd))
+  if (!nightSeg) return ''
+  const tz = String(form.timezone || bcCampaignUxScheduleModalCamp.value?.timezone || 'Europe/Moscow')
+  const today = bcCampaignUxTodayIsoInTimezone(tz)
+  if (!today || today === day) return ''
+  const end = String(nightSeg.windowEnd || form.windowEnd || '05:00').slice(0, 5)
+  return tt('admin.bc_campaign.schedule_night_day_hint', { day, today, end, tz })
+})
+const bcCampaignUxScheduleModalBlockHint = computed(() => {
+  const st = bcCampaignUxScheduleModalCamp.value?.slot_status_today
+  if (!st?.last_block_reason || !bcCampaignUxScheduleModalSlotStatusApplicable.value) return ''
+  const reason = String(st.last_block_reason || '').trim()
+  if (!reason) return ''
+  const extra = st.last_block && typeof st.last_block === 'object' ? st.last_block : {}
+  const next = String(st.next_slot_time || '').trim()
+  const key = `admin.bc_campaign.schedule_block_${reason}`
+  if (te(key)) return tt(key, { next, ...extra })
+  return tt('admin.bc_campaign.schedule_block_unknown', { next, reason })
+})
+const bcCampaignUxScheduleModalStoppedHint = computed(() => {
+  const camp = bcCampaignUxScheduleModalCamp.value
+  if (!camp || !bcCampaignUxScheduleModalSlotStatusApplicable.value) return ''
+  if (bcCampaignRunState(camp) === 'running') return ''
+  return tt('admin.bc_campaign.schedule_not_running_hint')
+})
+const bcCampaignUxScheduleModalSchedulerHint = computed(() => {
+  const camp = bcCampaignUxScheduleModalCamp.value
+  if (!camp || bcCampaignRunState(camp) !== 'running') return ''
+  const sched = camp?.slot_status_today?.scheduler || camp?.autopost_scheduler
+  if (!sched || typeof sched !== 'object') return ''
+  if (sched.bot_token_configured === false) {
+    return tt('admin.bc_campaign.schedule_block_bot_token_missing')
+  }
+  const runningCampaigns = Number(sched.running_campaigns ?? -1)
+  if (runningCampaigns === 0) {
+    return tt('admin.bc_campaign.schedule_not_running_hint')
+  }
+  const ticks = Number(sched.ticks_total || 0)
+  if (ticks <= 0 || sched.loop_alive === false) {
+    return tt('admin.bc_campaign.schedule_scheduler_not_running')
+  }
+  return ''
+})
+const bcCampaignUxScheduleModalSlotEntries = computed(() => {
+  const previews = bcCampaignUxScheduleModalSlotTimePreview.value || []
+  const camp = bcCampaignUxScheduleModalCamp.value
+  const form = bcCampaignUxScheduleForm.value
+  const st = camp?.slot_status_today || null
+  const statusApplicable = bcCampaignUxScheduleModalSlotStatusApplicable.value
+  const campRunning = bcCampaignRunState(camp) === 'running'
+  const { sent, skipped } =
+    statusApplicable && campRunning && st ? bcCampaignUxScheduleStatusTimeSets(st) : { sent: new Set(), skipped: new Set() }
+  const tz = String(form?.timezone || camp?.autopost?.timezone || 'Europe/Moscow')
+  const schedDay = String(st?.day || bcCampaignUxScheduleModalSlotDay.value || form?.startDate || bcCampaignUxTodayIsoInTimezone(tz))
+  const markPast = campRunning && bcCampaignUxShouldMarkPastSlotsSkipped(schedDay, tz)
+  const flatPreview = previews.flat()
+  const backendTimes =
+    statusApplicable && campRunning && Array.isArray(st?.times) && st.times.length === flatPreview.length
+      ? st.times
+      : null
+  let flatIdx = 0
+  return previews.map((labels) =>
+    (labels || []).map((previewLabel) => {
+      const label = backendTimes ? backendTimes[flatIdx++] : previewLabel
+      let status = 'preview'
+      if (statusApplicable && campRunning) {
+        status = bcCampaignUxResolveSlotDisplayStatus(label, {
+          scheduleDay: schedDay,
+          tz,
+          sent,
+          skipped,
+          markPastAsSkipped: markPast,
+        })
+      } else if (statusApplicable) {
+        status = 'pending'
+      }
+      return { label, status }
+    }),
+  )
+})
 const bcCampaignUxWizardReviewTimingPreview = computed(() => {
   const w = bcCampaignUxWizard.value
   return bcCampaignUxScheduleSubtitleFromAutopost({
@@ -2874,29 +3213,46 @@ function bcBroadcastIsAutopostRotationDraft(b) {
 }
 
 function bcCampaignForRecentBroadcast(item) {
+  const cid = Number(item?.autopost_campaign_id || 0)
+  if (cid > 0) {
+    return (bcAutopostCampaigns.value || []).find((c) => Number(c?.id || 0) === cid) || null
+  }
   const bid = Number(item?.id || 0)
   if (!bid) return null
   const camps = bcAutopostCampaigns.value || []
-  const soleUseAll =
-    camps.filter((c) => c?.autopost?.use_all_broadcasts).length === 1
-      ? camps.find((c) => c?.autopost?.use_all_broadcasts) || null
-      : null
+  const matches = []
+  const seen = new Set()
+  const push = (camp) => {
+    const id = Number(camp?.id || 0)
+    if (!id || seen.has(id)) return
+    seen.add(id)
+    matches.push(camp)
+  }
   for (const camp of camps) {
     const ap = camp?.autopost || {}
     const anchor = Number(camp?.anchor_broadcast_id || ap?.anchor_broadcast_id || 0)
-    if (anchor === bid) return camp
+    if (anchor === bid) {
+      push(camp)
+      continue
+    }
     const br = Array.isArray(ap.broadcast_ids) ? ap.broadcast_ids.map((x) => Number(x)) : []
-    if (br.some((x) => x === bid)) return camp
-    if (ap.use_all_broadcasts) {
-      if (String(item?.cabinet_draft_scope || '').toLowerCase() === 'autopost') return camp
-      if (soleUseAll && soleUseAll === camp && bcBroadcastIsAutopostRotationDraft(item)) return camp
+    if (br.some((x) => x === bid)) {
+      push(camp)
+      continue
+    }
+    if (ap.use_all_broadcasts && String(item?.cabinet_draft_scope || '').toLowerCase() === 'autopost') {
+      push(camp)
     }
   }
-  return null
+  return matches.length === 1 ? matches[0] : null
 }
 
 function bcRecentBroadcastKindIsCampaign(item) {
   if (!item) return false
+  const lk = String(item.list_kind || '').toLowerCase()
+  if (lk === 'oneshot' || lk === 'oneshot_scheduled') return false
+  if (Number(item?.autopost_campaign_id || 0) > 0) return true
+  if (lk === 'campaign') return true
   if (String(item.cabinet_draft_scope || '').toLowerCase() === 'oneshot') return false
   if (bcCampaignForRecentBroadcast(item)) return true
   if (String(item.cabinet_draft_scope || '').toLowerCase() === 'autopost') return true
@@ -2905,6 +3261,9 @@ function bcRecentBroadcastKindIsCampaign(item) {
 
 function bcRecentBroadcastKindLabel(item) {
   if (!item) return tt('admin.broadcast_shell.recent_kind_oneshot')
+  if (String(item?.list_kind || '').toLowerCase() === 'oneshot_scheduled') {
+    return tt('admin.broadcast_shell.recent_kind_oneshot_scheduled')
+  }
   if (String(item.cabinet_draft_scope || '').toLowerCase() === 'oneshot')
     return tt('admin.broadcast_shell.recent_kind_oneshot')
   if (bcRecentBroadcastKindIsCampaign(item)) return tt('admin.broadcast_shell.recent_kind_campaign')
@@ -2980,6 +3339,8 @@ async function bcRecentPulseHydrateQuiet() {
   const cap = bcShowAllRecentModal.value ? Math.min(120, src.length) : 12
   const ids = src
     .slice(0, cap)
+    .filter((b) => !Number(b?.autopost_campaign_id || 0))
+    .filter((b) => String(b?.list_kind || '').toLowerCase() !== 'oneshot_scheduled')
     .map((b) => Number(b?.id || 0))
     .filter((x) => x > 0)
   if (!ids.length) return
@@ -3153,6 +3514,76 @@ function bcCampaignUxDayWindowMinuteSpan(ws, we) {
   return { lo, hi }
 }
 
+function bcCampaignUxWindowCrossesMidnight(ws, we) {
+  const lo = bcHmMinutesCampaign(bcParseHmCampaign(String(ws || '09:00').slice(0, 5)))
+  const hi = bcHmMinutesCampaign(bcParseHmCampaign(String(we || '21:00').slice(0, 5)))
+  return hi <= lo
+}
+
+function bcCampaignUxTodayIsoInTimezone(tzName) {
+  const tz = String(tzName || 'Europe/Moscow').trim() || 'Europe/Moscow'
+  try {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
+  } catch {
+    return ''
+  }
+}
+
+function bcCampaignUxAddDaysIso(isoDay, addDays) {
+  const [y, m, d] = String(isoDay || '').split('-').map((x) => parseInt(x, 10))
+  if (!y || !m || !d) return ''
+  const dt = new Date(Date.UTC(y, m - 1, d + Math.trunc(Number(addDays) || 0)))
+  return dt.toISOString().slice(0, 10)
+}
+
+function bcCampaignUxNowHmMinutesInTimezone(tzName) {
+  const tz = String(tzName || 'Europe/Moscow').trim() || 'Europe/Moscow'
+  try {
+    const parts = Object.fromEntries(
+      new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false })
+        .formatToParts(new Date())
+        .filter((p) => p.type !== 'literal')
+        .map((p) => [p.type, p.value]),
+    )
+    return parseInt(parts.hour, 10) * 60 + parseInt(parts.minute, 10)
+  } catch {
+    return 0
+  }
+}
+
+/** День уже начался (сегодня или раньше) — прошлые слоты не планируем. */
+function bcCampaignUxShouldMarkPastSlotsSkipped(scheduleDayIso, tzName) {
+  const day = String(scheduleDayIso || '').trim()
+  const today = bcCampaignUxTodayIsoInTimezone(tzName)
+  if (!day || !today) return false
+  return day <= today
+}
+
+function bcCampaignUxResolveSlotDisplayStatus(label, { scheduleDay, tz, sent, skipped, markPastAsSkipped }) {
+  const keys = bcCampaignUxSlotLabelMatchKeys(label)
+  if (sent && keys.some((k) => sent.has(k))) return 'sent'
+  if (skipped && keys.some((k) => skipped.has(k))) return 'skipped'
+  const schedDay = String(scheduleDay || '').trim()
+  const tzName = String(tz || 'Europe/Moscow')
+  if (markPastAsSkipped && schedDay && bcCampaignUxShouldMarkPastSlotsSkipped(schedDay, tzName)) {
+    if (bcCampaignUxSlotLabelIsPastGrace(label, schedDay, tzName)) return 'skipped'
+  }
+  return 'pending'
+}
+
+/** Слот прошёл и окно отправки (grace) истекло — показываем «пропущено». */
+function bcCampaignUxSlotLabelIsPastGrace(label, scheduleDayIso, tzName, graceMin = BC_AUTOPOST_SLOT_FIRE_GRACE_MIN) {
+  const m = String(label || '').trim().match(/^(\d{1,2}):(\d{2})(?:\s\(\+(\d+)\))?$/)
+  if (!m || !scheduleDayIso) return false
+  const slotDay = bcCampaignUxAddDaysIso(scheduleDayIso, m[3] ? parseInt(m[3], 10) : 0)
+  const today = bcCampaignUxTodayIsoInTimezone(tzName)
+  if (!slotDay || !today) return false
+  if (slotDay < today) return true
+  if (slotDay > today) return false
+  const slotMin = parseInt(m[1], 10) * 60 + parseInt(m[2], 10)
+  return slotMin + graceMin <= bcCampaignUxNowHmMinutesInTimezone(tzName)
+}
+
 function bcClampMinCampaign(m, lo, hi) {
   return Math.min(hi, Math.max(lo, m))
 }
@@ -3183,7 +3614,7 @@ function bcMinToHmLabelCampaign(totalMin) {
   let x = totalMin % (24 * 60)
   if (x < 0) x += 24 * 60
   const hh = Math.floor(x / 60)
-  const mm = Math.round(x % 60)
+  const mm = Math.floor(x % 60)
   const pad = (u) => String(u).padStart(2, '0')
   if (wrap > 0) return `${pad(hh)}:${pad(mm)} (+${wrap})`
   return `${pad(hh)}:${pad(mm)}`
@@ -3264,9 +3695,74 @@ function bcCampaignUxSlotPreviewByOriginalIndex(form) {
   return out
 }
 
+function bcCampaignUxScheduleSegmentsSignature(rows, spread = true) {
+  const norm = (rows || []).map((r) => ({
+    windowStart: String(r.windowStart || '09:00').slice(0, 5),
+    windowEnd: String(r.windowEnd || '21:00').slice(0, 5),
+    posts: Math.max(1, Math.min(288, Math.trunc(Number(r.posts || 1)))),
+  }))
+  return JSON.stringify({ rows: norm, spread: spread !== false })
+}
+
+function bcCampaignUxSlotLabelMatchKeys(label) {
+  const raw = String(label || '').trim()
+  const m = raw.match(/^(\d{1,2}):(\d{2})(?:\s\(\+(\d+)\))?$/)
+  if (!m) return [raw]
+  const hh = String(m[1]).padStart(2, '0')
+  const mm = m[2]
+  const keys = [`${hh}:${mm}`]
+  if (m[3]) keys.push(`${hh}:${mm}+${m[3]}`)
+  return keys
+}
+
+function bcCampaignUxScheduleStatusTimeSets(st) {
+  const sent = new Set()
+  const skipped = new Set()
+  if (!st || typeof st !== 'object') return { sent, skipped, day: '' }
+  const times = Array.isArray(st.times) ? st.times : []
+  const addKeys = (set, idx) => {
+    const t = times[idx]
+    if (!t) return
+    for (const k of bcCampaignUxSlotLabelMatchKeys(t)) set.add(k)
+  }
+  for (const i of st.sent_times || []) {
+    for (const k of bcCampaignUxSlotLabelMatchKeys(i)) sent.add(k)
+  }
+  for (const i of st.skipped_times || []) {
+    for (const k of bcCampaignUxSlotLabelMatchKeys(i)) skipped.add(k)
+  }
+  for (const i of st.sent_indices || []) addKeys(sent, Number(i))
+  for (const i of st.skipped_indices || []) addKeys(skipped, Number(i))
+  return { sent, skipped, day: String(st.day || '') }
+}
+
+function bcCampaignUxScheduleFormMatchesSaved(camp, form) {
+  if (!camp || !form) return false
+  const ap = camp.autopost || {}
+  const savedRows = bcCampaignUxScheduleSegmentsFromAp(ap)
+  const { rows: formRows } = bcCampaignUxNormalizeSendWindowRowsFromInput(form)
+  const savedSig = bcCampaignUxScheduleSegmentsSignature(savedRows, ap?.spreadInWindow !== false)
+  const formSig = bcCampaignUxScheduleSegmentsSignature(formRows, form?.spreadInWindow !== false)
+  return savedSig === formSig
+}
+
 function bcCampaignUxSlotPreviewLines(form) {
   const byIx = bcCampaignUxSlotPreviewByOriginalIndex(form)
   return byIx.map((labels) => labels || [])
+}
+
+function bcCampaignUxScheduleSlotStatusClass(status) {
+  if (status === 'sent') return 'text-emerald-400'
+  if (status === 'skipped') return 'text-rose-400'
+  if (status === 'preview') return 'text-violet-300/90'
+  return 'text-slate-200'
+}
+
+function bcCampaignUxScheduleSlotStatusTitle(status) {
+  if (status === 'sent') return tt('admin.bc_campaign.schedule_slot_sent')
+  if (status === 'skipped') return tt('admin.bc_campaign.schedule_slot_skipped')
+  if (status === 'preview') return tt('admin.bc_campaign.schedule_slot_preview')
+  return tt('admin.bc_campaign.schedule_slot_pending')
 }
 
 async function bcCampaignUxBroadcastsResolvedForCamp(camp) {
@@ -3804,6 +4300,12 @@ async function openBcCampaignUxWizard() {
 function bcOneShotFlowBack() {
   if (bcConfirmModalOpen.value) {
     bcConfirmModalOpen.value = false
+    bcSendTimingModalOpen.value = true
+    return
+  }
+  if (bcSendTimingModalOpen.value) {
+    bcSendTimingModalOpen.value = false
+    bcSendTargetModalOpen.value = true
     return
   }
   if (bcSendTargetModalOpen.value) {
@@ -4225,12 +4727,34 @@ async function bcCampaignUxCreateCampaign() {
   }
 }
 
-function bcCampaignUxOpenScheduleModal(camp) {
+async function bcCampaignUxSuccessStartNow() {
+  const id = Number(bcCampaignUxSuccessInfo.value?.id || bcCampaignUxManageId.value || 0)
+  if (!id) return
+  try {
+    await loadAutopostCampaigns()
+    const camp = (bcAutopostCampaigns.value || []).find((c) => Number(c?.id || 0) === id)
+    if (!camp) return
+    await bcCampaignStartOrResume(camp)
+    bcCampaignUxSuccessInfo.value = { ...bcCampaignUxSuccessInfo.value, needsStart: false }
+    bcCampaignUxManageId.value = id
+    bcCampaignUxScreen.value = 'manage'
+  } catch (e) {
+    window.alert(String(e?.body?.detail || e?.message || tt('admin.autopost.err_save')))
+  }
+}
+
+async function bcCampaignUxOpenScheduleModal(camp) {
   const id = Number(camp?.id || 0)
   if (!id) return
-  const ap = camp?.autopost || {}
+  try {
+    await loadAutopostCampaigns({ silent: true })
+  } catch {
+    /* keep cached camp */
+  }
+  const fresh = (bcAutopostCampaigns.value || []).find((c) => Number(c?.id || 0) === id) || camp
+  const ap = fresh?.autopost || camp?.autopost || {}
   bcCampaignUxScheduleCampId.value = id
-  const apModeRaw = String(ap?.scheduleMode || 'every_day')
+  const apModeRaw = String(ap?.scheduleMode || fresh?.autopost?.scheduleMode || 'every_day')
   const apMode = apModeRaw === 'weekdays' ? 'weekdays' : 'every_day'
   bcCampaignUxScheduleForm.value = {
     scheduleMode: apMode,
@@ -4244,12 +4768,17 @@ function bcCampaignUxOpenScheduleModal(camp) {
     customDays: '',
     sendWindows: bcCampaignUxScheduleSegmentsFromAp(ap),
   }
+  bcCampaignUxScheduleSavedSig.value = bcCampaignUxScheduleSegmentsSignature(
+    bcCampaignUxScheduleForm.value.sendWindows,
+    bcCampaignUxScheduleForm.value.spreadInWindow !== false,
+  )
   bcCampaignUxScheduleModalOpen.value = true
 }
 
 function bcCampaignUxCloseScheduleModal() {
   bcCampaignUxScheduleModalOpen.value = false
   bcCampaignUxScheduleCampId.value = 0
+  bcCampaignUxScheduleSavedSig.value = ''
 }
 
 function bcCampaignUxScheduleSetStartTodayFromTz() {
@@ -5434,6 +5963,7 @@ async function loadBcSendResultStats(broadcastId, opts = {}) {
 
 function closeBcSendModal() {
   stopBroadcastProgressPolling()
+  bcClearStatsPulseTimers()
   bcSendModalOpen.value = false
   bcSendModalState.value = 'sending'
   bcSendModalText.value = ''
@@ -5480,6 +6010,7 @@ function bcDismissBroadcastSendPrefaceOverlays() {
   bcConfirmModalOpen.value = false
   bcConfirmSending.value = false
   bcConfirmLoading.value = false
+  bcSendTimingModalOpen.value = false
   bcSendTargetModalOpen.value = false
   bcShowGroupsPicker.value = false
   bcShowChannelsPicker.value = false
@@ -5557,7 +6088,15 @@ async function startBroadcastProgressPolling(id, target) {
         }
         if (!bcSendModalOpen.value || Number(bcSendModalBroadcastId.value || 0) !== bidSnap) return
         bcSendModalState.value = 'done'
-        await loadBcSendResultStats(bidSnap)
+        await loadBcSendResultStats(bidSnap, { silent: true })
+        bcPulseBroadcastStats(
+          loadBcSendResultStats,
+          bidSnap,
+          () =>
+            bcSendModalOpen.value &&
+            bcSendModalState.value === 'done' &&
+            Number(bcSendModalBroadcastId.value || 0) === bidSnap,
+        )
         return
       }
       if (failedAsDraftWithError) {
@@ -5633,6 +6172,7 @@ async function ensureEmojiPicker() {
 function bcSyncEditorHtml() {
   const el = bcResolveBodyEditor()
   if (!el) return
+  sanitizeEditorLinksNoUnderline(el)
   const htmlFromEditor = String(el.innerHTML || '')
   const normalized = bcNormalizeHtmlForTelegram(htmlFromEditor)
   if (bcEditModalOpen.value && bcEditBodyRef.value && el === bcEditBodyRef.value) {
@@ -5674,6 +6214,7 @@ function bcUndo() {
   const el = bcResolveBodyEditor()
   if (!el) return
   el.innerHTML = String(bcHistory.value[bcHistoryIndex.value] || '')
+  sanitizeEditorLinksNoUnderline(el)
   bcSyncEditorHtml()
   bcSavedTick.value = false
   bcUpdateFormatState()
@@ -5685,6 +6226,7 @@ function bcRedo() {
   const el = bcResolveBodyEditor()
   if (!el) return
   el.innerHTML = String(bcHistory.value[bcHistoryIndex.value] || '')
+  sanitizeEditorLinksNoUnderline(el)
   bcSyncEditorHtml()
   bcSavedTick.value = false
   bcUpdateFormatState()
@@ -5953,13 +6495,37 @@ function bcApplyLinkModal() {
   }
   const el = bcResolveBodyEditor()
   if (!el) return
+  const range = bcLinkRange.value || bcCurrentRange()
+  const selectedText = bcSelectedTextFromRange(range)
+  if (!selectedText.trim()) {
+    bcEditorShowHint(tt('admin.broadcast_editor.select_text_link'))
+    return
+  }
   const sel = window.getSelection?.()
   el.focus()
-  if (bcLinkRange.value && sel) {
+  if (range && sel) {
     sel.removeAllRanges()
-    sel.addRange(bcLinkRange.value)
+    sel.addRange(range)
+    range.deleteContents()
+    const a = document.createElement('a')
+    a.href = href
+    a.textContent = selectedText
+    a.style.textDecoration = 'none'
+    a.style.textDecorationLine = 'none'
+    a.setAttribute('data-bc-link', '1')
+    while (a.parentElement && String(a.parentElement.tagName || '').toLowerCase() === 'u') {
+      const u = a.parentElement
+      u.parentNode?.insertBefore(a, u)
+      if (!String(u.textContent || '').trim()) u.remove()
+    }
+    range.insertNode(a)
+    range.setStartAfter(a)
+    range.collapse(true)
+    sel.removeAllRanges()
+    sel.addRange(range)
+    bcSavedRange.value = range.cloneRange()
   }
-  document.execCommand('createLink', false, href)
+  sanitizeEditorLinksNoUnderline(el)
   bcSyncEditorHtml()
   bcRecordHistory()
   bcSavedTick.value = false
@@ -5969,7 +6535,9 @@ function bcApplyLinkModal() {
 }
 
 function onBcEditInput(ev) {
-  bcEditBodyHtml.value = bcNormalizeHtmlForTelegram(String(ev?.target?.innerHTML || ''))
+  const el = ev?.target
+  if (el instanceof HTMLElement) sanitizeEditorLinksNoUnderline(el)
+  bcEditBodyHtml.value = bcNormalizeHtmlForTelegram(String(el?.innerHTML || ''))
 }
 
 function onBcEmojiClick(ev) {
@@ -5983,10 +6551,15 @@ function onBcEmojiClick(ev) {
 }
 
 function onBcEditorInput(ev) {
-  bcBodyHtml.value = bcNormalizeHtmlForTelegram(String(ev?.target?.innerHTML || ''))
+  const el = ev?.target
+  if (el instanceof HTMLElement) sanitizeEditorLinksNoUnderline(el)
+  bcBodyHtml.value = bcNormalizeHtmlForTelegram(String(el?.innerHTML || ''))
   bcSavedTick.value = false
   bcRecordHistory()
   bcSaveLocalSnapshot()
+  nextTick(() => {
+    if (el instanceof HTMLElement) sanitizeEditorLinksNoUnderline(el)
+  })
 }
 
 /** Вставка из буфера: берём plain text и кладём в редактор как текст + &lt;br&gt;, без «слоя» Chrome div/br, которые дают лишние пустые строки. */
@@ -7000,20 +7573,163 @@ async function createAdminBindingProbe(mode = 'live') {
   }
 }
 
+const BC_TME_HOSTS = new Set(['t.me', 'telegram.me', 'telegram.dog'])
+
+function bcNormalizeTelegramUsername(raw) {
+  let s = String(raw || '').trim()
+  if (!s) return ''
+  s = s.replace(/^https?:\/\//i, '')
+  s = s.replace(/^(t\.me|telegram\.me|telegram\.dog)\//i, '')
+  s = s.replace(/^@+/, '')
+  s = s.split(/[/?#]/)[0]
+  return s.trim()
+}
+
+function bcParsePrefilledDmUrl(url) {
+  const raw = String(url || '').trim()
+  if (!raw) return null
+  try {
+    const withProto = /^https?:\/\//i.test(raw) ? raw : `https://${raw.replace(/^\/\//, '')}`
+    const u = new URL(withProto)
+    const host = u.hostname.toLowerCase().replace(/^www\./, '')
+    if (!BC_TME_HOSTS.has(host)) return null
+    const username = bcNormalizeTelegramUsername(u.pathname)
+    if (!username || username === 'share') return null
+    const prefill = u.searchParams.get('text')
+    if (prefill == null || prefill === '') return null
+    return { dm_username: username, dm_prefill_text: prefill }
+  } catch {
+    return null
+  }
+}
+
+function bcBuildPrefilledDmUrl(username, prefillText) {
+  const user = bcNormalizeTelegramUsername(username)
+  const body = String(prefillText || '').trim()
+  if (!user || !body) return ''
+  return `https://t.me/${user}?text=${encodeURIComponent(body)}`
+}
+
 function bcEmptyButton() {
-  return { text: '', url: '', web_app_url: '', callback_data: '' }
+  return {
+    kind: 'default',
+    text: '',
+    url: '',
+    web_app_url: '',
+    callback_data: '',
+    style: '',
+    non_member_text: '',
+    member_text: '',
+    dm_username: '',
+    dm_prefill_text: '',
+  }
+}
+
+function bcEmptyHiddenContinuationButton() {
+  return {
+    kind: 'hidden_continuation',
+    text: '',
+    url: '',
+    web_app_url: '',
+    callback_data: '',
+    style: '',
+    non_member_text: '',
+    member_text: '',
+    dm_username: '',
+    dm_prefill_text: '',
+  }
+}
+
+function bcEmptyPrefilledDmButton() {
+  return {
+    kind: 'prefilled_dm',
+    text: '',
+    url: '',
+    web_app_url: '',
+    callback_data: '',
+    style: '',
+    non_member_text: '',
+    member_text: '',
+    dm_username: '',
+    dm_prefill_text: '',
+  }
+}
+
+const BC_BUTTON_STYLE_OPTIONS = [
+  { id: '', labelKey: 'admin.broadcast_ui.btn_style_default' },
+  { id: 'primary', labelKey: 'admin.broadcast_ui.btn_style_primary' },
+  { id: 'success', labelKey: 'admin.broadcast_ui.btn_style_success' },
+  { id: 'danger', labelKey: 'admin.broadcast_ui.btn_style_danger' },
+]
+
+function bcButtonStylePreviewClass(style) {
+  const s = String(style || '').trim().toLowerCase()
+  if (s === 'primary') return 'bg-sky-500 ring-1 ring-sky-300/45'
+  if (s === 'success') return 'bg-emerald-500 ring-1 ring-emerald-300/45'
+  if (s === 'danger') return 'bg-rose-500 ring-1 ring-rose-300/45'
+  return 'bg-slate-500 ring-1 ring-white/25'
+}
+
+function bcButtonStyleChipClass(style, kind = 'default') {
+  const s = String(style || '').trim().toLowerCase()
+  const k = String(kind || 'default').trim().toLowerCase()
+  const layout = 'rounded-lg border px-2.5 py-1.5 text-center font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]'
+  if (s === 'primary') return `${layout} border-sky-400/55 bg-sky-600 text-white`
+  if (s === 'success') return `${layout} border-emerald-400/55 bg-emerald-600 text-white`
+  if (s === 'danger') return `${layout} border-rose-400/55 bg-rose-600 text-white`
+  if (k === 'hidden_continuation') return `${layout} border-cyan-400/40 bg-cyan-950/75 text-cyan-100`
+  if (k === 'prefilled_dm') return `${layout} border-sky-400/40 bg-sky-950/75 text-sky-100`
+  return `${layout} border-white/12 bg-slate-700/90 text-slate-100`
 }
 
 function bcKeyboardRowsFromApi(kbd) {
   const rows = kbd?.rows
   if (!rows?.length) return [[bcEmptyButton()]]
   return rows.map((row) =>
-    row.map((b) => ({
-      text: b.text || '',
-      url: b.url || '',
-      web_app_url: b.web_app?.url || '',
-      callback_data: b.callback_data || '',
-    })),
+    row.map((b) => {
+      const hc = b?.hidden_continuation
+      if (hc && (hc.non_member_text || hc.member_text)) {
+        return {
+          kind: 'hidden_continuation',
+          text: b.text || '',
+          url: '',
+          web_app_url: '',
+          callback_data: '',
+          style: b.style || '',
+          non_member_text: hc.non_member_text || '',
+          member_text: hc.member_text || '',
+          dm_username: '',
+          dm_prefill_text: '',
+        }
+      }
+      const parsedDm = b.url ? bcParsePrefilledDmUrl(b.url) : null
+      if (parsedDm) {
+        return {
+          kind: 'prefilled_dm',
+          text: b.text || '',
+          url: '',
+          web_app_url: '',
+          callback_data: '',
+          style: b.style || '',
+          non_member_text: '',
+          member_text: '',
+          dm_username: parsedDm.dm_username,
+          dm_prefill_text: parsedDm.dm_prefill_text,
+        }
+      }
+      return {
+        kind: 'default',
+        text: b.text || '',
+        url: b.url || '',
+        web_app_url: b.web_app?.url || '',
+        callback_data: b.callback_data || '',
+        style: b.style || '',
+        non_member_text: '',
+        member_text: '',
+        dm_username: '',
+        dm_prefill_text: '',
+      }
+    }),
   )
 }
 
@@ -7024,12 +7740,35 @@ function bcBuildKeyboardPayload() {
     for (const b of row) {
       const text = String(b.text || '').trim()
       if (!text) continue
-      const url = String(b.url || '').trim()
-      const wu = String(b.web_app_url || '').trim()
-      const cb = String(b.callback_data || '').trim()
-      if (url) line.push({ text, url })
-      else if (wu) line.push({ text, web_app_url: wu })
-      else if (cb) line.push({ text, callback_data: cb })
+      const style = String(b.style || '').trim().toLowerCase()
+      const kind = String(b.kind || 'default').trim()
+      let item = null
+      if (kind === 'hidden_continuation') {
+        const nonMember = String(b.non_member_text || '').trim()
+        const member = String(b.member_text || '').trim()
+        if (!nonMember && !member) continue
+        item = {
+          text,
+          hidden_continuation: {
+            non_member_text: nonMember,
+            member_text: member,
+          },
+        }
+      } else if (kind === 'prefilled_dm') {
+        const url = bcBuildPrefilledDmUrl(b.dm_username, b.dm_prefill_text)
+        if (!url) continue
+        item = { text, url }
+      } else {
+        const url = String(b.url || '').trim()
+        const wu = String(b.web_app_url || '').trim()
+        const cb = String(b.callback_data || '').trim()
+        if (url) item = { text, url }
+        else if (wu) item = { text, web_app_url: wu }
+        else if (cb) item = { text, callback_data: cb }
+      }
+      if (!item) continue
+      if (['primary', 'success', 'danger'].includes(style)) item.style = style
+      line.push(item)
     }
     if (line.length) out.push(line)
   }
@@ -7120,6 +7859,18 @@ async function setBcBroadcastDraftListScope(scope) {
   await loadBroadcasts()
 }
 
+async function loadRecentSendEvents(opts = {}) {
+  const silent = Boolean(opts?.silent)
+  try {
+    const r = silent
+      ? await fetchSilent(() => api.adminBroadcastRecentSendEvents(80))
+      : await fetch(() => api.adminBroadcastRecentSendEvents(80))
+    bcRecentSendEvents.value = Array.isArray(r?.items) ? r.items : []
+  } catch {
+    if (!silent) bcRecentSendEvents.value = []
+  }
+}
+
 async function loadBroadcasts(opts = {}) {
   const silent = Boolean(opts?.silent)
   if (!silent) bcLoading.value = true
@@ -7128,6 +7879,7 @@ async function loadBroadcasts(opts = {}) {
       bcBroadcastDraftListScope.value === 'all' && bcBroadcastCanScopeAll.value ? 'all' : 'mine'
     const r = await fetch(() => api.adminBroadcasts(listScope))
     broadcasts.value = r?.items || []
+    await loadRecentSendEvents({ silent: true })
     if (r?.scope === 'mine' && bcBroadcastDraftListScope.value === 'all') {
       bcBroadcastDraftListScope.value = 'mine'
     }
@@ -7272,6 +8024,14 @@ async function saveBcDraft() {
     bcSaving.value = false
   }
   return ok
+}
+
+async function saveBcAuxKeyboardModal() {
+  if (bcSelectedId.value) {
+    const ok = await saveBcDraft()
+    if (!ok) return
+  }
+  bcAuxModal.value = ''
 }
 
 function bcQuickDraftHasPendingChanges() {
@@ -7871,6 +8631,39 @@ function addBcButton(rowIdx) {
   bcButtonRows.value[rowIdx].push(bcEmptyButton())
 }
 
+function addBcHiddenContinuationButton(rowIdx) {
+  bcButtonRows.value[rowIdx].push(bcEmptyHiddenContinuationButton())
+}
+
+function addBcPrefilledDmButton(rowIdx) {
+  bcButtonRows.value[rowIdx].push(bcEmptyPrefilledDmButton())
+}
+
+function bcFlattenFilledButtons() {
+  const out = []
+  for (const row of bcButtonRows.value || []) {
+    for (const b of row || []) {
+      if (!String(b?.text || '').trim()) continue
+      out.push({ ...b })
+    }
+  }
+  return out
+}
+
+/** Все кнопки в одну строку под постом (как три «Жми» в ряд). */
+function bcApplyKeyboardLayoutInline() {
+  const flat = bcFlattenFilledButtons()
+  bcButtonRows.value = flat.length ? [flat] : [[bcEmptyButton()]]
+  bcSavedTick.value = false
+}
+
+/** Каждая кнопка — отдельный ряд (друг под другом на всю ширину). */
+function bcApplyKeyboardLayoutStacked() {
+  const flat = bcFlattenFilledButtons()
+  bcButtonRows.value = flat.length ? flat.map((b) => [b]) : [[bcEmptyButton()]]
+  bcSavedTick.value = false
+}
+
 function removeBcButton(rowIdx, btnIdx) {
   const row = bcButtonRows.value[rowIdx]
   row.splice(btnIdx, 1)
@@ -8049,6 +8842,7 @@ watch(
 watch(
   () => bcAuxModal.value,
   (v) => {
+    if (v !== 'keyboard') bcKeyboardInfoOpen.value = false
     if (v === 'media') loadBcMediaThumbnails()
   },
 )
@@ -8273,6 +9067,7 @@ watch(
     bcShowAllRecentModal.value ||
     bcRecentStatsModalOpen.value ||
     bcSendTargetModalOpen.value ||
+    bcSendTimingModalOpen.value ||
     bcSendModalOpen.value ||
     bcConfirmModalOpen.value ||
     showUserInfoModal.value ||
@@ -8325,7 +9120,7 @@ watch(
     if (!open || !Number(bid || 0)) return
     bcStatsPollTimer.value = window.setInterval(() => {
       void bcLoadRecentBroadcastStats(Number(bid), { silent: true })
-    }, 3000)
+    }, BC_STATS_POLL_MS)
   },
 )
 
@@ -8339,7 +9134,7 @@ watch(
     if (!open || st !== 'done' || !Number(bid || 0)) return
     bcSendResultPollTimer.value = window.setInterval(() => {
       void loadBcSendResultStats(Number(bid), { silent: true })
-    }, 3000)
+    }, BC_STATS_POLL_MS)
   },
 )
 
@@ -9762,17 +10557,44 @@ watch(
             <button
               type="button"
               class="text-[14px] font-bold text-[#59a6ff] transition hover:text-[#7cbcff]"
-              :disabled="!bcRecentBroadcasts.length"
+              :disabled="!bcRecentBroadcastsFiltered.length"
               @click="bcShowAllRecentModal = true"
             >
               {{ tt('admin.broadcast_shell.view_all') }}
             </button>
           </div>
 
+          <div class="mt-2 flex flex-wrap gap-1.5">
+            <button
+              type="button"
+              class="rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition"
+              :class="bcRecentListPreset === 'all' ? 'border-sky-400/45 bg-sky-500/15 text-sky-100' : 'border-white/10 bg-white/[0.03] text-zinc-400'"
+              @click="bcRecentListPreset = 'all'"
+            >
+              {{ tt('admin.broadcast_shell.recent_preset_all') }}
+            </button>
+            <button
+              type="button"
+              class="rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition"
+              :class="bcRecentListPreset === 'oneshot' ? 'border-sky-400/45 bg-sky-500/15 text-sky-100' : 'border-white/10 bg-white/[0.03] text-zinc-400'"
+              @click="bcRecentListPreset = 'oneshot'"
+            >
+              {{ tt('admin.broadcast_shell.recent_preset_oneshot') }}
+            </button>
+            <button
+              type="button"
+              class="rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition"
+              :class="bcRecentListPreset === 'scheduled' ? 'border-violet-400/45 bg-violet-500/15 text-violet-100' : 'border-white/10 bg-white/[0.03] text-zinc-400'"
+              @click="bcRecentListPreset = 'scheduled'"
+            >
+              {{ tt('admin.broadcast_shell.recent_preset_scheduled') }}
+            </button>
+          </div>
+
           <div class="mt-2 space-y-2">
             <div
               v-for="item in bcRecentBroadcastsPreview"
-              :key="`recent-bc-${item.id}`"
+              :key="`recent-bc-${item.schedule_id || item.run_id || item.autopost_campaign_id || item.id}-${item.scheduled_at || item.sent_at || ''}`"
               role="button"
               tabindex="0"
               class="cursor-pointer rounded-xl border border-white/[0.07] bg-[#111827]/88 px-3 py-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] ring-1 ring-white/[0.03] transition hover:border-white/[0.12] hover:bg-[#151d2e]/90"
@@ -9840,8 +10662,26 @@ watch(
               </div>
             </div>
             <div class="flex items-center gap-1">
-              <button type="button" class="rounded-lg px-2 py-1 text-[13px] font-bold text-[#70a8ff] hover:bg-white/10" :disabled="bcSaving" @click="saveBcDraft">
-                {{ tt('common.save') }}
+              <button
+                type="button"
+                class="rounded-lg px-2 py-1 text-[13px] font-bold transition hover:bg-white/10 disabled:cursor-wait disabled:opacity-70"
+                :class="bcQuickSaveBtnClass"
+                :disabled="bcSaving"
+                :aria-busy="bcSaving"
+                @click="saveBcDraft"
+              >
+                <span class="relative inline-flex min-w-[5.25rem] items-center justify-center">
+                  <span
+                    v-if="bcSaving"
+                    class="absolute inset-0 flex items-center justify-center"
+                    aria-hidden="true"
+                  >
+                    <span
+                      class="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current/20 border-t-current"
+                    />
+                  </span>
+                  <span :class="bcSaving ? 'opacity-0' : ''">{{ bcQuickSaveBtnLabel }}</span>
+                </span>
               </button>
               <button
                 type="button"
@@ -9888,14 +10728,20 @@ watch(
 
           <div class="mt-3">
             <p class="text-[12px] font-semibold text-zinc-300">{{ tt('admin.broadcast_ui.buttons_block') }}</p>
-            <div v-if="bcQuickButtonPreview.length" class="mt-1.5 space-y-1.5">
+            <div v-if="bcQuickButtonPreviewRows.length" class="mt-1.5 space-y-1">
               <div
-                v-for="(btn, bi) in bcQuickButtonPreview.slice(0, 3)"
-                :key="`quick-bbtn-${bi}-${btn.text}`"
-                class="rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-1.5"
+                v-for="(row, ri) in bcQuickButtonPreviewRows.slice(0, 4)"
+                :key="`quick-brow-${ri}`"
+                class="flex flex-wrap gap-1"
               >
-                <p class="truncate text-[12px] font-semibold text-zinc-100">{{ btn.text }}</p>
-                <p v-if="btn.url" class="truncate text-[11px] text-zinc-400">{{ btn.url }}</p>
+                <div
+                  v-for="(btn, bi) in row"
+                  :key="`quick-bbtn-${ri}-${bi}-${btn.text}`"
+                  class="min-w-0 flex-1"
+                  :class="[bcButtonStyleChipClass(btn.style, btn.kind), row.length === 1 ? 'basis-full' : 'basis-[calc(50%-0.125rem)]']"
+                >
+                  <p class="truncate text-[12px]">{{ btn.text }}</p>
+                </div>
               </div>
             </div>
             <button type="button" class="bc-tool-btn mt-1.5 !text-[12px]" @click="bcAuxModal = 'keyboard'">{{ tt('admin.broadcast_ui.add_post_buttons') }}</button>
@@ -10047,6 +10893,76 @@ watch(
         </div>
       </GuardTeleport>
 
+      <GuardTeleport guard-to="body">
+        <div
+          v-if="bcSendTimingModalOpen"
+          class="fixed inset-0 z-[95250] flex min-h-[100dvh] min-w-0 flex-col bg-[#0b0d14] pb-[env(safe-area-inset-bottom,0px)] pt-[max(0.25rem,calc(env(safe-area-inset-top,0px)+48px))]"
+          @click.self="bcSendTimingModalOpen = false"
+        >
+          <div class="flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-2">
+            <div class="flex flex-col rounded-2xl border border-white/[0.04] bg-[#12161f] p-3 text-zinc-100 shadow-[0_24px_72px_-28px_rgba(0,0,0,0.9)] ring-1 ring-white/[0.02]">
+              <div class="flex items-center justify-between gap-2">
+                <div class="flex min-w-0 items-center gap-1">
+                  <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-transparent text-[14px] text-white/90 hover:bg-white/[0.08]" @click="bcOneShotFlowBack">←</button>
+                  <p class="truncate text-[19px] font-black text-white">{{ tt('admin.broadcast_ui.timing_title') }}</p>
+                </div>
+                <button type="button" class="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-transparent text-[14px] text-white/90 hover:bg-white/[0.08]" @click="bcSendTimingModalOpen = false">✕</button>
+              </div>
+              <p class="mt-2 text-[13px] text-zinc-400">{{ tt('admin.broadcast_ui.timing_sub') }}</p>
+
+              <div class="mt-4 space-y-2.5">
+                <button
+                  type="button"
+                  class="flex w-full items-center justify-between gap-3 rounded-xl bg-white/[0.035] px-3 py-2.5 text-left"
+                  @click="bcSendTimingMode = 'now'"
+                >
+                  <span class="min-w-0">
+                    <span class="block text-[18px] font-extrabold text-white">{{ tt('admin.broadcast_ui.timing_now') }}</span>
+                    <span class="block text-[12px] text-slate-200/90">{{ tt('admin.broadcast_ui.timing_now_sub') }}</span>
+                  </span>
+                  <span class="inline-flex h-6 w-6 items-center justify-center rounded-md border text-[14px] font-black" :class="bcSendTimingMode === 'now' ? 'border-violet-300/55 bg-violet-600/85 text-white' : 'border-white/35 bg-transparent text-transparent'">✓</span>
+                </button>
+
+                <button
+                  type="button"
+                  class="flex w-full items-center justify-between gap-3 rounded-xl bg-white/[0.035] px-3 py-2.5 text-left"
+                  @click="bcSendTimingMode = 'scheduled'"
+                >
+                  <span class="min-w-0">
+                    <span class="block text-[18px] font-extrabold text-white">{{ tt('admin.broadcast_ui.timing_scheduled') }}</span>
+                    <span class="block text-[12px] text-slate-200/90">{{ tt('admin.broadcast_ui.timing_scheduled_sub') }}</span>
+                  </span>
+                  <span class="inline-flex h-6 w-6 items-center justify-center rounded-md border text-[14px] font-black" :class="bcSendTimingMode === 'scheduled' ? 'border-violet-300/55 bg-violet-600/85 text-white' : 'border-white/35 bg-transparent text-transparent'">✓</span>
+                </button>
+              </div>
+
+              <div v-if="bcSendTimingMode === 'scheduled'" class="mt-4">
+                <label class="text-[13px] font-semibold text-zinc-300">{{ tt('admin.broadcast_ui.timing_datetime_label') }}</label>
+                <input
+                  v-model="bcSendScheduleAtLocal"
+                  type="datetime-local"
+                  class="mt-1.5 w-full rounded-xl border border-white/10 bg-zinc-950/80 px-3 py-2 text-[14px] text-zinc-100"
+                />
+              </div>
+
+              <div v-if="bcSendQuoteError" class="mt-3 rounded-xl border border-rose-500/35 bg-rose-950/40 px-3 py-2 text-[12px] leading-snug text-rose-50">
+                {{ bcSendQuoteError }}
+              </div>
+
+              <button
+                type="button"
+                class="mt-4 w-full rounded-xl border border-indigo-400/40 bg-gradient-to-r from-indigo-600/95 to-blue-700/95 px-4 py-2 text-[13px] font-extrabold text-white shadow-[0_14px_30px_-16px_rgba(59,130,246,0.8)]"
+                :class="bcConfirmLoading ? 'cursor-not-allowed opacity-45' : ''"
+                :disabled="bcConfirmLoading"
+                @click="proceedSendTimingModal()"
+              >
+                {{ tt('common.next') }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </GuardTeleport>
+
       <GuardTeleport>
       <div
         v-if="bcConfirmModalOpen"
@@ -10070,10 +10986,14 @@ watch(
               </svg>
             </div>
             <p class="text-[18px] font-extrabold text-white leading-tight">{{ tt('admin.broadcast_ui.ready_title') }}</p>
-            <p class="mx-auto mt-1 max-w-[17rem] text-[13px] leading-[1.35] text-zinc-300/95">{{ tt('admin.broadcast_ui.ready_sub') }}</p>
+            <p class="mx-auto mt-1 max-w-[17rem] text-[13px] leading-[1.35] text-zinc-300/95">{{ bcConfirmReadySub }}</p>
           </div>
 
           <div class="mt-4 rounded-xl border border-white/[0.07] bg-white/[0.02] px-3 py-2">
+            <div v-if="bcSendTimingMode === 'scheduled'" class="flex items-center justify-between gap-3 py-1.5 text-[13px] leading-snug">
+              <span class="text-zinc-300">{{ tt('admin.broadcast_ui.row_scheduled_at') }}</span>
+              <span class="text-right font-semibold text-violet-200">{{ bcFormatScheduledAtLabel(new Date(String(bcSendScheduleAtLocal || '')).toISOString(), typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : '') }}</span>
+            </div>
             <div class="flex items-center justify-between gap-3 py-1.5 text-[13px] leading-snug">
               <span class="text-zinc-300">{{ tt('admin.broadcast_ui.row_recipients') }}</span>
               <span class="text-right font-semibold text-zinc-100">{{ bcConfirmRecipientLabel }}</span>
@@ -10100,7 +11020,7 @@ watch(
           <div class="mt-auto pt-4">
             <div class="flex gap-2">
               <button type="button" class="flex-1 rounded-xl border border-white/12 bg-[#171e2e]/95 px-3 py-2 text-[15px] font-semibold text-[#7590d8]" :disabled="bcConfirmSending" @click="bcConfirmModalOpen = false">{{ tt('common.cancel') }}</button>
-              <button type="button" class="flex-1 rounded-xl border border-indigo-400/45 bg-gradient-to-r from-[#6d3ef7] to-[#4b67ff] px-3 py-2 text-[15px] font-extrabold text-white" :disabled="bcConfirmSending || bcConfirmLoading" @click="submitBcConfirmedSend">{{ bcConfirmSending ? tt('admin.broadcast_ui.sending') : tt('admin.broadcast_ui.send') }}</button>
+              <button type="button" class="flex-1 rounded-xl border border-indigo-400/45 bg-gradient-to-r from-[#6d3ef7] to-[#4b67ff] px-3 py-2 text-[15px] font-extrabold text-white" :disabled="bcConfirmSending || bcConfirmLoading" @click="submitBcConfirmedSend">{{ bcConfirmSubmitLabel }}</button>
             </div>
           </div>
         </div>
@@ -10119,8 +11039,8 @@ watch(
           </div>
           <div class="max-h-[min(70vh,30rem)] space-y-2 overflow-y-auto pr-1">
             <div
-              v-for="item in bcRecentBroadcasts"
-              :key="`recent-all-bc-${item.id}`"
+              v-for="item in bcRecentBroadcastsFiltered"
+              :key="`recent-all-bc-${item.schedule_id || item.run_id || item.autopost_campaign_id || item.id}-${item.scheduled_at || item.sent_at || ''}`"
               role="button"
               tabindex="0"
               class="cursor-pointer rounded-xl border border-white/[0.08] bg-[#121a27]/88 px-3 py-2.5 transition hover:border-white/[0.14] hover:bg-[#172032]/95"
@@ -10141,7 +11061,7 @@ watch(
                 <span>{{ tt('admin.broadcast_shell.errors') }} <b class="text-zinc-100">{{ Number(item.recipient_fail || 0) }}</b></span>
               </div>
             </div>
-            <p v-if="!bcRecentBroadcasts.length" class="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-[12px] text-zinc-400">
+            <p v-if="!bcRecentBroadcastsFiltered.length" class="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-[12px] text-zinc-400">
               {{ tt('admin.broadcast_shell.recent_empty') }}
             </p>
           </div>
@@ -10984,9 +11904,26 @@ watch(
                   class="rounded-lg border border-white/[0.06] bg-black/20 px-2 py-2"
                 >
                   <p class="text-[10px] font-semibold text-slate-500">{{ tt('admin.bc_campaign.schedule_slot_times_preview') }}</p>
-                  <p class="mt-1 break-words font-mono text-[11px] leading-relaxed text-slate-200">
-                    {{ bcCampaignUxWizardSlotTimePreview[si].join(' · ') }}
+                  <p class="mt-1 break-words font-mono text-[11px] leading-relaxed">
+                    <template v-for="(ent, ti) in (bcCampaignUxWizardSlotEntries[si] || [])" :key="`wiz-st-${si}-${ti}`">
+                      <span v-if="ti > 0" class="text-slate-500"> · </span>
+                      <span
+                        :class="bcCampaignUxScheduleSlotStatusClass(ent.status)"
+                        :title="bcCampaignUxScheduleSlotStatusTitle(ent.status)"
+                      >{{ ent.label }}</span>
+                    </template>
                   </p>
+                  <p
+                    v-if="bcCampaignUxShouldMarkPastSlotsSkipped(bcCampaignUxWizard.startDate || bcCampaignUxTodayIsoInTimezone(bcCampaignUxWizard.timezone), bcCampaignUxWizard.timezone)"
+                    class="mt-1.5 text-[10px] leading-snug text-slate-500"
+                  >
+                    {{ tt('admin.bc_campaign.schedule_past_slots_hint') }}
+                  </p>
+                  <p class="mt-2 flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-slate-500">
+                    <span><span class="text-slate-200" aria-hidden="true">●</span> {{ tt('admin.bc_campaign.schedule_slot_pending') }}</span>
+                    <span><span class="text-rose-400" aria-hidden="true">●</span> {{ tt('admin.bc_campaign.schedule_slot_skipped') }}</span>
+                  </p>
+                  <p class="mt-2 text-[10px] leading-snug text-slate-500">{{ tt('admin.bc_campaign.schedule_timing_precision') }}</p>
                 </div>
               </div>
               <p v-if="(bcCampaignUxWizard.sendWindows || []).length >= 2" class="mt-2 text-[11px] font-medium text-slate-400">
@@ -11074,6 +12011,14 @@ watch(
           <p v-if="bcCampaignUxSuccessInfo.needsStart" class="mt-1 text-[13px] text-amber-100/95">{{ tt('admin.bc_campaign.success_sub_stopped') }}</p>
           <p v-else class="mt-1 text-[13px] text-slate-300">{{ tt('admin.bc_campaign.success_sub', { when: bcCampaignUxSuccessInfo.nextAt || tt('admin.bc_campaign.success_when_fallback') }) }}</p>
           <div class="mt-5 w-full max-w-sm space-y-2">
+            <button
+              v-if="bcCampaignUxSuccessInfo.needsStart"
+              type="button"
+              class="w-full rounded-2xl border border-emerald-400/45 bg-gradient-to-r from-[#27b35f] to-[#36D67A] px-4 py-3 font-bold text-[#04130a] shadow-[0_18px_34px_-18px_rgba(54,214,122,0.95)] transition hover:brightness-110"
+              @click="bcCampaignUxSuccessStartNow"
+            >
+              {{ tt('admin.bc_campaign.success_start_now') }}
+            </button>
             <button type="button" class="w-full rounded-2xl border border-emerald-400/45 bg-gradient-to-r from-[#27b35f] to-[#36D67A] px-4 py-3 font-bold text-[#04130a] shadow-[0_18px_34px_-18px_rgba(54,214,122,0.95)] transition hover:brightness-110" @click="bcCampaignUxScreen = 'manage'">{{ tt('admin.bc_campaign.btn_to_campaign') }}</button>
             <button type="button" class="w-full rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxScreen = 'list'">{{ tt('admin.bc_campaign.btn_to_list') }}</button>
           </div>
@@ -11212,11 +12157,21 @@ watch(
           <p class="mt-1 text-[11px]" :class="bcCurrentLen() > bcCurrentMaxLen() ? 'text-rose-400' : 'text-slate-500'">
             {{ tt('admin.broadcast_ui.chars_count', { current: bcCurrentLen(), max: bcCurrentMaxLen() }) }}
           </p>
-          <div v-if="bcQuickButtonPreview.length" class="mt-2 space-y-1">
+          <div v-if="bcQuickButtonPreviewRows.length" class="mt-2 space-y-1">
             <p class="text-[11px] font-semibold text-slate-400">{{ tt('admin.broadcast_ui.buttons_block') }}</p>
-            <div v-for="(btn, bi) in bcQuickButtonPreview.slice(0, 8)" :key="`camp-pe-btn-${bi}-${btn.text}`" class="rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-1.5">
-              <p class="truncate text-[12px] font-semibold text-zinc-100">{{ btn.text }}</p>
-              <p v-if="btn.url" class="truncate text-[11px] text-zinc-400">{{ btn.url }}</p>
+            <div
+              v-for="(row, ri) in bcQuickButtonPreviewRows.slice(0, 6)"
+              :key="`camp-pe-row-${ri}`"
+              class="flex flex-wrap gap-1"
+            >
+              <div
+                v-for="(btn, bi) in row"
+                :key="`camp-pe-btn-${ri}-${bi}-${btn.text}`"
+                class="min-w-0 flex-1"
+                :class="[bcButtonStyleChipClass(btn.style, btn.kind), row.length === 1 ? 'basis-full' : 'basis-[calc(50%-0.125rem)]']"
+              >
+                <p class="truncate text-center text-[12px]">{{ btn.text }}</p>
+              </div>
             </div>
           </div>
           <div class="mt-3 grid grid-cols-2 gap-2">
@@ -11479,10 +12434,61 @@ watch(
                   v-if="(bcCampaignUxScheduleModalSlotTimePreview[si] || []).length"
                   class="rounded-lg border border-white/[0.06] bg-black/20 px-2 py-2"
                 >
-                  <p class="text-[10px] font-semibold text-slate-500">{{ tt('admin.bc_campaign.schedule_slot_times_preview') }}</p>
-                  <p class="mt-1 break-words font-mono text-[11px] leading-relaxed text-slate-200">
-                    {{ bcCampaignUxScheduleModalSlotTimePreview[si].join(' · ') }}
+                  <p class="text-[10px] font-semibold text-slate-500">
+                    <template v-if="bcCampaignUxScheduleModalSlotDay">
+                      {{ tt('admin.bc_campaign.schedule_slot_times_preview_day', { day: bcCampaignUxScheduleModalSlotDay }) }}
+                    </template>
+                    <template v-else>
+                      {{ tt('admin.bc_campaign.schedule_slot_times_preview') }}
+                    </template>
                   </p>
+                  <p
+                    v-if="bcCampaignUxScheduleModalNightDayHint"
+                    class="mt-1 text-[10px] leading-snug text-sky-200/90"
+                  >
+                    {{ bcCampaignUxScheduleModalNightDayHint }}
+                  </p>
+                  <p
+                    v-if="!bcCampaignUxScheduleModalSlotStatusApplicable"
+                    class="mt-1 text-[10px] leading-snug text-amber-200/85"
+                  >
+                    {{ tt('admin.bc_campaign.schedule_slot_preview_draft_hint') }}
+                  </p>
+                  <p class="mt-1 break-words font-mono text-[11px] leading-relaxed">
+                    <template v-for="(ent, ti) in (bcCampaignUxScheduleModalSlotEntries[si] || [])" :key="`sch-st-${si}-${ti}`">
+                      <span v-if="ti > 0" class="text-slate-500"> · </span>
+                      <span
+                        :class="bcCampaignUxScheduleSlotStatusClass(ent.status)"
+                        :title="bcCampaignUxScheduleSlotStatusTitle(ent.status)"
+                      >{{ ent.label }}</span>
+                    </template>
+                  </p>
+                  <p class="mt-2 flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-slate-500">
+                    <span v-if="bcCampaignUxScheduleModalSlotStatusApplicable && bcCampaignRunState(bcCampaignUxScheduleModalCamp) === 'running'"><span class="text-emerald-400" aria-hidden="true">●</span> {{ tt('admin.bc_campaign.schedule_slot_sent') }}</span>
+                    <span v-if="bcCampaignUxScheduleModalSlotStatusApplicable && bcCampaignRunState(bcCampaignUxScheduleModalCamp) === 'running'"><span class="text-slate-200" aria-hidden="true">●</span> {{ tt('admin.bc_campaign.schedule_slot_pending') }}</span>
+                    <span v-if="bcCampaignUxScheduleModalSlotStatusApplicable && bcCampaignRunState(bcCampaignUxScheduleModalCamp) === 'running'"><span class="text-rose-400" aria-hidden="true">●</span> {{ tt('admin.bc_campaign.schedule_slot_skipped') }}</span>
+                    <span v-if="bcCampaignUxScheduleModalSlotStatusApplicable && bcCampaignRunState(bcCampaignUxScheduleModalCamp) !== 'running'"><span class="text-slate-200" aria-hidden="true">●</span> {{ tt('admin.bc_campaign.schedule_slot_planned_stopped') }}</span>
+                    <span v-if="!bcCampaignUxScheduleModalSlotStatusApplicable"><span class="text-violet-300" aria-hidden="true">●</span> {{ tt('admin.bc_campaign.schedule_slot_preview') }}</span>
+                  </p>
+                  <p
+                    v-if="bcCampaignUxScheduleModalSchedulerHint"
+                    class="mt-2 rounded-lg border border-rose-500/40 bg-rose-500/10 px-2 py-1.5 text-[11px] leading-snug text-rose-100/95"
+                  >
+                    {{ bcCampaignUxScheduleModalSchedulerHint }}
+                  </p>
+                  <p
+                    v-if="bcCampaignUxScheduleModalStoppedHint"
+                    class="mt-2 rounded-lg border border-amber-500/35 bg-amber-500/10 px-2 py-1.5 text-[11px] leading-snug text-amber-100/95"
+                  >
+                    {{ bcCampaignUxScheduleModalStoppedHint }}
+                  </p>
+                  <p
+                    v-if="bcCampaignUxScheduleModalBlockHint"
+                    class="mt-2 rounded-lg border border-amber-500/35 bg-amber-500/10 px-2 py-1.5 text-[11px] leading-snug text-amber-100/95"
+                  >
+                    {{ bcCampaignUxScheduleModalBlockHint }}
+                  </p>
+                  <p class="mt-2 text-[10px] leading-snug text-slate-500">{{ tt('admin.bc_campaign.schedule_timing_precision') }}</p>
                 </div>
               </div>
               <p v-if="(bcCampaignUxScheduleForm.sendWindows || []).length >= 2" class="mt-2 text-[11px] font-medium text-slate-400">
@@ -12356,56 +13362,213 @@ watch(
         @click.stop
       >
         <div class="flex shrink-0 items-center justify-between border-b border-slate-700/60 p-3">
-          <p class="text-sm font-semibold text-white">Кнопки под постом</p>
+          <div class="flex min-w-0 items-center gap-2">
+            <p class="text-sm font-semibold text-white">{{ tt('admin.broadcast_ui.keyboard_modal_title') }}</p>
+            <button
+              type="button"
+              class="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-violet-400/25 bg-violet-950/40 text-[11px] font-bold text-violet-200/90 transition hover:bg-violet-900/50 hover:text-white"
+              :title="tt('admin.broadcast_ui.keyboard_info_btn_title')"
+              :aria-label="tt('admin.broadcast_ui.keyboard_info_btn_aria')"
+              @click="bcKeyboardInfoOpen = true"
+            >
+              ⓘ
+            </button>
+          </div>
           <div class="flex items-center gap-2">
-            <button type="button" class="bc-tool-btn !px-2.5 !py-1 text-[11px]" :disabled="bcSaving" @click="saveBcDraft">{{ tt('common.locale_code') === 'en' ? 'Save' : 'Сохранить' }}</button>
+            <button type="button" class="bc-tool-btn !px-2.5 !py-1 text-[11px]" :disabled="bcSaving" @click="saveBcAuxKeyboardModal">{{ tt('common.locale_code') === 'en' ? 'Save' : 'Сохранить' }}</button>
             <button type="button" class="bc-tool-btn" @click="bcAuxModal = ''">✕</button>
           </div>
         </div>
         <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-2 touch-pan-y">
+          <div class="mt-0.5 flex flex-wrap items-center gap-2">
+            <span class="text-[11px] font-medium text-slate-400">{{ tt('admin.broadcast_ui.keyboard_layout_label') }}</span>
+            <button
+              type="button"
+              class="bc-tool-btn !px-2 !py-1 text-[11px]"
+              :class="bcKeyboardLayoutActive === 'inline' ? 'bc-tool-active' : ''"
+              @click="bcApplyKeyboardLayoutInline"
+            >
+              {{ tt('admin.broadcast_ui.keyboard_layout_inline') }}
+            </button>
+            <button
+              type="button"
+              class="bc-tool-btn !px-2 !py-1 text-[11px]"
+              :class="bcKeyboardLayoutActive === 'stacked' ? 'bc-tool-active' : ''"
+              @click="bcApplyKeyboardLayoutStacked"
+            >
+              {{ tt('admin.broadcast_ui.keyboard_layout_stacked') }}
+            </button>
+          </div>
+          <div
+            v-if="bcQuickButtonPreviewRows.length"
+            class="mt-2 rounded-lg border border-violet-500/20 bg-violet-950/15 px-2.5 py-2"
+          >
+            <p class="text-[10px] font-semibold uppercase tracking-wide text-violet-300/80">{{ tt('admin.broadcast_ui.keyboard_layout_preview') }}</p>
+            <div class="mt-1.5 space-y-1">
+              <div
+                v-for="(row, ri) in bcQuickButtonPreviewRows"
+                :key="`kb-tg-prev-${ri}`"
+                class="flex gap-1"
+                :class="bcKeyboardLayoutActive === 'stacked' ? 'flex-col' : 'flex-row flex-wrap'"
+              >
+                <span
+                  v-for="(btn, bi) in row"
+                  :key="`kb-tg-prev-${ri}-${bi}`"
+                  class="truncate text-[11px]"
+                  :class="[
+                    bcButtonStyleChipClass(btn.style, btn.kind),
+                    bcKeyboardLayoutActive === 'stacked' || row.length === 1 ? 'block w-full' : 'min-w-0 flex-1',
+                  ]"
+                >
+                  {{ btn.text }}
+                </span>
+              </div>
+            </div>
+            <p v-if="bcQuickButtonPreview.length < 2" class="mt-1.5 text-[10px] leading-snug text-slate-500">
+              {{ tt('admin.broadcast_ui.keyboard_layout_preview_hint') }}
+            </p>
+          </div>
           <div v-for="(row, ri) in bcButtonRows" :key="`mkb-${ri}`" class="mt-2 space-y-1.5 rounded-lg border border-white/10 bg-black/30 p-2 ring-1 ring-violet-500/15">
             <div class="flex items-center justify-between gap-2">
-              <span class="text-xs font-semibold text-slate-400">Ряд {{ ri + 1 }}</span>
-              <button type="button" class="text-xs text-rose-400 hover:text-rose-300" @click="removeBcRow(ri)">Убрать ряд</button>
+              <span class="text-xs font-semibold text-slate-400">{{ tt('admin.broadcast_ui.btn_row_label', { n: ri + 1 }) }}</span>
+              <button type="button" class="text-xs text-rose-400 hover:text-rose-300" @click="removeBcRow(ri)">{{ tt('admin.broadcast_ui.btn_remove_row') }}</button>
             </div>
             <div
               v-for="(btn, bi) in row"
               :key="`mkbtn-${ri}-${bi}`"
               class="grid grid-cols-1 gap-2 border-t border-slate-700/40 pt-3 text-xs sm:grid-cols-2"
+              :class="btn.kind === 'hidden_continuation' ? 'rounded-lg border border-cyan-500/25 bg-cyan-950/20 px-2 pb-2' : btn.kind === 'prefilled_dm' ? 'rounded-lg border border-sky-500/25 bg-sky-950/20 px-2 pb-2' : ''"
             >
+              <div v-if="btn.kind === 'hidden_continuation'" class="sm:col-span-2 flex items-center justify-between gap-2">
+                <span class="text-[11px] font-semibold uppercase tracking-wide text-cyan-300/90">{{ tt('admin.broadcast_ui.hidden_continuation_badge') }}</span>
+              </div>
+              <div v-if="btn.kind === 'prefilled_dm'" class="sm:col-span-2 flex items-center justify-between gap-2">
+                <span class="text-[11px] font-semibold uppercase tracking-wide text-sky-300/90">{{ tt('admin.broadcast_ui.prefilled_dm_badge') }}</span>
+              </div>
               <input
                 v-model="btn.text"
                 type="text"
-                placeholder="Текст на кнопке"
+                :placeholder="tt('admin.broadcast_ui.btn_text_ph')"
                 class="bc-post-input rounded-lg border border-slate-600 bg-slate-900 px-2 py-1.5 sm:col-span-2"
               />
-              <input
-                v-model="btn.url"
-                type="text"
-                placeholder="Ссылка https://… (из браузера)"
-                class="bc-post-input rounded-lg border border-slate-600 bg-slate-900 px-2 py-1.5"
-              />
-              <input
-                v-model="btn.web_app_url"
-                type="text"
-                placeholder="URL мини-приложения (Web App)"
-                class="bc-post-input rounded-lg border border-slate-600 bg-slate-900 px-2 py-1.5"
-              />
-              <input
-                v-model="btn.callback_data"
-                type="text"
-                placeholder="Данные для бота (callback)"
-                class="bc-post-input rounded-lg border border-slate-600 bg-slate-900 px-2 py-1.5 sm:col-span-2"
-              />
-              <button type="button" class="text-rose-400 sm:col-span-2" @click="removeBcButton(ri, bi)">Удалить кнопку</button>
+              <label class="flex items-center gap-2 sm:col-span-2">
+                <span class="shrink-0 text-slate-400">{{ tt('admin.broadcast_ui.btn_style_label') }}</span>
+                <span
+                  class="inline-block h-4 w-4 shrink-0 rounded-full"
+                  :class="bcButtonStylePreviewClass(btn.style)"
+                  aria-hidden="true"
+                />
+                <select
+                  v-model="btn.style"
+                  class="min-w-0 flex-1 rounded-lg border border-slate-600 bg-slate-900 px-2 py-1.5 text-slate-100"
+                >
+                  <option v-for="opt in BC_BUTTON_STYLE_OPTIONS" :key="`bcbst-${opt.id || 'default'}`" :value="opt.id">
+                    {{ tt(opt.labelKey) }}
+                  </option>
+                </select>
+              </label>
+              <template v-if="btn.kind === 'hidden_continuation'">
+                <textarea
+                  v-model="btn.non_member_text"
+                  rows="3"
+                  :placeholder="tt('admin.broadcast_ui.hidden_continuation_non_member_ph')"
+                  class="bc-post-input min-h-[4.5rem] resize-y rounded-lg border border-slate-600 bg-slate-900 px-2 py-1.5 sm:col-span-2"
+                />
+                <p class="text-[10px] text-slate-500 sm:col-span-2">{{ tt('admin.broadcast_ui.hidden_continuation_non_member_hint') }}</p>
+                <textarea
+                  v-model="btn.member_text"
+                  rows="3"
+                  :placeholder="tt('admin.broadcast_ui.hidden_continuation_member_ph')"
+                  class="bc-post-input min-h-[4.5rem] resize-y rounded-lg border border-slate-600 bg-slate-900 px-2 py-1.5 sm:col-span-2"
+                />
+                <p class="text-[10px] text-slate-500 sm:col-span-2">{{ tt('admin.broadcast_ui.hidden_continuation_member_hint') }}</p>
+              </template>
+              <template v-else-if="btn.kind === 'prefilled_dm'">
+                <input
+                  v-model="btn.dm_username"
+                  type="text"
+                  :placeholder="tt('admin.broadcast_ui.prefilled_dm_username_ph')"
+                  class="bc-post-input rounded-lg border border-slate-600 bg-slate-900 px-2 py-1.5 sm:col-span-2"
+                />
+                <p class="text-[10px] text-slate-500 sm:col-span-2">{{ tt('admin.broadcast_ui.prefilled_dm_username_hint') }}</p>
+                <textarea
+                  v-model="btn.dm_prefill_text"
+                  rows="3"
+                  :placeholder="tt('admin.broadcast_ui.prefilled_dm_text_ph')"
+                  class="bc-post-input min-h-[4.5rem] resize-y rounded-lg border border-slate-600 bg-slate-900 px-2 py-1.5 sm:col-span-2"
+                />
+                <p class="text-[10px] text-slate-500 sm:col-span-2">{{ tt('admin.broadcast_ui.prefilled_dm_text_hint') }}</p>
+                <p
+                  v-if="bcBuildPrefilledDmUrl(btn.dm_username, btn.dm_prefill_text)"
+                  class="break-all text-[10px] text-sky-400/80 sm:col-span-2"
+                >
+                  {{ bcBuildPrefilledDmUrl(btn.dm_username, btn.dm_prefill_text) }}
+                </p>
+              </template>
+              <template v-else>
+                <input
+                  v-model="btn.url"
+                  type="text"
+                  :placeholder="tt('admin.broadcast_ui.btn_url_ph')"
+                  class="bc-post-input rounded-lg border border-slate-600 bg-slate-900 px-2 py-1.5"
+                />
+                <input
+                  v-model="btn.web_app_url"
+                  type="text"
+                  :placeholder="tt('admin.broadcast_ui.btn_webapp_ph')"
+                  class="bc-post-input rounded-lg border border-slate-600 bg-slate-900 px-2 py-1.5"
+                />
+                <input
+                  v-model="btn.callback_data"
+                  type="text"
+                  :placeholder="tt('admin.broadcast_ui.btn_callback_ph')"
+                  class="bc-post-input rounded-lg border border-slate-600 bg-slate-900 px-2 py-1.5 sm:col-span-2"
+                />
+              </template>
+              <button type="button" class="text-rose-400 sm:col-span-2" @click="removeBcButton(ri, bi)">{{ tt('admin.broadcast_ui.btn_remove') }}</button>
             </div>
-            <button type="button" class="text-xs font-semibold text-violet-400" @click="addBcButton(ri)">+ Кнопка в этот ряд</button>
+            <div class="flex flex-wrap gap-3 pt-1">
+              <button type="button" class="text-xs font-semibold text-violet-400" @click="addBcButton(ri)">{{ tt('admin.broadcast_ui.btn_add_in_row') }}</button>
+              <button type="button" class="text-xs font-semibold text-cyan-400" @click="addBcHiddenContinuationButton(ri)">{{ tt('admin.broadcast_ui.hidden_continuation_add') }}</button>
+              <button type="button" class="text-xs font-semibold text-sky-400" @click="addBcPrefilledDmButton(ri)">{{ tt('admin.broadcast_ui.prefilled_dm_add') }}</button>
+            </div>
           </div>
           <button type="button" class="mt-3 w-full rounded-lg border border-violet-500/40 py-2 text-sm font-semibold text-violet-200" @click="addBcRow">
-            + Новый ряд кнопок
+            {{ tt('admin.broadcast_ui.btn_add_row') }}
           </button>
         </div>
       </div>
+      <GuardTeleport>
+        <div
+          v-if="bcKeyboardInfoOpen"
+          style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:101000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+          class="flex items-center justify-center overscroll-none p-3 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
+          @click.self="bcKeyboardInfoOpen = false"
+        >
+          <div
+            class="max-h-[min(85vh,28rem)] w-full max-w-md overflow-y-auto overscroll-contain rounded-2xl border border-white/[0.1] bg-slate-950/[0.98] p-4 text-slate-200 shadow-[0_28px_80px_-24px_rgba(0,0,0,0.9)] ring-1 ring-violet-400/25"
+            @click.stop
+          >
+            <div class="mb-3 flex items-center justify-between gap-2">
+              <p class="text-sm font-semibold text-white">{{ tt('admin.broadcast_ui.keyboard_info_modal_title') }}</p>
+              <button
+                type="button"
+                class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
+                :aria-label="tt('common.close')"
+                @click="bcKeyboardInfoOpen = false"
+              >
+                ✕
+              </button>
+            </div>
+            <div class="space-y-2.5 text-[11px] leading-relaxed text-slate-400">
+              <p>{{ tt('admin.broadcast_ui.btn_style_hint') }}</p>
+              <p>{{ tt('admin.broadcast_ui.hidden_continuation_hint') }}</p>
+              <p>{{ tt('admin.broadcast_ui.prefilled_dm_hint') }}</p>
+              <p>{{ tt('admin.broadcast_ui.keyboard_layout_hint') }}</p>
+            </div>
+          </div>
+        </div>
+      </GuardTeleport>
     </div>
     </GuardTeleport>
 
@@ -13122,33 +14285,21 @@ watch(
               </div>
               <div class="flex items-end justify-between gap-3">
                 <div>
-                  <p class="text-4xl font-extrabold leading-none">{{ partnerAudienceGender.malePct }}%</p>
-                  <p class="text-lg font-semibold text-cyan-200">{{ partnerFmtInt(partnerAudienceGender.maleCount) }}</p>
+                  <p class="text-4xl font-extrabold leading-none text-emerald-300">{{ partnerAudienceGender.malePct }}%</p>
                   <p class="text-[12px] text-slate-300">мужчины</p>
                 </div>
                 <div class="text-right">
-                  <p class="text-4xl font-extrabold leading-none">{{ partnerAudienceGender.femalePct }}%</p>
-                  <p class="text-lg font-semibold text-rose-200">{{ partnerFmtInt(partnerAudienceGender.femaleCount) }}</p>
+                  <p class="text-4xl font-extrabold leading-none text-sky-300">{{ partnerAudienceGender.femalePct }}%</p>
                   <p class="text-[12px] text-slate-300">женщины</p>
                 </div>
               </div>
               <div class="mt-3 h-8 overflow-hidden rounded-lg border border-slate-600 bg-slate-950/60">
                 <div class="flex h-full w-full">
-                  <div
-                    class="flex h-full items-center justify-center bg-cyan-500/75 text-sm font-bold text-white"
-                    :style="{ width: `${partnerAudienceGender.malePct}%` }"
-                  >
-                    {{ partnerAudienceGender.malePct }}%
-                  </div>
-                  <div
-                    class="flex h-full items-center justify-center bg-rose-500/80 text-sm font-bold text-white"
-                    :style="{ width: `${partnerAudienceGender.femalePct}%` }"
-                  >
-                    {{ partnerAudienceGender.femalePct }}%
-                  </div>
+                  <div class="h-full bg-emerald-500/80" :style="{ width: `${partnerAudienceGender.malePct}%` }" />
+                  <div class="h-full bg-sky-500/80" :style="{ width: `${partnerAudienceGender.femalePct}%` }" />
                 </div>
               </div>
-              <p class="mt-2 text-[11px] text-slate-400">
+<p class="mt-2 text-[11px] text-slate-400">
                 Учтено по именам: {{ partnerFmtInt(partnerAudienceGender.knownTotal) }}, не определено: {{ partnerFmtInt(partnerAudienceGender.unknownCount) }}
                 <span v-if="partnerAudienceGender.isEstimate">· оценка</span>
               </p>
@@ -13649,7 +14800,7 @@ watch(
           </div>
           <div class="mt-3 rounded-xl border border-white/[0.08] bg-zinc-950/55 p-3 ring-1 ring-white/[0.04]">
             <div
-              class="max-h-[50vh] overflow-y-auto text-sm leading-relaxed text-zinc-100 whitespace-pre-wrap"
+              class="bc-html-preview max-h-[50vh] overflow-y-auto text-sm leading-relaxed text-zinc-100 whitespace-pre-wrap"
               v-html="bcPreviewItem.body_text || 'Без текста'"
             />
           </div>
@@ -13659,7 +14810,7 @@ watch(
               <span
                 v-for="(btn, bi) in row"
                 :key="`pv-btn-${ri}-${bi}`"
-                class="rounded-md border border-white/[0.1] bg-zinc-900/80 px-2 py-1 text-xs text-zinc-200"
+                :class="bcButtonStyleChipClass(btn.style, btn.hidden_continuation ? 'hidden_continuation' : '')"
               >
                 {{ btn.text }}
               </span>
@@ -13951,11 +15102,29 @@ watch(
   color: #e2e8f0 !important;
   -webkit-text-fill-color: #e2e8f0;
 }
-.bc-editor :deep(a) {
+.bc-editor :deep(a),
+.bc-editor :deep(a:any-link),
+.bc-editor :deep(a:-webkit-any-link),
+.bc-html-preview :deep(a),
+.bc-html-preview :deep(a:any-link),
+.bc-html-preview :deep(a:-webkit-any-link) {
   color: #60a5fa !important;
   -webkit-text-fill-color: #60a5fa;
-  text-decoration: underline;
-  text-underline-offset: 2px;
+  text-decoration: none !important;
+  text-decoration-line: none !important;
+  -webkit-text-decoration: none !important;
+}
+.bc-editor :deep(a:hover),
+.bc-html-preview :deep(a:hover) {
+  color: #93c5fd !important;
+  -webkit-text-fill-color: #93c5fd;
+}
+.bc-editor :deep(a u),
+.bc-editor :deep(a ins),
+.bc-html-preview :deep(a u),
+.bc-html-preview :deep(a ins) {
+  text-decoration: none !important;
+  text-decoration-line: none !important;
 }
 .bc-editor :deep(code) {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;

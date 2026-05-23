@@ -253,9 +253,9 @@ function goManageChats() {
                 <p class="w-full whitespace-nowrap text-[9px] font-semibold uppercase leading-tight tracking-wide text-white sm:text-[10px]">
                   {{ t('cabinet_stats.hero.col_level') }}
                 </p>
-                <div class="mt-0.5 flex w-full min-w-0 flex-col items-stretch gap-1">
+                <div class="mt-0.5 flex w-full min-w-0 flex-col items-stretch gap-1 pl-1.5 sm:pl-2">
                   <p
-                    class="text-center text-[14px] font-extrabold leading-tight sm:text-[15px]"
+                    class="text-left text-[14px] font-extrabold leading-tight sm:text-[15px]"
                     :class="dashboardProtectionLevelMeta.labelClass"
                   >
                     {{ dashboardProtectionLevelMeta.label }}

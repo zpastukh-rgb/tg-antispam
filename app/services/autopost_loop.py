@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -27,14 +28,53 @@ from app.services.user_service import get_or_create_user
 
 log = logging.getLogger(__name__)
 
+_AUTOPOST_RUNTIME: dict[str, Any] = {
+    "loop_started_at": None,
+    "last_tick_at": None,
+    "last_tick_ok_at": None,
+    "ticks_total": 0,
+    "lock_miss_total": 0,
+    "last_error": None,
+    "last_fire_at": None,
+    "worker_label": (os.getenv("RAILWAY_REPLICA_ID") or os.getenv("RAILWAY_SERVICE_NAME") or os.getenv("HOSTNAME") or "local")[:80],
+    "bot_token_configured": bool((os.getenv("BOT_TOKEN") or "").strip()),
+}
+
+
+def autopost_runtime_status() -> dict[str, Any]:
+    """Снимок для /health и UI: жив ли фоновый тик расписания на этом воркере."""
+    now = datetime.now(timezone.utc)
+    last_ok = _AUTOPOST_RUNTIME.get("last_tick_ok_at")
+    tick_stale = True
+    if isinstance(last_ok, datetime):
+        tick_stale = (now - last_ok).total_seconds() > 120.0
+    started = _AUTOPOST_RUNTIME.get("loop_started_at")
+    out: dict[str, Any] = {
+        "worker_label": str(_AUTOPOST_RUNTIME.get("worker_label") or "local"),
+        "bot_token_configured": bool(_AUTOPOST_RUNTIME.get("bot_token_configured")),
+        "ticks_total": int(_AUTOPOST_RUNTIME.get("ticks_total") or 0),
+        "lock_miss_total": int(_AUTOPOST_RUNTIME.get("lock_miss_total") or 0),
+        "running_campaigns": int(_AUTOPOST_RUNTIME.get("running_campaigns") or 0),
+        "tick_stale": tick_stale,
+        "loop_alive": isinstance(started, datetime) and not tick_stale,
+        "last_error": _AUTOPOST_RUNTIME.get("last_error"),
+    }
+    for k in ("loop_started_at", "last_tick_at", "last_tick_ok_at", "last_fire_at"):
+        v = _AUTOPOST_RUNTIME.get(k)
+        out[k] = v.isoformat() if isinstance(v, datetime) else None
+    return out
+
+
 # Один воркер на кластер (бот + API не дублируют тик); только PostgreSQL.
 _AUTOPOST_ADVISORY_LOCK_KEY = 402_119_330
 
 # Если последний слот пришёлся на конец окна, тик после закрытия окна всё ещё успевает отстрелять слот
 # (иначе при интервале 30 с легко получить «9 из 10» за день).
 _AUTOPOST_SLOT_GRACE = timedelta(hours=2)
-# Слот «устарел» дольше — не догоняем подряд (как пачка за минуту); пропускаем и идём к ближайшему в окне
-_AUTOPOST_MISSED_MAX_LATE = timedelta(minutes=50)
+# Слот пропущен дольше — не догоняем; ждём следующий или следующий календарный день.
+_AUTOPOST_FIRE_GRACE = timedelta(minutes=15)
+# Черновик в status=sending дольше — считаем зависшим (run_broadcast_job упал/рестарт).
+_AUTOPOST_SENDING_STALE = timedelta(minutes=12)
 
 
 async def _autopost_try_advisory_lock(session: AsyncSession) -> bool:
@@ -271,6 +311,244 @@ def _compose_daily_fire_times(
     return [t_first, *remainder]
 
 
+def _ap_spread_in_window(ap: dict[str, Any]) -> bool:
+    raw_spread = ap.get("spreadInWindow")
+    return True if raw_spread is None else bool(raw_spread)
+
+
+def _ap_weekdays_ok(ap: dict[str, Any], calendar_day: date) -> bool:
+    wd = {int(x) for x in (ap.get("weekdays") or [])}
+    if not wd:
+        return True
+    return int(calendar_day.weekday()) in wd
+
+
+def compute_ap_fire_times_for_calendar_day(
+    ap: dict[str, Any],
+    calendar_day: date,
+    tz,
+) -> list[datetime]:
+    """Плановые моменты отправки за календарный день (как в тике автопоста)."""
+    ws = str(ap.get("windowStart") or "10:00")
+    we = str(ap.get("windowEnd") or "21:00")
+    spread_b = _ap_spread_in_window(ap)
+    fp_hms = str(ap.get("firstPostTime") or ap.get("windowStart") or "10:00").strip()
+    sw_any = ap.get("sendWindows")
+    sw_segments: list[dict[str, Any]] = [x for x in sw_any if isinstance(x, dict)] if isinstance(sw_any, list) else []
+    if len(sw_segments) >= 2:
+        return _compose_daily_fire_times_multi(
+            tz=tz,
+            calendar_day=calendar_day,
+            segments=sw_segments,
+            spread_b=spread_b,
+            first_post_hms=fp_hms,
+        )
+    if len(sw_segments) == 1:
+        seg1 = sw_segments[0]
+        ws = str(seg1.get("windowStart") or ws).strip()
+        we = str(seg1.get("windowEnd") or we).strip()
+        n1 = max(1, min(288, int(seg1.get("posts") or ap.get("postsPerDay") or 1)))
+        return _compose_daily_fire_times(
+            tz=tz,
+            calendar_day=calendar_day,
+            ws=ws,
+            we=we,
+            n=n1,
+            spread_b=spread_b,
+            anchor_first_daily=spread_b,
+            first_post_hms=fp_hms,
+        )
+    n = max(1, min(288, int(ap.get("postsPerDay") or 1)))
+    return _compose_daily_fire_times(
+        tz=tz,
+        calendar_day=calendar_day,
+        ws=ws,
+        we=we,
+        n=n,
+        spread_b=spread_b,
+        anchor_first_daily=spread_b,
+        first_post_hms=fp_hms,
+    )
+
+
+def _merge_slot_index_list(state: dict[str, Any], key: str, indices: list[int]) -> None:
+    cur = {int(x) for x in (state.get(key) or []) if isinstance(x, (int, float, str))}
+    for i in indices:
+        try:
+            cur.add(int(i))
+        except (TypeError, ValueError):
+            continue
+    state[key] = sorted(x for x in cur if 0 <= x < 288)
+
+
+def _prune_future_skipped_slots(
+    state: dict[str, Any],
+    fire_times: list[datetime],
+    now_local: datetime,
+) -> None:
+    """Будущие слоты не должны оставаться в skipped_slots — только прошедшее время."""
+    if not fire_times:
+        state["skipped_slots"] = []
+        return
+    kept: list[int] = []
+    for raw in state.get("skipped_slots") or []:
+        try:
+            idx = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= idx < len(fire_times) and fire_times[idx] <= now_local:
+            kept.append(idx)
+    state["skipped_slots"] = sorted(set(kept))
+
+
+def _resolve_schedule_calendar_day(ap: dict[str, Any], now_local: datetime, tz) -> date:
+    """День расписания для _state: окно через полночь (09:00–04:00) после 00:00 ещё относится к вчера."""
+    cal = now_local.date()
+    yday = cal - timedelta(days=1)
+    if _ap_weekdays_ok(ap, yday):
+        y_times = compute_ap_fire_times_for_calendar_day(ap, yday, tz)
+        if y_times:
+            y_last = y_times[-1]
+            if y_last.date() > yday and cal == y_last.date():
+                if now_local <= y_last:
+                    return yday
+                if now_local <= y_last + _AUTOPOST_FIRE_GRACE:
+                    return yday
+    return cal
+
+
+def advance_autopost_state_skip_past_slots_today(
+    ap: dict[str, Any],
+    *,
+    now_local: datetime | None = None,
+    abandon_rest_of_day_if_late_start: bool = False,
+) -> None:
+    """При запуске/возобновлении: не догонять прошлые слоты текущего дня.
+
+    Если ``abandon_rest_of_day_if_late_start`` и сегодня ещё не было отправок —
+    оставшиеся слоты текущего дня тоже пропускаем (следующий запуск — завтра по расписанию).
+    """
+    from zoneinfo import ZoneInfo
+
+    if str(ap.get("runState") or "").lower() != "running":
+        return
+    state = ap.get("_state")
+    if not isinstance(state, dict):
+        ap["_state"] = {}
+        state = ap["_state"]
+    tz_name = str(ap.get("timezone") or "Europe/Moscow")
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo("Europe/Moscow")
+    if now_local is None:
+        now_local = datetime.now(tz)
+    elif now_local.tzinfo is None:
+        now_local = now_local.replace(tzinfo=tz)
+    else:
+        now_local = now_local.astimezone(tz)
+    sched_day = _resolve_schedule_calendar_day(ap, now_local, tz)
+    day_key = sched_day.isoformat()
+    if state.get("day") != day_key:
+        state["day"] = day_key
+        state["next_slot"] = 0
+        state["skipped_slots"] = []
+        state["sent_slots"] = []
+    if not _ap_weekdays_ok(ap, sched_day):
+        return
+    fire_times = compute_ap_fire_times_for_calendar_day(ap, sched_day, tz)
+    if not fire_times:
+        return
+    n = len(fire_times)
+    ns = int(state.get("next_slot") or 0)
+    skipped_now: list[int] = []
+    sent_today = [int(x) for x in (state.get("sent_slots") or []) if isinstance(x, (int, float, str))]
+    # Первый запуск дня без отправок — не догоняем прошлое сразу.
+    # Уже идущий день — уважаем _AUTOPOST_FIRE_GRACE, как в тике (иначе save в 12:02 убивает слот 12:01).
+    fresh_day_run = ns == 0 and not sent_today
+    while ns < n:
+        st = fire_times[ns]
+        if st > now_local:
+            break
+        overdue = now_local - st
+        if fresh_day_run or overdue > _AUTOPOST_FIRE_GRACE:
+            skipped_now.append(ns)
+            ns += 1
+            continue
+        break
+    if skipped_now:
+        _merge_slot_index_list(state, "skipped_slots", skipped_now)
+    if (
+        abandon_rest_of_day_if_late_start
+        and skipped_now
+        and not sent_today
+        and ns < n
+    ):
+        remaining = list(range(ns, n))
+        _merge_slot_index_list(state, "skipped_slots", remaining)
+        state["next_slot"] = n
+    else:
+        state["next_slot"] = ns
+    _prune_future_skipped_slots(state, fire_times, now_local)
+    state.pop("run_catch_up_until", None)
+
+
+def autopost_slot_status_today(ap: dict[str, Any]) -> dict[str, Any] | None:
+    """Статус слотов за сегодня для UI (время, отправлено, пропущено)."""
+    from zoneinfo import ZoneInfo
+
+    if str(ap.get("runState") or "").lower() != "running":
+        return None
+    state = ap.get("_state")
+    if not isinstance(state, dict):
+        state = {}
+    tz_name = str(ap.get("timezone") or "Europe/Moscow")
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo("Europe/Moscow")
+    now_local = datetime.now(tz)
+    sched_day = _resolve_schedule_calendar_day(ap, now_local, tz)
+    day_key = sched_day.isoformat()
+    if not _ap_weekdays_ok(ap, sched_day):
+        return None
+    fire_times = compute_ap_fire_times_for_calendar_day(ap, sched_day, tz)
+    if not fire_times:
+        return None
+    state_synced = str(state.get("day") or "") == day_key
+    if state_synced:
+        _prune_future_skipped_slots(state, fire_times, now_local)
+    skipped = (
+        {int(x) for x in (state.get("skipped_slots") or []) if isinstance(x, (int, float, str))}
+        if state_synced
+        else set()
+    )
+    sent = (
+        {int(x) for x in (state.get("sent_slots") or []) if isinstance(x, (int, float, str))}
+        if state_synced
+        else set()
+    )
+    times = [f"{dt.hour:02d}:{dt.minute:02d}" for dt in fire_times]
+    sent_list = sorted(i for i in sent if 0 <= i < len(times))
+    skipped_list = sorted(i for i in skipped if 0 <= i < len(times))
+    next_idx = int(state.get("next_slot") or 0) if state_synced else 0
+    return {
+        "day": day_key,
+        "state_synced": state_synced,
+        "times": times,
+        "skipped_indices": skipped_list,
+        "sent_indices": sent_list,
+        "sent_times": [times[i] for i in sent_list],
+        "skipped_times": [times[i] for i in skipped_list],
+        "next_slot_index": next_idx,
+        "next_slot_time": times[next_idx] if 0 <= next_idx < len(times) else None,
+        "last_block_reason": str(state.get("last_block_reason") or "").strip() or None,
+        "last_block": state.get("last_block") if isinstance(state.get("last_block"), dict) else None,
+        "last_block_at": str(state.get("last_block_at") or "").strip() or None,
+        "scheduler": autopost_runtime_status(),
+    }
+
+
 def _broadcast_has_sendable_content(row: AdminBroadcast, media_count: int) -> bool:
     text_ok = bool((row.body_text or "").strip())
     media_ok = media_count > 0 or ((row.media_kind or "none").lower() != "none" and bool(row.media_local_name))
@@ -307,7 +585,7 @@ async def _rotation_broadcast_ids(
             select(AdminBroadcast.id)
             .where(
                 AdminBroadcast.admin_telegram_id == admin_id,
-                AdminBroadcast.status == "draft",
+                AdminBroadcast.status.in_(("draft", "sending")),
                 or_(
                     AdminBroadcast.cabinet_draft_scope == "autopost",
                     AdminBroadcast.cabinet_draft_scope.is_(None),
@@ -321,6 +599,115 @@ async def _rotation_broadcast_ids(
         return out
     ids_raw = [int(x) for x in (ap.get("broadcast_ids") or []) if int(x) > 0]
     return _dedupe_ordered(ids_raw)
+
+
+async def _autopost_save_runtime_state(
+    session: AsyncSession,
+    persist_row: Any,
+    ap: dict[str, Any],
+    *,
+    block_reason: str | None = None,
+    block_extra: dict[str, Any] | None = None,
+    clear_block: bool = False,
+) -> None:
+    state = ap.get("_state")
+    if not isinstance(state, dict):
+        return
+    if clear_block:
+        state.pop("last_block_reason", None)
+        state.pop("last_block_at", None)
+        state.pop("last_block", None)
+    elif block_reason:
+        state["last_block_reason"] = str(block_reason)[:120]
+        state["last_block_at"] = datetime.now(timezone.utc).isoformat()
+        if block_extra:
+            state["last_block"] = block_extra
+    persist_row.autopost_json = json.dumps(ap, ensure_ascii=False)
+    await session.commit()
+
+
+async def _autopost_pick_rotation_target(
+    session: AsyncSession,
+    *,
+    owner_tid: int,
+    ap: dict[str, Any],
+    state: dict[str, Any],
+    rotation_first_bid: int,
+) -> tuple[AdminBroadcast | None, int, int, list[int]]:
+    """Выбор поста из ротации; если один в sending — пробуем следующий."""
+    ids = await _rotation_broadcast_ids(session, owner_tid, ap, rotation_first_bid=rotation_first_bid)
+    if not ids:
+        return None, 0, 0, []
+    rot_start = int(state.get("rot_i") or 0) % len(ids)
+    for offset in range(len(ids)):
+        rot_i = (rot_start + offset) % len(ids)
+        bid = int(ids[rot_i])
+        target = await session.get(AdminBroadcast, bid)
+        if not target:
+            continue
+        if await _autopost_unblock_stale_sending_broadcast(session, target):
+            continue
+        return target, bid, rot_i, ids
+    return None, 0, rot_start, ids
+
+
+async def _autopost_unblock_stale_sending_broadcast(session: AsyncSession, target: AdminBroadcast) -> bool:
+    """True — черновик ещё в sending, слот пока пропускаем. False — можно слать (или сбросили зависший sending)."""
+    st = (target.status or "").strip().lower()
+    if st != "sending":
+        return False
+    uat = getattr(target, "updated_at", None)
+    now_utc = datetime.now(timezone.utc)
+    if uat is not None:
+        if uat.tzinfo is None:
+            uat = uat.replace(tzinfo=timezone.utc)
+        age = now_utc - uat
+        if age <= _AUTOPOST_SENDING_STALE:
+            log.debug(
+                "autopost wait broadcast=%s still sending age=%ss",
+                int(target.id),
+                int(age.total_seconds()),
+            )
+            return True
+    log.warning(
+        "autopost reset stale sending broadcast=%s updated_at=%s",
+        int(target.id),
+        uat,
+    )
+    target.status = "draft"
+    err = (target.error_message or "").strip()
+    if not err:
+        target.error_message = "autopost_stale_sending_reset"
+    session.add(target)
+    await session.commit()
+    return False
+
+
+def _autopost_plan_signature_key(
+    ap: dict[str, Any],
+    *,
+    ws: str,
+    we: str,
+    n: int,
+    sig_sw: str,
+    spread_b: bool,
+) -> str:
+    """Стабильный ключ расписания (hash, не обрезка — иначе каждый тик «менялся» plan и сбрасывался next_slot)."""
+    raw = "|".join(
+        [
+            ws,
+            we,
+            str(ap.get("firstPostTime") or ""),
+            str(n),
+            sig_sw[:200],
+            str(ap.get("timezone") or ""),
+            str(ap.get("autopost_target") or "groups"),
+            "1" if spread_b else "0",
+            str(ap.get("startDate") or ""),
+            str(ap.get("endDate") or ""),
+        ]
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
 async def _autopost_process_one_loaded_ap(
@@ -365,7 +752,9 @@ async def _autopost_process_one_loaded_ap(
             end_dt = None
         if end_dt and now_local.date() > end_dt:
             return
-    if int(now_local.weekday()) not in {int(x) for x in (ap.get("weekdays") or [])}:
+
+    sched_day = _resolve_schedule_calendar_day(ap, now_local, tz)
+    if not _ap_weekdays_ok(ap, sched_day):
         return
 
     g_ids = [int(x) for x in (ap.get("group_chat_ids") or []) if int(x) < 0]
@@ -380,55 +769,20 @@ async def _autopost_process_one_loaded_ap(
             "autopost campaign %s: нет групп/каналов в настройках — пропуск (укажите получателей в кампании)",
             entity_pk,
         )
+        await _autopost_save_runtime_state(
+            session,
+            persist_row,
+            ap,
+            block_reason="no_destinations",
+        )
         return
 
     ws = str(ap.get("windowStart") or "10:00")
     we = str(ap.get("windowEnd") or "21:00")
-    raw_spread = ap.get("spreadInWindow")
-    spread_b = True if raw_spread is None else bool(raw_spread)
-
-    fp_hms = str(ap.get("firstPostTime") or ap.get("windowStart") or "10:00").strip()
-
     sw_any = ap.get("sendWindows")
     sw_segments: list[dict[str, Any]] = [x for x in sw_any if isinstance(x, dict)] if isinstance(sw_any, list) else []
 
-    fire_times: list[datetime]
-    if len(sw_segments) >= 2:
-        fire_times = _compose_daily_fire_times_multi(
-            tz=tz,
-            calendar_day=now_local.date(),
-            segments=sw_segments,
-            spread_b=spread_b,
-            first_post_hms=fp_hms,
-        )
-    elif len(sw_segments) == 1:
-        seg1 = sw_segments[0]
-        ws = str(seg1.get("windowStart") or ws).strip()
-        we = str(seg1.get("windowEnd") or we).strip()
-        n1 = max(1, min(288, int(seg1.get("posts") or ap.get("postsPerDay") or 1)))
-        fire_times = _compose_daily_fire_times(
-            tz=tz,
-            calendar_day=now_local.date(),
-            ws=ws,
-            we=we,
-            n=n1,
-            spread_b=spread_b,
-            anchor_first_daily=spread_b,
-            first_post_hms=fp_hms,
-        )
-    else:
-        n = int(ap.get("postsPerDay") or 1)
-        n = max(1, min(288, n))
-        fire_times = _compose_daily_fire_times(
-            tz=tz,
-            calendar_day=now_local.date(),
-            ws=ws,
-            we=we,
-            n=n,
-            spread_b=spread_b,
-            anchor_first_daily=spread_b,
-            first_post_hms=fp_hms,
-        )
+    fire_times = compute_ap_fire_times_for_calendar_day(ap, sched_day, tz)
     if not fire_times:
         return
 
@@ -440,64 +794,57 @@ async def _autopost_process_one_loaded_ap(
         sig_sw = str(sw_segments)
 
     state = ap["_state"]
-    plan_sig = "|".join(
-        [
-            ws,
-            we,
-            str(ap.get("firstPostTime") or ""),
-            str(n),
-            sig_sw[:200],
-            str(ap.get("timezone") or ""),
-            str(ap.get("autopost_target") or "groups"),
-            "1" if spread_b else "0",
-            str(ap.get("startDate") or ""),
-            str(ap.get("endDate") or ""),
-        ]
-    )
+    spread_b = _ap_spread_in_window(ap)
+    plan_sig = _autopost_plan_signature_key(ap, ws=ws, we=we, n=n, sig_sw=sig_sw, spread_b=spread_b)
+    stored_sig = str(state.get("plan_sig") or "")
+    if stored_sig and (len(stored_sig) != 32 or not all(c in "0123456789abcdef" for c in stored_sig.lower())):
+        state.pop("plan_sig", None)
+    plan_changed = False
     if state.get("plan_sig") != plan_sig:
-        state["plan_sig"] = plan_sig[:120]
+        state["plan_sig"] = plan_sig
         state["next_slot"] = 0
+        state["skipped_slots"] = []
+        state["sent_slots"] = []
+        plan_changed = True
 
-    day_key = now_local.date().isoformat()
+    day_key = sched_day.isoformat()
+    day_changed = False
     if state.get("day") != day_key:
         state["day"] = day_key
         state["next_slot"] = 0
+        state["skipped_slots"] = []
+        state["sent_slots"] = []
+        day_changed = True
+
+    if plan_changed or day_changed:
+        persist_row.autopost_json = json.dumps(ap, ensure_ascii=False)
+        await session.commit()
 
     next_slot = int(state.get("next_slot") or 0)
     if next_slot >= n:
         return
 
-    catch_up_active = False
-    catch_raw = state.get("run_catch_up_until")
-    if catch_raw:
-        try:
-            cu = datetime.fromisoformat(str(catch_raw).replace("Z", "+00:00"))
-            if cu.tzinfo is None:
-                cu = cu.replace(tzinfo=timezone.utc)
-            catch_up_active = (now_local.astimezone(timezone.utc) - cu.astimezone(timezone.utc)) <= _AUTOPOST_SLOT_GRACE
-        except Exception:
-            catch_up_active = False
-
-    max_late = _AUTOPOST_SLOT_GRACE if catch_up_active else _AUTOPOST_MISSED_MAX_LATE
-
-    # Пропуск «устаревших» слотов только при n>1: иначе при postsPerDay=1 один пропуск >50 мин
-    # выставлял next_slot>=n и автопост молча не работал до следующего календарного дня.
-    if n > 1:
-        ns = next_slot
-        while ns < n and (now_local - fire_times[ns]) > max_late:
+    # Пропуск просроченных слотов без «догоняющей» пачки: отправляем только если опоздание ≤ grace.
+    ns = next_slot
+    late_skip: list[int] = []
+    while ns < n:
+        st = fire_times[ns]
+        if st > now_local:
+            break
+        if (now_local - st) > _AUTOPOST_FIRE_GRACE:
+            late_skip.append(ns)
             ns += 1
-        if ns != next_slot:
-            state["next_slot"] = ns
-            persist_row.autopost_json = json.dumps(ap, ensure_ascii=False)
-            await session.commit()
-            if ns >= n:
-                return
-            next_slot = ns
-    elif catch_up_active and next_slot < n and (now_local - fire_times[next_slot]) > max_late:
-        state["next_slot"] = n
+            continue
+        break
+    if late_skip:
+        _merge_slot_index_list(state, "skipped_slots", late_skip)
+    if ns != next_slot:
+        state["next_slot"] = ns
         persist_row.autopost_json = json.dumps(ap, ensure_ascii=False)
         await session.commit()
-        return
+        if ns >= n:
+            return
+        next_slot = ns
 
     slot_time = fire_times[next_slot]
     slot_ready = slot_time <= now_local
@@ -515,23 +862,52 @@ async def _autopost_process_one_loaded_ap(
                 in_any = True
                 break
         if not in_any:
-            grace_ok = slot_ready and (now_local - slot_time) <= _AUTOPOST_SLOT_GRACE and slot_time.date() == now_local.date()
+            grace_ok = slot_ready and (now_local - slot_time) <= _AUTOPOST_SLOT_GRACE and (
+                slot_time.date() == now_local.date() or sched_day < now_local.date()
+            )
             if not grace_ok:
                 return
     else:
         bounds_active = _active_window_bounds(now_local, ws, we)
         if bounds_active is None:
-            grace_ok = slot_ready and (now_local - slot_time) <= _AUTOPOST_SLOT_GRACE and slot_time.date() == now_local.date()
+            grace_ok = slot_ready and (now_local - slot_time) <= _AUTOPOST_SLOT_GRACE and (
+                slot_time.date() == now_local.date() or sched_day < now_local.date()
+            )
             if not grace_ok:
                 return
 
-    ids = await _rotation_broadcast_ids(session, owner_tid, ap, rotation_first_bid=rotation_first_bid)
+    target, bid, rot_i, ids = await _autopost_pick_rotation_target(
+        session,
+        owner_tid=owner_tid,
+        ap=ap,
+        state=state,
+        rotation_first_bid=rotation_first_bid,
+    )
     if not ids:
         log.warning("autopost %s=%s: пустая ротация постов", idem_prefix, entity_pk)
+        await _autopost_save_runtime_state(
+            session,
+            persist_row,
+            ap,
+            block_reason="empty_rotation",
+        )
+        return
+    if not target:
+        log.warning(
+            "autopost %s=%s: все посты ротации заняты (sending), slot=%s",
+            idem_prefix,
+            entity_pk,
+            next_slot,
+        )
+        await _autopost_save_runtime_state(
+            session,
+            persist_row,
+            ap,
+            block_reason="rotation_busy_sending",
+            block_extra={"slot_index": int(next_slot)},
+        )
         return
 
-    rot_i = int(state.get("rot_i") or 0) % len(ids)
-    bid = ids[rot_i]
     log.info(
         "autopost rotation %s entity=%s owner=%s rot_i=%s len=%s ids=%s chosen_bid=%s slot=%s/%s",
         idem_prefix,
@@ -544,14 +920,18 @@ async def _autopost_process_one_loaded_ap(
         next_slot,
         n,
     )
-    target = await session.get(AdminBroadcast, int(bid))
-    if not target or (target.status or "") == "sending":
-        return
 
     mc_q = await session.execute(select(AdminBroadcastMedia).where(AdminBroadcastMedia.broadcast_id == int(target.id)))
     media_count = len(list(mc_q.scalars().all()))
     if not _broadcast_has_sendable_content(target, media_count):
         log.warning("autopost skip broadcast=%s: нет текста и медиа", bid)
+        await _autopost_save_runtime_state(
+            session,
+            persist_row,
+            ap,
+            block_reason="empty_content",
+            block_extra={"broadcast_id": int(bid)},
+        )
         return
 
     if not owner_tid:
@@ -566,6 +946,12 @@ async def _autopost_process_one_loaded_ap(
             entity_pk,
             bid,
         )
+        await _autopost_save_runtime_state(
+            session,
+            persist_row,
+            ap,
+            block_reason="bot_token_missing",
+        )
         return
 
     billing_user = await get_or_create_user(session, owner_tid)
@@ -579,9 +965,21 @@ async def _autopost_process_one_loaded_ap(
     )
     if merged_ids and not resolved:
         log.warning("autopost %s=%s broadcast=%s: группы/каналы не прошли фильтр", idem_prefix, entity_pk, bid)
+        await _autopost_save_runtime_state(
+            session,
+            persist_row,
+            ap,
+            block_reason="recipients_filtered",
+        )
         return
     if not resolved:
         log.warning("autopost %s=%s broadcast=%s: нет групп для отправки", idem_prefix, entity_pk, bid)
+        await _autopost_save_runtime_state(
+            session,
+            persist_row,
+            ap,
+            block_reason="no_recipients",
+        )
         return
 
     _n_users, n_groups = await estimate_recipient_counts(session, target="groups", target_chat_ids=resolved)
@@ -608,11 +1006,26 @@ async def _autopost_process_one_loaded_ap(
             int(cost),
             float(getattr(billing_user, "aurum_credits", 0.0) or 0.0),
         )
+        await _autopost_save_runtime_state(
+            session,
+            persist_row,
+            ap,
+            block_reason="insufficient_aurum",
+            block_extra={
+                "need_tokens": int(cost),
+                "have_aurum": float(getattr(billing_user, "aurum_credits", 0.0) or 0.0),
+                "slot_index": int(next_slot),
+            },
+        )
         return
 
+    _merge_slot_index_list(state, "sent_slots", [slot_firing])
     state["next_slot"] = next_slot + 1
     state["rot_i"] = rot_i + 1
     state.pop("run_catch_up_until", None)
+    state.pop("last_block_reason", None)
+    state.pop("last_block_at", None)
+    state.pop("last_block", None)
     persist_row.autopost_json = json.dumps(ap, ensure_ascii=False)
 
     target.status = "sending"
@@ -637,16 +1050,35 @@ async def _autopost_process_one_loaded_ap(
         int(cost),
         idem_base,
     )
+    _AUTOPOST_RUNTIME["last_fire_at"] = datetime.now(timezone.utc)
 
+    apc_id = int(entity_pk) if idem_prefix == "apc" else None
     asyncio.create_task(
-        run_broadcast_job(int(bid), "groups", resolved, keep_draft_after=True, run_source="autopost"),
+        run_broadcast_job(
+            int(bid),
+            "groups",
+            resolved,
+            keep_draft_after=True,
+            run_source="autopost",
+            autopost_campaign_id=apc_id,
+        ),
     )
 
 
 async def autopost_tick_once() -> None:
+    now_utc = datetime.now(timezone.utc)
+    _AUTOPOST_RUNTIME["last_tick_at"] = now_utc
     session = await get_session()
     async with session:
         if not await _autopost_try_advisory_lock(session):
+            _AUTOPOST_RUNTIME["lock_miss_total"] = int(_AUTOPOST_RUNTIME.get("lock_miss_total") or 0) + 1
+            miss_n = int(_AUTOPOST_RUNTIME["lock_miss_total"])
+            if miss_n == 1 or miss_n % 30 == 0:
+                log.info(
+                    "autopost_tick: advisory lock busy (another worker ticks?) miss=%s worker=%s",
+                    miss_n,
+                    _AUTOPOST_RUNTIME.get("worker_label"),
+                )
             return
         try:
             cq = await session.execute(
@@ -738,15 +1170,70 @@ async def autopost_tick_once() -> None:
                     rotation_first_bid=int(anchor.id),
                 )
 
+            _AUTOPOST_RUNTIME["last_tick_ok_at"] = datetime.now(timezone.utc)
+            _AUTOPOST_RUNTIME["ticks_total"] = int(_AUTOPOST_RUNTIME.get("ticks_total") or 0) + 1
+            _AUTOPOST_RUNTIME["last_error"] = None
+            running_n = 0
+            for camp in campaigns:
+                raw_txt = (camp.autopost_json or "").strip()
+                if not raw_txt:
+                    continue
+                try:
+                    raw = json.loads(raw_txt)
+                except Exception:
+                    continue
+                if isinstance(raw, dict) and str(raw.get("runState") or "").lower() == "running":
+                    running_n += 1
+            _AUTOPOST_RUNTIME["running_campaigns"] = running_n
+
         finally:
             await _autopost_advisory_unlock(session)
 
 
-async def autopost_loop(interval_sec: float = 30.0) -> None:
-    log.info("autopost_loop started (interval=%ss)", interval_sec)
+def autopost_tick_interval_sec(explicit: float | None = None) -> float:
+    """Интервал опроса расписания. Меньше = ближе к минуте слота (но больше нагрузка на БД)."""
+    if explicit is not None:
+        try:
+            return max(5.0, min(60.0, float(explicit)))
+        except (TypeError, ValueError):
+            pass
+    raw = (os.getenv("AUTOPOST_TICK_SEC") or "10").strip()
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        v = 10.0
+    return max(5.0, min(60.0, v))
+
+
+async def autopost_loop(interval_sec: float | None = None) -> None:
+    tick = autopost_tick_interval_sec(interval_sec)
+    _AUTOPOST_RUNTIME["loop_started_at"] = datetime.now(timezone.utc)
+    _AUTOPOST_RUNTIME["bot_token_configured"] = bool((os.getenv("BOT_TOKEN") or "").strip())
+    log.info(
+        "autopost_loop started worker=%s interval=%ss bot_token=%s",
+        _AUTOPOST_RUNTIME.get("worker_label"),
+        tick,
+        "yes" if _AUTOPOST_RUNTIME["bot_token_configured"] else "NO",
+    )
+    print(
+        f"autopost_loop started worker={_AUTOPOST_RUNTIME.get('worker_label')} interval={tick}s",
+        flush=True,
+    )
+    tick_n = 0
     while True:
         try:
             await autopost_tick_once()
-        except Exception:
+            tick_n += 1
+            if tick_n == 1 or tick_n % 30 == 0:
+                st = autopost_runtime_status()
+                log.info(
+                    "autopost_loop heartbeat tick=%s interval=%ss alive=%s lock_miss=%s",
+                    tick_n,
+                    tick,
+                    st.get("loop_alive"),
+                    st.get("lock_miss_total"),
+                )
+        except Exception as exc:
+            _AUTOPOST_RUNTIME["last_error"] = str(exc)[:240]
             log.exception("autopost_tick_once")
-        await asyncio.sleep(max(10.0, float(interval_sec)))
+        await asyncio.sleep(tick)

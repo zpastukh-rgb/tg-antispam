@@ -7,6 +7,8 @@ import { useRouter } from 'vue-router'
 import { api } from '../api/client'
 import { useApi, messageFromApiError } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
+import { usePremiumLock } from '../composables/usePremiumLock'
+import { useModalScrollLock, resetModalScrollLock } from '../composables/useModalScrollLock'
 import NavIcon from '../components/NavIcon.vue'
 import SubscriptionManagementPanel from '../components/SubscriptionManagementPanel.vue'
 import { formatDateRu, formatDateTimeShortRu } from '../utils/formatDateTime'
@@ -35,6 +37,7 @@ const router = useRouter()
 const { hasInitData, fetchSilent } = useApi()
 const { showToast } = useToast()
 const { t, locale: i18nLocale } = useI18n()
+const { openLock: openPremiumLockModal } = usePremiumLock()
 
 const LANG_KEY = 'guard.settings.lang'
 const LANG_AUTO_KEY = 'guard.settings.lang_auto'
@@ -233,6 +236,8 @@ const botHandle = computed(() => {
 })
 
 const isPremium = computed(() => !!me.value?.is_premium)
+const settingsModalOpen = computed(() => showPdfModal.value || showPurgeConfirm.value)
+useModalScrollLock(settingsModalOpen)
 const subscriptionUntilShort = computed(() => formatDateRu(me.value?.subscription_until))
 
 /** Инвалидация computed после записи PIN в localStorage */
@@ -466,6 +471,15 @@ function iosSwitchClass(on) {
 
 async function exportPdf() {
   if (!me.value) return
+  if (!isPremium.value) {
+    openPremiumLockModal({
+      feature: 'pdf_export',
+      me: me.value,
+      titleKey: 'premium_lock.lock_pdf_export_title',
+      descriptionKey: 'premium_lock.lock_pdf_export_body',
+    })
+    return
+  }
   showPdfModal.value = true
   void loadPdfChats()
   await refreshPdfPreview()
@@ -1335,15 +1349,9 @@ watch(showPdfModal, (on) => {
   if (on) {
     void loadPdfChats()
     void refreshPdfPreview()
-    try {
-      document.body.style.overflow = 'hidden'
-    } catch { /* */ }
   } else {
     revokePdfObjectUrl()
     pdfPreview.value = null
-    try {
-      document.body.style.overflow = ''
-    } catch { /* */ }
   }
 })
 
@@ -1353,9 +1361,7 @@ onBeforeUnmount(() => {
     clearTimeout(pdfRefreshTimer)
     pdfRefreshTimer = null
   }
-  try {
-    document.body.style.overflow = ''
-  } catch { /* */ }
+  resetModalScrollLock()
 })
 </script>
 
@@ -1607,6 +1613,7 @@ onBeforeUnmount(() => {
           role="dialog"
           aria-modal="true"
           @click.self="showPurgeConfirm = false"
+          @touchmove.prevent
         >
           <div
             class="w-full max-w-md overflow-hidden rounded-[24px] border border-white/[0.14] bg-[#1c1c1e]/95 p-5 shadow-2xl backdrop-blur-2xl"
@@ -2055,6 +2062,7 @@ onBeforeUnmount(() => {
       role="dialog"
       aria-modal="true"
       @click.self="showPdfModal = false"
+      @touchmove.prevent
     >
       <div
         class="flex max-h-[92vh] w-full max-w-md flex-col overflow-hidden rounded-[26px] bg-[#15171a]/96 shadow-[0_30px_60px_-20px_rgba(0,0,0,0.7)]"

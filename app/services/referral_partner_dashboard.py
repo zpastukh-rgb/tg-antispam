@@ -4,19 +4,79 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import PartnerCommission, User
-from app.services.chat_owner_premium import user_effective_miniapp_premium
+from app.services.chat_owner_premium import user_effective_miniapp_premium, user_premium_subscription_snapshot
 from app.services.credit_policy import PARTNER_TOKEN_RUB_RATE, REFERRAL_LEVEL_RATES
 
 
 def referral_partner_ui_max_levels(owner: User | None, now_utc: datetime | None = None) -> int:
     """Совпадает с правилами выплат PartnerCommission (L2/L3 только при Premium у партнёра)."""
     return 3 if user_effective_miniapp_premium(owner, now_utc or datetime.now(timezone.utc)) else 1
+
+
+def referral_partner_access_block(
+    user: User | None,
+    *,
+    now_utc: datetime | None = None,
+    access_label_fn: Callable[..., str],
+    format_dt_fn: Callable[[datetime | None], str | None],
+    subscription_snapshot: dict[str, Any] | None = None,
+    promo_code: str | None = None,
+) -> dict[str, Any]:
+    """Строки «Доступ» в партнёрке: уровни сети + Premium (оплата / промо / триал)."""
+    now = now_utc or datetime.now(timezone.utc)
+    snap = subscription_snapshot or user_premium_subscription_snapshot(user, now)
+    sub_active = bool(snap.get("subscription_active"))
+    max_lv = 3 if sub_active else 1
+    if max_lv >= 3:
+        access_label = access_label_fn("full", levels=3)
+    else:
+        access_label = access_label_fn("free", levels=1)
+
+    is_forever = bool(snap.get("subscription_forever"))
+    sub_until = snap.get("subscription_until")
+    days_left = snap.get("subscription_days_left")
+    source = str(snap.get("subscription_source") or "").strip().lower()
+    promo = str(promo_code or "").strip().upper() or None
+
+    premium_kind = ""
+    active_until: str | None = None
+    if sub_active:
+        if source == "promo":
+            premium_kind = "promo"
+        elif source == "trial":
+            premium_kind = "trial"
+        elif source == "payment":
+            premium_kind = "payment"
+        else:
+            premium_kind = "generic"
+        if is_forever:
+            active_until = None
+            days_left = None
+        elif sub_until is not None:
+            active_until = format_dt_fn(sub_until)
+            if days_left is None:
+                su = sub_until
+                if getattr(su, "tzinfo", None) is None:
+                    su = su.replace(tzinfo=timezone.utc)
+                days_left = max(0, (su.date() - now.date()).days)
+
+    return {
+        "access_label": access_label,
+        "partner_ui_max_levels": max_lv,
+        "subscription_active": sub_active,
+        "subscription_forever": is_forever,
+        "subscription_source": source,
+        "subscription_promo_code": promo,
+        "premium_kind": premium_kind,
+        "days_left": int(days_left) if days_left is not None else None,
+        "active_until": active_until,
+    }
 
 
 def reward_rub_to_partner_tokens(reward_rub: float) -> float:

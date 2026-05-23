@@ -37,6 +37,7 @@ from app.services.user_service import (
     TRIAL_WINDOW_DAYS,
     TRIAL_SUBSCRIPTION_SOURCE,
     is_trial_active,
+    is_trial_eligible,
     trial_active_remaining_days,
     trial_window_remaining_days,
 )
@@ -594,9 +595,15 @@ async def _run_reminders_no_group(
 
             from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
             connect_link = await _startapp_link_for_bot(bot, "connect")
-            kb = InlineKeyboardMarkup(inline_keyboard=[[
+            rows: list[list[InlineKeyboardButton]] = [[
                 InlineKeyboardButton(text=button_text, url=connect_link),
-            ]])
+            ]]
+            if stage == 0 and is_trial_eligible(user, now):
+                trial_link = await _startapp_link_for_bot(bot, "trial")
+                rows.append([
+                    InlineKeyboardButton(text=t(loc, "reminders.btn_trial_activate"), url=trial_link),
+                ])
+            kb = InlineKeyboardMarkup(inline_keyboard=rows)
             await bot.send_message(
                 user.telegram_id,
                 text,
