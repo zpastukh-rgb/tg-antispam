@@ -32,6 +32,12 @@ import {
   shouldConfirmForAction,
   shouldAskPinForAction,
 } from '../utils/settingsSecurity'
+import {
+  applySettingsBootCache,
+  hydrateSettingsBoot,
+  prefetchSettingsBoot,
+} from '../utils/settingsViewCache'
+import { readBotInfoCache } from '../utils/reportsViewCache'
 
 const router = useRouter()
 const { hasInitData, fetchSilent } = useApi()
@@ -49,8 +55,9 @@ const LOGIN_HIST_KEY = 'guard.login_history_v1'
 const panel = ref('hub')
 const me = ref(null)
 const botInfo = ref(null)
-const loading = ref(true)
+const loading = ref(false)
 const bootErr = ref('')
+let meLoadInFlight = null
 
 const delegationLoading = ref(false)
 const delegationRows = ref([])
@@ -346,28 +353,68 @@ function onSettingsSubscriptionProfileUpdate(next) {
   if (next && typeof next === 'object') me.value = next
 }
 
-async function loadMe() {
+function applyMeLanguageFromProfile(profile) {
+  const remoteLang = normalizeLocale(profile?.language)
+  if (!remoteLang) return
+  uiLang.value = remoteLang
+  setAppLocale(remoteLang)
+}
+
+function hydrateSettingsFromCache() {
+  const cached = hydrateSettingsBoot()
+  if (cached.me) {
+    me.value = cached.me
+    applyMeLanguageFromProfile(cached.me)
+  }
+  if (cached.botInfo) botInfo.value = cached.botInfo
+  return !!(cached.me || cached.botInfo)
+}
+
+function onGuardMeRefresh() {
+  const cached = hydrateSettingsBoot()
+  if (cached.me) me.value = cached.me
+  if (cached.botInfo) botInfo.value = cached.botInfo
+}
+
+async function loadMe(opts = {}) {
+  const background = !!opts.background
   if (!hasInitData.value) {
     loading.value = false
     return
   }
-  loading.value = true
+  if (meLoadInFlight) return meLoadInFlight
+
+  const hadCache = hydrateSettingsFromCache()
+  if (!background && !hadCache && !me.value) loading.value = true
   bootErr.value = ''
-  try {
-    const [u, bi] = await Promise.all([
-      fetchSilent(() => api.me()),
-      fetchSilent(() => api.botInfo()),
-    ])
-    me.value = u
-    botInfo.value = bi
-    const remoteLang = normalizeLocale(u?.language)
-    uiLang.value = remoteLang
-    setAppLocale(remoteLang)
-  } catch (e) {
-    bootErr.value = messageFromApiError(e, t('app.profile_error'))
-  } finally {
-    loading.value = false
-  }
+
+  meLoadInFlight = (async () => {
+    try {
+      const botCached = readBotInfoCache()
+      const [u, bi] = await Promise.all([
+        fetchSilent(() => api.me()),
+        botCached
+          ? Promise.resolve(botCached)
+          : fetchSilent(() => api.botInfo()).catch(() => null),
+      ])
+      if (u) {
+        me.value = u
+        applyMeLanguageFromProfile(u)
+      }
+      if (bi && typeof bi === 'object') botInfo.value = bi
+      applySettingsBootCache(u, bi)
+      if (!u && !me.value) {
+        bootErr.value = t('app.profile_error')
+      }
+    } catch (e) {
+      if (!me.value) bootErr.value = messageFromApiError(e, t('app.profile_error'))
+    } finally {
+      loading.value = false
+      meLoadInFlight = null
+    }
+  })()
+
+  return meLoadInFlight
 }
 
 async function chooseLanguage(code) {
@@ -436,6 +483,8 @@ async function loadDelegations() {
 
 watch(panel, (s) => {
   if (s === 'delegation') loadDelegations()
+  if (s === 'security') void loadSessions()
+  if (s === 'data' && !pdfChats.value.length) void loadPdfChats()
 })
 
 watch(delegationEnabled, () => {
@@ -545,8 +594,9 @@ async function loadPdfChats() {
 const REASON_LABEL_MAP_RU = {
   ads: 'Реклама', vulgar: 'Вульгарность', nazi: 'Нацизм', insult: 'Оскорбления',
   racism: 'Расизм', profanity: 'Мат', stopword: 'Запретные слова', media: 'Медиа',
-  link: 'Ссылки', mention: 'Упоминания', casino: 'Казино / ставки', jobs: 'Подработки',
+  link: 'Ссылки', mention: 'Упоминания', casino: 'Казино / ставки', crypto: 'Антикрипт', jobs: 'Подработки',
   politics: 'Анти-политика', religion: 'Религия', esoteric: 'Эзотерика / магия',
+  drugs: 'Наркотики',
   buttons: 'Кнопки', antinakrutka: 'Анти-накрутка', flood: 'Флуд', raid: 'Рейд',
   captcha: 'Капча', global_antispam: 'Глобальный антиспам', forward: 'Репосты',
   global_url: 'Глобальные URL', url: 'URL', hate: 'Ненависть', spam: 'Спам',
@@ -555,8 +605,9 @@ const REASON_LABEL_MAP_RU = {
 const REASON_LABEL_MAP_EN = {
   ads: 'Ads', vulgar: 'Vulgar', nazi: 'Nazi', insult: 'Insults',
   racism: 'Racism', profanity: 'Profanity', stopword: 'Stopwords', media: 'Media',
-  link: 'Links', mention: 'Mentions', casino: 'Casino / betting', jobs: 'Side jobs',
+  link: 'Links', mention: 'Mentions', casino: 'Casino / betting', crypto: 'Anti-crypto', jobs: 'Side jobs',
   politics: 'Anti‑politics', religion: 'Religion', esoteric: 'Esoteric / magic',
+  drugs: 'Drugs',
   buttons: 'Buttons', antinakrutka: 'Anti‑boosting', flood: 'Flood', raid: 'Raid',
   captcha: 'Captcha', global_antispam: 'Global antispam', forward: 'Forwards',
   global_url: 'Global URLs', url: 'URL', hate: 'Hate', spam: 'Spam',
@@ -1324,10 +1375,10 @@ onMounted(() => {
   confirmMap.value = { ...loadConfirmMap() }
   pinMap.value = { ...loadPinMap() }
   pinEnabled.value = loadPinEnabled()
-  void loadSessions()
-  void loadPdfChats()
   touchLoginHistory()
-  loadMe()
+  const hadCache = hydrateSettingsFromCache()
+  void loadMe({ background: hadCache })
+  window.addEventListener('guard:me-refresh', onGuardMeRefresh)
 })
 
 watch(uiLang, (v) => {
@@ -1356,6 +1407,7 @@ watch(showPdfModal, (on) => {
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('guard:me-refresh', onGuardMeRefresh)
   revokePdfObjectUrl()
   if (pdfRefreshTimer) {
     clearTimeout(pdfRefreshTimer)
@@ -1381,20 +1433,15 @@ onBeforeUnmount(() => {
       >
         {{ t('app.init_required') }}
       </div>
-      <div
-        v-else-if="loading"
-        class="rounded-[22px] bg-white/[0.06] px-4 py-8 text-center text-[14px] text-white/55 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-2xl"
-      >
-        {{ t('common.loading') }}
-      </div>
-      <div
-        v-else-if="bootErr"
-        class="rounded-[22px] border border-rose-400/25 bg-rose-500/[0.1] px-4 py-3.5 text-[14px] text-rose-100 backdrop-blur-xl"
-      >
-        {{ bootErr }}
-      </div>
+      <template v-else>
+        <div
+          v-if="bootErr && !me"
+          class="rounded-[22px] border border-rose-400/25 bg-rose-500/[0.1] px-4 py-3.5 text-[14px] text-rose-100 backdrop-blur-xl"
+        >
+          {{ bootErr }}
+        </div>
 
-      <div v-else class="space-y-2">
+        <div class="space-y-2">
         <button
           v-for="row in [
             { key: 'profile', title: t('settings.hub.profile.title'), sub: t('settings.hub.profile.sub'), icon: 'account' },
@@ -1420,7 +1467,8 @@ onBeforeUnmount(() => {
           </span>
           <NavIcon name="chevron-right" class="h-5 w-5 shrink-0 text-white/25 group-hover:text-white/40" />
         </button>
-      </div>
+        </div>
+      </template>
     </template>
 
     <!-- Sub-screen shell -->
@@ -1440,6 +1488,13 @@ onBeforeUnmount(() => {
 
       <!-- Profile -->
       <div v-if="panel === 'profile'" class="space-y-3 pt-3">
+        <div
+          v-if="!me && loading"
+          class="rounded-[22px] bg-white/[0.06] px-4 py-8 text-center text-[14px] text-white/55 backdrop-blur-2xl"
+        >
+          {{ t('common.loading') }}
+        </div>
+        <template v-else>
         <button
           type="button"
           class="flex w-full items-center gap-3.5 rounded-[22px] border border-white/[0.11] bg-white/[0.07] px-4 py-4 text-left shadow-[inset_0_1px_0_0_rgba(255,255,255,0.07)] backdrop-blur-2xl transition hover:bg-white/[0.09]"
@@ -1532,6 +1587,7 @@ onBeforeUnmount(() => {
             </button>
           </div>
         </div>
+        </template>
       </div>
 
       <!-- Payment -->

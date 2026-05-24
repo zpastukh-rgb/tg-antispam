@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { normalizeHtmlForTelegram, sanitizeEditorLinksNoUnderline } from './telegramHtmlForTg.js'
+import {
+  extractEditorTextLinks,
+  normalizeHtmlForTelegram,
+  sanitizeEditorLinksNoUnderline,
+} from './telegramHtmlForTg.js'
 
 describe('normalizeHtmlForTelegram links', () => {
   it('keeps text_link without underline entity', () => {
@@ -28,6 +32,36 @@ describe('normalizeHtmlForTelegram links', () => {
   it('keeps underline outside links', () => {
     const out = normalizeHtmlForTelegram('<u>важно</u> и <a href="https://example.com">ссылка</a>')
     expect(out).toBe('<u>важно</u> и <a href="https://example.com">ссылка</a>')
+  })
+})
+
+describe('extractEditorTextLinks', () => {
+  it('returns empty for blank html', () => {
+    expect(extractEditorTextLinks('')).toEqual([])
+    expect(extractEditorTextLinks('   ')).toEqual([])
+  })
+
+  it('extracts single link text and url', () => {
+    expect(
+      extractEditorTextLinks('<a href="https://example.com">Купить</a>'),
+    ).toEqual([{ text: 'Купить', url: 'https://example.com' }])
+  })
+
+  it('extracts multiple links in order', () => {
+    expect(
+      extractEditorTextLinks(
+        'Текст <a href="https://a.com">Первый</a> и <a href="https://b.com">Второй</a>',
+      ),
+    ).toEqual([
+      { text: 'Первый', url: 'https://a.com' },
+      { text: 'Второй', url: 'https://b.com' },
+    ])
+  })
+
+  it('uses visible text without underline markup inside anchor', () => {
+    expect(
+      extractEditorTextLinks('<a href="https://vk.com/im"><u>Жми</u></a>'),
+    ).toEqual([{ text: 'Жми', url: 'https://vk.com/im' }])
   })
 })
 

@@ -15,6 +15,7 @@ const router = useRouter()
 const addToGroupUrl = ref(null)
 const addToChannelUrl = ref(null)
 const preparedAddGroupButtonId = ref(null)
+const preparedAddChannelButtonId = ref(null)
 const pendingChats = ref([])
 const pendingLoading = ref(false)
 
@@ -31,10 +32,35 @@ const pendingGroups = computed(() => (pendingChats.value || []).filter((c) => St
 const pendingChannels = computed(() => (pendingChats.value || []).filter((c) => String(c?.chat_kind || '') === 'channel'))
 const pendingCurrentKind = computed(() => (isGroupKind.value ? pendingGroups.value : pendingChannels.value))
 
-function buildAddUrl(username) {
+function buildAddGroupUrl(username) {
   const u = (username || '').replace(/^@/, '').trim()
   if (!u) return null
   return `https://t.me/${u}?startgroup=connect&admin=${ADMIN_RIGHTS}`
+}
+
+function buildAddChannelUrl(username) {
+  const u = (username || '').replace(/^@/, '').trim()
+  if (!u) return null
+  return `https://t.me/${u}?startchannel=connect_channel&admin=${CHANNEL_ADMIN_RIGHTS}`
+}
+
+function applyBotInfo(botData) {
+  const username = String(botData?.username || '').replace(/^@/, '').trim()
+  addToGroupUrl.value = botData?.add_to_group_url || buildAddGroupUrl(username)
+  addToChannelUrl.value = botData?.add_to_channel_url || buildAddChannelUrl(username)
+  preparedAddGroupButtonId.value = botData?.prepared_add_group_button_id || null
+  preparedAddChannelButtonId.value = botData?.prepared_add_channel_button_id || null
+}
+
+async function refreshPreparedConnectButtons() {
+  if (!hasInitData.value) return null
+  try {
+    const botData = await fetchSilent(() => api.botInfo())
+    applyBotInfo(botData)
+    return botData
+  } catch {
+    return null
+  }
 }
 
 async function loadConnectData() {
@@ -42,13 +68,10 @@ async function loadConnectData() {
   pendingLoading.value = true
   try {
     const [botData, pendingData] = await Promise.all([
-      fetchSilent(() => api.botInfo()).catch(() => null),
+      refreshPreparedConnectButtons(),
       fetchSilent(() => api.connectPending()).catch(() => ({ chats: [] })),
     ])
-    addToGroupUrl.value = botData?.add_to_group_url || buildAddUrl(botData?.username)
-    const username = String(botData?.username || '').replace(/^@/, '').trim()
-    addToChannelUrl.value = username ? `https://t.me/${username}?startchannel=connect_channel&admin=${CHANNEL_ADMIN_RIGHTS}` : null
-    preparedAddGroupButtonId.value = botData?.prepared_add_group_button_id || null
+    if (botData) applyBotInfo(botData)
     pendingChats.value = pendingData?.chats || []
   } catch {
     //
@@ -67,43 +90,58 @@ watch(
   { immediate: true },
 )
 
-function openAddToGroup() {
+async function requestChatWithPrepared(preparedId, refreshFirst = true) {
   const tg = typeof window !== 'undefined' ? window.Telegram?.WebApp : null
-  // 1) Стабильно для защиты: t.me/...?startgroup=connect&admin= (не reportschat_* из «Отчёты»).
+  if (!tg || typeof tg.requestChat !== 'function') return false
+  let prep = String(preparedId || '').trim()
+  if (refreshFirst) {
+    const botData = await refreshPreparedConnectButtons()
+    prep = String(
+      (isGroupKind.value ? botData?.prepared_add_group_button_id : botData?.prepared_add_channel_button_id)
+        || prep
+        || '',
+    ).trim()
+  }
+  if (!prep) return false
+  try {
+    tg.requestChat(prep, () => {
+      void loadConnectData()
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function openAddToGroup() {
+  // 1) Mini App: нативный выбор группы сразу с экраном «Назначить администратором» и нужными правами.
+  if (await requestChatWithPrepared(preparedAddGroupButtonId.value)) return
+
+  // 2) Deep link с admin= — только если requestChat недоступен.
   if (addToGroupUrl.value) {
     const ok = openTelegramDeepLink(addToGroupUrl.value)
-    if (ok) {
-      return
-    }
+    if (ok) return
   }
-  // 2) Фоллбек Mini App: нативный выбор чата
-  const prep = preparedAddGroupButtonId.value
-  if (prep && typeof tg?.requestChat === 'function') {
-    try {
-      tg.requestChat(prep, () => {
-        loadConnectData()
-      })
-      return
-    } catch {
-      //
-    }
-  }
+
   showToast(
     isEn.value
-      ? 'Open the Mini App from Telegram. If the link did not work, refresh the screen (pull down) and try again.'
-      : 'Откройте мини-приложение из Telegram. Если ссылка не сработала, обновите экран (потяните вниз) и повторите.',
+      ? 'Open the Mini App from Telegram. If the picker did not open, refresh the screen (pull down) and try again.'
+      : 'Откройте мини-приложение из Telegram. Если выбор группы не открылся, обновите экран (потяните вниз) и повторите.',
   )
 }
 
-function openAddToChannel() {
+async function openAddToChannel() {
+  if (await requestChatWithPrepared(preparedAddChannelButtonId.value)) return
+
   if (addToChannelUrl.value) {
     const ok = openTelegramDeepLink(addToChannelUrl.value)
     if (ok) return
   }
+
   showToast(
     isEn.value
-      ? 'Open the Mini App from Telegram and try to connect the channel again.'
-      : 'Откройте мини-приложение из Telegram и повторите подключение канала.',
+      ? 'Open the Mini App from Telegram. If the channel picker did not open, refresh and try again.'
+      : 'Откройте мини-приложение из Telegram. Если выбор канала не открылся, обновите экран и повторите.',
   )
 }
 
@@ -176,12 +214,24 @@ async function clearAllPendingChats() {
       >
         <p class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ isEn ? 'Connection' : 'Подключение' }}</p>
         <p v-if="isGroupKind" class="mt-2 text-xs leading-relaxed text-slate-300">
-          {{ isEn ? 'Pick a group with the button below and grant the bot admin rights: delete messages and restrict members — protection cannot work without that. Then open “Protection”; reports are under the “Reports” menu.' : 'Выберите группу кнопкой ниже и выдайте боту админку: удаление сообщений и ограничение участников — без этого защита не работает. Затем настройте «Защита»; отчёты — в пункте меню «Отчёты».' }}
+          {{ t('connect.group_rights_hint') }}
+        </p>
+        <p v-if="isGroupKind" class="mt-2 text-[11px] leading-relaxed text-emerald-200/90">
+          {{ t('connect.group_admin_picker_hint') }}
+        </p>
+        <p v-if="isGroupKind" class="mt-2 text-[11px] leading-relaxed text-amber-200/85">
+          {{ t('connect.creator_only_note') }}
         </p>
         <p v-else class="mt-2 text-xs leading-relaxed text-slate-300">
-          {{ isEn ? 'Connect a channel to run autopost / broadcasts, see channel analytics separately and manage delegate rights per channel. If the channel has a discussion group, stats will be linked to the discussion group.' : 'Подключите канал, чтобы запускать автопост/рассылки, видеть аналитику канала отдельно и управлять правами делегатов по каналу. Если у канала есть обсуждение, статистика будет связана с группой обсуждения.' }}
+          {{ t('connect.channel_rights_hint') }}
         </p>
         <p v-if="!isGroupKind" class="mt-2 text-[11px] leading-relaxed text-emerald-200/90">
+          {{ t('connect.channel_admin_picker_hint') }}
+        </p>
+        <p v-if="!isGroupKind" class="mt-2 text-[11px] leading-relaxed text-amber-200/85">
+          {{ t('connect.creator_only_note') }}
+        </p>
+        <p v-if="!isGroupKind" class="mt-2 text-[11px] leading-relaxed text-slate-400">
           {{ t('connect.channel_discussion_rules_hint') }}
         </p>
         <p class="mt-2 text-[11px] leading-relaxed text-slate-500">
@@ -191,7 +241,7 @@ async function clearAllPendingChats() {
 
       <div class="flex justify-center pt-1">
         <button
-          v-if="isGroupKind && (addToGroupUrl || preparedAddGroupButtonId)"
+          v-if="isGroupKind && (preparedAddGroupButtonId || addToGroupUrl)"
           type="button"
           class="guard-green-soft max-w-[220px] rounded-xl px-4 py-2 text-sm font-semibold transition active:scale-[0.99]"
           @click="openAddToGroup"
@@ -199,7 +249,7 @@ async function clearAllPendingChats() {
           {{ isEn ? 'Pick a group' : 'Выбрать группу' }}
         </button>
         <button
-          v-else-if="!isGroupKind && addToChannelUrl"
+          v-else-if="!isGroupKind && (preparedAddChannelButtonId || addToChannelUrl)"
           type="button"
           class="max-w-[220px] rounded-xl bg-amber-400/95 px-4 py-2 text-sm font-semibold text-slate-900 shadow-[0_10px_30px_-12px_rgba(251,191,36,0.75)] transition active:scale-[0.99]"
           @click="openAddToChannel"

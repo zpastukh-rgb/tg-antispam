@@ -7,6 +7,7 @@ import { useApi } from '../composables/useApi'
 import { canOpenAdminEntry } from '../utils/adminAccess'
 import { useCabinetMode } from '../composables/useCabinetMode'
 import { useDashboardSection } from '../composables/useDashboardSection'
+import { prefetchAdminCabinet, readMeProfileCache, writeMeProfileCache, readMeHasDelegatedCache } from '../utils/adminViewCache.js'
 
 const router = useRouter()
 const route = useRoute()
@@ -14,23 +15,32 @@ const { api, fetchSilent, hasInitData } = useApi()
 const { setDashboardSection } = useDashboardSection()
 const { t } = useI18n()
 const PREMIUM_CACHE_KEY = 'guard.me.is_premium.v1'
-const me = ref(null)
-const hasDelegated = ref(false)
+const meCached = readMeProfileCache()
+const me = ref(meCached || null)
+const delegatedCached = readMeHasDelegatedCache()
+const hasDelegated = ref(delegatedCached === true)
 const { cabinetMode, setCabinetMode } = useCabinetMode()
 
 const props = defineProps({
   sidebarOpen: Boolean,
-  /** Экран «Подписка» на главной: назад вместо меню, без кнопок ADM */
-  subscriptionScreen: { type: Boolean, default: false },
   /** Скрыть кнопки ADM (например статус подписки в админке). */
   suppressAdmBadges: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['menu-click', 'subscription-back'])
+const emit = defineEmits(['menu-click'])
 
-const showBack = computed(() => props.subscriptionScreen || (route.path !== '/' && route.name !== 'Dashboard'))
-const canSeeAdmin = computed(() => canOpenAdminEntry(me.value))
+const canSeeAdmin = computed(() => hasInitData.value || canOpenAdminEntry(me.value))
 const isBlueAdmActive = computed(() => route.path.startsWith('/admin') && cabinetMode.value !== 'delegated')
+const showHeaderBack = computed(() => {
+  if (!route.path.startsWith('/admin')) return false
+  const admSection = String(route.query.adm_section || '').trim()
+  if (admSection) return true
+  const tab = String(route.query.admin_tab || route.query.tab || 'overview').toLowerCase()
+  if (tab && tab !== 'overview') return true
+  const embed = String(route.query.admin_embed || '').trim()
+  if (embed) return true
+  return false
+})
 const isPurpleAdmActive = computed(() => {
   if (cabinetMode.value !== 'delegated') return false
   if (route.path === '/chats' && String(route.query?.cabinet || '').toLowerCase() === 'delegated') return true
@@ -44,6 +54,7 @@ async function loadMeProfile() {
     const meData = await fetchSilent(() => api.me())
     me.value = meData
     hasDelegated.value = !!meData?.has_managed_shared_chat
+    writeMeProfileCache(meData)
     try {
       localStorage.setItem(PREMIUM_CACHE_KEY, meData?.is_premium ? '1' : '0')
     } catch {
@@ -62,8 +73,8 @@ function onCustomRefreshMe() {
   void loadMeProfile()
 }
 
-onMounted(async () => {
-  await loadMeProfile()
+onMounted(() => {
+  void loadMeProfile()
   document.addEventListener('visibilitychange', onVisibleRefreshMe)
   window.addEventListener('guard:me-refresh', onCustomRefreshMe)
 })
@@ -74,6 +85,8 @@ onBeforeUnmount(() => {
 })
 
 function openBlueAdm() {
+  void prefetchAdminCabinet(api)
+  window.dispatchEvent(new CustomEvent('guard:prefetch-broadcasts'))
   setCabinetMode('owner')
   const nav = route.path === '/admin' ? router.replace({ path: '/admin' }) : router.push({ path: '/admin' })
   if (nav && typeof nav.catch === 'function') {
@@ -95,26 +108,12 @@ function goDashboardAccount() {
   if (nav && typeof nav.catch === 'function') nav.catch(() => {})
 }
 
-function goBack() {
-  if (props.subscriptionScreen) {
-    emit('subscription-back')
+function onHeaderLeftClick() {
+  if (showHeaderBack.value) {
+    window.dispatchEvent(new CustomEvent('guard:header-back', { cancelable: true }))
     return
   }
-  // Дать активному вью шанс «снять» внутренний шаг (например, AdminView
-  // перехватит чтобы сначала свернуть внутренний экран статистики/защиты).
-  try {
-    const ev = new CustomEvent('guard:header-back', { cancelable: true })
-    const accepted = window.dispatchEvent(ev)
-    if (accepted === false || ev.defaultPrevented) return
-  } catch { /* */ }
-  // Иначе — настоящий шаг по истории; на главную уводим только если истории нет.
-  try {
-    if (window.history && window.history.length > 1) {
-      router.back()
-      return
-    }
-  } catch { /* */ }
-  goDashboardAccount()
+  emit('menu-click')
 }
 </script>
 
@@ -124,22 +123,12 @@ function goBack() {
   >
     <div class="flex items-center gap-2 md:gap-2.5">
       <button
-        v-if="showBack"
         type="button"
         class="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/[0.06] text-slate-200 hover:bg-white/[0.12] hover:text-white md:h-9 md:w-9"
-        :aria-label="t('common.back')"
-        @click="goBack"
+        :aria-label="showHeaderBack ? t('common.back') : t('common.menu')"
+        @click="onHeaderLeftClick"
       >
-        <NavIcon name="back" class="h-4 w-4 md:h-5 md:w-5" />
-      </button>
-      <button
-        v-else
-        type="button"
-        class="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/[0.06] text-slate-200 hover:bg-white/[0.12] hover:text-white md:h-9 md:w-9"
-        :aria-label="t('common.menu')"
-        @click="emit('menu-click')"
-      >
-        <NavIcon name="menu" class="h-4 w-4 md:h-5 md:w-5" />
+        <NavIcon :name="showHeaderBack ? 'back' : 'menu'" class="h-4 w-4 md:h-5 md:w-5" />
       </button>
       <a href="#" class="flex min-w-0 items-center gap-2" @click.prevent="goDashboardAccount">
         <span class="flex min-w-0 flex-col leading-tight">
@@ -151,7 +140,7 @@ function goBack() {
     </div>
     <div class="flex items-center gap-1">
       <button
-        v-if="canSeeAdmin && !subscriptionScreen && !suppressAdmBadges"
+        v-if="canSeeAdmin && !suppressAdmBadges"
         type="button"
         class="inline-flex h-[22px] shrink-0 items-center justify-center rounded border border-cyan-400/45 px-1.5 text-[9px] font-bold leading-none tracking-wide text-cyan-600 transition-colors hover:bg-cyan-500/10 dark:text-cyan-300 dark:hover:bg-cyan-500/15"
         :class="isBlueAdmActive ? 'bg-cyan-500/15 shadow-[0_0_12px_rgba(34,211,238,0.45)] ring-1 ring-cyan-300/35' : ''"
@@ -161,7 +150,7 @@ function goBack() {
         ADM
       </button>
       <button
-        v-if="hasDelegated && !subscriptionScreen && !suppressAdmBadges"
+        v-if="hasDelegated && !suppressAdmBadges"
         type="button"
         class="inline-flex h-[22px] shrink-0 items-center justify-center rounded border border-violet-400/45 px-1.5 text-[9px] font-bold leading-none tracking-wide text-violet-300 transition-colors hover:bg-violet-500/10"
         :class="isPurpleAdmActive ? 'bg-violet-500/15 shadow-[0_0_12px_rgba(167,139,250,0.5)] ring-1 ring-violet-300/45' : ''"

@@ -13,6 +13,8 @@ const props = defineProps({
   profile: { type: Object, default: () => ({}) },
   referralPaidCount: { type: [Number, null], default: null },
   broadcastSpendTokens: { type: [Number, null], default: null },
+  summaryLoading: { type: Boolean, default: false },
+  referralLoading: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['open-section', 'open-main'])
@@ -70,7 +72,9 @@ function open(key) {
         <p class="mt-0.5 text-[11px] font-semibold" :class="protectionActive ? 'text-emerald-300' : 'text-rose-300/90'">
           {{ protectionActive ? t('owner_cabinet_home.protection_on') : t('owner_cabinet_home.protection_off') }}
         </p>
-        <p class="mt-3 text-4xl font-black tabular-nums leading-none text-white">{{ deletedToday }}</p>
+        <p class="mt-3 text-4xl font-black tabular-nums leading-none text-white">
+          {{ deletedToday }}
+        </p>
         <p class="mt-1 text-[11px] text-white/55">{{ t('owner_cabinet_home.deleted_label') }}</p>
         <div class="pointer-events-none absolute bottom-2.5 right-2.5 opacity-95">
           <NavIcon name="shield" class="h-9 w-9 text-emerald-400/90 drop-shadow-[0_0_12px_rgba(52,211,153,0.35)]" />
@@ -118,7 +122,9 @@ function open(key) {
       >
         <p class="text-[13px] font-bold leading-tight text-white">{{ t('owner_cabinet_home.partner_heading') }}</p>
         <p class="mt-1.5 text-[11px] leading-snug text-amber-100/75">{{ t('owner_cabinet_home.partner_sub') }}</p>
-        <p v-if="referralPaidCount != null" class="mt-2 text-xl font-extrabold text-amber-100">{{ referralPaidCount }} {{ t('owner_cabinet_home.paying_suffix') }}</p>
+        <p v-if="referralPaidCount != null" class="mt-2 text-xl font-extrabold text-amber-100">
+          {{ referralPaidCount }} {{ t('owner_cabinet_home.paying_suffix') }}
+        </p>
         <div class="pointer-events-none absolute bottom-2.5 right-2.5 opacity-95">
           <NavIcon name="users" class="h-8 w-8 text-amber-300/95 drop-shadow-[0_0_12px_rgba(251,191,36,0.35)]" />
         </div>

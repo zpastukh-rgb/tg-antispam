@@ -8,6 +8,12 @@ import { useApi } from '../composables/useApi'
 import { useCabinetMode } from '../composables/useCabinetMode'
 import { userCanUseBroadcasts } from '../utils/broadcastAccess'
 import { usePremiumLock } from '../composables/usePremiumLock'
+import { prefetchAdminCabinet } from '../utils/adminViewCache.js'
+import { navQueryForPath } from '../utils/navQuery.js'
+import {
+  telegramVerticalSwipeGestureBegin,
+  telegramVerticalSwipeGestureEnd,
+} from '../utils/telegramVerticalSwipeLock.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -192,6 +198,7 @@ function onNavPointerMove(ev) {
     }
     try {
       grid.setPointerCapture?.(ev.pointerId)
+      telegramVerticalSwipeGestureBegin(ev.pointerId)
     } catch {
       //
     }
@@ -211,10 +218,14 @@ function onNavPointerMove(ev) {
 
 function endIndicatorDrag() {
   if (!navDragState.value.active) return
+  const endedPointerId = navDragState.value.pointerId
   navDragState.value.active = false
   navDragState.value.pending = false
   navActiveIndicatorDragging.value = false
   navActiveIndicatorSettling.value = true
+  if (endedPointerId != null) {
+    telegramVerticalSwipeGestureEnd(endedPointerId, { delayMs: 360 })
+  }
   const grid = navGridRef.value
   const left = Number.parseFloat(String(navActiveIndicatorStyle.value.left || '0').replace('px', '')) || 0
   const width = Number.parseFloat(String(navActiveIndicatorStyle.value.width || '0').replace('px', '')) || 0
@@ -314,11 +325,18 @@ async function onTap(item) {
       }
     }
     setCabinetMode('owner')
-    const nav = router.push({ path: item.to, query: { ...route.query, tab: item.adminTab } })
+    if (item.adminTab === 'broadcasts') {
+      window.dispatchEvent(new CustomEvent('guard:prefetch-broadcasts'))
+      void prefetchAdminCabinet(api)
+    }
+    const nav = router.push({
+      path: item.to,
+      query: { ...route.query, tab: item.adminTab, admin_tab: item.adminTab },
+    })
     if (nav && typeof nav.catch === 'function') nav.catch(() => {})
     return
   }
-  const nav = router.push({ path: item.to, query: { ...route.query } })
+  const nav = router.push({ path: item.to, query: navQueryForPath(item.to, route.query) })
   if (nav && typeof nav.catch === 'function') nav.catch(() => {})
 }
 

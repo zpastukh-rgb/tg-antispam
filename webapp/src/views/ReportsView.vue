@@ -1,14 +1,31 @@
 <script setup>
-import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
 import { openTelegramDeepLink } from '../utils/openTelegramDeepLink'
-import GuardBlueLoadingState from '../components/GuardBlueLoadingState.vue'
 import PremiumLockBadge from '../components/PremiumLockBadge.vue'
+import GuardTeleport from '../components/GuardTeleport.vue'
 import { useCabinetMode } from '../composables/useCabinetMode'
 import { usePremiumLock } from '../composables/usePremiumLock'
+import { useModalScrollLock } from '../composables/useModalScrollLock'
+import { fetchAndCacheChatsList, readChatsListCache } from '../utils/chatsListCache.js'
+import {
+  buildReportsUrl,
+  filterReportsSelectableChats,
+  isReportsSelectableChat,
+  readReportsViewCache,
+  writeReportsViewCache,
+  readBotInfoCache,
+  writeBotInfoCache,
+  fetchChatDeduped,
+  prefetchReportsView,
+  pickReportsSelection,
+  buildReportsShellChat,
+  buildReportsSnapshotPayload,
+} from '../utils/reportsViewCache.js'
+import { readAdminMeCache } from '../utils/adminViewCache.js'
 
 const router = useRouter()
 const route = useRoute()
@@ -30,38 +47,232 @@ const showReportsInfoModal = ref(false)
 const reportsSettingInfoOpen = ref(null)
 const botInfo = ref(null)
 const meProfile = ref(null)
+const reportsFirstLoad = ref(true)
+const reportsModalOpen = computed(
+  () => showChatPicker.value || showReportsInfoModal.value || !!reportsSettingInfoOpen.value,
+)
+useModalScrollLock(reportsModalOpen)
 let stopListen = null
+let reportsLoadInFlight = null
+
+function saveReportsCacheSnapshot() {
+  writeReportsViewCache({
+    chatsList: chatsList.value,
+    selectedChatId: selectedChatId.value,
+    chat: chat.value,
+    botInfo: botInfo.value,
+    meProfile: meProfile.value,
+    reportsChatUrl: reportsChatUrl.value,
+  })
+}
+
+function hydrateReportsFromCache() {
+  const cached = readReportsViewCache()
+  const chatsCached = readChatsListCache('all')
+  const rows = cached?.chatsList?.length
+    ? cached.chatsList
+    : chatsCached?.rows?.length
+      ? chatsCached.rows
+      : []
+  if (rows.length) chatsList.value = rows
+
+  if (cached?.botInfo) {
+    botInfo.value = cached.botInfo
+  } else {
+    const botCached = readBotInfoCache()
+    if (botCached) botInfo.value = botCached
+  }
+  if (cached?.meProfile) {
+    meProfile.value = cached.meProfile
+  } else {
+    const meCached = readAdminMeCache()
+    if (meCached) meProfile.value = meCached
+  }
+
+  if (cached?.chat?.noSelection) {
+    chat.value = { noSelection: true }
+    reportsFirstLoad.value = false
+    return true
+  }
+
+  const preferredId =
+    cached?.selectedChatId ||
+    selectedChatId.value ||
+    Number(route.query?.chat_id || 0) ||
+    null
+  const selectedId = rows.length
+    ? pickReportsSelection(rows, preferredId, chatsCached?.selected_chat_id)
+    : null
+
+  if (!rows.length) return false
+
+  if (!selectedId) {
+    chat.value = { noSelection: true }
+    reportsFirstLoad.value = false
+    return true
+  }
+
+  selectedChatId.value = selectedId
+  const row = rows.find((c) => Number(c.id) === Number(selectedId))
+  if (cached?.chat?.rule && Number(cached.selectedChatId) === Number(selectedId)) {
+    chat.value = cached.chat
+  } else {
+    chat.value = buildReportsShellChat(row, selectedId, cached?.chat)
+  }
+  if (cached?.reportsChatUrl) {
+    reportsChatUrl.value = cached.reportsChatUrl
+  } else {
+    reportsChatUrl.value = buildReportsUrl(botInfo.value, selectedId)
+  }
+  const picked = row
+  if (picked?.is_shared) setCabinetMode('delegated')
+  else setCabinetMode('owner')
+  reportsFirstLoad.value = false
+  return true
+}
 
 function boolToggleClass(on) {
   return on ? 'guard-green-soft' : 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-300'
 }
 
 function isChannelChatRow(c) {
-  return String(c?.chat_kind || 'group').toLowerCase() === 'channel'
-}
-
-function filterReportsSelectableChats(list) {
-  return (list || []).filter((c) => !isChannelChatRow(c))
-}
-
-function buildReportsUrl(botData, protectedChatId) {
-  const tpl = botData?.reports_chat_url_template
-  if (tpl && protectedChatId != null) {
-    return tpl.replace(/\{chat_id\}/g, String(protectedChatId))
-  }
-  const u = (botData?.username || '').replace(/^@/, '').trim()
-  if (!u || protectedChatId == null) return null
-  return `https://t.me/${u}?startgroup=reportschat_${protectedChatId}`
+  return !isReportsSelectableChat(c)
 }
 
 async function reloadChat() {
   if (!selectedChatId.value) return
   try {
-    const data = await fetchSilent(() => api.chat(selectedChatId.value))
+    const data = await fetchSilent(() => fetchChatDeduped(api, selectedChatId.value))
     chat.value = data
+    reportsChatUrl.value = buildReportsUrl(botInfo.value, selectedChatId.value)
+    saveReportsCacheSnapshot()
   } catch {
     //
   }
+}
+
+function applyCabinetForChatId(chatId) {
+  const picked = (chatsList.value || []).find((c) => Number(c.id) === Number(chatId))
+  if (picked?.is_shared) setCabinetMode('delegated')
+  else setCabinetMode('owner')
+}
+
+async function resolveAndLoadSelection(allChats, serverSelectedId, requestedChatId) {
+  let selectedId = serverSelectedId
+  const serverRow = selectedId && allChats.find((c) => Number(c.id) === Number(selectedId))
+  if (!serverRow || isChannelChatRow(serverRow)) selectedId = null
+
+  if (requestedChatId && allChats.some((c) => Number(c.id) === requestedChatId)) {
+    const reqRow = allChats.find((c) => Number(c.id) === requestedChatId)
+    if (reqRow && isReportsSelectableChat(reqRow)) {
+      selectedId = requestedChatId
+      if (Number(selectedChatId.value) !== requestedChatId) {
+        void fetchSilent(() => api.selectChat(requestedChatId)).catch(() => {})
+      }
+    }
+  }
+
+  if (!selectedId) {
+    const fallback = filterReportsSelectableChats(allChats)[0]
+    if (fallback?.id) {
+      selectedId = Number(fallback.id)
+      if (Number(selectedChatId.value) !== selectedId) {
+        void fetchSilent(() => api.selectChat(selectedId)).catch(() => {})
+      }
+    }
+  }
+
+  if (!selectedId) {
+    selectedChatId.value = null
+    chat.value = { noSelection: true }
+    reportsFirstLoad.value = false
+    return
+  }
+
+  selectedChatId.value = selectedId
+  applyCabinetForChatId(selectedId)
+  reportsChatUrl.value = buildReportsUrl(botInfo.value, selectedId)
+
+  const row = allChats.find((c) => Number(c.id) === Number(selectedId))
+  const cached = readReportsViewCache()
+  if (cached?.chat?.rule && Number(cached.selectedChatId) === Number(selectedId)) {
+    chat.value = cached.chat
+  } else if (!chat.value?.rule || Number(chat.value?.id) !== Number(selectedId)) {
+    chat.value = buildReportsShellChat(row, selectedId, cached?.chat)
+  }
+  reportsFirstLoad.value = false
+
+  void reloadChat().then(() => ensureReportsSelectionIsGroup())
+}
+
+function loadReportsInitial() {
+  if (!hasInitData.value) return Promise.resolve()
+  if (reportsLoadInFlight) return reportsLoadInFlight
+
+  reportsLoadInFlight = (async () => {
+    error.value = null
+    if (!chat.value?.rule && !chat.value?.noSelection) {
+      hydrateReportsFromCache()
+    }
+    const hadShell = !!(chat.value?.rule && selectedChatId.value)
+
+    const refresh = async () => {
+      const botCached = readBotInfoCache()
+      if (botCached) {
+        botInfo.value = botCached
+        if (selectedChatId.value && !reportsChatUrl.value) {
+          reportsChatUrl.value = buildReportsUrl(botCached, selectedChatId.value)
+        }
+      }
+
+      const requestedChatId = Number(route.query?.chat_id || 0) || null
+      const [chatsResult, botData, meData] = await Promise.all([
+        fetchAndCacheChatsList(api, 'all').catch(() => null),
+        botCached ? Promise.resolve(botCached) : fetchSilent(() => api.botInfo()).catch(() => ({})),
+        fetchSilent(() => api.me()).catch(() => null),
+      ])
+
+      const allChats = chatsResult?.rows?.length
+        ? chatsResult.rows
+        : chatsResult?.data?.chats || chatsList.value || []
+      if (allChats.length) chatsList.value = allChats
+
+      if (botData && typeof botData === 'object' && Object.keys(botData).length) {
+        botInfo.value = botData
+        writeBotInfoCache(botData)
+      }
+      if (meData) meProfile.value = meData
+
+      const serverSelectedId = chatsResult?.selected_chat_id ?? chatsResult?.data?.selected_chat_id ?? null
+      await resolveAndLoadSelection(allChats, serverSelectedId, requestedChatId)
+      saveReportsCacheSnapshot()
+    }
+
+    try {
+      if (hadShell && !Number(route.query?.chat_id || 0)) {
+        reportsFirstLoad.value = false
+        void refresh()
+        return
+      }
+      await refresh()
+    } catch {
+      if (!chat.value?.rule && !chat.value?.noSelection) {
+        chat.value = { loadError: true }
+      }
+    } finally {
+      reportsFirstLoad.value = false
+      reportsLoadInFlight = null
+    }
+  })()
+  return reportsLoadInFlight
+}
+
+function onPrefetchReports() {
+  void prefetchReportsView(api)
+}
+
+if (hasInitData.value) {
+  hydrateReportsFromCache()
 }
 
 const selectedChatTitle = computed(() => {
@@ -102,6 +313,7 @@ async function ensureReportsSelectionIsGroup() {
     }
     await reloadChat()
     reportsChatUrl.value = buildReportsUrl(botInfo.value, selectedChatId.value)
+    saveReportsCacheSnapshot()
   } catch {
     //
   }
@@ -113,77 +325,34 @@ async function switchChat(chatId) {
   try {
     await fetchSilent(() => api.selectChat(Number(chatId)))
     selectedChatId.value = Number(chatId)
-    const row = (chatsList.value || []).find((c) => Number(c.id) === Number(chatId))
-    if (row?.is_shared) {
-      setCabinetMode('delegated')
-    } else {
-      setCabinetMode('owner')
-    }
+    applyCabinetForChatId(chatId)
     await reloadChat()
-    reportsChatUrl.value = buildReportsUrl(botInfo.value, selectedChatId.value)
     showChatPicker.value = false
   } catch {
     //
   }
 }
 
-onMounted(async () => {
-  error.value = null
-  if (!hasInitData.value) return
-  try {
-    const [chatsData, botData, meData] = await Promise.all([
-      fetchSilent(() => api.chats('all')).catch(() => ({ selected_chat_id: null, chats: [] })),
-      fetchSilent(() => api.botInfo()).catch(() => ({})),
-      fetchSilent(() => api.me()).catch(() => null),
-    ])
-    const allChats = chatsData?.chats || []
-    const requestedChatId = Number(route.query?.chat_id || 0) || null
-    let selected_chat_id = chatsData?.selected_chat_id
-    const serverRow =
-      selected_chat_id && allChats.find((c) => Number(c.id) === Number(selected_chat_id))
-    if (!serverRow || isChannelChatRow(serverRow)) {
-      selected_chat_id = null
-    }
-    if (requestedChatId && allChats.some((c) => Number(c.id) === requestedChatId)) {
-      const reqRow = allChats.find((c) => Number(c.id) === requestedChatId)
-      if (reqRow && !isChannelChatRow(reqRow)) {
-        selected_chat_id = requestedChatId
-        await fetchSilent(() => api.selectChat(requestedChatId)).catch(() => {})
-      }
-    }
-    chatsList.value = allChats
-    botInfo.value = botData || null
-    meProfile.value = meData || null
-    if (!selected_chat_id) {
-      const fallback = filterReportsSelectableChats(allChats)[0]
-      if (fallback?.id) {
-        selected_chat_id = Number(fallback.id)
-        await fetchSilent(() => api.selectChat(selected_chat_id)).catch(() => {})
-      }
-    }
-    if (!selected_chat_id) {
-      chat.value = { noSelection: true }
-      return
-    }
-    selectedChatId.value = selected_chat_id
-    const picked = (chatsData?.chats || []).find((c) => Number(c.id) === Number(selected_chat_id))
-    if (picked?.is_shared) {
-      setCabinetMode('delegated')
-    } else {
-      setCabinetMode('owner')
-    }
-    await reloadChat()
-    reportsChatUrl.value = buildReportsUrl(botData, selected_chat_id)
-    await ensureReportsSelectionIsGroup()
-  } catch {
-    chat.value = { noSelection: false, loadError: true }
-  }
+watch(
+  hasInitData,
+  (ready) => {
+    if (!ready) return
+    if (!chat.value?.rule && !chat.value?.noSelection) hydrateReportsFromCache()
+    void loadReportsInitial()
+  },
+  { immediate: true },
+)
 
+onMounted(() => {
+  window.addEventListener('guard:prefetch-reports', onPrefetchReports)
   const onVis = () => {
-    if (document.visibilityState === 'visible') reloadChat()
+    if (document.visibilityState === 'visible') void reloadChat()
   }
   document.addEventListener('visibilitychange', onVis)
-  stopListen = () => document.removeEventListener('visibilitychange', onVis)
+  stopListen = () => {
+    document.removeEventListener('visibilitychange', onVis)
+    window.removeEventListener('guard:prefetch-reports', onPrefetchReports)
+  }
 })
 
 onUnmounted(() => {
@@ -206,6 +375,7 @@ async function clearReportsChat() {
     const res = await fetchSilent(() => api.setReportsChat(chat.value.id, null))
     chat.value.log_chat_id = res.log_chat_id
     chat.value.log_chat_title = res.log_chat_title
+    saveReportsCacheSnapshot()
     showToast(isEn.value ? 'Reports chat disconnected' : 'Чат отчётов отключён')
   } catch (e) {
     showToast(e?.body?.detail || (isEn.value ? 'Error' : 'Ошибка'))
@@ -217,10 +387,11 @@ async function clearReportsChat() {
 async function refreshReportsStatus() {
   if (!selectedChatId.value) return
   try {
-    const chatsData = await fetchSilent(() => api.chats('all')).catch(() => null)
-    if (chatsData?.chats) chatsList.value = chatsData.chats
+    const chatsResult = await fetchAndCacheChatsList(api, 'all').catch(() => null)
+    if (chatsResult?.rows?.length) chatsList.value = chatsResult.rows
     await ensureReportsSelectionIsGroup()
     await reloadChat()
+    saveReportsCacheSnapshot()
     showToast(isEn.value ? 'Updated' : 'Обновлено')
   } catch {
     showToast(isEn.value ? 'Could not refresh' : 'Не удалось обновить')
@@ -252,6 +423,7 @@ async function updateRule(patch) {
   try {
     const data = await fetchSilent(() => api.updateRule(chat.value.id, patch))
     chat.value.rule = data.rule
+    saveReportsCacheSnapshot()
     showToast(isEn.value ? 'Saved' : 'Сохранено')
   } finally {
     saving.value = false
@@ -488,18 +660,24 @@ function goToExtendedStatsReports() {
       </div>
       </div>
 
+      <GuardTeleport guard-to="body">
       <div
         v-if="showChatPicker"
-        style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/65 p-0 pb-[calc(5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-sm md:pb-6"
+        class="fixed inset-0 z-[95000] flex items-end justify-center overscroll-none bg-black/65 p-0 pb-[calc(5rem+env(safe-area-inset-bottom,0px))] backdrop-blur-sm md:items-center md:pb-6"
         @click="showChatPicker = false"
+        @touchmove.prevent
       >
         <div
-          class="flex max-h-[min(70vh,32rem)] w-full max-w-lg min-h-0 flex-col rounded-t-2xl border border-white/15 border-b-0 bg-zinc-950/90 px-3 pb-4 pt-2 text-slate-100 shadow-[0_-12px_40px_rgba(0,0,0,0.75)] ring-1 ring-white/10 backdrop-blur-2xl md:mx-2 md:rounded-2xl md:border-b md:pb-3"
+          class="flex max-h-[min(70vh,32rem)] w-full max-w-lg min-h-0 flex-col overflow-hidden rounded-t-2xl border border-white/15 border-b-0 bg-zinc-950/90 px-3 pb-4 pt-2 text-slate-100 shadow-[0_-12px_40px_rgba(0,0,0,0.75)] ring-1 ring-white/10 backdrop-blur-2xl md:mx-2 md:rounded-2xl md:border-b md:pb-3"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="reports-chat-picker-title"
           @click.stop
+          @touchmove.self.prevent
         >
           <div class="mx-auto mb-2 h-1 w-10 shrink-0 rounded-full bg-white/20 md:hidden" aria-hidden="true" />
           <div class="mb-2 flex shrink-0 items-center justify-between gap-2 border-b border-white/10 pb-2">
-            <p class="text-sm font-semibold text-white">{{ isEn ? 'Pick chat' : 'Выбор чата' }}</p>
+            <p id="reports-chat-picker-title" class="text-sm font-semibold text-white">{{ isEn ? 'Pick chat' : 'Выбор чата' }}</p>
             <button
               type="button"
               class="rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-white/10 hover:text-white"
@@ -509,7 +687,10 @@ function goToExtendedStatsReports() {
             </button>
           </div>
           <template v-if="reportsSelectableChatCount > 1">
-            <div class="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain py-1 [-webkit-overflow-scrolling:touch]">
+            <div
+              class="reports-chat-picker-scroll min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain touch-pan-y py-1 [-webkit-overflow-scrolling:touch]"
+              style="-webkit-overflow-scrolling: touch;"
+            >
               <div v-if="chatsListMine.length">
                 <p class="mb-1.5 px-1 text-[10px] font-semibold uppercase tracking-wide text-cyan-200/80">{{ isEn ? 'My chats' : 'Мои чаты' }}</p>
                 <div class="space-y-1">
@@ -546,22 +727,17 @@ function goToExtendedStatsReports() {
               </div>
             </div>
           </template>
-          <p v-else-if="reportsSelectableChatCount === 1" class="px-1 py-4 text-center text-xs text-slate-400">
+          <p v-else-if="reportsSelectableChatCount === 1" class="shrink-0 px-1 py-4 text-center text-xs text-slate-400">
             {{ t('reports.picker_one_group') }}
           </p>
-          <p v-else class="px-1 py-4 text-center text-xs text-slate-400">
+          <p v-else class="shrink-0 px-1 py-4 text-center text-xs text-slate-400">
             {{ hasOnlyChannelChats ? t('reports.picker_only_channels') : t('reports.picker_no_groups') }}
           </p>
         </div>
       </div>
+      </GuardTeleport>
     </div>
 
-    <div
-      v-else-if="hasInitData"
-      class="rounded-2xl bg-white/[0.06] py-6 text-center shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-xl"
-    >
-      <GuardBlueLoadingState />
-    </div>
     <div
       v-if="showReportsInfoModal"
       style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:95000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-end justify-center bg-black/70 p-3 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] md:items-center md:pb-6"

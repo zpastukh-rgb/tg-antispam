@@ -11,6 +11,37 @@ import { protectionFilterModalFlags } from '../utils/protectionFilterModalState'
 import { protectionFilterModalOpenPlanSteps } from '../utils/protectionFilterModalOpenPlan'
 import { probeProtectionFilterModalDom, queryGuardDomSelector } from '../utils/protectionModalDomProbe'
 import { closeMentionsVanillaModal } from '../utils/mentionsVanillaModal'
+import {
+  openAntinakrutkaVanillaModal,
+  closeAntinakrutkaVanillaModal,
+} from '../utils/antinakrutkaVanillaModal'
+import {
+  openJoinFilterVanillaModal,
+  closeJoinFilterVanillaModal,
+} from '../utils/joinFilterVanillaModal'
+import {
+  openForwardFilterVanillaModal,
+  closeForwardFilterVanillaModal,
+  FORWARD_FILTER_ROWS,
+} from '../utils/forwardFilterVanillaModal'
+import {
+  openJoinRequestsVanillaModal,
+  closeJoinRequestsVanillaModal,
+} from '../utils/joinRequestsVanillaModal'
+import {
+  openMechAntispamVanillaModal,
+  closeMechAntispamVanillaModal,
+  MECH_ANTISPAM_ROWS,
+  MECH_FILTER_ACTION_OPTIONS,
+} from '../utils/mechAntispamVanillaModal'
+import {
+  openAntifloodVanillaModal,
+  closeAntifloodVanillaModal,
+} from '../utils/antifloodVanillaModal'
+import {
+  openPostCommentKeywordsVanillaModal,
+  closePostCommentKeywordsVanillaModal,
+} from '../utils/postCommentKeywordsVanillaModal'
 import { runMentionsChain, MENTION_FILTER_KINDS } from '../utils/mentionsChain'
 import {
   openWelcomeFallbackModal,
@@ -64,6 +95,7 @@ const chat = ref(null)
 const selectedChatId = ref(null)
 const showChatPicker = ref(false)
 let protectionScrollLockMainTop = 0
+let protectionScrollLockWindowY = 0
 
 function setProtectionSheetScrollLock(lock) {
   if (typeof document === 'undefined') return
@@ -73,8 +105,14 @@ function setProtectionSheetScrollLock(lock) {
   if (!body || !html) return
   if (lock) {
     if (!body.dataset.protectionSheetScrollLocked) {
+      protectionScrollLockWindowY = window.scrollY || html.scrollTop || 0
       protectionScrollLockMainTop = main?.scrollTop || 0
       body.dataset.protectionSheetScrollLocked = '1'
+      body.style.position = 'fixed'
+      body.style.top = `-${protectionScrollLockWindowY}px`
+      body.style.left = '0'
+      body.style.right = '0'
+      body.style.width = '100%'
     }
     body.style.overflow = 'hidden'
     html.style.overflow = 'hidden'
@@ -88,6 +126,11 @@ function setProtectionSheetScrollLock(lock) {
   }
   delete body.dataset.protectionSheetScrollLocked
   body.style.overflow = ''
+  body.style.position = ''
+  body.style.top = ''
+  body.style.left = ''
+  body.style.right = ''
+  body.style.width = ''
   html.style.overflow = ''
   body.style.overscrollBehavior = ''
   if (main) {
@@ -96,6 +139,7 @@ function setProtectionSheetScrollLock(lock) {
     main.style.touchAction = ''
     main.scrollTop = protectionScrollLockMainTop
   }
+  window.scrollTo(0, protectionScrollLockWindowY)
 }
 const saving = ref(false)
 const newStopword = ref('')
@@ -121,7 +165,8 @@ onMounted(() => {
 /**
  * TMA / WKWebView: `telegramTapPolyfill` делает `hit.click()` из `touchend` — «хвост» может закрыть подложку (`@click.self`) → пустой экран.
  * Сразу гасим `allowFilterModalBackdropClose`, открытие флагов — `setTimeout(0)` после сброса; `@click.capture` на подложке, пока закрытие заблокировано.
- * Модалки фильтров + тест «упоминания»: GuardTeleport (как остальные модалки) + маркер в целевом узле.
+ * Модалки фильтров: in-place fixed; ghost-click гасим ~650 ms.
+ * Антинакрутка «Настроить» — vanilla DOM (antinakrutkaVanillaModal.js), без Teleport.
  */
 const allowFilterModalBackdropClose = ref(true)
 let filterBackdropArmTimer = null
@@ -142,6 +187,67 @@ function closeFilterModalBackdrop(which) {
   else if (which === 'media') showMediaFilterModal.value = false
   else if (which === 'buttons') showButtonsFilterModal.value = false
   else if (which === 'channelPosts') showChannelPostsFilterModal.value = false
+}
+/** Vanilla-модалка (без Vue/Teleport): в TMA иначе scroll lock без видимой панели. */
+function openAntinakrutkaSettingsModalDeferred() {
+  if (!chat.value?.rule) return
+  setTimeout(() => {
+    antinakrutkaSettingsVanillaOpen.value = true
+    openAntinakrutkaVanillaModal({
+      labels: {
+        title: tt('protection.antinakrutka_settings_modal.title'),
+        quick: tt('protection.antinakrutka_settings_modal.quick'),
+        enable: tt('protection.antinakrutka_settings_modal.enable'),
+        threshold: tt('protection.antinakrutka_settings_modal.threshold'),
+        window: tt('protection.antinakrutka_settings_modal.window'),
+        action: tt('protection.antinakrutka_settings_modal.action'),
+        mute: tt('protection.antinakrutka_settings_modal.mute'),
+        muteField: tt('protection.antinakrutka_settings_modal.mute_field'),
+        lockdown: tt('protection.antinakrutka_settings_modal.lockdown'),
+        cooldown: tt('protection.antinakrutka_settings_modal.cooldown'),
+        pauseWelcomes: tt('protection.antinakrutka_settings_modal.pause_welcomes'),
+        forceCaptcha: tt('protection.antinakrutka_settings_modal.force_captcha'),
+        autoSilence: tt('protection.antinakrutka_settings_modal.auto_silence'),
+        defenseTitle: tt('protection.antinakrutka_settings_modal.defense_title'),
+        detectTitle: tt('protection.antinakrutka_settings_modal.detect_title'),
+        unitMin: tt('protection.antinakrutka_settings_modal.unit_min'),
+        on: tt('protection.ui.on_short'),
+        off: tt('protection.ui.off_short'),
+      },
+      getState: () => {
+        const r = chat.value?.rule
+        if (!r) return {}
+        return {
+          antinakrutka_enabled: r.antinakrutka_enabled,
+          antinakrutka_joins_threshold: r.antinakrutka_joins_threshold,
+          antinakrutka_window_minutes: r.antinakrutka_window_minutes,
+          antinakrutka_action: r.antinakrutka_action,
+          antinakrutka_restrict_minutes: r.antinakrutka_restrict_minutes,
+          antinakrutka_lockdown_minutes: r.antinakrutka_lockdown_minutes,
+          antinakrutka_pause_welcomes: r.antinakrutka_pause_welcomes,
+          antinakrutka_force_captcha: r.antinakrutka_force_captcha,
+          antinakrutka_cooldown_minutes: r.antinakrutka_cooldown_minutes,
+          antinakrutka_auto_silence_minutes: r.antinakrutka_auto_silence_minutes,
+        }
+      },
+      getActivePresetKey: () => antiraidActivePresetKey.value,
+      presets: antinakrutkaModePresets.value.map((p) => ({
+        ...p,
+        subline: antinakrutkaPresetSubline(p),
+      })),
+      actionOptions: antinakrutkaActionOptions.value,
+      onPatch: async (patch) => {
+        if (!canUsePremiumForCurrentChat.value) {
+          openPremiumLock('protection_bundle')
+          return
+        }
+        await updateRule(patch)
+      },
+      onClose: () => {
+        antinakrutkaSettingsVanillaOpen.value = false
+      },
+    })
+  }, 50)
 }
 
 /** Пока закрытие подложки заблокировано — гасим ранний touch/mousedown (ghost после synthetic click в WebView). */
@@ -483,16 +589,36 @@ const showReputationTopModal = ref(false)
 const showHardDictInfoModal = ref(false)
 const showCleanupInfoModal = ref(false)
 const showAntinakrutkaInfoModal = ref(false)
-const showAntinakrutkaSettingsModal = ref(false)
 const showNewbieInfoModal = ref(false)
 const showAntispamInfoModal = ref(false)
+const showMechAntispamInfoModal = ref(false)
+const MECH_ANTISPAM_INFO_FILTER_KEYS = ['apk', 'guest_bots', 'symbol_subst', 'text_spam', 'strict_edit']
+const MECH_ANTISPAM_INFO_ACTION_KEYS = ['action_inherit', 'action_delete', 'action_mute', 'action_ban', 'action_observe']
+const showForwardFilterInfoModal = ref(false)
+const FORWARD_FILTER_INFO_SOURCE_KEYS = ['channels', 'chats', 'bots', 'users']
+const FORWARD_FILTER_INFO_EXTRA_KEYS = ['with_links', 'stories', 'with_button']
+const showPunishmentsInfoModal = ref(false)
 const showAntispamListModal = ref(false)
 const showPublicAlertsHelpModal = ref(false)
 const showPublicAlertsStyleHelpModal = ref(false)
 const showPublicAlertsSettingsModal = ref(false)
 const showGuardianPeriodicHelpModal = ref(false)
 const showJoinCaptchaInfoModal = ref(false)
+const showJoinFilterInfoModal = ref(false)
+const JOIN_FILTER_INFO_READY_KEYS = ['arab', 'cjk', 'zalgo', 'spam_nick', 'require_username', 'cas']
+const joinFilterSettingsVanillaOpen = ref(false)
+const forwardFilterVanillaOpen = ref(false)
+const mechAntispamVanillaOpen = ref(false)
+const antifloodVanillaOpen = ref(false)
+const postCommentKeywordsVanillaOpen = ref(false)
+const joinRequestsVanillaOpen = ref(false)
+const showJoinRequestsInfoModal = ref(false)
+const JOIN_REQUESTS_INFO_MODE_KEYS = ['off', 'auto', 'survey_auto', 'survey_manual']
+const JOIN_REQUESTS_INFO_QUESTION_KEYS = ['questions', 'answers', 'buttons', 'advanced']
+const JOIN_REQUESTS_INFO_TEXT_KEYS = ['welcome', 'done']
+const JOIN_REQUESTS_INFO_REPORT_KEYS = ['report_off', 'report_brief', 'report_full']
 const showJoinCaptchaSettingsModal = ref(false)
+const antinakrutkaSettingsVanillaOpen = ref(false)
 const showFilterMediaCaptchaSettingsModal = ref(false)
 const joinCaptchaKindHintOpen = ref(null)
 const showSpamSpikeSettingsModal = ref(false)
@@ -572,6 +698,8 @@ const antispamLoading = ref(false)
 const newAntispamUserId = ref('')
 const copyTargetId = ref(null)
 const copyLoading = ref(false)
+const transferTargetInput = ref('')
+const transferLoading = ref(false)
 const cleanLaunchLoading = ref(false)
 const isPremium = ref(false)
 const pickerToggleBusyByChat = ref({})
@@ -755,6 +883,13 @@ function ensureChatRuleShape(c) {
       ? ''
       : String(r.rules_group_active_draft_id)
   if (typeof r.rules_group_delete_pin_notice !== 'boolean') r.rules_group_delete_pin_notice = !!r.rules_group_delete_pin_notice
+  if (typeof r.mech_filter_flood_enabled !== 'boolean') r.mech_filter_flood_enabled = !!r.mech_filter_flood_enabled
+  r.mech_filter_flood_threshold = nInt(r.mech_filter_flood_threshold, 2, 20, 3)
+  r.mech_filter_flood_window_minutes = nInt(r.mech_filter_flood_window_minutes, 1, 60, 5)
+  const floodMode = String(r.mech_filter_flood_mode || 'soft').toLowerCase()
+  r.mech_filter_flood_mode = floodMode === 'strict' ? 'strict' : 'soft'
+  const floodAct = String(r.mech_filter_flood_action || 'mute').toLowerCase()
+  r.mech_filter_flood_action = floodAct === 'ban' ? 'ban' : floodAct === 'delete' ? 'delete' : 'mute'
 }
 
 function saveCurrentChatCache(nextChat = chat.value) {
@@ -894,6 +1029,48 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   try {
     closeMentionsVanillaModal()
+  } catch {
+    //
+  }
+  try {
+    closeAntinakrutkaVanillaModal()
+    antinakrutkaSettingsVanillaOpen.value = false
+  } catch {
+    //
+  }
+  try {
+    closeJoinFilterVanillaModal()
+    joinFilterSettingsVanillaOpen.value = false
+  } catch {
+    //
+  }
+  try {
+    closeForwardFilterVanillaModal()
+    forwardFilterVanillaOpen.value = false
+  } catch {
+    //
+  }
+  try {
+    closeMechAntispamVanillaModal()
+    mechAntispamVanillaOpen.value = false
+  } catch {
+    //
+  }
+  try {
+    closeAntifloodVanillaModal()
+    antifloodVanillaOpen.value = false
+  } catch {
+    //
+  }
+  try {
+    closePostCommentKeywordsVanillaModal()
+    postCommentKeywordsVanillaOpen.value = false
+  } catch {
+    //
+  }
+  try {
+    closeJoinRequestsVanillaModal()
+    joinRequestsVanillaOpen.value = false
   } catch {
     //
   }
@@ -1172,14 +1349,34 @@ const antiraidActivePresetKey = computed(() => {
   const windowMin = Number(r.antinakrutka_window_minutes || 5)
   const action = String(r.antinakrutka_action || 'alert')
   const restrict = Number(r.antinakrutka_restrict_minutes || 30)
-  const hit = antinakrutkaModePresets.find(
-    (p) => p.threshold === threshold && p.window === windowMin && p.action === action && p.restrict === restrict,
+  const lockdown = Number(r.antinakrutka_lockdown_minutes || 0)
+  const pauseWelcomes = !!r.antinakrutka_pause_welcomes
+  const forceCaptcha = !!r.antinakrutka_force_captcha
+  const cooldown = Number(r.antinakrutka_cooldown_minutes ?? 5)
+  const autoSilence = Number(r.antinakrutka_auto_silence_minutes || 0)
+  const hit = antinakrutkaModePresets.value.find(
+    (p) =>
+      p.threshold === threshold
+      && p.window === windowMin
+      && p.action === action
+      && p.restrict === restrict
+      && p.lockdown === lockdown
+      && !!p.pauseWelcomes === pauseWelcomes
+      && !!p.forceCaptcha === forceCaptcha
+      && p.cooldown === cooldown
+      && p.autoSilence === autoSilence,
   )
   return hit?.key || null
 })
 
 async function switchChat(chatId) {
   if (!chatId || Number(chatId) === Number(selectedChatId.value)) return
+  try {
+    closeAntifloodVanillaModal()
+    antifloodVanillaOpen.value = false
+  } catch {
+    //
+  }
   const target = (chatsList.value || []).find((c) => Number(c.id) === Number(chatId))
   if (target?.locked_by_limit) {
     goToPremiumBilling()
@@ -1335,23 +1532,442 @@ function onSilenceConfigureClick() {
   )
 }
 
-function onAntinakrutkaOpenSettingsClick() {
-  if (!canUsePremiumForCurrentChat.value) {
-    openPremiumLock('protection_bundle')
-    return
-  }
-  showAntinakrutkaSettingsModal.value = true
+function onAntinakrutkaOpenSettingsClick(ev) {
+  tileClickLog('antinakrutkaConfigure', ev, () => {
+    if (!canUsePremiumForCurrentChat.value) {
+      openPremiumLock('protection_bundle')
+      return
+    }
+    openAntinakrutkaSettingsModalDeferred()
+  })
 }
 
 function onJoinCaptchaToggleClick() {
-  withPremiumForCurrentChatOrModal(() =>
-    updateRule({ join_captcha_enabled: !chat.value.rule.join_captcha_enabled }), 'captcha_kinds')
+  if (!chat.value?.rule) return
+  updateRule({ join_captcha_enabled: !chat.value.rule.join_captcha_enabled })
+}
+
+function isJoinCaptchaKindPremiumOnly(kind) {
+  return String(kind || 'button') !== 'button'
+}
+
+function onJoinCaptchaKindPick(kind) {
+  if (isJoinCaptchaKindPremiumOnly(kind) && !canUsePremiumForCurrentChat.value) {
+    openPremiumLock('captcha_kinds')
+    return
+  }
+  updateRule({ join_captcha_kind: kind })
+}
+
+function onJoinCaptchaPreferDmToggle() {
+  if (!canUsePremiumForCurrentChat.value) {
+    openPremiumLock('captcha_kinds')
+    return
+  }
+  updateRule({ join_captcha_prefer_dm: !chat.value.rule.join_captcha_prefer_dm })
 }
 
 function onJoinCaptchaOpenSettingsClick() {
-  withPremiumForCurrentChatOrModal(() => {
-    showJoinCaptchaSettingsModal.value = true
-  }, 'captcha_kinds')
+  if (!chat.value?.rule) return
+  showJoinCaptchaSettingsModal.value = true
+}
+
+function onJoinFilterToggleClick() {
+  if (!chat.value?.rule) return
+  updateRule({ join_filter_enabled: !chat.value.rule.join_filter_enabled })
+}
+
+function openJoinFilterSettingsModalDeferred() {
+  if (!chat.value?.rule) return
+  setTimeout(() => {
+    joinFilterSettingsVanillaOpen.value = true
+    openJoinFilterVanillaModal({
+      onInfo: () => {
+        showJoinFilterInfoModal.value = true
+      },
+      labels: {
+        title: tt('protection.join_filter_settings_modal.title'),
+        intro: tt('protection.join_filter_settings_modal.intro'),
+        infoAria: tt('protection.ui.info_join_filter_aria'),
+        readyTitle: tt('protection.join_filter_settings_modal.ready_title'),
+        arab: tt('protection.join_filter_settings_modal.arab'),
+        cjk: tt('protection.join_filter_settings_modal.cjk'),
+        zalgo: tt('protection.join_filter_settings_modal.zalgo'),
+        spamNick: tt('protection.join_filter_settings_modal.spam_nick'),
+        requireUsername: tt('protection.join_filter_settings_modal.require_username'),
+        cas: tt('protection.join_filter_settings_modal.cas'),
+        casHint: tt('protection.join_filter_settings_modal.cas_hint'),
+        networkTitle: tt('protection.join_filter_settings_modal.network_title'),
+        networkEnable: tt('protection.join_filter_settings_modal.network_enable'),
+        networkThreshold: tt('protection.join_filter_settings_modal.network_threshold'),
+        networkWindow: tt('protection.join_filter_settings_modal.network_window'),
+        networkChatsUnit: tt('protection.join_filter_settings_modal.network_chats_unit'),
+        unitMin: tt('protection.join_filter_settings_modal.unit_min'),
+        networkHint: tt('protection.join_filter_settings_modal.network_hint'),
+        stopwordsTitle: tt('protection.join_filter_settings_modal.stopwords_title'),
+        stopwordsEnable: tt('protection.join_filter_settings_modal.stopwords_enable'),
+        stopwordsPlaceholder: tt('protection.join_filter_settings_modal.stopwords_placeholder'),
+        stopwordsHint: tt('protection.join_filter_settings_modal.stopwords_hint'),
+        closeTitle: tt('protection.join_filter_settings_modal.close_title'),
+        closeEnable: tt('protection.join_filter_settings_modal.close_enable'),
+        on: tt('protection.ui.on_short'),
+        off: tt('protection.ui.off_short'),
+      },
+      closeActions: [
+        { value: 'kick', label: tt('protection.join_filter_settings_modal.action_kick') },
+        { value: 'ban', label: tt('protection.join_filter_settings_modal.action_ban') },
+      ],
+      getState: () => {
+        const r = chat.value?.rule
+        if (!r) return {}
+        return {
+          join_filter_arab: r.join_filter_arab,
+          join_filter_cjk: r.join_filter_cjk,
+          join_filter_zalgo: r.join_filter_zalgo,
+          join_filter_spam_nick: r.join_filter_spam_nick,
+          join_filter_require_username: r.join_filter_require_username,
+          join_filter_cas: r.join_filter_cas,
+          join_filter_network_mass_join: r.join_filter_network_mass_join,
+          join_filter_network_join_threshold: r.join_filter_network_join_threshold,
+          join_filter_network_join_window_minutes: r.join_filter_network_join_window_minutes,
+          join_filter_name_stopwords_enabled: r.join_filter_name_stopwords_enabled,
+          join_filter_name_stopwords: r.join_filter_name_stopwords,
+          join_filter_close_entry: r.join_filter_close_entry,
+          join_filter_close_action: r.join_filter_close_action,
+        }
+      },
+      canPremium: canUsePremiumForCurrentChat.value,
+      onPatch: async (patch) => updateRule(patch),
+      onPremiumLock: () => openPremiumLock('join_filter_premium'),
+      onClose: () => {
+        joinFilterSettingsVanillaOpen.value = false
+      },
+    })
+  }, 50)
+}
+
+function openJoinRequestsSettingsModalDeferred() {
+  if (!chat.value?.rule) return
+  setTimeout(() => {
+    joinRequestsVanillaOpen.value = true
+    openJoinRequestsVanillaModal({
+      onInfo: () => {
+        showJoinRequestsInfoModal.value = true
+      },
+      canPremium: canUsePremiumForCurrentChat.value,
+      labels: {
+        title: tt('protection.join_requests_modal.title'),
+        infoAria: tt('protection.ui.info_join_requests_aria'),
+        intro: tt('protection.join_requests_modal.intro'),
+        modeTitle: tt('protection.join_requests_modal.mode_title'),
+        questions: tt('protection.join_requests_modal.questions'),
+        questionsIntro: tt('protection.join_requests_modal.questions_intro'),
+        questionTitle: tt('protection.join_requests_modal.question_title'),
+        questionText: tt('protection.join_requests_modal.question_text'),
+        questionTextPh: tt('protection.join_requests_modal.question_text_ph'),
+        answersLabel: tt('protection.join_requests_modal.answers_label'),
+        answersPh: tt('protection.join_requests_modal.answers_ph'),
+        answersHint: tt('protection.join_requests_modal.answers_hint'),
+        buttonsLabel: tt('protection.join_requests_modal.buttons_label'),
+        buttonLabelPh: tt('protection.join_requests_modal.button_label_ph'),
+        buttonUrlPh: tt('protection.join_requests_modal.button_url_ph'),
+        addButton: tt('protection.join_requests_modal.add_button'),
+        addQuestion: tt('protection.join_requests_modal.add_question'),
+        removeQuestion: tt('protection.join_requests_modal.remove_question'),
+        maxQuestionsHint: tt('protection.join_requests_modal.max_questions_hint'),
+        advancedToggle: tt('protection.join_requests_modal.advanced_toggle'),
+        questionsPlaceholder: tt('protection.join_requests_modal.questions_placeholder'),
+        questionsHint: tt('protection.join_requests_modal.questions_hint'),
+        welcome: tt('protection.join_requests_modal.welcome'),
+        welcomePlaceholder: tt('protection.join_requests_modal.welcome_placeholder'),
+        done: tt('protection.join_requests_modal.done'),
+        donePlaceholder: tt('protection.join_requests_modal.done_placeholder'),
+        reportTitle: tt('protection.join_requests_modal.report_title'),
+        hint: tt('protection.join_requests_modal.hint'),
+      },
+      modes: [
+        { value: 'off', label: tt('protection.ui.join_requests_mode_off') },
+        { value: 'auto', label: tt('protection.ui.join_requests_mode_auto'), premium: true },
+        { value: 'survey_auto', label: tt('protection.ui.join_requests_mode_survey_auto') },
+        { value: 'survey_manual', label: tt('protection.ui.join_requests_mode_survey_manual'), premium: true },
+      ],
+      reportModes: [
+        { value: 'off', label: tt('protection.ui.join_requests_report_off') },
+        { value: 'brief', label: tt('protection.ui.join_requests_report_brief') },
+        { value: 'full', label: tt('protection.ui.join_requests_report_full'), premium: true },
+      ],
+      getState: () => {
+        const r = chat.value?.rule
+        if (!r) return {}
+        let mode = r.join_requests_mode || 'off'
+        if (mode === 'off' && r.auto_approve_join_requests) mode = 'auto'
+        return {
+          join_requests_mode: mode,
+          join_requests_questions_text: r.join_requests_questions_text,
+          join_requests_welcome_text: r.join_requests_welcome_text,
+          join_requests_done_text: r.join_requests_done_text,
+          join_requests_report_mode: r.join_requests_report_mode || 'full',
+        }
+      },
+      onPatch: async (patch) => updateRule(patch),
+      onPremiumLock: () => openPremiumLock('join_requests_premium'),
+      onClose: () => {
+        joinRequestsVanillaOpen.value = false
+      },
+    })
+  }, 50)
+}
+
+function onJoinRequestsOpenSettingsClick(ev) {
+  tileClickLog('joinRequestsConfigure', ev, () => openJoinRequestsSettingsModalDeferred())
+}
+
+function onForwardFilterTileClick(ev) {
+  tileClickLog('forwardFilterTile', ev, () => openForwardFilterSettingsModalDeferred())
+}
+
+function onMechAntispamTileClick(ev) {
+  tileClickLog('mechAntispamTile', ev, () => openMechAntispamSettingsModalDeferred())
+}
+
+function onAntifloodTileClick(ev) {
+  tileClickLog('antifloodTile', ev, () => openAntifloodSettingsModalDeferred())
+}
+
+function onPostCommentKeywordsTileClick(ev) {
+  tileClickLog('postCommentKeywordsTile', ev, () => openPostCommentKeywordsSettingsModalDeferred())
+}
+
+async function recheckChannelDiscussionLink() {
+  const id = Number(chat.value?.id || 0)
+  if (!id) return
+  try {
+    const data = await fetchSilent(() => api.chat(id, { refreshTelegram: true }))
+    if (data && typeof data === 'object') {
+      chat.value = { ...chat.value, ...data }
+      ensureChatRuleShape(chat.value)
+      saveCurrentChatCache(chat.value)
+    }
+  } catch {
+    //
+  }
+}
+
+function openAntifloodSettingsModalDeferred() {
+  if (!chat.value?.rule) return
+  setTimeout(() => {
+    antifloodVanillaOpen.value = true
+    openAntifloodVanillaModal({
+      labels: {
+        title: tt('protection.antiflood_modal.title'),
+        intro: tt('protection.antiflood_modal.intro'),
+        mainTitle: tt('protection.antiflood_modal.main_title'),
+        enableLabel: tt('protection.antiflood_modal.enable_label'),
+        enableHint: tt('protection.antiflood_modal.enable_hint'),
+        modeTitle: tt('protection.antiflood_modal.mode_title'),
+        modeStrict: tt('protection.antiflood_modal.mode_strict'),
+        modeSoft: tt('protection.antiflood_modal.mode_soft'),
+        modeStrictHint: tt('protection.antiflood_modal.mode_strict_hint'),
+        modeSoftHint: tt('protection.antiflood_modal.mode_soft_hint'),
+        actionTitle: tt('protection.antiflood_modal.action_title'),
+        actionBan: tt('protection.antiflood_modal.action_ban'),
+        actionMute: tt('protection.antiflood_modal.action_mute'),
+        thresholdTitle: tt('protection.antiflood_modal.threshold_title'),
+        floodThreshold: tt('protection.antiflood_modal.flood_threshold'),
+        floodWindow: tt('protection.antiflood_modal.flood_window'),
+        unitMin: tt('protection.antiflood_modal.unit_min'),
+        note: tt('protection.antiflood_modal.note'),
+      },
+      getState: () => {
+        const r = chat.value?.rule
+        return {
+          mech_filter_flood_enabled: !!r?.mech_filter_flood_enabled,
+          mech_filter_flood_mode: r?.mech_filter_flood_mode || 'soft',
+          mech_filter_flood_action: r?.mech_filter_flood_action || 'mute',
+          mech_filter_flood_threshold: r?.mech_filter_flood_threshold ?? 3,
+          mech_filter_flood_window_minutes: r?.mech_filter_flood_window_minutes ?? 5,
+        }
+      },
+      onPatch: async (patch) => {
+        await updateRule(patch)
+      },
+      onClose: () => {
+        antifloodVanillaOpen.value = false
+      },
+    })
+  }, 50)
+}
+
+function openPostCommentKeywordsSettingsModalDeferred() {
+  if (!chat.value?.rule) return
+  setTimeout(() => {
+    postCommentKeywordsVanillaOpen.value = true
+    openPostCommentKeywordsVanillaModal({
+      linkedOk: isChannelDiscussion.value,
+      premiumLocked: premiumFeatureLocked.value,
+      labels: {
+        title: tt('protection.post_comment_keywords_modal.title'),
+        intro: tt('protection.post_comment_keywords_modal.intro'),
+        on: tt('protection.post_comment_keywords_modal.on'),
+        off: tt('protection.post_comment_keywords_modal.off'),
+        linkedChannel: tt('protection.post_comment_keywords_modal.linked_channel'),
+        noLink: tt('protection.post_comment_keywords_modal.no_link'),
+        recheck: tt('protection.post_comment_keywords_modal.recheck'),
+        keywordsLabel: tt('protection.post_comment_keywords_modal.keywords_label'),
+        keywordsPlaceholder: tt('protection.post_comment_keywords_modal.keywords_placeholder'),
+        saveKeywords: tt('protection.post_comment_keywords_modal.save_keywords'),
+        current: tt('protection.post_comment_keywords_modal.current'),
+        actionLabel: tt('protection.post_comment_keywords_modal.action_label'),
+        actionDelete: tt('protection.post_comment_keywords_modal.action_delete'),
+        actionMute: tt('protection.post_comment_keywords_modal.action_mute'),
+        actionBan: tt('protection.post_comment_keywords_modal.action_ban'),
+        note: tt('protection.post_comment_keywords_modal.note'),
+      },
+      getState: () => {
+        const r = chat.value?.rule
+        const kws = r?.post_comment_keywords || []
+        return {
+          post_comment_keywords_enabled: !!r?.post_comment_keywords_enabled,
+          post_comment_keywords_action: r?.post_comment_keywords_action || 'delete',
+          keywords: kws,
+          keywordsText: kws.join(', '),
+          linkedChannelTitle: chat.value?.linked_channel_title || '',
+        }
+      },
+      onPatch: async (patch) => {
+        if (premiumFeatureLocked.value) {
+          openPremiumLock('protection_bundle')
+          return
+        }
+        if (patch.post_comment_keywords_enabled && !isChannelDiscussion.value) {
+          showToast(tt('protection.toasts.post_comment_keywords_no_link'))
+          return
+        }
+        await updateRule(patch)
+      },
+      onRecheckLink: () => recheckChannelDiscussionLink(),
+      onPremiumLock: () => openPremiumLock('protection_bundle'),
+      onClose: () => {
+        postCommentKeywordsVanillaOpen.value = false
+      },
+    })
+  }, 50)
+}
+
+function openMechAntispamSettingsModalDeferred() {
+  if (!chat.value?.rule) return
+  setTimeout(() => {
+    mechAntispamVanillaOpen.value = true
+    openMechAntispamVanillaModal({
+      canPremium: canUsePremiumForCurrentChat.value,
+      globalActionOff: chat.value?.rule?.action_mode === 'off',
+      labels: {
+        title: tt('protection.mech_antispam_modal.title'),
+        infoAria: tt('protection.ui.info_mech_antispam_aria'),
+        intro: tt('protection.mech_antispam_modal.intro'),
+        on: tt('protection.mech_antispam_modal.on'),
+        off: tt('protection.mech_antispam_modal.off'),
+        note: tt('protection.mech_antispam_modal.note'),
+        actionsTitle: tt('protection.mech_antispam_modal.actions_title'),
+        actionForFilter: tt('protection.mech_antispam_modal.action_for_filter'),
+        globalOffHint: tt('protection.mech_antispam_modal.global_off_hint'),
+        actionOptions: MECH_FILTER_ACTION_OPTIONS.map((o) => ({
+          ...o,
+          title: o.v
+            ? tt(`protection.mech_antispam_modal.action_${o.v}`)
+            : tt('protection.mech_antispam_modal.action_inherit'),
+        })),
+      },
+      rows: MECH_ANTISPAM_ROWS.map((r) => ({
+        field: r.field,
+        premium: r.premium,
+        actionKey: r.actionKey,
+        label: tt(`protection.ui.mech_antispam_kinds.${r.key}`),
+        hint:
+          r.key === 'guest_bots'
+            ? tt('protection.mech_antispam_modal.guest_bots_hint')
+            : '',
+      })),
+      getState: () => {
+        const r = chat.value?.rule
+        if (!r) return {}
+        const out = {
+          filter_actions: { ...(r.filter_actions || {}) },
+        }
+        for (const row of MECH_ANTISPAM_ROWS) out[row.field] = !!r[row.field]
+        return out
+      },
+      onPatch: async (patch) => {
+        const premiumKeys = new Set(
+          MECH_ANTISPAM_ROWS.filter((r) => r.premium).map((r) => r.field),
+        )
+        const touchesPremium = Object.keys(patch).some((k) => premiumKeys.has(k))
+        if (touchesPremium && !canUsePremiumForCurrentChat.value) {
+          openPremiumLock('protection_bundle')
+          return
+        }
+        await updateRule(patch)
+      },
+      onPremiumLock: () => openPremiumLock('protection_bundle'),
+      onInfo: () => {
+        showMechAntispamInfoModal.value = true
+      },
+      onClose: () => {
+        mechAntispamVanillaOpen.value = false
+      },
+    })
+  }, 50)
+}
+
+function openForwardFilterSettingsModalDeferred() {
+  if (!chat.value?.rule) return
+  setTimeout(() => {
+    forwardFilterVanillaOpen.value = true
+    openForwardFilterVanillaModal({
+      onInfo: () => {
+        showForwardFilterInfoModal.value = true
+      },
+      canPremium: canUsePremiumForCurrentChat.value,
+      labels: {
+        title: tt('protection.forward_filter_modal.title'),
+        infoAria: tt('protection.ui.info_forward_filter_aria'),
+        intro: tt('protection.forward_filter_modal.intro'),
+        note: tt('protection.forward_filter_modal.note'),
+        forbidden: tt('protection.forward_filter_modal.forbidden'),
+        allowed: tt('protection.forward_filter_modal.allowed'),
+      },
+      rows: FORWARD_FILTER_ROWS.map((r) => ({
+        field: r.field,
+        premium: r.premium,
+        label: tt(`protection.ui.forward_filter_kinds.${r.key}`),
+      })),
+      getState: () => {
+        const r = chat.value?.rule
+        if (!r) return {}
+        const out = {}
+        for (const row of FORWARD_FILTER_ROWS) out[row.field] = !!r[row.field]
+        return out
+      },
+      onPatch: async (patch) => {
+        const premiumKeys = new Set(
+          FORWARD_FILTER_ROWS.filter((r) => r.premium).map((r) => r.field),
+        )
+        const touchesPremium = Object.keys(patch).some((k) => premiumKeys.has(k))
+        if (touchesPremium && !canUsePremiumForCurrentChat.value) {
+          openPremiumLock('protection_bundle')
+          return
+        }
+        await updateRule(patch)
+      },
+      onClose: () => {
+        forwardFilterVanillaOpen.value = false
+      },
+    })
+  }, 50)
+}
+
+function onJoinFilterOpenSettingsClick(ev) {
+  tileClickLog('joinFilterConfigure', ev, () => openJoinFilterSettingsModalDeferred())
 }
 
 function onNewbieToggleClick() {
@@ -2152,6 +2768,36 @@ async function doCopySettings() {
   }
 }
 
+async function onTransferOwnershipClick() {
+  if (!chat.value?.id || !isChatOwner.value) return
+  const raw = String(transferTargetInput.value || '').trim()
+  if (!raw) {
+    showToast(tt('protection.toasts.transfer_target_empty'))
+    return
+  }
+  const okConfirm = window.confirm(
+    tt('protection.confirm.transfer_ownership', {
+      title: chat.value.title || chat.value.id,
+      target: raw,
+    }),
+  )
+  if (!okConfirm) return
+  transferLoading.value = true
+  try {
+    const body = /^\d+$/.test(raw)
+      ? { target_user_id: Number(raw) }
+      : { target_username: raw.replace(/^@/, '') }
+    await fetchSilent(() => api.transferOwnership(chat.value.id, body))
+    showToast(tt('protection.toasts.transfer_ownership_ok'))
+    transferTargetInput.value = ''
+    router.push('/chats')
+  } catch (e) {
+    showToast(messageFromApiError(e) || tt('protection.toasts.transfer_ownership_fail'))
+  } finally {
+    transferLoading.value = false
+  }
+}
+
 const policyOptions = computed(() => [
   { value: 'allow', label: tt('protection.policy.allow') },
   { value: 'forbid', label: tt('protection.policy.forbid') },
@@ -2294,6 +2940,90 @@ const channelPostsSummary = computed(() => {
   }
   return tt('protection.summaries.channel_posts_granular', { list: enabledShort.join(', ') })
 })
+const forwardFilterSummary = computed(() => {
+  const rule = chat.value?.rule
+  if (!rule) return tt('protection.summaries.forward_filter_allowed')
+  const blocked = FORWARD_FILTER_ROWS.filter((r) => !!rule[r.field]).map((r) =>
+    tt(`protection.ui.forward_filter_kinds_short.${r.key}`),
+  )
+  if (!blocked.length) return tt('protection.summaries.forward_filter_allowed')
+  return tt('protection.summaries.forward_filter_blocked', { list: blocked.join(', ') })
+})
+const mechAntispamSummary = computed(() => {
+  const rule = chat.value?.rule
+  if (!rule) return tt('protection.summaries.mech_antispam_off')
+  const enabled = MECH_ANTISPAM_ROWS.filter((r) => !!rule[r.field]).map((r) =>
+    tt(`protection.ui.mech_antispam_kinds_short.${r.key}`),
+  )
+  if (!enabled.length) return tt('protection.summaries.mech_antispam_off')
+  return tt('protection.summaries.mech_antispam_on', { list: enabled.join(', ') })
+})
+const antifloodSummary = computed(() => {
+  const rule = chat.value?.rule
+  if (!rule || !rule.mech_filter_flood_enabled) return tt('protection.summaries.antiflood_off')
+  const mode =
+    String(rule.mech_filter_flood_mode || 'soft') === 'strict'
+      ? tt('protection.summaries.antiflood_mode_strict')
+      : tt('protection.summaries.antiflood_mode_soft')
+  const action =
+    String(rule.mech_filter_flood_action || 'mute') === 'ban'
+      ? tt('protection.summaries.antiflood_action_ban')
+      : tt('protection.summaries.antiflood_action_mute')
+  return tt('protection.summaries.antiflood_on', { mode, action })
+})
+const isChannelDiscussion = computed(() => {
+  if (!chat.value || chat.value.loadError || chat.value.noSelection) return false
+  if (chat.value.is_channel_discussion === true) return true
+  return Number(chat.value.linked_channel_chat_id || 0) > 0
+})
+const isChatOwner = computed(() => !!chat.value?.rule && !chat.value?.is_shared)
+const postCommentKeywordsSummary = computed(() => {
+  const rule = chat.value?.rule
+  if (!rule) return tt('protection.summaries.post_comment_keywords_off')
+  if (!rule.post_comment_keywords_enabled) return tt('protection.summaries.post_comment_keywords_off')
+  const kws = rule.post_comment_keywords || []
+  if (!kws.length) return tt('protection.summaries.post_comment_keywords_on_empty')
+  return tt('protection.summaries.post_comment_keywords_on', {
+    n: kws.length,
+    action: rule.post_comment_keywords_action || 'delete',
+  })
+})
+
+function joinRequestsModeLabel(mode) {
+  const m = String(mode || 'off')
+  const key = `protection.ui.join_requests_mode_${m}`
+  const t = tt(key)
+  return t === key ? m : t
+}
+
+const joinRequestsSummary = computed(() => {
+  const r = chat.value?.rule
+  if (!r) return tt('protection.summaries.join_requests_off')
+  let mode = r.join_requests_mode || 'off'
+  if (mode === 'off' && r.auto_approve_join_requests) mode = 'auto'
+  if (String(mode) === 'off') return tt('protection.summaries.join_requests_off')
+  return joinRequestsModeLabel(mode)
+})
+
+const joinFilterSummary = computed(() => {
+  const r = chat.value?.rule
+  if (!r?.join_filter_enabled) return tt('protection.summaries.join_filter_off')
+  const active = []
+  if (r.join_filter_zalgo) active.push(tt('protection.join_filter_settings_modal.zalgo'))
+  if (r.join_filter_spam_nick) active.push(tt('protection.join_filter_settings_modal.spam_nick'))
+  if (r.join_filter_arab) active.push(tt('protection.join_filter_settings_modal.arab'))
+  if (r.join_filter_cjk) active.push(tt('protection.join_filter_settings_modal.cjk'))
+  if (r.join_filter_require_username) active.push(tt('protection.join_filter_settings_modal.require_username'))
+  if (canUsePremiumForCurrentChat.value) {
+    if (r.join_filter_cas) active.push('CAS')
+    if (r.join_filter_network_mass_join) active.push(tt('protection.join_filter_settings_modal.network_enable'))
+    if (r.join_filter_name_stopwords_enabled) active.push(tt('protection.join_filter_settings_modal.stopwords_enable'))
+    if (r.join_filter_close_entry) active.push(tt('protection.join_filter_settings_modal.close_enable'))
+  }
+  if (!active.length) return tt('protection.summaries.join_filter_on_empty')
+  return active.slice(0, 4).join(' · ')
+})
+
 const postRulesDraftsForChat = computed(() =>
   (postRulesDrafts.value || []).filter(
     (d) => String(d?.chatId || '') === postRulesDraftChatKey() && String(d?.mode || 'channel') === 'group',
@@ -4315,8 +5045,19 @@ watch(
     showMainInfoModal,
     showChatSwitchInfoModal,
     showAntinakrutkaInfoModal,
+    antinakrutkaSettingsVanillaOpen,
     showJoinCaptchaInfoModal,
+    joinFilterSettingsVanillaOpen,
+    forwardFilterVanillaOpen,
+    mechAntispamVanillaOpen,
+    antifloodVanillaOpen,
+    postCommentKeywordsVanillaOpen,
+    joinRequestsVanillaOpen,
+    showJoinRequestsInfoModal,
+    showJoinFilterInfoModal,
     showAntispamInfoModal,
+    showMechAntispamInfoModal,
+    showPunishmentsInfoModal,
     showNewbieInfoModal,
     showSilencePickerModal,
   ],
@@ -4620,6 +5361,7 @@ const actionOptions = computed(() => [
   { value: 'kick', label: tt('protection.ui.action_kick_label'), hint: tt('protection.ui.action_kick_hint') },
   { value: 'ban', label: tt('protection.ui.action_ban_label'), hint: tt('protection.ui.action_ban_hint') },
   { value: 'observe', label: tt('protection.ui.action_observe_label'), hint: tt('protection.ui.action_observe_hint') },
+  { value: 'off', label: tt('protection.ui.action_off_label'), hint: tt('protection.ui.action_off_hint') },
 ])
 
 const mutePresets = computed(() => [
@@ -4645,18 +5387,110 @@ const SILENCE_PRESET_MINUTES = [10, 60, 120, 180, 240, 360, 480, 600, 720, 1440]
 const silencePresets = computed(() =>
   SILENCE_PRESET_MINUTES.map((value) => ({ value, label: silencePresetLabel(value) })),
 )
-const antinakrutkaThresholdPresets = [5, 10, 15, 20]
-const antinakrutkaWindowPresets = [3, 5, 10]
 const antinakrutkaActionOptions = computed(() => [
   { value: 'alert', label: tt('protection.antinakrutka_ui.action_alert') },
   { value: 'alert_restrict', label: tt('protection.antinakrutka_ui.action_alert_restrict') },
+  { value: 'alert_kick', label: tt('protection.antinakrutka_ui.action_alert_kick') },
+  { value: 'alert_ban', label: tt('protection.antinakrutka_ui.action_alert_ban') },
 ])
-const antinakrutkaRestrictPresets = [15, 30, 60]
 const antinakrutkaModePresets = computed(() => [
-  { key: 'soft', label: tt('protection.antinakrutka_ui.preset_soft'), threshold: 20, window: 3, action: 'alert', restrict: 30 },
-  { key: 'standard', label: tt('protection.antinakrutka_ui.preset_standard'), threshold: 10, window: 5, action: 'alert_restrict', restrict: 30 },
-  { key: 'hard', label: tt('protection.antinakrutka_ui.preset_hard'), threshold: 5, window: 10, action: 'alert_restrict', restrict: 60 },
+  {
+    key: 'soft',
+    label: tt('protection.antinakrutka_ui.preset_soft'),
+    threshold: 20,
+    window: 3,
+    action: 'alert',
+    restrict: 30,
+    lockdown: 0,
+    pauseWelcomes: false,
+    forceCaptcha: false,
+    cooldown: 5,
+    autoSilence: 0,
+  },
+  {
+    key: 'standard',
+    label: tt('protection.antinakrutka_ui.preset_standard'),
+    threshold: 10,
+    window: 5,
+    action: 'alert_restrict',
+    restrict: 30,
+    lockdown: 30,
+    pauseWelcomes: true,
+    forceCaptcha: false,
+    cooldown: 5,
+    autoSilence: 0,
+  },
+  {
+    key: 'hard',
+    label: tt('protection.antinakrutka_ui.preset_hard'),
+    threshold: 5,
+    window: 10,
+    action: 'alert_kick',
+    restrict: 60,
+    lockdown: 60,
+    pauseWelcomes: true,
+    forceCaptcha: true,
+    cooldown: 5,
+    autoSilence: 0,
+  },
 ])
+
+function antinakrutkaPresetSubline(preset) {
+  if (!preset) return ''
+  if (preset.action === 'alert_restrict') {
+    return tt('protection.antinakrutka_ui.preset_subline_restrict', {
+      t: preset.threshold,
+      m: preset.window,
+      r: preset.restrict,
+    })
+  }
+  if (preset.action === 'alert_kick') {
+    return tt('protection.antinakrutka_ui.preset_subline_kick', {
+      t: preset.threshold,
+      m: preset.window,
+    })
+  }
+  if (preset.action === 'alert_ban') {
+    return tt('protection.antinakrutka_ui.preset_subline_ban', {
+      t: preset.threshold,
+      m: preset.window,
+    })
+  }
+  return tt('protection.antinakrutka_ui.preset_subline_alert', {
+    t: preset.threshold,
+    m: preset.window,
+  })
+}
+
+function antinakrutkaPresetActionLabel(preset) {
+  if (!preset) return ''
+  if (preset.action === 'alert_restrict') {
+    return tt('protection.antinakrutka_ui.preset_action_mute', { r: preset.restrict })
+  }
+  if (preset.action === 'alert_kick') {
+    return tt('protection.antinakrutka_ui.preset_action_kick')
+  }
+  if (preset.action === 'alert_ban') {
+    return tt('protection.antinakrutka_ui.preset_action_ban')
+  }
+  return tt('protection.antinakrutka_ui.action_alert').toLowerCase()
+}
+
+function antinakrutkaMoodDescKey(key) {
+  if (key === 'standard') return 'mood_desc_std'
+  if (key === 'hard') return 'mood_desc_hard'
+  return 'mood_desc_soft'
+}
+
+function antinakrutkaInfoMoodLine(preset) {
+  const line = tt('protection.modals.antinakrutka.mood_line', {
+    name: preset.label,
+    t: preset.threshold,
+    m: preset.window,
+    action: antinakrutkaPresetActionLabel(preset),
+  })
+  return `${line} ${tt(`protection.modals.antinakrutka.${antinakrutkaMoodDescKey(preset.key)}`)}`
+}
 
 const publicAlertsEveryPresets = [
   { n: 3, label: '3' },
@@ -4742,6 +5576,11 @@ async function applyAntinakrutkaPreset(preset) {
     antinakrutka_window_minutes: preset.window,
     antinakrutka_action: preset.action,
     antinakrutka_restrict_minutes: preset.restrict,
+    antinakrutka_lockdown_minutes: preset.lockdown,
+    antinakrutka_pause_welcomes: preset.pauseWelcomes,
+    antinakrutka_force_captcha: preset.forceCaptcha,
+    antinakrutka_cooldown_minutes: preset.cooldown,
+    antinakrutka_auto_silence_minutes: preset.autoSilence,
   })
 }
 
@@ -4878,11 +5717,11 @@ const protCardIndigo =
         aria-modal="true"
         role="dialog"
         aria-labelledby="protection-chat-picker-title"
-        @touchmove.prevent
       >
         <div
           class="guard-protection-fullsheet-glass flex min-h-0 w-full flex-1 flex-col overflow-hidden border-t border-white/[0.10] pb-0 pt-2 pl-[max(1.25rem,env(safe-area-inset-left))] pr-[max(1.25rem,env(safe-area-inset-right))] text-slate-100 sm:pl-[max(1.5rem,env(safe-area-inset-left))] sm:pr-[max(1.5rem,env(safe-area-inset-right))]"
           @click.stop
+          @touchmove.self.prevent
         >
           <div class="mx-auto mb-2 h-1 w-12 shrink-0 rounded-full bg-white/35 md:hidden" aria-hidden="true" />
           <div class="mb-2 flex shrink-0 items-center justify-between gap-2 border-b border-white/[0.08] pb-2.5">
@@ -5163,6 +6002,64 @@ const protCardIndigo =
             </button>
             <button
               type="button"
+              data-guard-filter-tile="forwards"
+              class="group relative col-span-2 flex min-h-[4.75rem] touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-cyan-500/15 to-blue-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-cyan-400/40 hover:shadow-md active:scale-[0.99]"
+              @click="onForwardFilterTileClick"
+            >
+              <button
+                type="button"
+                class="prot-info-btn prot-info-btn--ink prot-info-btn--corner-sm absolute right-2 top-2 z-[2]"
+                :aria-label="tt('protection.ui.info_forward_filter_aria')"
+                @click.stop="showForwardFilterInfoModal = true"
+              >
+                i
+              </button>
+              <span class="text-lg leading-none">↪️</span>
+              <span class="mt-1.5 pr-8 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_forward_quote') }}</span>
+              <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ forwardFilterSummary }}</span>
+            </button>
+            <button
+              type="button"
+              data-guard-filter-tile="antiflood"
+              class="group relative col-span-2 flex min-h-[4.75rem] touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-emerald-500/15 to-teal-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-emerald-400/40 hover:shadow-md active:scale-[0.99]"
+              @click="onAntifloodTileClick"
+            >
+              <span class="text-lg leading-none">🌊</span>
+              <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_antiflood') }}</span>
+              <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ antifloodSummary }}</span>
+            </button>
+            <button
+              type="button"
+              data-guard-filter-tile="mechAntispam"
+              class="group relative col-span-2 flex min-h-[4.75rem] touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-orange-500/15 to-rose-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-orange-400/40 hover:shadow-md active:scale-[0.99]"
+              @click="onMechAntispamTileClick"
+            >
+              <button
+                type="button"
+                class="prot-info-btn prot-info-btn--ink prot-info-btn--corner-sm absolute right-2 top-2 z-[2]"
+                :aria-label="tt('protection.ui.info_mech_antispam_aria')"
+                @click.stop="showMechAntispamInfoModal = true"
+              >
+                i
+              </button>
+              <span class="text-lg leading-none">🔸</span>
+              <span class="mt-1.5 pr-8 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_mech_antispam') }}</span>
+              <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ mechAntispamSummary }}</span>
+            </button>
+            <button
+              v-if="isChannelDiscussion"
+              type="button"
+              data-guard-filter-tile="postCommentKeywords"
+              class="group relative col-span-2 flex min-h-[4.75rem] touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-violet-500/15 to-purple-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-violet-400/40 hover:shadow-md active:scale-[0.99]"
+              @click="onPostCommentKeywordsTileClick"
+            >
+              <span class="text-lg leading-none">🔸</span>
+              <span class="mt-1.5 text-xs font-semibold text-slate-100">{{ tt('protection.ui.filter_post_comment_keywords') }}</span>
+              <span class="mt-0.5 line-clamp-2 text-[10px] text-slate-400">{{ postCommentKeywordsSummary }}</span>
+              <span v-if="premiumFeatureLocked" class="absolute right-2 top-2 text-[10px] text-amber-300">🔒</span>
+            </button>
+            <button
+              type="button"
               data-guard-filter-tile="channelPosts"
               class="group relative col-span-2 flex min-h-[4.75rem] touch-manipulation flex-col items-start rounded-xl border border-white/12 bg-gradient-to-br from-fuchsia-500/15 to-indigo-600/10 p-3 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_6px_24px_-12px_rgba(0,0,0,0.45)] ring-1 ring-inset ring-white/[0.06] [-webkit-tap-highlight-color:transparent] transition hover:border-fuchsia-400/40 hover:shadow-md active:scale-[0.99]"
               @click="onChannelPostsTileClick"
@@ -5322,6 +6219,20 @@ const protCardIndigo =
                 </button>
               </div>
               <div class="flex items-center justify-between gap-2">
+                <span class="text-xs text-rose-100/90">{{ tt('protection.filters.crypto_row') }}</span>
+                <button
+                  type="button"
+                  :class="hardDictSwitchClass(chat.rule.filter_crypto_enabled)"
+                  class="relative h-[30px] w-[50px] shrink-0 rounded-full border transition duration-200"
+                  @click="updateRule({ filter_crypto_enabled: !chat.rule.filter_crypto_enabled })"
+                >
+                  <span
+                    class="absolute left-[2px] top-1/2 h-[24px] w-[24px] rounded-full bg-white shadow-md transition duration-200"
+                    :style="{ transform: chat.rule.filter_crypto_enabled ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }"
+                  />
+                </button>
+              </div>
+              <div class="flex items-center justify-between gap-2">
                 <span class="text-xs text-rose-100/90">{{ tt('protection.filters.ads_promos') }}</span>
                 <button
                   type="button"
@@ -5445,6 +6356,30 @@ const protCardIndigo =
                   />
                 </button>
               </div>
+              <div class="flex items-start justify-between gap-2">
+                <span class="flex min-w-0 items-start gap-1.5 text-xs leading-snug text-rose-100/90">
+                  <PremiumLockBadge
+                    v-if="premiumFeatureLocked"
+                    variant="crown"
+                    size="xs"
+                    class="mt-0.5 shrink-0"
+                    interactive
+                    @click="openPremiumLock('extra_dicts')"
+                  />
+                  <span class="min-w-0 flex-1 break-words">{{ tt('protection.filters.drugs_detail') }}</span>
+                </span>
+                <button
+                  type="button"
+                  :class="hardDictSwitchClass(chat.rule.filter_drugs_enabled)"
+                  class="relative h-[30px] w-[50px] shrink-0 rounded-full border transition duration-200"
+                  @click="tryExtraDictToggle(() => updateRule({ filter_drugs_enabled: !chat.rule.filter_drugs_enabled }))"
+                >
+                  <span
+                    class="absolute left-[2px] top-1/2 h-[24px] w-[24px] rounded-full bg-white shadow-md transition duration-200"
+                    :style="{ transform: chat.rule.filter_drugs_enabled ? 'translate3d(20px, -50%, 0)' : 'translate3d(0, -50%, 0)' }"
+                  />
+                </button>
+              </div>
               <div class="space-y-1">
                 <div class="flex items-start justify-between gap-2">
                   <div class="min-w-0">
@@ -5556,7 +6491,17 @@ const protCardIndigo =
 
       <!-- Наказания -->
       <section :class="protCard">
-        <h2 class="mb-3 text-xs font-medium text-slate-200">{{ tt('protection.ui.punishments_title') }}</h2>
+        <div class="mb-3 flex items-center justify-between gap-2">
+          <h2 class="text-xs font-medium text-slate-200">{{ tt('protection.ui.punishments_title') }}</h2>
+          <button
+            type="button"
+            class="prot-info-btn"
+            :aria-label="tt('protection.ui.info_punishments_aria')"
+            @click="showPunishmentsInfoModal = true"
+          >
+            i
+          </button>
+        </div>
         <div :class="protCardSub">
           <p class="text-xs font-semibold text-amber-200">{{ tt('protection.ui.guard_mode_title') }}</p>
           <p class="mt-1 text-xs leading-relaxed text-amber-100/85">
@@ -5566,7 +6511,7 @@ const protCardIndigo =
         <div class="space-y-3">
           <div>
             <p class="mb-1 text-xs text-slate-400">{{ tt('protection.ui.action_label') }}</p>
-            <div class="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5">
+            <div class="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
               <button
                 v-for="opt in actionOptions"
                 :key="opt.value"
@@ -5836,16 +6781,16 @@ const protCardIndigo =
               : 'border border-white/15 bg-white/10 text-slate-100 hover:bg-white/15',
             premiumFeatureLocked && 'border-amber-400/30',
           ]"
-          @click.stop="onAntinakrutkaOpenSettingsClick"
+          @click="onAntinakrutkaOpenSettingsClick"
         >
           {{ tt('protection.ui.configure') }}
         </button>
       </section>
 
-      <!-- Капча при входе (Premium) -->
-      <section :class="[protCardIndigo, premiumSectionFrameClass]">
+      <!-- Капча при входе -->
+      <section :class="protCardIndigo">
         <div class="mb-3 flex items-center justify-between gap-2">
-          <h2 class="text-xs font-medium text-slate-100">{{ tt('protection.ui.join_captcha_title') }} <span v-if="premiumFeatureLocked" class="text-amber-300">🔒 Premium</span></h2>
+          <h2 class="text-xs font-medium text-slate-100">{{ tt('protection.ui.join_captcha_title') }}</h2>
           <button
             type="button"
             class="prot-info-btn"
@@ -5855,7 +6800,8 @@ const protCardIndigo =
             i
           </button>
         </div>
-        <div :class="['space-y-3', premiumControlRowClass]">
+        <div class="space-y-3">
+          <p class="text-[11px] leading-snug text-slate-400">{{ tt('protection.ui.join_captcha_card_hint') }}</p>
           <div class="flex items-center justify-between gap-2">
             <span class="text-xs text-slate-300">{{ tt('protection.ui.join_captcha_enable') }}</span>
             <button
@@ -5869,11 +6815,70 @@ const protCardIndigo =
           </div>
           <button
             type="button"
-            :class="[
-              'rounded-lg border border-white/15 bg-white/10 px-3 py-1.5 text-xs font-semibold text-slate-100 hover:bg-white/15',
-              premiumFeatureLocked && 'border-amber-400/30',
-            ]"
+            class="rounded-lg border border-white/15 bg-white/10 px-3 py-1.5 text-xs font-semibold text-slate-100 hover:bg-white/15"
             @click="onJoinCaptchaOpenSettingsClick"
+          >
+            {{ tt('protection.ui.configure') }}
+          </button>
+        </div>
+      </section>
+
+      <!-- Фильтрация входящих -->
+      <section :class="protCardIndigo">
+        <div class="mb-3 flex items-center justify-between gap-2">
+          <h2 class="text-xs font-medium text-slate-100">{{ tt('protection.ui.join_filter_title') }}</h2>
+          <button
+            type="button"
+            class="prot-info-btn"
+            :aria-label="tt('protection.ui.info_join_filter_aria')"
+            @click="showJoinFilterInfoModal = true"
+          >
+            i
+          </button>
+        </div>
+        <div class="space-y-3">
+          <p class="text-[11px] leading-snug text-slate-400">{{ tt('protection.ui.join_filter_card_hint') }}</p>
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-xs text-slate-300">{{ tt('protection.ui.join_filter_enable') }}</span>
+            <button
+              type="button"
+              :class="boolToggleClass(!!chat.rule.join_filter_enabled)"
+              class="rounded-lg px-2.5 py-1 text-xs"
+              @click="onJoinFilterToggleClick"
+            >
+              {{ chat.rule.join_filter_enabled ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}
+            </button>
+          </div>
+          <p v-if="chat.rule.join_filter_enabled" class="text-[11px] leading-snug text-slate-500">{{ joinFilterSummary }}</p>
+          <button
+            type="button"
+            class="rounded-lg border border-white/15 bg-white/10 px-3 py-1.5 text-xs font-semibold text-slate-100 hover:bg-white/15"
+            @click="onJoinFilterOpenSettingsClick"
+          >
+            {{ tt('protection.ui.configure') }}
+          </button>
+        </div>
+      </section>
+
+      <!-- Заявки на вступление -->
+      <section :class="protCardIndigo">
+        <div class="mb-3 flex items-center justify-between gap-2">
+          <h2 class="text-xs font-medium text-slate-100">{{ tt('protection.ui.join_requests_title') }}</h2>
+          <button
+            type="button"
+            class="prot-info-btn"
+            :aria-label="tt('protection.ui.info_join_requests_aria')"
+            @click="showJoinRequestsInfoModal = true"
+          >
+            i
+          </button>
+        </div>
+        <div class="space-y-3">
+          <p class="text-[11px] leading-snug text-slate-400">{{ joinRequestsSummary }}</p>
+          <button
+            type="button"
+            class="rounded-lg border border-white/15 bg-white/10 px-3 py-1.5 text-xs font-semibold text-slate-100 hover:bg-white/15"
+            @click="onJoinRequestsOpenSettingsClick"
           >
             {{ tt('protection.ui.configure') }}
           </button>
@@ -5985,6 +6990,35 @@ const protCardIndigo =
         <p v-else class="text-xs text-slate-400">
           {{ tt('protection.ui.pick_chat_for_cleanup') }}
         </p>
+      </section>
+
+      <!-- Дополнительно: передача владения (только владелец) -->
+      <section v-if="isChatOwner" :class="protCard">
+        <h2 class="mb-3 text-xs font-medium text-slate-200">{{ tt('protection.ui.extra_title') }}</h2>
+        <div :class="protCardSub">
+          <p class="text-xs font-semibold text-slate-200">{{ tt('protection.ui.transfer_ownership_title') }}</p>
+          <p class="mt-1 text-xs leading-relaxed text-slate-400">
+            {{ tt('protection.ui.transfer_ownership_body') }}
+          </p>
+          <div class="mt-3 flex flex-wrap items-center gap-2">
+            <input
+              v-model="transferTargetInput"
+              type="text"
+              :placeholder="tt('protection.ui.transfer_ownership_placeholder')"
+              class="min-w-[10rem] flex-1 rounded-lg border border-white/15 bg-white/10 px-2.5 py-1.5 text-xs text-slate-100 placeholder:text-slate-500"
+              :disabled="transferLoading"
+              @keydown.enter.prevent="onTransferOwnershipClick"
+            />
+            <button
+              type="button"
+              class="rounded-lg border border-amber-400/40 bg-amber-500/15 px-3 py-1.5 text-xs font-semibold text-amber-100 disabled:opacity-50"
+              :disabled="transferLoading || !transferTargetInput.trim()"
+              @click="onTransferOwnershipClick"
+            >
+              {{ transferLoading ? tt('protection.ui.saving_dots') : tt('protection.ui.transfer_ownership_btn') }}
+            </button>
+          </div>
+        </div>
       </section>
 
       <!-- Перенести настройки (доступно при нескольких чатах / Premium) -->
@@ -8469,117 +9503,6 @@ const protCardIndigo =
         </div>
       </div>
 
-    <GuardTeleport guard-to="body">
-    <div
-      v-if="showAntinakrutkaSettingsModal && chat?.rule"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483150;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
-      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
-      @click.self="showAntinakrutkaSettingsModal = false"
-    >
-      <div class="w-full max-w-xl overflow-hidden rounded-2xl border border-white/[0.08] bg-[#101013] text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
-        <div class="flex items-center justify-between gap-2 border-b border-white/[0.06] bg-[#0c0c0f] px-4 py-3">
-          <h3 class="pr-2 text-xs font-semibold uppercase tracking-wide text-white">{{ tt('protection.antinakrutka_settings_modal.title') }}</h3>
-          <button
-            type="button"
-            class="shrink-0 rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
-            @click="showAntinakrutkaSettingsModal = false"
-          >
-            ✕
-          </button>
-        </div>
-        <div class="max-h-[min(80dvh,calc(100dvh-24px))] space-y-3 overflow-y-auto overscroll-contain p-4">
-          <div class="rounded-xl bg-white/[0.05] p-2.5">
-            <p class="mb-1 text-xs text-slate-400">{{ tt('protection.antinakrutka_settings_modal.quick') }}</p>
-            <div class="grid grid-cols-3 gap-2">
-              <button
-                v-for="preset in antinakrutkaModePresets"
-                :key="`anti-set-${preset.key}`"
-                type="button"
-                class="rounded-lg px-2 py-2 text-xs font-semibold transition"
-                :class="antiraidPresetClass(preset.key)"
-                @click="applyAntinakrutkaPreset(preset)"
-              >
-                {{ preset.label }}
-              </button>
-            </div>
-          </div>
-          <div class="flex items-center justify-between gap-2 rounded-xl bg-white/[0.05] p-2.5">
-            <span class="text-xs text-slate-300">{{ tt('protection.antinakrutka_settings_modal.enable') }}</span>
-            <button
-              type="button"
-              :class="boolToggleClass(chat.rule.antinakrutka_enabled)"
-              class="rounded-lg px-2.5 py-1 text-xs"
-              @click="onAntinakrutkaMainToggleClick"
-            >
-              {{ chat.rule.antinakrutka_enabled ? tt('protection.ui.on_short') : tt('protection.ui.off_short') }}
-            </button>
-          </div>
-          <div v-if="chat.rule.antinakrutka_enabled" class="space-y-2">
-            <div>
-              <p class="mb-1 text-xs text-slate-400">{{ tt('protection.antinakrutka_settings_modal.threshold') }}</p>
-              <div class="flex flex-wrap gap-2">
-                <button
-                  v-for="n in antinakrutkaThresholdPresets"
-                  :key="`anti-th-${n}`"
-                  type="button"
-                  :class="(chat.rule.antinakrutka_joins_threshold || 10) === n ? 'guard-green-soft' : protToggleOff"
-                  class="rounded-lg px-2.5 py-1 text-xs"
-                  @click="updateRule({ antinakrutka_joins_threshold: n })"
-                >
-                  {{ n }}
-                </button>
-              </div>
-            </div>
-            <div>
-              <p class="mb-1 text-xs text-slate-400">{{ tt('protection.antinakrutka_settings_modal.window') }}</p>
-              <div class="flex flex-wrap gap-2">
-                <button
-                  v-for="w in antinakrutkaWindowPresets"
-                  :key="`anti-win-${w}`"
-                  type="button"
-                  :class="(chat.rule.antinakrutka_window_minutes || 5) === w ? 'guard-green-soft' : protToggleOff"
-                  class="rounded-lg px-2.5 py-1 text-xs"
-                  @click="updateRule({ antinakrutka_window_minutes: w })"
-                >
-                  {{ tt('protection.presets.spike_minutes', { n: w }) }}
-                </button>
-              </div>
-            </div>
-            <div>
-              <p class="mb-1 text-xs text-slate-400">{{ tt('protection.antinakrutka_settings_modal.action') }}</p>
-              <div class="flex flex-wrap gap-2">
-                <button
-                  v-for="opt in antinakrutkaActionOptions"
-                  :key="`anti-act-${opt.value}`"
-                  type="button"
-                  :class="(chat.rule.antinakrutka_action || 'alert') === opt.value ? 'guard-green-soft' : protToggleOff"
-                  class="rounded-lg px-2.5 py-1 text-xs"
-                  @click="updateRule({ antinakrutka_action: opt.value })"
-                >
-                  {{ opt.label }}
-                </button>
-              </div>
-            </div>
-            <div v-if="(chat.rule.antinakrutka_action || 'alert') === 'alert_restrict'">
-              <p class="mb-1 text-xs text-slate-400">{{ tt('protection.antinakrutka_settings_modal.mute') }}</p>
-              <div class="flex flex-wrap gap-2">
-                <button
-                  v-for="r in antinakrutkaRestrictPresets"
-                  :key="`anti-res-${r}`"
-                  type="button"
-                  :class="(chat.rule.antinakrutka_restrict_minutes || 30) === r ? 'guard-green-soft' : protToggleOff"
-                  class="rounded-lg px-2.5 py-1 text-xs"
-                  @click="updateRule({ antinakrutka_restrict_minutes: r })"
-                >
-                  {{ r }}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-    </GuardTeleport>
     <GuardTeleport>
     <div
       v-if="showAntinakrutkaInfoModal"
@@ -8604,9 +9527,9 @@ const protCardIndigo =
           </p>
           <div class="rounded-lg bg-white/[0.05] p-3">
             <p class="font-semibold text-slate-100">{{ tt('protection.modals.antinakrutka.moods_title') }}</p>
-            <p class="mt-1">{{ tt('protection.modals.antinakrutka.mood_soft') }}</p>
-            <p>{{ tt('protection.modals.antinakrutka.mood_std') }}</p>
-            <p>{{ tt('protection.modals.antinakrutka.mood_hard') }}</p>
+            <p v-for="preset in antinakrutkaModePresets" :key="`anti-mood-${preset.key}`" class="mt-1">
+              {{ antinakrutkaInfoMoodLine(preset) }}
+            </p>
           </div>
           <div class="rounded-lg bg-emerald-500/10 p-3 text-emerald-100/95">
             <p class="font-semibold text-emerald-200">{{ tt('protection.modals.antinakrutka.tip_title') }}</p>
@@ -8667,14 +9590,16 @@ const protCardIndigo =
                 v-for="k in joinCaptchaKinds"
                 :key="`jc-kind-modal-${k.value}`"
                 class="inline-flex items-stretch overflow-hidden rounded-xl ring-1 ring-white/12 shadow-[0_8px_24px_-18px_rgba(0,0,0,0.85)]"
+                :class="isJoinCaptchaKindPremiumOnly(k.value) && premiumFeatureLocked ? 'ring-amber-400/35' : ''"
               >
                 <button
                   type="button"
                   :class="(chat.rule.join_captcha_kind || 'button') === k.value ? 'guard-green-soft font-bold text-slate-900' : protToggleOff"
                   class="touch-manipulation px-2.5 py-1.5 text-[11px] font-medium leading-tight transition active:scale-[0.99]"
-                  @click="updateRule({ join_captcha_kind: k.value })"
+                  @click="onJoinCaptchaKindPick(k.value)"
                 >
                   {{ k.label }}
+                  <span v-if="isJoinCaptchaKindPremiumOnly(k.value) && premiumFeatureLocked" class="ml-1 text-[9px] text-amber-300">🔒</span>
                 </button>
                 <button
                   type="button"
@@ -8688,12 +9613,15 @@ const protCardIndigo =
             </div>
           </div>
           <div class="flex items-center justify-between gap-3 rounded-xl border border-white/[0.08] bg-white/[0.04] px-3.5 py-3 ring-1 ring-inset ring-white/[0.05]">
-            <span class="text-xs font-medium leading-snug text-slate-200">{{ tt('protection.join_captcha_settings_modal.prefer_dm') }}</span>
+            <span class="text-xs font-medium leading-snug text-slate-200">
+              {{ tt('protection.join_captcha_settings_modal.prefer_dm') }}
+              <span v-if="premiumFeatureLocked" class="ml-1 text-[10px] text-amber-300">🔒 Premium</span>
+            </span>
             <button
               type="button"
               :class="boolToggleClass(!!chat.rule.join_captcha_prefer_dm)"
               class="shrink-0 rounded-xl px-3 py-1.5 text-xs font-bold"
-              @click="updateRule({ join_captcha_prefer_dm: !chat.rule.join_captcha_prefer_dm })"
+              @click="onJoinCaptchaPreferDmToggle"
             >
               {{ chat.rule.join_captcha_prefer_dm ? tt('protection.join_captcha_settings_modal.yes') : tt('protection.join_captcha_settings_modal.no') }}
             </button>
@@ -8705,6 +9633,7 @@ const protCardIndigo =
       </div>
     </div>
     </GuardTeleport>
+    <!-- Антинакрутка «Настроить»: vanilla DOM (antinakrutkaVanillaModal.js), см. openAntinakrutkaSettingsModalDeferred -->
     <GuardTeleport guard-to="body">
     <div
       v-if="showFilterMediaCaptchaSettingsModal && chat?.rule"
@@ -8870,6 +9799,282 @@ const protCardIndigo =
           <p class="text-[11px] text-slate-500">
             {{ tt('protection.modals.join_captcha.p4') }}
           </p>
+        </div>
+      </div>
+    </div>
+    </GuardTeleport>
+    <GuardTeleport>
+    <div
+      v-if="showJoinFilterInfoModal"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483050;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
+      @click.self="showJoinFilterInfoModal = false"
+    >
+      <div class="max-h-[min(88dvh,calc(100dvh-24px))] w-full max-w-xl overflow-y-auto overscroll-contain rounded-2xl border border-white/[0.08] bg-[#101013] p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
+        <div class="mb-3 flex items-center justify-between gap-2">
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.modals.join_filter.title') }}</h3>
+          <button
+            type="button"
+            class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
+            @click="showJoinFilterInfoModal = false"
+          >
+            ✕
+          </button>
+        </div>
+        <div class="space-y-3 text-xs leading-relaxed text-slate-300">
+          <p>{{ tt('protection.modals.join_filter.intro') }}</p>
+
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-lime-300/90">
+            {{ tt('protection.modals.join_filter.sections.ready') }}
+          </p>
+          <div
+            v-for="key in JOIN_FILTER_INFO_READY_KEYS"
+            :key="key"
+            class="rounded-lg border border-white/[0.06] bg-white/[0.03] p-2.5"
+          >
+            <p class="font-semibold text-slate-200">{{ tt(`protection.modals.join_filter.items.${key}.title`) }}</p>
+            <p class="mt-1">{{ tt(`protection.modals.join_filter.items.${key}.body`) }}</p>
+            <p class="mt-1.5 text-[11px] text-emerald-100/90">{{ tt(`protection.modals.join_filter.items.${key}.tip`) }}</p>
+          </div>
+
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-lime-300/90">
+            {{ tt('protection.modals.join_filter.sections.network') }}
+          </p>
+          <div class="rounded-lg border border-white/[0.06] bg-white/[0.03] p-2.5">
+            <p>{{ tt('protection.modals.join_filter.items.network.body') }}</p>
+            <p class="mt-1.5 text-[11px] text-emerald-100/90">{{ tt('protection.modals.join_filter.items.network.tip') }}</p>
+          </div>
+
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-lime-300/90">
+            {{ tt('protection.modals.join_filter.sections.stopwords') }}
+          </p>
+          <div class="rounded-lg border border-white/[0.06] bg-white/[0.03] p-2.5">
+            <p>{{ tt('protection.modals.join_filter.items.stopwords.body') }}</p>
+            <p class="mt-1.5 text-[11px] text-emerald-100/90">{{ tt('protection.modals.join_filter.items.stopwords.tip') }}</p>
+          </div>
+
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-lime-300/90">
+            {{ tt('protection.modals.join_filter.sections.close') }}
+          </p>
+          <div class="rounded-lg border border-white/[0.06] bg-white/[0.03] p-2.5">
+            <p>{{ tt('protection.modals.join_filter.items.close.body') }}</p>
+            <p class="mt-1.5 text-[11px] text-emerald-100/90">{{ tt('protection.modals.join_filter.items.close.tip') }}</p>
+          </div>
+
+          <p class="rounded-lg bg-emerald-500/10 p-2.5 text-[11px] text-emerald-100/95">{{ tt('protection.modals.join_filter.rec') }}</p>
+        </div>
+      </div>
+    </div>
+    </GuardTeleport>
+    <GuardTeleport>
+    <div
+      v-if="showJoinRequestsInfoModal"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483050;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
+      @click.self="showJoinRequestsInfoModal = false"
+    >
+      <div class="max-h-[min(88dvh,calc(100dvh-24px))] w-full max-w-xl overflow-y-auto overscroll-contain rounded-2xl border border-white/[0.08] bg-[#101013] p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
+        <div class="mb-3 flex items-center justify-between gap-2">
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.modals.join_requests.title') }}</h3>
+          <button
+            type="button"
+            class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
+            @click="showJoinRequestsInfoModal = false"
+          >
+            ✕
+          </button>
+        </div>
+        <div class="space-y-3 text-xs leading-relaxed text-slate-300">
+          <p>{{ tt('protection.modals.join_requests.intro') }}</p>
+          <p class="rounded-lg border border-white/[0.06] bg-white/[0.03] p-2.5 text-[11px] text-slate-400">
+            {{ tt('protection.modals.join_requests.setup') }}
+          </p>
+
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-lime-300/90">
+            {{ tt('protection.modals.join_requests.sections.mode') }}
+          </p>
+          <div
+            v-for="key in JOIN_REQUESTS_INFO_MODE_KEYS"
+            :key="key"
+            class="rounded-lg border border-white/[0.06] bg-white/[0.03] p-2.5"
+          >
+            <p class="font-semibold text-slate-200">{{ tt(`protection.modals.join_requests.items.${key}.title`) }}</p>
+            <p class="mt-1">{{ tt(`protection.modals.join_requests.items.${key}.body`) }}</p>
+            <p class="mt-1.5 text-[11px] text-emerald-100/90">{{ tt(`protection.modals.join_requests.items.${key}.tip`) }}</p>
+          </div>
+
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-lime-300/90">
+            {{ tt('protection.modals.join_requests.sections.questionnaire') }}
+          </p>
+          <div
+            v-for="key in JOIN_REQUESTS_INFO_QUESTION_KEYS"
+            :key="key"
+            class="rounded-lg border border-white/[0.06] bg-white/[0.03] p-2.5"
+          >
+            <p class="font-semibold text-slate-200">{{ tt(`protection.modals.join_requests.items.${key}.title`) }}</p>
+            <p class="mt-1">{{ tt(`protection.modals.join_requests.items.${key}.body`) }}</p>
+            <p class="mt-1.5 text-[11px] text-emerald-100/90">{{ tt(`protection.modals.join_requests.items.${key}.tip`) }}</p>
+          </div>
+
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-lime-300/90">
+            {{ tt('protection.modals.join_requests.sections.texts') }}
+          </p>
+          <div
+            v-for="key in JOIN_REQUESTS_INFO_TEXT_KEYS"
+            :key="key"
+            class="rounded-lg border border-white/[0.06] bg-white/[0.03] p-2.5"
+          >
+            <p class="font-semibold text-slate-200">{{ tt(`protection.modals.join_requests.items.${key}.title`) }}</p>
+            <p class="mt-1">{{ tt(`protection.modals.join_requests.items.${key}.body`) }}</p>
+            <p class="mt-1.5 text-[11px] text-emerald-100/90">{{ tt(`protection.modals.join_requests.items.${key}.tip`) }}</p>
+          </div>
+
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-lime-300/90">
+            {{ tt('protection.modals.join_requests.sections.report') }}
+          </p>
+          <div
+            v-for="key in JOIN_REQUESTS_INFO_REPORT_KEYS"
+            :key="key"
+            class="rounded-lg border border-white/[0.06] bg-white/[0.03] p-2.5"
+          >
+            <p class="font-semibold text-slate-200">{{ tt(`protection.modals.join_requests.items.${key}.title`) }}</p>
+            <p class="mt-1">{{ tt(`protection.modals.join_requests.items.${key}.body`) }}</p>
+            <p class="mt-1.5 text-[11px] text-emerald-100/90">{{ tt(`protection.modals.join_requests.items.${key}.tip`) }}</p>
+          </div>
+
+          <p class="rounded-lg bg-emerald-500/10 p-2.5 text-[11px] text-emerald-100/95">{{ tt('protection.modals.join_requests.rec') }}</p>
+        </div>
+      </div>
+    </div>
+    </GuardTeleport>
+    <GuardTeleport>
+    <div
+      v-if="showPunishmentsInfoModal"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:200000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
+      @click.self="showPunishmentsInfoModal = false"
+    >
+      <div class="max-h-[min(88dvh,calc(100dvh-24px))] w-full max-w-xl overflow-y-auto overscroll-contain rounded-2xl border border-white/[0.08] bg-[#101013] p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
+        <div class="mb-3 flex items-center justify-between gap-2">
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.modals.punishments.title') }}</h3>
+          <button
+            type="button"
+            class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
+            @click="showPunishmentsInfoModal = false"
+          >
+            ✕
+          </button>
+        </div>
+        <div class="space-y-2 text-xs leading-relaxed text-slate-300">
+          <p>{{ tt('protection.modals.punishments.p1') }}</p>
+          <p>{{ tt('protection.modals.punishments.p2') }}</p>
+          <p>{{ tt('protection.modals.punishments.p3') }}</p>
+          <p class="rounded-lg bg-amber-500/10 p-2.5 text-[11px] text-amber-100/95">{{ tt('protection.modals.punishments.p4') }}</p>
+          <p class="rounded-lg bg-emerald-500/10 p-2.5 text-[11px] text-emerald-100/95">{{ tt('protection.modals.punishments.p5') }}</p>
+        </div>
+      </div>
+    </div>
+    </GuardTeleport>
+    <GuardTeleport>
+    <div
+      v-if="showMechAntispamInfoModal"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483050;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
+      @click.self="showMechAntispamInfoModal = false"
+    >
+      <div class="max-h-[min(88dvh,calc(100dvh-24px))] w-full max-w-xl overflow-y-auto overscroll-contain rounded-2xl border border-white/[0.08] bg-[#101013] p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
+        <div class="mb-3 flex items-center justify-between gap-2">
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.modals.mech_antispam.title') }}</h3>
+          <button
+            type="button"
+            class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
+            @click="showMechAntispamInfoModal = false"
+          >
+            ✕
+          </button>
+        </div>
+        <div class="space-y-3 text-xs leading-relaxed text-slate-300">
+          <p>{{ tt('protection.modals.mech_antispam.intro') }}</p>
+
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-lime-300/90">
+            {{ tt('protection.modals.mech_antispam.sections.filters') }}
+          </p>
+          <div
+            v-for="key in MECH_ANTISPAM_INFO_FILTER_KEYS"
+            :key="key"
+            class="rounded-lg border border-white/[0.06] bg-white/[0.03] p-2.5"
+          >
+            <p class="font-semibold text-slate-200">{{ tt(`protection.modals.mech_antispam.items.${key}.title`) }}</p>
+            <p class="mt-1">{{ tt(`protection.modals.mech_antispam.items.${key}.body`) }}</p>
+            <p class="mt-1.5 text-[11px] text-emerald-100/90">{{ tt(`protection.modals.mech_antispam.items.${key}.tip`) }}</p>
+          </div>
+
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-lime-300/90">
+            {{ tt('protection.modals.mech_antispam.sections.actions') }}
+          </p>
+          <div
+            v-for="key in MECH_ANTISPAM_INFO_ACTION_KEYS"
+            :key="key"
+            class="rounded-lg border border-white/[0.06] bg-white/[0.03] p-2.5"
+          >
+            <p class="font-semibold text-slate-200">{{ tt(`protection.modals.mech_antispam.items.${key}.title`) }}</p>
+            <p class="mt-1">{{ tt(`protection.modals.mech_antispam.items.${key}.body`) }}</p>
+            <p class="mt-1.5 text-[11px] text-emerald-100/90">{{ tt(`protection.modals.mech_antispam.items.${key}.tip`) }}</p>
+          </div>
+
+          <p class="rounded-lg bg-emerald-500/10 p-2.5 text-[11px] text-emerald-100/95">{{ tt('protection.modals.mech_antispam.rec') }}</p>
+        </div>
+      </div>
+    </div>
+    </GuardTeleport>
+    <GuardTeleport>
+    <div
+      v-if="showForwardFilterInfoModal"
+      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483050;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.82);padding:16px"
+      class="flex items-center justify-center overscroll-none p-3 backdrop-blur-sm"
+      @click.self="showForwardFilterInfoModal = false"
+    >
+      <div class="max-h-[min(88dvh,calc(100dvh-24px))] w-full max-w-xl overflow-y-auto overscroll-contain rounded-2xl border border-white/[0.08] bg-[#101013] p-4 text-slate-100 shadow-[0_28px_90px_-28px_rgba(0,0,0,0.96)]">
+        <div class="mb-3 flex items-center justify-between gap-2">
+          <h3 class="text-sm font-semibold text-white">{{ tt('protection.modals.forward_filter.title') }}</h3>
+          <button
+            type="button"
+            class="rounded-lg bg-white/[0.06] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.1]"
+            @click="showForwardFilterInfoModal = false"
+          >
+            ✕
+          </button>
+        </div>
+        <div class="space-y-3 text-xs leading-relaxed text-slate-300">
+          <p>{{ tt('protection.modals.forward_filter.intro') }}</p>
+
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-lime-300/90">
+            {{ tt('protection.modals.forward_filter.sections.sources') }}
+          </p>
+          <div
+            v-for="key in FORWARD_FILTER_INFO_SOURCE_KEYS"
+            :key="key"
+            class="rounded-lg border border-white/[0.06] bg-white/[0.03] p-2.5"
+          >
+            <p class="font-semibold text-slate-200">{{ tt(`protection.modals.forward_filter.items.${key}.title`) }}</p>
+            <p class="mt-1">{{ tt(`protection.modals.forward_filter.items.${key}.body`) }}</p>
+            <p class="mt-1.5 text-[11px] text-emerald-100/90">{{ tt(`protection.modals.forward_filter.items.${key}.tip`) }}</p>
+          </div>
+
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-lime-300/90">
+            {{ tt('protection.modals.forward_filter.sections.extra') }}
+          </p>
+          <div
+            v-for="key in FORWARD_FILTER_INFO_EXTRA_KEYS"
+            :key="key"
+            class="rounded-lg border border-white/[0.06] bg-white/[0.03] p-2.5"
+          >
+            <p class="font-semibold text-slate-200">{{ tt(`protection.modals.forward_filter.items.${key}.title`) }}</p>
+            <p class="mt-1">{{ tt(`protection.modals.forward_filter.items.${key}.body`) }}</p>
+            <p class="mt-1.5 text-[11px] text-emerald-100/90">{{ tt(`protection.modals.forward_filter.items.${key}.tip`) }}</p>
+          </div>
+
+          <p class="rounded-lg bg-emerald-500/10 p-2.5 text-[11px] text-emerald-100/95">{{ tt('protection.modals.forward_filter.rec') }}</p>
         </div>
       </div>
     </div>

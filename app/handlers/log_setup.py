@@ -185,6 +185,22 @@ async def _handle_my_chat_member_channel(update: ChatMemberUpdated) -> None:
     )
     if not (bot_admin and added):
         return
+    uid = int(update.from_user.id)
+    try:
+        from app.services.group_connect_actor import actor_may_connect_chat_as_owner
+
+        if not await actor_may_connect_chat_as_owner(update.bot, chat.id, uid):
+            try:
+                await update.bot.send_message(
+                    uid,
+                    "ℹ️ Подключить канал в Guard может только владелец (создатель) канала. "
+                    "Попросите владельца добавить бота через кабинет или ссылку с правами администратора.",
+                )
+            except Exception:
+                pass
+            return
+    except Exception:
+        return
     try:
         async with await get_session() as session:
             row = await session.get(Chat, chat.id)
@@ -314,25 +330,35 @@ async def on_my_chat_member(update: ChatMemberUpdated):
     # ТЗ: при добавлении бота в группу — сохраняем чат в список «ожидающих», чтобы он появился в «Подключить чат»
     if added:
         try:
+            from app.services.chat_owner_guard import (
+                resolve_group_creator_id,
+                transfer_chat_owner_to_creator_if_needed,
+            )
+
             owner_uid, _, _ = await resolve_guard_connect_actor_for_group(
                 update.bot, chat.id, update.from_user
             )
+            owner_uid = int(owner_uid or 0)
             async with await get_session() as session:
                 chat_row = await session.get(Chat, chat.id)
                 if not chat_row:
                     chat_row = Chat(
                         id=chat.id,
                         title=chat.title or "",
-                        owner_user_id=int(owner_uid),
+                        owner_user_id=owner_uid,
                         is_active=False,
                         is_log_chat=False,
                     )
                     session.add(chat_row)
                 else:
                     chat_row.title = chat.title or chat_row.title or ""
-                    # Владелец в Guard = создатель группы (если API отдал админов), иначе кто добавил бота
-                    chat_row.owner_user_id = int(owner_uid)
-                    # не трогаем is_active — подключит пользователь из панели
+                    prev_active = bool(getattr(chat_row, "is_active", False))
+                    if not prev_active:
+                        chat_row.owner_user_id = owner_uid
+                    elif owner_uid > 0:
+                        creator_id = await resolve_group_creator_id(update.bot, chat.id)
+                        if creator_id and creator_id == owner_uid:
+                            await transfer_chat_owner_to_creator_if_needed(update.bot, chat_row)
                 await session.commit()
         except Exception:
             pass
@@ -358,6 +384,22 @@ async def on_my_chat_member(update: ChatMemberUpdated):
         return
 
     if bot_is_admin:
+        actor_id = int(update.from_user.id)
+        try:
+            from app.services.group_connect_actor import actor_may_connect_chat_as_owner
+
+            if not await actor_may_connect_chat_as_owner(update.bot, chat.id, actor_id):
+                try:
+                    await update.bot.send_message(
+                        actor_id,
+                        "ℹ️ Подключить защиту может только владелец (создатель) группы. "
+                        "Попросите владельца открыть Guard и добавить бота с правами администратора.",
+                    )
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
         # После выдачи админки подключаем защиту автоматически:
         # - skip для лог-чатов/чатов отчётов уже обработан выше;
         # - _try_bind_pending_reports_chat тоже отрабатывает выше и делает ранний return.

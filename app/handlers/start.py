@@ -612,19 +612,20 @@ async def cmd_start(message: Message):
             # ?startgroup=connect → автоматически подключаем группу к защите
             if payload == "connect":
                 try:
-                    from aiogram.enums import ChatMemberStatus
                     from app.handlers.panel_dm import connect_chat_after_bot_added
                     from app.services.group_connect_actor import (
                         actor_may_init_group_connect_from_group,
                         resolve_guard_connect_actor_for_group,
                     )
+                    from app.services.group_connect_rights import first_missing_i18n_key
 
                     chat_id = message.chat.id
                     chat_title = (message.chat.title or "").strip() or str(chat_id)
                     me = await message.bot.get_me()
                     m = await message.bot.get_chat_member(chat_id, me.id)
-                    if m.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
-                        await message.answer(_i18n_t(lang, "bot.start.group_need_bot_admin"))
+                    miss_key = first_missing_i18n_key(m)
+                    if miss_key:
+                        await message.answer(_i18n_t(lang, f"panel.connect_verify.{miss_key}"))
                         return
                     if not await actor_may_init_group_connect_from_group(message.bot, chat_id, message):
                         await message.answer(
@@ -658,6 +659,8 @@ async def cmd_start(message: Message):
                         )
                     elif fail == "log":
                         await message.answer(_i18n_t(lang, "bot.start.group_log_conflict"))
+                    elif fail == "rights":
+                        await message.answer(_i18n_t(lang, "bot.start.group_need_bot_rights"))
                     else:
                         await message.answer(_i18n_t(lang, "bot.start.group_connect_fail"))
                 except Exception as e:

@@ -20,7 +20,7 @@ from time import perf_counter
 
 import aiohttp
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse, Response
 from aiogram import Bot
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, BufferedInputFile
 from typing import Any, Sequence
@@ -123,6 +123,7 @@ from app.services.pii_user_store import (
 from app.services.telegram_notify import send_user_dm, send_user_dm_with_result, delete_user_dm_message
 from app.services.telegram_bot_api import (
     tg_save_prepared_add_group_button,
+    tg_save_prepared_add_channel_button,
     tg_unban_chat_member,
     tg_restrict_chat_member_unmute,
     tg_get_chat_member,
@@ -135,6 +136,13 @@ from app.services.telegram_bot_api import (
 from app.services.telegram_notify import send_user_dm
 from app.services.global_antispam import remove_from_global_antispam
 from app.services.spam_spike_notify import SPAM_MODERATION_REASONS
+from app.services.filter_actions import dump_filter_actions, load_filter_actions
+from app.services.post_comment_keywords import (
+    dump_post_comment_keywords,
+    load_post_comment_keywords,
+    normalize_post_comment_action,
+    normalize_keywords_list,
+)
 from app.services.chat_cleanup import clean_deleted_accounts
 from app.services.credit_policy import REFERRAL_LEVEL_RATES, PARTNER_TOKEN_RUB_RATE
 from app.services.referral_partner_dashboard import (
@@ -295,6 +303,7 @@ _MANAGER_ACTION_KINDS = frozenset({
     "manager_invite_created",   # owner создал ссылку-приглашение (meta=username/days)
     "manager_invite_cancelled", # owner отменил pending-инвайт (target=invite_id)
     "manager_invite_accepted",  # юзер принял инвайт по ссылке (target=user_id, meta=via_link=true)
+    "ownership_transferred",    # owner передал чат другому админу (target=new_owner_id)
     # Правила
     "rule_patched",             # любой PATCH /chat/{id}/rule (meta=changed_fields list)
 })
@@ -1264,6 +1273,11 @@ def _rule_to_dict(rule: Rule, stopwords_count: int = 0, *, chat_owner_premium: b
         "delete_join_messages": bool(getattr(rule, "delete_join_messages", True)),
         "delete_left_messages": bool(getattr(rule, "delete_left_messages", True)),
         "auto_approve_join_requests": bool(getattr(rule, "auto_approve_join_requests", False)),
+        "join_requests_mode": str(getattr(rule, "join_requests_mode", "off") or "off"),
+        "join_requests_welcome_text": str(getattr(rule, "join_requests_welcome_text", "") or ""),
+        "join_requests_done_text": str(getattr(rule, "join_requests_done_text", "") or ""),
+        "join_requests_questions_text": str(getattr(rule, "join_requests_questions_text", "") or ""),
+        "join_requests_report_mode": str(getattr(rule, "join_requests_report_mode", "full") or "full"),
         "silence_minutes": int(getattr(rule, "silence_minutes", 0) or 0),
         "master_anti_spam": bool(getattr(rule, "master_anti_spam", True)),
         "antinakrutka_enabled": bool(getattr(rule, "antinakrutka_enabled", False)),
@@ -1271,6 +1285,27 @@ def _rule_to_dict(rule: Rule, stopwords_count: int = 0, *, chat_owner_premium: b
         "antinakrutka_window_minutes": int(getattr(rule, "antinakrutka_window_minutes", 5) or 5),
         "antinakrutka_action": str(getattr(rule, "antinakrutka_action", "alert") or "alert"),
         "antinakrutka_restrict_minutes": int(getattr(rule, "antinakrutka_restrict_minutes", 30) or 30),
+        "antinakrutka_lockdown_minutes": int(getattr(rule, "antinakrutka_lockdown_minutes", 0) or 0),
+        "antinakrutka_pause_welcomes": bool(getattr(rule, "antinakrutka_pause_welcomes", False)),
+        "antinakrutka_force_captcha": bool(getattr(rule, "antinakrutka_force_captcha", False)),
+        "antinakrutka_cooldown_minutes": int(getattr(rule, "antinakrutka_cooldown_minutes", 5) or 5),
+        "antinakrutka_auto_silence_minutes": int(getattr(rule, "antinakrutka_auto_silence_minutes", 0) or 0),
+        "join_filter_enabled": bool(getattr(rule, "join_filter_enabled", False)),
+        "join_filter_arab": bool(getattr(rule, "join_filter_arab", False)),
+        "join_filter_cjk": bool(getattr(rule, "join_filter_cjk", False)),
+        "join_filter_zalgo": bool(getattr(rule, "join_filter_zalgo", False)),
+        "join_filter_spam_nick": bool(getattr(rule, "join_filter_spam_nick", False)),
+        "join_filter_require_username": bool(getattr(rule, "join_filter_require_username", False)),
+        "join_filter_name_stopwords_enabled": bool(getattr(rule, "join_filter_name_stopwords_enabled", False)),
+        "join_filter_name_stopwords": str(getattr(rule, "join_filter_name_stopwords", "") or ""),
+        "join_filter_close_entry": bool(getattr(rule, "join_filter_close_entry", False)),
+        "join_filter_close_action": str(getattr(rule, "join_filter_close_action", "kick") or "kick"),
+        "join_filter_cas": bool(getattr(rule, "join_filter_cas", False)),
+        "join_filter_network_mass_join": bool(getattr(rule, "join_filter_network_mass_join", False)),
+        "join_filter_network_join_threshold": int(getattr(rule, "join_filter_network_join_threshold", 4) or 4),
+        "join_filter_network_join_window_minutes": int(
+            getattr(rule, "join_filter_network_join_window_minutes", 10) or 10
+        ),
         "spam_spike_enabled": bool(getattr(rule, "spam_spike_enabled", False)),
         "spam_spike_min_deletes": int(getattr(rule, "spam_spike_min_deletes", 15) or 15),
         "spam_spike_window_minutes": int(getattr(rule, "spam_spike_window_minutes", 35) or 35),
@@ -1286,15 +1321,40 @@ def _rule_to_dict(rule: Rule, stopwords_count: int = 0, *, chat_owner_premium: b
         "filter_channel_post_fwd_group": bool(getattr(rule, "filter_channel_post_fwd_group", False)),
         "filter_channel_post_no_username": bool(getattr(rule, "filter_channel_post_no_username", False)),
         "filter_channel_post_hidden_fwd": bool(getattr(rule, "filter_channel_post_hidden_fwd", False)),
+        "filter_forward_block_channels": bool(getattr(rule, "filter_forward_block_channels", False)),
+        "filter_forward_block_chats": bool(getattr(rule, "filter_forward_block_chats", False)),
+        "filter_forward_block_bots": bool(getattr(rule, "filter_forward_block_bots", False)),
+        "filter_forward_block_users": bool(getattr(rule, "filter_forward_block_users", False)),
+        "filter_forward_block_with_links": bool(getattr(rule, "filter_forward_block_with_links", False)),
+        "filter_forward_block_stories": bool(getattr(rule, "filter_forward_block_stories", False)),
+        "filter_forward_block_with_button": bool(getattr(rule, "filter_forward_block_with_button", False)),
+        "mech_filter_block_apk": bool(getattr(rule, "mech_filter_block_apk", False)),
+        "mech_filter_guest_bots": bool(getattr(rule, "mech_filter_guest_bots", False)),
+        "mech_filter_symbol_subst": bool(getattr(rule, "mech_filter_symbol_subst", False)),
+        "mech_filter_text_spam": bool(getattr(rule, "mech_filter_text_spam", False)),
+        "mech_filter_strict_edit": bool(getattr(rule, "mech_filter_strict_edit", False)),
+        "mech_filter_flood_enabled": bool(getattr(rule, "mech_filter_flood_enabled", False)),
+        "mech_filter_flood_threshold": int(getattr(rule, "mech_filter_flood_threshold", 3) or 3),
+        "mech_filter_flood_window_minutes": int(getattr(rule, "mech_filter_flood_window_minutes", 5) or 5),
+        "mech_filter_flood_mode": str(getattr(rule, "mech_filter_flood_mode", "soft") or "soft"),
+        "mech_filter_flood_action": str(getattr(rule, "mech_filter_flood_action", "mute") or "mute"),
+        "filter_actions": load_filter_actions(rule),
+        "post_comment_keywords_enabled": bool(getattr(rule, "post_comment_keywords_enabled", False)),
+        "post_comment_keywords": load_post_comment_keywords(rule),
+        "post_comment_keywords_action": str(
+            getattr(rule, "post_comment_keywords_action", "delete") or "delete"
+        ),
         "filter_profanity_enabled": bool(getattr(rule, "filter_profanity_enabled", True)),
         "filter_jobs_enabled": bool(getattr(rule, "filter_jobs_enabled", True)),
         "filter_casino_enabled": bool(getattr(rule, "filter_casino_enabled", True)),
+        "filter_crypto_enabled": bool(getattr(rule, "filter_crypto_enabled", False)),
         "filter_ads_enabled": bool(getattr(rule, "filter_ads_enabled", False)),
         "filter_insults_enabled": bool(getattr(rule, "filter_insults_enabled", False)),
         "filter_racism_enabled": bool(getattr(rule, "filter_racism_enabled", False)),
         "filter_nazi_enabled": bool(getattr(rule, "filter_nazi_enabled", False)),
         "filter_vulgar_enabled": bool(getattr(rule, "filter_vulgar_enabled", False)),
         "filter_politics_enabled": bool(getattr(rule, "filter_politics_enabled", False)),
+        "filter_drugs_enabled": bool(getattr(rule, "filter_drugs_enabled", False)),
         "filter_religion_enabled": bool(getattr(rule, "filter_religion_enabled", False)),
         "filter_religion_promo_only": bool(getattr(rule, "filter_religion_promo_only", False)),
         "filter_esoteric_enabled": bool(getattr(rule, "filter_esoteric_enabled", False)),
@@ -1327,11 +1387,17 @@ async def api_bot_info(
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=err_detail("bot_username_unavailable"))
     # Нативный выбор чата с выдачей прав (Telegram 9.6+); иначе фронт откроет deep link.
     prepared_id = await tg_save_prepared_add_group_button(user_id)
-    admin_q = "delete_messages+restrict_members+invite_users+pin_messages"
+    prepared_channel_id = await tg_save_prepared_add_channel_button(user_id)
+    from app.services.group_connect_rights import CHANNEL_CONNECT_ADMIN_QUERY, GROUP_CONNECT_ADMIN_QUERY
+
+    admin_q = GROUP_CONNECT_ADMIN_QUERY
+    channel_admin_q = CHANNEL_CONNECT_ADMIN_QUERY
     return {
         "username": username,
         "prepared_add_group_button_id": prepared_id,
+        "prepared_add_channel_button_id": prepared_channel_id,
         "add_to_group_url": f"https://t.me/{username}?startgroup=connect&admin={admin_q}",
+        "add_to_channel_url": f"https://t.me/{username}?startchannel=connect_channel&admin={channel_admin_q}",
         "reports_chat_url_template": f"https://t.me/{username}?startgroup=reportschat_{{chat_id}}",
     }
 
@@ -1934,6 +2000,129 @@ async def api_me_post_rules_drafts_put(
     return {"ok": True, "count": len(shrunk)}
 
 
+def _discussion_title_needs_telegram(raw: object, lid_int: int) -> bool:
+    lt = (str(raw or "")).strip()
+    if not lt:
+        return True
+    try:
+        if lt == str(int(lid_int)):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return bool(re.fullmatch(r"-?\d+", lt))
+
+
+async def _resolve_linked_discussion_titles_for_payloads(
+    session: AsyncSession,
+    chats: list,
+    chat_payloads: list[dict],
+    tg_get_chat,
+    *,
+    persist: bool = True,
+) -> None:
+    """Подставить человекочитаемые названия групп обсуждения каналов (не только при refresh_telegram)."""
+    dirty = False
+    for c, p in zip(chats, chat_payloads):
+        if str(p.get("chat_kind") or "").strip().lower() != "channel":
+            continue
+        if p.get("linked_discussion_chat_id") is None:
+            try:
+                info_ch = await tg_get_chat(int(c.id))
+            except Exception:
+                info_ch = None
+            lc = (info_ch or {}).get("linked_chat_id")
+            if lc is not None:
+                try:
+                    lid_int = int(lc)
+                except (TypeError, ValueError):
+                    lid_int = None
+                if lid_int is not None:
+                    p["linked_discussion_chat_id"] = lid_int
+                    if persist:
+                        row = await session.get(Chat, int(c.id))
+                        if row is not None:
+                            row.linked_discussion_chat_id = lid_int
+                            session.add(row)
+                            dirty = True
+
+    titles_to_fetch: set[int] = set()
+    for p in chat_payloads:
+        if str(p.get("chat_kind") or "").strip().lower() != "channel":
+            continue
+        lid = p.get("linked_discussion_chat_id")
+        if lid is None:
+            continue
+        try:
+            lid_int = int(lid)
+        except (TypeError, ValueError):
+            continue
+        if _discussion_title_needs_telegram(p.get("linked_discussion_title"), lid_int):
+            titles_to_fetch.add(lid_int)
+
+    remote_discussion_titles: dict[int, str] = {}
+    for lid_int in sorted(titles_to_fetch):
+        try:
+            info_lc = await tg_get_chat(int(lid_int))
+            if not info_lc:
+                continue
+            title = (info_lc.get("title") or "").strip()
+            if not title:
+                un = (info_lc.get("username") or "").strip()
+                title = un or str(lid_int)
+            remote_discussion_titles[int(lid_int)] = str(title or "")[:255]
+        except Exception:
+            continue
+
+    if remote_discussion_titles:
+        for p in chat_payloads:
+            if str(p.get("chat_kind") or "").strip().lower() != "channel":
+                continue
+            lid = p.get("linked_discussion_chat_id")
+            if lid is None:
+                continue
+            try:
+                lid_int = int(lid)
+            except (TypeError, ValueError):
+                continue
+            t_fix = remote_discussion_titles.get(lid_int)
+            if t_fix:
+                p["linked_discussion_title"] = t_fix
+
+        if persist:
+            for lid_int, t_fix in remote_discussion_titles.items():
+                disc_row = await session.get(Chat, int(lid_int))
+                if disc_row is not None and t_fix:
+                    disc_row.title = t_fix
+                    session.add(disc_row)
+                    dirty = True
+            for p in chat_payloads:
+                if str(p.get("chat_kind") or "").strip().lower() != "channel":
+                    continue
+                lid = p.get("linked_discussion_chat_id")
+                t_fix = p.get("linked_discussion_title")
+                if lid is None or not t_fix:
+                    continue
+                if _discussion_title_needs_telegram(t_fix, int(lid)):
+                    continue
+                cid = int(p.get("id") or 0)
+                row = await session.get(Chat, cid)
+                if row is None:
+                    continue
+                cur_lt = (getattr(row, "linked_discussion_title", None) or "").strip()
+                cur_lid = getattr(row, "linked_discussion_chat_id", None)
+                if cur_lt != t_fix or cur_lid != int(lid):
+                    row.linked_discussion_title = str(t_fix)[:255]
+                    row.linked_discussion_chat_id = int(lid)
+                    session.add(row)
+                    dirty = True
+
+    if dirty and persist:
+        try:
+            await session.commit()
+        except Exception:
+            await session.rollback()
+
+
 # ---------- GET /api/chats ----------
 @router.get("/chats")
 async def api_chats(
@@ -1953,13 +2142,22 @@ async def api_chats(
         await enforce_owner_active_chat_limit(session, int(user_id), int(TARIFF_CHAT_LIMITS.get(Tariff.FREE.value, 3) or 3))
         await session.commit()
     chats = await get_accessible_chats_any_active(session, user_id)
+    do_refresh_telegram = int(refresh_telegram or 0) == 1
+    # Тяжёлая синхронизация с Telegram (admin/creator на каждый чат) — только по явному refresh.
+    if do_refresh_telegram:
+        try:
+            from app.services.chat_owner_guard import sync_accessible_chat_ownership
+
+            await sync_accessible_chat_ownership(session, int(user_id), chats)
+            chats = await get_accessible_chats_any_active(session, user_id)
+        except Exception:
+            pass
     m = str(mode or "all").strip().lower()
     if m == "own":
         chats = [c for c in chats if int(getattr(c, "owner_user_id", 0) or 0) == int(user_id)]
     elif m == "shared":
         chats = [c for c in chats if int(getattr(c, "owner_user_id", 0) or 0) != int(user_id)]
     snap_by_id: dict[int, dict] = {}
-    do_refresh_telegram = int(refresh_telegram or 0) == 1
     if do_refresh_telegram:
         for c in chats:
             try:
@@ -2080,7 +2278,12 @@ async def api_chats(
 
     def auto_approve_join_for(cid: int) -> bool:
         ru = rules_by_chat.get(int(cid))
-        return bool(getattr(ru, "auto_approve_join_requests", False)) if ru else False
+        if not ru:
+            return False
+        mode = str(getattr(ru, "join_requests_mode", "off") or "off").strip().lower()
+        if mode and mode != "off":
+            return True
+        return bool(getattr(ru, "auto_approve_join_requests", False))
 
     # У канала в getChat иногда нет linked_chat; у группы-обсуждения linked_chat.id = id канала — обратный маппинг.
     channel_row_ids = {int(c.id) for c in chats if _row_chat_kind(c) == "channel"}
@@ -2131,12 +2334,14 @@ async def api_chats(
                 fb = discussion_for_channel.get(int(c.id))
                 if fb:
                     linked_id_int, linked_title = int(fb[0]), str(fb[1])
+            if linked_id_int is not None:
+                cached_lt = (getattr(c, "linked_discussion_title", None) or "").strip()
+                if cached_lt and not _discussion_title_needs_telegram(cached_lt, linked_id_int):
+                    linked_title = cached_lt
             if linked_id_int is not None and linked_title is None:
                 other = next((x for x in chats if int(getattr(x, "id", 0) or 0) == int(linked_id_int)), None)
                 if other is not None:
-                    linked_title = (getattr(other, "title", "") or "").strip() or str(linked_id_int)
-                else:
-                    linked_title = str(linked_id_int)
+                    linked_title = (getattr(other, "title", "") or "").strip() or None
         return {
             "id": c.id,
             "title": (c.title or "").strip() or str(c.id),
@@ -2203,57 +2408,7 @@ async def api_chats(
                 connected = False
         p["discussion_chat_connected"] = connected
 
-    def _discussion_title_needs_telegram(raw: object, lid_int: int) -> bool:
-        lt = (str(raw or "")).strip()
-        if not lt:
-            return True
-        try:
-            if lt == str(int(lid_int)):
-                return True
-        except (TypeError, ValueError):
-            pass
-        return bool(re.fullmatch(r"-?\d+", lt))
-
-    titles_to_fetch: set[int] = set()
-    for p in chat_payloads:
-        if str(p.get("chat_kind") or "").strip().lower() != "channel":
-            continue
-        lid = p.get("linked_discussion_chat_id")
-        if lid is None:
-            continue
-        try:
-            lid_int = int(lid)
-        except (TypeError, ValueError):
-            continue
-        if _discussion_title_needs_telegram(p.get("linked_discussion_title"), lid_int):
-            titles_to_fetch.add(lid_int)
-    remote_discussion_titles: dict[int, str] = {}
-    for lid_int in sorted(titles_to_fetch):
-        try:
-            info_lc = await tg_get_chat(int(lid_int))
-            if not info_lc:
-                continue
-            title = (info_lc.get("title") or "").strip()
-            if not title:
-                un = (info_lc.get("username") or "").strip()
-                title = un or str(lid_int)
-            remote_discussion_titles[int(lid_int)] = str(title or "")[:255]
-        except Exception:
-            continue
-    if remote_discussion_titles:
-        for p in chat_payloads:
-            if str(p.get("chat_kind") or "").strip().lower() != "channel":
-                continue
-            lid = p.get("linked_discussion_chat_id")
-            if lid is None:
-                continue
-            try:
-                lid_int = int(lid)
-            except (TypeError, ValueError):
-                continue
-            t_fix = remote_discussion_titles.get(lid_int)
-            if t_fix:
-                p["linked_discussion_title"] = t_fix
+    await _resolve_linked_discussion_titles_for_payloads(session, chats, chat_payloads, tg_get_chat)
 
     return {
         "chats": chat_payloads,
@@ -3157,6 +3312,9 @@ _PREMIUM_RULE_FIELDS_GRANULAR: frozenset[str] = frozenset({
     "filter_channel_posts_action",
     "filter_channel_post_fwd_channel", "filter_channel_post_fwd_group",
     "filter_channel_post_no_username", "filter_channel_post_hidden_fwd",
+    "filter_forward_block_bots", "filter_forward_block_users",
+    "filter_forward_block_with_links", "filter_forward_block_stories",
+    "filter_forward_block_with_button",
 })
 
 # 4. Audit log — отдельные endpoints (см. `api_chat_audit`).
@@ -3169,12 +3327,25 @@ _PREMIUM_RULE_FIELDS_AUTO_REPORTS: frozenset[str] = frozenset({"auto_reports_ena
 # 8. Extra dicts.
 _PREMIUM_RULE_FIELDS_EXTRA_DICTS: frozenset[str] = frozenset({
     "filter_politics_enabled",
+    "filter_drugs_enabled",
     "filter_religion_enabled", "filter_religion_promo_only",
     "filter_esoteric_enabled", "filter_esoteric_promo_only",
     "filter_racism_enabled", "filter_nazi_enabled", "filter_vulgar_enabled",
 })
 # 9. Global antispam DB.
 _PREMIUM_RULE_FIELDS_GLOBAL_DB: frozenset[str] = frozenset({"use_global_antispam_db"})
+# 10. Механический антиспам (расширенные режимы).
+_PREMIUM_RULE_FIELDS_MECH: frozenset[str] = frozenset({
+    "mech_filter_symbol_subst",
+    "mech_filter_text_spam",
+    "mech_filter_strict_edit",
+})
+# 11. Ключевые слова в комментариях к постам канала.
+_PREMIUM_RULE_FIELDS_POST_COMMENT: frozenset[str] = frozenset({
+    "post_comment_keywords_enabled",
+    "post_comment_keywords",
+    "post_comment_keywords_action",
+})
 
 # Объединение для удобной фильтрации в `api_chat_rule`.
 # NB: ALERT_RESTRICT и не-button капча проверяются по значениям, а не по ключам.
@@ -3185,6 +3356,8 @@ _PREMIUM_RULE_FIELDS: frozenset[str] = (
     | _PREMIUM_RULE_FIELDS_AUTO_REPORTS
     | _PREMIUM_RULE_FIELDS_EXTRA_DICTS
     | _PREMIUM_RULE_FIELDS_GLOBAL_DB
+    | _PREMIUM_RULE_FIELDS_MECH
+    | _PREMIUM_RULE_FIELDS_POST_COMMENT
 )
 
 # Ключи тела PATCH, которые игнорируются, если у владельца чата нет активного Premium
@@ -3192,7 +3365,22 @@ _PREMIUM_RULE_FIELDS: frozenset[str] = (
 _PREMIUM_PATCH_DENY_KEYS_FREE: frozenset[str] = _PREMIUM_RULE_FIELDS | frozenset({
     "antinakrutka_action",
     "antinakrutka_restrict_minutes",
+    "antinakrutka_lockdown_minutes",
+    "antinakrutka_pause_welcomes",
+    "antinakrutka_force_captcha",
+    "antinakrutka_auto_silence_minutes",
+    "join_filter_name_stopwords_enabled",
+    "join_filter_name_stopwords",
+    "join_filter_close_entry",
+    "join_filter_close_action",
+    "join_filter_cas",
+    "join_filter_network_mass_join",
+    "join_filter_network_join_threshold",
+    "join_filter_network_join_window_minutes",
+    "join_requests_welcome_text",
+    "join_requests_done_text",
     "join_captcha_kind",
+    "join_captcha_prefer_dm",
     "filter_media_captcha_kind",
     # Всплеск удалений: только Premium у владельца чата
     "spam_spike_enabled",
@@ -3215,6 +3403,9 @@ def _mask_rule_public_dict_non_premium(d: dict) -> None:
         "filter_button_copy_text", "filter_button_reply", "filter_button_mass_enabled",
         "filter_channel_post_fwd_channel", "filter_channel_post_fwd_group",
         "filter_channel_post_no_username", "filter_channel_post_hidden_fwd",
+        "filter_forward_block_bots", "filter_forward_block_users",
+        "filter_forward_block_with_links", "filter_forward_block_stories",
+        "filter_forward_block_with_button",
     ):
         d[k] = False
     d["filter_mention_mass_threshold"] = 5
@@ -3244,13 +3435,28 @@ def _mask_rule_public_dict_non_premium(d: dict) -> None:
     d["rules_group_event_trigger_every_n"] = 1
     d["rules_group_event_punish_every_n"] = 1
     d["join_captcha_kind"] = "button"
+    d["join_captcha_prefer_dm"] = False
     d["filter_media_captcha_kind"] = "button"
-    if str(d.get("antinakrutka_action") or "").strip().lower() == "alert_restrict":
+    aa = str(d.get("antinakrutka_action") or "").strip().lower()
+    if aa in ("alert_restrict", "alert_kick", "alert_ban"):
         d["antinakrutka_action"] = "alert"
+    d["antinakrutka_lockdown_minutes"] = 0
+    d["antinakrutka_pause_welcomes"] = False
+    d["antinakrutka_force_captcha"] = False
+    d["antinakrutka_auto_silence_minutes"] = 0
+    d["join_filter_name_stopwords_enabled"] = False
+    d["join_filter_name_stopwords"] = ""
+    d["join_filter_close_entry"] = False
+    d["join_filter_close_action"] = "kick"
+    d["join_filter_cas"] = False
+    d["join_filter_network_mass_join"] = False
+    d["join_filter_network_join_threshold"] = 4
+    d["join_filter_network_join_window_minutes"] = 10
     d["auto_reports_enabled"] = False
     d["use_global_antispam_db"] = False
     d["spam_spike_enabled"] = False
     d["filter_politics_enabled"] = False
+    d["filter_drugs_enabled"] = False
     d["filter_religion_enabled"] = False
     d["filter_religion_promo_only"] = False
     d["filter_esoteric_enabled"] = False
@@ -3259,6 +3465,22 @@ def _mask_rule_public_dict_non_premium(d: dict) -> None:
     d["filter_nazi_enabled"] = False
     d["filter_vulgar_enabled"] = False
     d["spam_spike_notify_managers"] = False
+    jr_mode = str(d.get("join_requests_mode") or "off").strip().lower()
+    if jr_mode == "auto":
+        d["join_requests_mode"] = "off"
+        d["auto_approve_join_requests"] = False
+    elif jr_mode == "survey_manual":
+        d["join_requests_mode"] = "survey_auto"
+    d["join_requests_welcome_text"] = ""
+    d["join_requests_done_text"] = ""
+    if str(d.get("join_requests_report_mode") or "full") == "full":
+        d["join_requests_report_mode"] = "brief"
+    d["mech_filter_symbol_subst"] = False
+    d["mech_filter_text_spam"] = False
+    d["mech_filter_strict_edit"] = False
+    d["post_comment_keywords_enabled"] = False
+    d["post_comment_keywords"] = []
+    d["post_comment_keywords_action"] = "delete"
 
 
 async def _link_blacklist_patterns_list(session: AsyncSession, chat_id: int) -> list[str]:
@@ -3372,6 +3594,9 @@ async def api_chat(
         kind = "group"
     linked_discussion_chat_id = None
     linked_discussion_title = None
+    linked_channel_chat_id = None
+    linked_channel_title = None
+    is_channel_discussion = False
     if kind == "channel":
         if snap_main and snap_main.get("linked_chat_id") is not None:
             try:
@@ -3386,10 +3611,16 @@ async def api_chat(
                 except (TypeError, ValueError):
                     linked_discussion_chat_id = None
         if linked_discussion_chat_id is not None:
+            cached_lt = (getattr(chat, "linked_discussion_title", None) or "").strip()
+            if cached_lt and not _discussion_title_needs_telegram(cached_lt, linked_discussion_chat_id):
+                linked_discussion_title = cached_lt
+        if linked_discussion_chat_id is not None and linked_discussion_title is None:
             lr = await session.get(Chat, int(linked_discussion_chat_id))
             if lr:
-                linked_discussion_title = (lr.title or "").strip() or str(linked_discussion_chat_id)
-            else:
+                lt = (lr.title or "").strip()
+                if lt and not _discussion_title_needs_telegram(lt, linked_discussion_chat_id):
+                    linked_discussion_title = lt
+            if linked_discussion_title is None:
                 try:
                     info_lc = await tg_get_chat(int(linked_discussion_chat_id))
                     if info_lc:
@@ -3400,6 +3631,49 @@ async def api_chat(
                         linked_discussion_title = (lt or str(linked_discussion_chat_id))[:255]
                 except Exception:
                     linked_discussion_title = None
+            if (
+                linked_discussion_chat_id is not None
+                and linked_discussion_title
+                and not _discussion_title_needs_telegram(linked_discussion_title, linked_discussion_chat_id)
+            ):
+                chat.linked_discussion_title = str(linked_discussion_title)[:255]
+                chat.linked_discussion_chat_id = int(linked_discussion_chat_id)
+                session.add(chat)
+                try:
+                    await session.commit()
+                except Exception:
+                    await session.rollback()
+    elif kind in ("group", "supergroup"):
+        if snap_main and snap_main.get("linked_chat_id") is not None:
+            lctype = str(snap_main.get("linked_chat_type") or "").lower()
+            if lctype == "channel":
+                try:
+                    linked_channel_chat_id = int(snap_main["linked_chat_id"])
+                except (TypeError, ValueError):
+                    linked_channel_chat_id = None
+        if linked_channel_chat_id is None:
+            ldb = getattr(chat, "linked_channel_chat_id", None)
+            if ldb is not None:
+                try:
+                    linked_channel_chat_id = int(ldb)
+                except (TypeError, ValueError):
+                    linked_channel_chat_id = None
+        if linked_channel_chat_id is not None:
+            is_channel_discussion = True
+            cr = await session.get(Chat, int(linked_channel_chat_id))
+            if cr:
+                linked_channel_title = (cr.title or "").strip() or str(linked_channel_chat_id)
+            else:
+                try:
+                    info_ch = await tg_get_chat(int(linked_channel_chat_id))
+                    if info_ch:
+                        lt = (info_ch.get("title") or "").strip()
+                        if not lt:
+                            un = (info_ch.get("username") or "").strip()
+                            lt = un or ""
+                        linked_channel_title = (lt or str(linked_channel_chat_id))[:255]
+                except Exception:
+                    linked_channel_title = str(linked_channel_chat_id)
     return {
         "id": chat.id,
         "title": (chat.title or "").strip() or str(chat.id),
@@ -3409,6 +3683,9 @@ async def api_chat(
         "is_shared": _chat_is_shared_payload(getattr(chat, "owner_user_id", None), int(user_id)),
         "linked_discussion_chat_id": linked_discussion_chat_id,
         "linked_discussion_title": linked_discussion_title,
+        "linked_channel_chat_id": linked_channel_chat_id,
+        "linked_channel_title": linked_channel_title,
+        "is_channel_discussion": is_channel_discussion,
         "rule": _rule_to_dict(rule, stopwords_count, chat_owner_premium=owner_premium),
         "stopwords": stopwords_list,
         "whitelist_max_domains": max_dom,
@@ -3465,6 +3742,44 @@ def _normalize_rules_photo_bytes(data: bytes) -> bytes:
             return out
     except (UnidentifiedImageError, OSError, ValueError) as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("image_process_failed", error=str(e)))
+
+
+_chat_avatar_cache: dict[int, tuple[float, bytes, str]] = {}
+_CHAT_AVATAR_CACHE_TTL_SEC = 3600.0
+
+
+@router.get("/chat/{chat_id}/avatar")
+async def api_chat_avatar(
+    chat_id: int,
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Аватар группы/канала из Telegram (getChat.photo)."""
+    ok = await user_can_access_chat(session, user_id, int(chat_id))
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
+    cid = int(chat_id)
+    now = datetime.now(timezone.utc).timestamp()
+    cached = _chat_avatar_cache.get(cid)
+    if cached and (now - float(cached[0])) < _CHAT_AVATAR_CACHE_TTL_SEC:
+        body, media = cached[1], cached[2]
+        return Response(
+            content=body,
+            media_type=media,
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+    from app.services.telegram_bot_api import tg_get_chat_photo_bytes
+
+    got = await tg_get_chat_photo_bytes(cid)
+    if not got:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_avatar_not_set"))
+    body, media = got
+    _chat_avatar_cache[cid] = (now, body, media)
+    return Response(
+        content=body,
+        media_type=media,
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 @router.get("/chat/{chat_id}/welcome/photo")
@@ -3524,9 +3839,10 @@ async def api_chat_welcome_photo_upload(
     rule.welcome_photo_path = new_rel
     rule.welcome_photo_file_id = None
     try:
-        storage_raw = (os.getenv("BROADCAST_STORAGE_CHAT_ID") or "").strip()
+        from app.services.admin_broadcast import resolve_broadcast_storage_chat_id
+
+        storage_id = await resolve_broadcast_storage_chat_id(session)
         token = (os.getenv("BOT_TOKEN") or "").strip()
-        storage_id = int(storage_raw) if storage_raw else 0
         if token and storage_id:
             bot = Bot(token=token)
             try:
@@ -3649,11 +3965,12 @@ async def api_chat_rules_photo_upload(
     else:
         rule.rules_channel_photo_path = new_rel
         rule.rules_channel_photo_file_id = None
-    # Cache Telegram file_id in storage chat (same pattern as broadcasts) to avoid cross-service filesystem issues.
+    # Cache Telegram file_id in Guard Storage (same pattern as broadcasts) to avoid cross-service filesystem issues.
     try:
-        storage_raw = (os.getenv("BROADCAST_STORAGE_CHAT_ID") or "").strip()
+        from app.services.admin_broadcast import resolve_broadcast_storage_chat_id
+
+        storage_id = await resolve_broadcast_storage_chat_id(session)
         token = (os.getenv("BOT_TOKEN") or "").strip()
-        storage_id = int(storage_raw) if storage_raw else 0
         if token and storage_id:
             bot = Bot(token=token)
             try:
@@ -4036,6 +4353,15 @@ async def api_chat_rule(
         "filter_channel_post_anon_admin",
         "filter_channel_post_fwd_channel", "filter_channel_post_fwd_group",
         "filter_channel_post_no_username", "filter_channel_post_hidden_fwd",
+        "filter_forward_block_channels", "filter_forward_block_chats",
+        "filter_forward_block_bots", "filter_forward_block_users",
+        "filter_forward_block_with_links", "filter_forward_block_stories",
+        "filter_forward_block_with_button",
+        "mech_filter_block_apk", "mech_filter_guest_bots",
+        "mech_filter_symbol_subst", "mech_filter_text_spam", "mech_filter_strict_edit",
+        "mech_filter_flood_enabled", "mech_filter_flood_threshold", "mech_filter_flood_window_minutes",
+        "mech_filter_flood_mode", "mech_filter_flood_action",
+        "post_comment_keywords_enabled", "post_comment_keywords_action",
         "welcome_enabled", "welcome_text", "welcome_buttons",
         "welcome_max_per_min", "welcome_silent_on_raid", "welcome_raid_threshold", "welcome_raid_window_minutes", "welcome_every_n_joins",
         "rules_channel_enabled", "rules_channel_text", "rules_channel_buttons",
@@ -4059,15 +4385,33 @@ async def api_chat_rule(
         "delete_join_messages",
         "delete_left_messages",
         "auto_approve_join_requests",
+        "join_requests_mode",
+        "join_requests_welcome_text",
+        "join_requests_done_text",
+        "join_requests_questions_text",
+        "join_requests_report_mode",
         "silence_minutes", "master_anti_spam",
         "antinakrutka_enabled", "antinakrutka_joins_threshold", "antinakrutka_window_minutes",
         "antinakrutka_action", "antinakrutka_restrict_minutes",
+        "antinakrutka_lockdown_minutes", "antinakrutka_pause_welcomes", "antinakrutka_force_captcha",
+        "antinakrutka_cooldown_minutes", "antinakrutka_auto_silence_minutes",
+        "join_filter_enabled", "join_filter_arab", "join_filter_cjk", "join_filter_zalgo",
+        "join_filter_spam_nick", "join_filter_require_username",
+        "join_filter_name_stopwords_enabled", "join_filter_name_stopwords",
+        "join_filter_close_entry", "join_filter_close_action",
+        "join_filter_cas", "join_filter_network_mass_join",
+        "join_filter_network_join_threshold", "join_filter_network_join_window_minutes",
+        "mech_filter_block_apk", "mech_filter_guest_bots",
+        "mech_filter_symbol_subst", "mech_filter_text_spam", "mech_filter_strict_edit",
+        "mech_filter_flood_enabled", "mech_filter_flood_threshold", "mech_filter_flood_window_minutes",
+        "mech_filter_flood_mode", "mech_filter_flood_action",
         "spam_spike_enabled", "spam_spike_min_deletes", "spam_spike_window_minutes", "spam_spike_notify_managers",
         "use_global_antispam_db",
         "use_global_bad_urls",
         "filter_profanity_enabled", "filter_jobs_enabled", "filter_casino_enabled",
-        "filter_ads_enabled", "filter_insults_enabled",
+        "filter_crypto_enabled", "filter_ads_enabled", "filter_insults_enabled",
         "filter_racism_enabled", "filter_nazi_enabled", "filter_vulgar_enabled", "filter_politics_enabled",
+        "filter_drugs_enabled",
         "filter_religion_enabled", "filter_religion_promo_only",
         "filter_esoteric_enabled", "filter_esoteric_promo_only",
         "reputation_enabled",
@@ -4158,9 +4502,83 @@ async def api_chat_rule(
         except (TypeError, ValueError):
             v = 35
         rule.spam_spike_window_minutes = max(5, min(720, v))
+    if "mech_filter_flood_threshold" in body:
+        try:
+            v = int(body.get("mech_filter_flood_threshold"))
+        except (TypeError, ValueError):
+            v = 3
+        rule.mech_filter_flood_threshold = max(2, min(20, v))
+    if "mech_filter_flood_window_minutes" in body:
+        try:
+            v = int(body.get("mech_filter_flood_window_minutes"))
+        except (TypeError, ValueError):
+            v = 5
+        rule.mech_filter_flood_window_minutes = max(1, min(60, v))
+    if "mech_filter_flood_mode" in body and hasattr(rule, "mech_filter_flood_mode"):
+        from app.services.flood_filter import normalize_flood_mode
+
+        rule.mech_filter_flood_mode = normalize_flood_mode(body.get("mech_filter_flood_mode"))
+    if "mech_filter_flood_action" in body and hasattr(rule, "mech_filter_flood_action"):
+        from app.services.flood_filter import normalize_flood_action
+
+        rule.mech_filter_flood_action = normalize_flood_action(body.get("mech_filter_flood_action"))
+    if "filter_actions" in body and isinstance(body.get("filter_actions"), dict):
+        current = load_filter_actions(rule)
+        valid = frozenset({"delete", "mute", "kick", "ban", "observe"})
+        for k, val in body["filter_actions"].items():
+            key = str(k or "").strip()
+            if not key:
+                continue
+            if val in (None, "", "inherit", "default", "global"):
+                current.pop(key, None)
+                continue
+            act = str(val or "").strip().lower()
+            if act in valid:
+                current[key] = act
+            else:
+                current.pop(key, None)
+        rule.filter_actions_json = dump_filter_actions(current)
+    if "post_comment_keywords" in body:
+        raw_kw = body.get("post_comment_keywords")
+        if isinstance(raw_kw, list):
+            rule.post_comment_keywords_json = dump_post_comment_keywords([str(x) for x in raw_kw])
+        elif raw_kw is None:
+            rule.post_comment_keywords_json = None
+        else:
+            rule.post_comment_keywords_json = dump_post_comment_keywords(
+                normalize_keywords_list([str(raw_kw)])
+            )
+    if "post_comment_keywords_action" in body and hasattr(rule, "post_comment_keywords_action"):
+        rule.post_comment_keywords_action = normalize_post_comment_action(
+            body.get("post_comment_keywords_action")
+        )
+    if "post_comment_keywords_enabled" in body and bool(body.get("post_comment_keywords_enabled")):
+        from app.services.telegram_bot_api import refresh_chat_from_telegram
+
+        try:
+            snap_link = await refresh_chat_from_telegram(session, int(chat_id))
+            if chat:
+                await session.refresh(chat)
+        except Exception:
+            snap_link = None
+        linked_ok = int(getattr(chat, "linked_channel_chat_id", 0) or 0) > 0
+        if not linked_ok and snap_link:
+            lcid = snap_link.get("linked_chat_id")
+            lctype = str(snap_link.get("linked_chat_type") or "").lower()
+            linked_ok = lcid is not None and lctype == "channel"
+        if not linked_ok:
+            rule.post_comment_keywords_enabled = False
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=err_detail("post_comment_keywords_requires_linked_channel"),
+            )
     am = str(getattr(rule, "action_mode", "") or "").lower()
-    if am not in ("delete", "mute", "kick", "ban", "observe"):
+    if am not in ("delete", "mute", "kick", "ban", "observe", "off"):
         rule.action_mode = "delete"
+    if "action_mode" in body:
+        am_in = str(body.get("action_mode") or "").strip().lower()
+        if am_in in ("delete", "mute", "kick", "ban", "observe", "off"):
+            rule.action_mode = am_in
     if "filter_links" in body and "filter_links_mode" not in body and hasattr(rule, "filter_links_mode"):
         rule.filter_links_mode = "forbid" if rule.filter_links else "allow"
     if "filter_channel_posts_action" in body and hasattr(rule, "filter_channel_posts_action"):
@@ -4465,6 +4883,7 @@ async def api_chat_rule(
         rule.filter_links = fm != "allow"
     if not owner_premium:
         rule.join_captcha_kind = "button"
+        rule.join_captcha_prefer_dm = False
         rule.filter_media_captcha_kind = "button"
         rule.use_global_antispam_db = False
         rule.auto_reports_enabled = False
@@ -4474,10 +4893,165 @@ async def api_chat_rule(
             if hasattr(rule, _fname):
                 setattr(rule, _fname, False)
     aa = (getattr(rule, "antinakrutka_action", None) or "alert").strip().lower()
-    if aa not in ("alert", "alert_restrict"):
+    if aa not in ("alert", "alert_restrict", "alert_kick", "alert_ban"):
         rule.antinakrutka_action = "alert"
-    elif not owner_premium and aa == "alert_restrict":
+    elif not owner_premium and aa in ("alert_restrict", "alert_kick", "alert_ban"):
         rule.antinakrutka_action = "alert"
+    if "antinakrutka_joins_threshold" in body and hasattr(rule, "antinakrutka_joins_threshold"):
+        try:
+            v = int(body.get("antinakrutka_joins_threshold"))
+        except (TypeError, ValueError):
+            v = 10
+        rule.antinakrutka_joins_threshold = max(2, min(100, v))
+    if "antinakrutka_window_minutes" in body and hasattr(rule, "antinakrutka_window_minutes"):
+        try:
+            v = int(body.get("antinakrutka_window_minutes"))
+        except (TypeError, ValueError):
+            v = 5
+        rule.antinakrutka_window_minutes = max(1, min(60, v))
+    if "antinakrutka_restrict_minutes" in body and hasattr(rule, "antinakrutka_restrict_minutes"):
+        try:
+            v = int(body.get("antinakrutka_restrict_minutes"))
+        except (TypeError, ValueError):
+            v = 30
+        rule.antinakrutka_restrict_minutes = max(1, min(1440, v))
+    if "antinakrutka_lockdown_minutes" in body and hasattr(rule, "antinakrutka_lockdown_minutes"):
+        try:
+            v = int(body.get("antinakrutka_lockdown_minutes"))
+        except (TypeError, ValueError):
+            v = 0
+        rule.antinakrutka_lockdown_minutes = max(0, min(120, v))
+        if not owner_premium:
+            rule.antinakrutka_lockdown_minutes = 0
+    if "antinakrutka_cooldown_minutes" in body and hasattr(rule, "antinakrutka_cooldown_minutes"):
+        try:
+            v = int(body.get("antinakrutka_cooldown_minutes"))
+        except (TypeError, ValueError):
+            v = 5
+        rule.antinakrutka_cooldown_minutes = max(0, min(60, v))
+    if "antinakrutka_auto_silence_minutes" in body and hasattr(rule, "antinakrutka_auto_silence_minutes"):
+        try:
+            v = int(body.get("antinakrutka_auto_silence_minutes"))
+        except (TypeError, ValueError):
+            v = 0
+        rule.antinakrutka_auto_silence_minutes = max(0, min(120, v))
+        if not owner_premium:
+            rule.antinakrutka_auto_silence_minutes = 0
+    if "antinakrutka_pause_welcomes" in body and hasattr(rule, "antinakrutka_pause_welcomes"):
+        rule.antinakrutka_pause_welcomes = bool(body.get("antinakrutka_pause_welcomes"))
+        if not owner_premium:
+            rule.antinakrutka_pause_welcomes = False
+    if "antinakrutka_force_captcha" in body and hasattr(rule, "antinakrutka_force_captcha"):
+        rule.antinakrutka_force_captcha = bool(body.get("antinakrutka_force_captcha"))
+        if not owner_premium:
+            rule.antinakrutka_force_captcha = False
+    if "join_filter_close_action" in body and hasattr(rule, "join_filter_close_action"):
+        act = str(body.get("join_filter_close_action") or "kick").strip().lower()
+        rule.join_filter_close_action = "ban" if act == "ban" else "kick"
+    if "join_filter_name_stopwords" in body and hasattr(rule, "join_filter_name_stopwords"):
+        raw = str(body.get("join_filter_name_stopwords") or "")[:2000]
+        rule.join_filter_name_stopwords = raw.strip() or None
+    if "join_filter_network_join_threshold" in body and hasattr(rule, "join_filter_network_join_threshold"):
+        try:
+            v = int(body.get("join_filter_network_join_threshold"))
+        except (TypeError, ValueError):
+            v = 4
+        rule.join_filter_network_join_threshold = max(2, min(30, v))
+    if "join_filter_network_join_window_minutes" in body and hasattr(rule, "join_filter_network_join_window_minutes"):
+        try:
+            v = int(body.get("join_filter_network_join_window_minutes"))
+        except (TypeError, ValueError):
+            v = 10
+        rule.join_filter_network_join_window_minutes = max(1, min(120, v))
+    _join_filter_bool_keys = (
+        "join_filter_enabled", "join_filter_arab", "join_filter_cjk", "join_filter_zalgo",
+        "join_filter_spam_nick", "join_filter_require_username",
+        "join_filter_name_stopwords_enabled", "join_filter_close_entry",
+        "join_filter_cas", "join_filter_network_mass_join",
+    )
+    for jfk in _join_filter_bool_keys:
+        if jfk in body and hasattr(rule, jfk):
+            setattr(rule, jfk, bool(body.get(jfk)))
+    if not owner_premium:
+        rule.join_filter_name_stopwords_enabled = False
+        rule.join_filter_name_stopwords = None
+        rule.join_filter_close_entry = False
+        rule.join_filter_close_action = "kick"
+        rule.join_filter_cas = False
+        rule.join_filter_network_mass_join = False
+        rule.join_filter_network_join_threshold = 4
+        rule.join_filter_network_join_window_minutes = 10
+    if "join_requests_mode" in body and hasattr(rule, "join_requests_mode"):
+        from app.services.join_requests_survey import normalize_mode
+
+        mode = normalize_mode(body.get("join_requests_mode"))
+        if not owner_premium and mode in ("survey_manual", "auto"):
+            mode = "off" if mode == "auto" else "survey_auto"
+        rule.join_requests_mode = mode
+        rule.auto_approve_join_requests = mode == "auto"
+    if "join_requests_report_mode" in body and hasattr(rule, "join_requests_report_mode"):
+        from app.services.join_requests_survey import normalize_report_mode
+
+        rm = normalize_report_mode(body.get("join_requests_report_mode"))
+        if not owner_premium and rm == "full":
+            rm = "brief"
+        rule.join_requests_report_mode = rm
+    if "join_requests_welcome_text" in body and hasattr(rule, "join_requests_welcome_text"):
+        raw = str(body.get("join_requests_welcome_text") or "")[:2000]
+        rule.join_requests_welcome_text = raw.strip() or None
+        if not owner_premium:
+            rule.join_requests_welcome_text = None
+    if "join_requests_done_text" in body and hasattr(rule, "join_requests_done_text"):
+        raw = str(body.get("join_requests_done_text") or "")[:2000]
+        rule.join_requests_done_text = raw.strip() or None
+        if not owner_premium:
+            rule.join_requests_done_text = None
+    if "join_requests_questions_text" in body and hasattr(rule, "join_requests_questions_text"):
+        from app.services.join_requests_survey import parse_questions_text, questions_to_text
+
+        raw = str(body.get("join_requests_questions_text") or "")[:8000]
+        qs = parse_questions_text(raw)
+        max_q = 5 if owner_premium else 1
+        qs = qs[:max_q]
+        rule.join_requests_questions_text = questions_to_text(qs) or None
+    if "auto_approve_join_requests" in body and "join_requests_mode" not in body and hasattr(rule, "auto_approve_join_requests"):
+        legacy = bool(body.get("auto_approve_join_requests"))
+        if not owner_premium:
+            legacy = False
+        rule.auto_approve_join_requests = legacy
+        if legacy and str(getattr(rule, "join_requests_mode", "off") or "off") == "off":
+            rule.join_requests_mode = "auto"
+        if not legacy and str(getattr(rule, "join_requests_mode", "off") or "off") == "auto":
+            rule.join_requests_mode = "off"
+    if not owner_premium:
+        for _ffk in (
+            "filter_forward_block_bots",
+            "filter_forward_block_users",
+            "filter_forward_block_with_links",
+            "filter_forward_block_stories",
+            "filter_forward_block_with_button",
+        ):
+            if hasattr(rule, _ffk):
+                setattr(rule, _ffk, False)
+        for _mk in (
+            "mech_filter_symbol_subst",
+            "mech_filter_text_spam",
+            "mech_filter_strict_edit",
+        ):
+            if hasattr(rule, _mk):
+                setattr(rule, _mk, False)
+        if hasattr(rule, "join_requests_mode"):
+            jr = str(getattr(rule, "join_requests_mode", "off") or "off")
+            if jr == "survey_manual":
+                rule.join_requests_mode = "survey_auto"
+            elif jr == "auto":
+                rule.join_requests_mode = "off"
+                rule.auto_approve_join_requests = False
+        rule.join_requests_welcome_text = None
+        rule.join_requests_done_text = None
+        if hasattr(rule, "join_requests_report_mode"):
+            if str(getattr(rule, "join_requests_report_mode", "full") or "full") == "full":
+                rule.join_requests_report_mode = "brief"
     # Audit / activity. См. _MANAGER_ACTION_KINDS.
     # Сохраняем список изменённых ключей (без значений) — достаточно для аудита,
     # значения могут быть большими и/или приватными.
@@ -5188,17 +5762,24 @@ async def api_connect_activate_pending(
     Активировать чаты из pending, где бот уже администратор.
     Полезно, если Telegram не прислал/пропустил событие my_chat_member.
     """
-    from app.services.telegram_bot_api import refresh_chat_from_telegram, tg_bot_is_admin_in_chat
+    from app.services.telegram_bot_api import (
+        refresh_chat_from_telegram,
+        tg_bot_has_group_connect_rights,
+        tg_bot_is_admin_in_chat,
+    )
 
     pending = await get_pending_chats(session, user_id)
     connected = 0
     skipped = 0
+    skipped_rights = 0
     activated_rows: list = []
     for c in pending:
         cid = int(c.id)
         try:
-            if not await tg_bot_is_admin_in_chat(cid):
+            if not await tg_bot_has_group_connect_rights(cid):
                 skipped += 1
+                if await tg_bot_is_admin_in_chat(cid):
+                    skipped_rights += 1
                 continue
             c.is_active = True
             await get_or_create_rule(session, cid)
@@ -5215,7 +5796,7 @@ async def api_connect_activate_pending(
                 await refresh_chat_from_telegram(session, int(row.id))
         except Exception:
             pass
-    return {"ok": True, "connected": connected, "skipped": skipped}
+    return {"ok": True, "connected": connected, "skipped": skipped, "skipped_rights": skipped_rights}
 
 @router.post("/connect/pending/cleanup")
 async def api_connect_cleanup_pending(
@@ -6303,6 +6884,35 @@ def _dedupe_admin_broadcast_rows(items: list[dict]) -> list[dict]:
     return out
 
 
+async def _broadcast_member_counts_for_chats(chat_ids: list[int]) -> dict[int, int | None]:
+    """member_count из Telegram getChat (параллельно, с коротким таймаутом — не блокируем UI)."""
+    import asyncio
+
+    from app.services.telegram_bot_api import tg_get_chat
+
+    ids = [int(x) for x in chat_ids if int(x) < 0][:200]
+    if not ids:
+        return {}
+    sem = asyncio.Semaphore(6)
+    per_chat_timeout = 3.0
+
+    async def _one(cid: int) -> tuple[int, int | None]:
+        async with sem:
+            try:
+                info = await asyncio.wait_for(tg_get_chat(int(cid)), timeout=per_chat_timeout)
+                if isinstance(info, dict) and info.get("member_count") is not None:
+                    return int(cid), int(info["member_count"])
+            except Exception:
+                pass
+            return int(cid), None
+
+    try:
+        pairs = await asyncio.wait_for(asyncio.gather(*[_one(cid) for cid in ids]), timeout=12.0)
+    except asyncio.TimeoutError:
+        pairs = []
+    return {k: v for k, v in pairs}
+
+
 @router.get("/admin/broadcast/groups")
 async def api_admin_broadcast_groups(
     scope: str = "mine",
@@ -6365,6 +6975,11 @@ async def api_admin_broadcast_groups(
             }
         )
     items_u = _dedupe_admin_broadcast_rows(items)
+    mc_map = await _broadcast_member_counts_for_chats([int(it.get("chat_id") or 0) for it in items_u])
+    for it in items_u:
+        cid = int(it.get("chat_id") or 0)
+        mc = mc_map.get(cid)
+        it["member_count"] = int(mc) if mc is not None and int(mc) >= 0 else None
     return {
         "items": items_u,
         "scope": sc,
@@ -6424,6 +7039,11 @@ async def api_admin_broadcast_channels(
             }
         )
     items_u = _dedupe_admin_broadcast_rows(items)
+    mc_map = await _broadcast_member_counts_for_chats([int(it.get("chat_id") or 0) for it in items_u])
+    for it in items_u:
+        cid = int(it.get("chat_id") or 0)
+        mc = mc_map.get(cid)
+        it["member_count"] = int(mc) if mc is not None and int(mc) >= 0 else None
     return {
         "items": items_u,
         "scope": sc,
@@ -7459,7 +8079,9 @@ async def api_activity_summary(
         enabled["ban"] = any(str(getattr(r, "action_mode", "") or "").lower() == "ban" for r in rules)
         enabled["mute"] = any(
             str(getattr(r, "action_mode", "") or "").lower() == "mute"
-            or str(getattr(r, "antinakrutka_action", "") or "").lower() == "alert_restrict"
+            or str(getattr(r, "antinakrutka_action", "") or "").lower() in (
+                "alert_restrict", "alert_kick", "alert_ban",
+            )
             for r in rules
         )
         enabled["observe"] = any(str(getattr(r, "action_mode", "") or "").lower() == "observe" for r in rules)
@@ -7564,6 +8186,8 @@ async def api_activity_breakdown(
         active_chats = [c for c in active_chats if int(getattr(c, "owner_user_id", 0) or 0) == int(user_id)]
     elif scope == "delegated":
         active_chats = [c for c in active_chats if int(getattr(c, "owner_user_id", 0) or 0) != int(user_id)]
+    else:
+        active_chats = [c for c in active_chats if int(getattr(c, "owner_user_id", 0) or 0) == int(user_id)]
     allowed_ids = [int(c.id) for c in active_chats]
     if chat_id is not None:
         cid = int(chat_id)
@@ -7732,12 +8356,14 @@ async def api_activity_breakdown(
         "profanity": _filter_enabled("filter_profanity_enabled", True),
         "jobs": _filter_enabled("filter_jobs_enabled", True),
         "casino": _filter_enabled("filter_casino_enabled", True),
+        "crypto": _filter_enabled("filter_crypto_enabled", False),
         "ads": _filter_enabled("filter_ads_enabled", False),
         "insult": _filter_enabled("filter_insults_enabled", False),
         "racism": _filter_enabled("filter_racism_enabled", False),
         "nazi": _filter_enabled("filter_nazi_enabled", False),
         "vulgar": _filter_enabled("filter_vulgar_enabled", False),
         "politics": _filter_enabled("filter_politics_enabled", False),
+        "drugs": _filter_enabled("filter_drugs_enabled", False),
         "religion": _filter_enabled("filter_religion_enabled", False),
         "esoteric": _filter_enabled("filter_esoteric_enabled", False),
         "link": (
@@ -7931,6 +8557,106 @@ async def _usernames_for_telegram_ids(session: AsyncSession, tg_ids: set[int]) -
         u = (str(un or "").strip().lstrip("@") or None)
         out[int(tid)] = u
     return out
+
+
+async def _user_profiles_for_telegram_ids(session: AsyncSession, tg_ids: set[int]) -> dict[int, dict[str, str | None]]:
+    """Username и имя из users по telegram_id."""
+    ids = sorted({int(x) for x in tg_ids if int(x or 0) > 0})
+    if not ids:
+        return {}
+    q = await session.execute(
+        select(User.telegram_id, User.username, User.first_name).where(User.telegram_id.in_(ids))
+    )
+    out: dict[int, dict[str, str | None]] = {}
+    for tid, un, fn in q.all():
+        out[int(tid)] = {
+            "username": (str(un or "").strip().lstrip("@") or None),
+            "first_name": (str(fn or "").strip() or None),
+        }
+    return out
+
+
+def _moderation_reason_db_variants(normalized: str) -> list[str]:
+    """Варианты reason в moderation_logs для нормализованного ключа (как в breakdown)."""
+    r = (normalized or "").strip().lower()
+    if not r:
+        return []
+    if r in {"link", "global_url", "url"}:
+        return ["link", "link_blacklist", "global_bad_url", "global_url", "url"]
+    out = [r]
+    nb = f"{r}_newbie"
+    if nb not in out:
+        out.append(nb)
+    return out
+
+
+def _resolve_moderation_trigger(reason: str, detail: str | None, message_text: str | None) -> str:
+    """Триггер для UI: слово/корень из detail или восстановление из текста сообщения."""
+    det = str(detail or "").strip()
+    if det:
+        return det[:200]
+    msg = str(message_text or "").strip()
+    if not msg:
+        return "—"
+    base = (str(reason or "").strip().lower() or "other")
+    if base.endswith("_newbie"):
+        base = base[: -len("_newbie")]
+    if base in ("link_blacklist", "global_bad_url", "global_url", "url"):
+        base = "link"
+
+    def _link_from_line(line: str) -> str | None:
+        low = line.lower()
+        for marker in ("https://", "http://", "tg://", "t.me/", "telegram.me/"):
+            idx = low.find(marker)
+            if idx >= 0:
+                chunk = line[idx:].split()[0] if line[idx:].split() else line[idx : idx + 120]
+                return chunk[:120]
+        www_idx = low.find("www.")
+        if www_idx >= 0:
+            chunk = line[www_idx:].split()[0] if line[www_idx:].split() else line[www_idx : www_idx + 120]
+            return chunk[:120]
+        m = re.search(r"(?:https?://)?(?:[\w-]+\.)+[a-z]{2,}(?:/[^\s]*)?", line, re.I)
+        if m:
+            return m.group(0)[:120]
+        bare = re.search(r"\b[\w.-]*\d[\w.-]*(?:\.[a-z]{2,})?\b", line, re.I)
+        if bare:
+            return bare.group(0)[:120]
+        return None
+
+    if base == "link" or base.startswith("link") or base in ("casino", "crypto"):
+        for line in msg.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            hit = _link_from_line(line)
+            if hit:
+                return hit
+            qm = re.search(r'["«]([^"»\n]{2,48})["»]', line)
+            if qm:
+                return qm.group(1).strip()[:80]
+    if base.startswith("mention_"):
+        m = re.search(r"@[\w]{2,}", msg)
+        if m:
+            return m.group(0)
+    word_reasons = {
+        "casino", "profanity", "stopword", "jobs", "crypto", "ads", "insult", "racism",
+        "nazi", "vulgar", "politics", "drugs", "religion", "esoteric", "flood", "spam",
+        "buttons", "media", "mention", "forward", "silence",
+    }
+    if base in word_reasons or base.startswith(("media_", "button_")):
+        qm = re.search(r'["«]([^"»\n]{2,48})["»]', msg)
+        if qm:
+            return qm.group(1).strip()[:80]
+        line = msg.split("\n", 1)[0].strip()
+        if len(line) <= 80:
+            return line[:80]
+        parts = line.split()
+        if parts:
+            return parts[0][:48]
+    line = msg.split("\n", 1)[0].strip()
+    if len(line) <= 48:
+        return line or "—"
+    return f"{line[:45].rstrip()}…"
 
 
 @router.get("/activity/journal")
@@ -8596,6 +9322,7 @@ async def api_activity_growth_events(
     period: str = Query("today", regex="^(today|7d|14d|30d|180d|365d)$"),
     scope: str = Query("all", regex="^(all|own|delegated)$"),
     chat_id: int | None = Query(None, description="Опционально: одна группа/канал."),
+    chat_kind: str | None = Query(None, regex="^(channel|group)$", description="Фильтр: только каналы или только группы."),
     kind: str = Query("joined", regex="^(joined|left|net|all)$"),
     tz_offset_min: int = Query(0, ge=-840, le=840),
     limit: int = Query(250, ge=1, le=500),
@@ -8609,6 +9336,15 @@ async def api_activity_growth_events(
         active_chats = [c for c in active_chats if int(getattr(c, "owner_user_id", 0) or 0) == int(user_id)]
     elif scope == "delegated":
         active_chats = [c for c in active_chats if int(getattr(c, "owner_user_id", 0) or 0) != int(user_id)]
+    else:
+        # «Все» — только свои чаты; делегированные только во вкладке delegated.
+        active_chats = [c for c in active_chats if int(getattr(c, "owner_user_id", 0) or 0) == int(user_id)]
+    if chat_kind in ("channel", "group"):
+        want_channel = chat_kind == "channel"
+        active_chats = [
+            c for c in active_chats
+            if (str(getattr(c, "chat_kind", "") or "group").lower() == "channel") == want_channel
+        ]
     allowed_ids = [int(c.id) for c in active_chats]
     if chat_id is not None:
         cid = int(chat_id)
@@ -8737,6 +9473,144 @@ async def api_activity_growth_events(
         "period_from": _format_dt(since_utc),
         "period_to": _format_dt(now_utc),
         "kind": str(kind),
+    }
+
+
+@router.get("/activity/moderation-events")
+async def api_activity_moderation_events(
+    period: str = Query("today", regex="^(today|7d|14d|30d|180d|365d)$"),
+    scope: str = Query("all", regex="^(all|own|delegated)$"),
+    chat_id: int | None = Query(None, description="Опционально: одна группа/канал."),
+    reason: str = Query(..., min_length=1, max_length=64, description="Нормализованный ключ фильтра (profanity, casino, …)."),
+    tz_offset_min: int = Query(0, ge=-840, le=840),
+    limit: int = Query(200, ge=1, le=500),
+    offset: int = Query(0, ge=0, le=5000),
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Полный список удалённых сообщений по типу фильтра (для разбора ложных срабатываний)."""
+    chats = await get_accessible_chats_any_active(session, user_id)
+    active_chats = [c for c in chats if not bool(getattr(c, "is_log_chat", False))]
+    if scope == "own":
+        active_chats = [c for c in active_chats if int(getattr(c, "owner_user_id", 0) or 0) == int(user_id)]
+    elif scope == "delegated":
+        active_chats = [c for c in active_chats if int(getattr(c, "owner_user_id", 0) or 0) != int(user_id)]
+    else:
+        active_chats = [c for c in active_chats if int(getattr(c, "owner_user_id", 0) or 0) == int(user_id)]
+    allowed_ids = [int(c.id) for c in active_chats]
+    if chat_id is not None:
+        cid = int(chat_id)
+        if cid not in allowed_ids:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("no_chat_access"))
+        active_chats = [c for c in active_chats if int(c.id) == cid]
+
+    chat_by_id = {int(c.id): c for c in active_chats}
+    chn_by_id: dict[int, Channel] = {}
+    phys_to_logical: dict[int, int] = {}
+    if active_chats:
+        chn_ids = [int(c.id) for c in active_chats if str(getattr(c, "chat_kind", "") or "group").lower() == "channel"]
+        if chn_ids:
+            chn_rows = (await session.execute(select(Channel).where(Channel.id.in_(chn_ids)))).scalars().all()
+            chn_by_id = {int(r.id): r for r in chn_rows}
+        for c in active_chats:
+            lg = int(c.id)
+            for p in _activity_effective_ids_for_chat(c, chn_by_id):
+                phys_to_logical[int(p)] = lg
+
+    scope_ids = sorted(set(phys_to_logical.keys()) | set(chat_by_id.keys()))
+    if not scope_ids:
+        return {"items": [], "total": 0, "has_more": False, "period_from": None, "period_to": None, "reason": str(reason)}
+
+    reason_key = str(reason or "").strip().lower().replace("_newbie", "")
+    reason_variants = _moderation_reason_db_variants(reason_key)
+    if not reason_variants:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("invalid_reason"))
+
+    now_utc = datetime.now(timezone.utc)
+    tz_offset = timedelta(minutes=int(tz_offset_min or 0))
+    now_local = now_utc + tz_offset
+    today_local_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start_utc = today_local_start - tz_offset
+    if period == "365d":
+        since_utc = now_utc - timedelta(days=365)
+    elif period == "180d":
+        since_utc = now_utc - timedelta(days=180)
+    elif period == "30d":
+        since_utc = now_utc - timedelta(days=30)
+    elif period == "14d":
+        since_utc = now_utc - timedelta(days=14)
+    elif period == "7d":
+        since_utc = now_utc - timedelta(days=7)
+    else:
+        since_utc = today_start_utc
+
+    lim = int(limit or 200)
+    off = int(offset or 0)
+
+    base_q = (
+        select(ModerationLog)
+        .where(
+            ModerationLog.chat_id.in_(list(scope_ids)),
+            ModerationLog.created_at >= since_utc,
+            func.lower(ModerationLog.reason).in_(reason_variants),
+        )
+    )
+    total = int(
+        (
+            await session.execute(select(func.count()).select_from(base_q.subquery()))
+        ).scalar()
+        or 0
+    )
+    rows = (
+        await session.execute(
+            base_q.order_by(ModerationLog.created_at.desc()).offset(off).limit(lim + 1)
+        )
+    ).scalars().all()
+    has_more = len(rows) > lim
+    rows = rows[:lim]
+
+    uid_set = {int(getattr(r, "user_id", 0) or 0) for r in rows if int(getattr(r, "user_id", 0) or 0) > 0}
+    profiles = await _user_profiles_for_telegram_ids(session, uid_set)
+
+    def _chat_meta(phys_id: int) -> tuple[int, str]:
+        lg = int(phys_to_logical.get(int(phys_id), int(phys_id)))
+        co = chat_by_id.get(lg)
+        title = ((getattr(co, "title", None) or "") if co else "").strip() or str(lg)
+        return lg, title
+
+    items: list[dict[str, Any]] = []
+    for r in rows:
+        uid = int(getattr(r, "user_id", 0) or 0)
+        prof = profiles.get(uid) or {}
+        msg_t = str(getattr(r, "message_text", None) or "").strip()
+        det_raw = getattr(r, "detail", None)
+        det = str(det_raw).strip() if det_raw is not None else ""
+        phys_cid = int(getattr(r, "chat_id", 0) or 0)
+        lg, title = _chat_meta(phys_cid)
+        items.append({
+            "id": int(getattr(r, "id", 0) or 0),
+            "created_at": _format_dt(getattr(r, "created_at", None)),
+            "chat_id": lg,
+            "chat_title": title,
+            "user_id": uid,
+            "username": prof.get("username"),
+            "first_name": prof.get("first_name"),
+            "reason": str(getattr(r, "reason", "") or ""),
+            "action": str(getattr(r, "action", "") or ""),
+            "detail": det or None,
+            "trigger": _resolve_moderation_trigger(str(getattr(r, "reason", "") or ""), det or None, msg_t or None),
+            "message_text": msg_t or None,
+        })
+
+    return {
+        "items": items,
+        "total": total,
+        "has_more": has_more,
+        "offset": off,
+        "limit": lim,
+        "period_from": _format_dt(since_utc),
+        "period_to": _format_dt(now_utc),
+        "reason": reason_key,
     }
 
 
@@ -8923,7 +9797,9 @@ async def api_activity_group_breakdown(
         {"key": "profanity", "label": i18n_t(loc, "api.ui.mod_cat_profanity"), "count": c("profanity", "profanity_newbie"), "premium": False, "tone": "rose"},
         {"key": "jobs", "label": i18n_t(loc, "api.ui.mod_cat_jobs"), "count": c("jobs", "jobs_newbie"), "premium": False, "tone": "amber"},
         {"key": "casino", "label": i18n_t(loc, "api.ui.mod_cat_casino"), "count": c("casino", "casino_newbie"), "premium": False, "tone": "amber"},
+        {"key": "crypto", "label": i18n_t(loc, "api.ui.mod_cat_crypto"), "count": c("crypto", "crypto_newbie"), "premium": False, "tone": "amber"},
         {"key": "politics", "label": i18n_t(loc, "api.ui.mod_cat_politics"), "count": c("politics", "politics_newbie"), "premium": False, "tone": "rose"},
+        {"key": "drugs", "label": i18n_t(loc, "api.ui.mod_cat_drugs"), "count": c("drugs", "drugs_newbie"), "premium": False, "tone": "rose"},
         {"key": "religion", "label": i18n_t(loc, "api.ui.mod_cat_religion"), "count": c("religion", "religion_newbie"), "premium": False, "tone": "rose"},
         {"key": "esoteric", "label": i18n_t(loc, "api.ui.mod_cat_esoteric"), "count": c("esoteric", "esoteric_newbie"), "premium": False, "tone": "rose"},
         {"key": "silence", "label": i18n_t(loc, "api.ui.mod_cat_silence"), "count": c("silence"), "premium": True, "tone": "violet"},
@@ -12009,12 +12885,15 @@ async def api_admin_broadcasts_upload_media(
     media_kind: str = Form(""),
 ):
     from app.services.admin_broadcast import (
+        _MAX_BROADCAST_MEDIA_ITEMS,
         _MAX_UPLOAD_BYTES,
         broadcast_row_to_dict,
         broadcast_upload_root,
         guess_media_kind_from_name,
         new_local_filename,
+        prepare_broadcast_upload_bytes,
         safe_media_kind,
+        store_broadcast_media_file_id,
     )
 
     _u, full = await _require_broadcast_access(session, int(user_id))
@@ -12031,19 +12910,23 @@ async def api_admin_broadcasts_upload_media(
 
     data = await file.read()
 
+    if not data:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("empty_file"))
+
     if len(data) > _MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=err_detail("file_too_large"))
 
-    # GIF временно отключены по продуктовой логике.
-    lower_name = str(file.filename or "").lower()
-    ct = str(getattr(file, "content_type", "") or "").lower()
-    if lower_name.endswith(".gif") or ct.startswith("image/gif"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("gif_disabled"))
+    media_count_q = await session.execute(
+        select(func.count()).select_from(AdminBroadcastMedia).where(AdminBroadcastMedia.broadcast_id == int(row.id))
+    )
+    if int(media_count_q.scalar() or 0) >= int(_MAX_BROADCAST_MEDIA_ITEMS):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("broadcast_media_limit", max=_MAX_BROADCAST_MEDIA_ITEMS))
 
     mk = safe_media_kind(media_kind) or guess_media_kind_from_name(
         file.filename or "", getattr(file, "content_type", None)
     )
-    fname = new_local_filename(file.filename or "upload.bin")
+    data, upload_name, mk = prepare_broadcast_upload_bytes(mk, data, file.filename or "upload.bin")
+    fname = new_local_filename(upload_name)
     root = broadcast_upload_root()
     path = root / fname
     path.write_bytes(data)
@@ -12060,6 +12943,27 @@ async def api_admin_broadcasts_upload_media(
     row.media_local_name = fname
     row.media_original_name = str(file.filename or "")[:255] or None
     row.telegram_file_id = None
+    await session.flush()
+    fid = await store_broadcast_media_file_id(mk, data, fname, session=session)
+    if fid:
+        item.telegram_file_id = fid
+        row.telegram_file_id = fid
+    elif mk in ("photo", "video", "animation"):
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=err_detail("broadcast_media_upload_failed"),
+        )
+    else:
+        _log.warning(
+            "broadcast media upload id=%s: file saved locally but no telegram file_id kind=%s",
+            int(row.id),
+            mk,
+        )
     await session.commit()
     q = await session.execute(
         select(AdminBroadcast)
@@ -12077,10 +12981,10 @@ async def api_admin_broadcasts_media_file(
     user_id: int = Depends(require_init_data),
     session: AsyncSession = Depends(get_db),
 ):
-    """Отдаёт загруженный файл медиа для превью в админке (с initData)."""
-    from pathlib import Path
+    """Отдаёт файл медиа для превью: локальный диск или Telegram file_id."""
+    from fastapi.responses import Response
 
-    from app.services.admin_broadcast import broadcast_upload_root
+    from app.services.admin_broadcast import broadcast_media_file_bytes
 
     viewer, _full = await _require_broadcast_access(session, int(user_id))
     row = await session.get(AdminBroadcast, int(broadcast_id))
@@ -12091,25 +12995,22 @@ async def api_admin_broadcasts_media_file(
     m = await session.get(AdminBroadcastMedia, int(media_id))
     if not m or int(m.broadcast_id) != int(broadcast_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("media_not_found"))
-    path = broadcast_upload_root() / str(m.media_local_name or "")
-    if not path.is_file():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("attach_not_found"))
     mk = str(m.media_kind or "photo").lower()
-    suffix = Path(path.name).suffix.lower()
-    media_type = "application/octet-stream"
-    if mk == "photo" or suffix in (".jpg", ".jpeg", ".png", ".webp"):
-        if suffix == ".png":
-            media_type = "image/png"
-        elif suffix == ".webp":
-            media_type = "image/webp"
-        else:
-            media_type = "image/jpeg"
-    elif mk == "video" or suffix in (".mp4", ".webm", ".mov"):
-        media_type = "video/mp4" if suffix == ".mp4" else "video/webm"
-    return FileResponse(
-        str(path),
+    got = await broadcast_media_file_bytes(
+        mk,
+        local_name=str(m.media_local_name or ""),
+        telegram_file_id=str(m.telegram_file_id or row.telegram_file_id or ""),
+        original_name=str(m.media_original_name or ""),
+    )
+    if not got:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("attach_not_found"))
+    body, media_type = got
+    return Response(
+        content=body,
         media_type=media_type,
-        filename=str(m.media_original_name or path.name)[:255],
+        headers={
+            "Content-Disposition": f'inline; filename="{str(m.media_original_name or "media")[:180]}"',
+        },
     )
 
 
@@ -12779,3 +13680,74 @@ async def api_chat_copy_settings(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     return {"target_chat_id": target_id, "ok": True}
+
+
+# ---------- POST /api/chat/:id/transfer-ownership ----------
+@router.post("/chat/{chat_id}/transfer-ownership")
+async def api_chat_transfer_ownership(
+    chat_id: int,
+    body: dict,
+    user_id: int = Depends(require_init_data),
+    session: AsyncSession = Depends(get_db),
+):
+    """Передать владение чатом в Guard другому админу Telegram."""
+    chat = await session.get(Chat, int(chat_id))
+    if not chat or bool(getattr(chat, "is_log_chat", False)):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_detail("chat_not_found"))
+    if int(getattr(chat, "owner_user_id", 0) or 0) != int(user_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("transfer_not_owner"))
+
+    target_id = 0
+    if body.get("target_user_id") is not None:
+        try:
+            target_id = int(body.get("target_user_id"))
+        except (TypeError, ValueError):
+            target_id = 0
+    if target_id <= 0:
+        uname = _norm_username(str(body.get("target_username") or body.get("username") or ""))
+        if uname:
+            target_user = await resolve_username_lookup(session, uname)
+            if target_user:
+                target_id = int(getattr(target_user, "telegram_id", 0) or 0)
+    if target_id <= 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("transfer_target_required"))
+
+    from app.services.chat_ownership_transfer import transfer_chat_ownership
+
+    try:
+        result = await transfer_chat_ownership(
+            session,
+            chat_id=int(chat_id),
+            from_user_id=int(user_id),
+            to_user_id=int(target_id),
+        )
+    except ValueError as e:
+        code = str(e)
+        if code == "not_owner":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_detail("transfer_not_owner"))
+        if code == "same_owner":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("transfer_same_owner"))
+        if code == "target_not_tg_admin":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("invite_target_not_tg_admin"))
+        if code == "target_user_unknown":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("invite_user_start_first"))
+        if code.startswith("target_chat_limit:"):
+            parts = code.split(":")
+            cur = parts[1] if len(parts) > 1 else "0"
+            lim = parts[2] if len(parts) > 2 else "0"
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=err_detail("transfer_target_chat_limit", current=cur, limit=lim),
+            )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("transfer_failed"))
+
+    await record_manager_action(
+        session,
+        chat_id=int(chat_id),
+        user_id=int(user_id),
+        action_kind="ownership_transferred",
+        target=int(target_id),
+        meta={"old_owner": int(user_id), "new_owner": int(target_id)},
+    )
+    await session.commit()
+    return {"ok": True, **result}

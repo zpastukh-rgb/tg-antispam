@@ -5,7 +5,6 @@ import { useI18n } from 'vue-i18n'
 import { useApi, messageFromApiError } from '../composables/useApi'
 import { api as rawApi } from '../api/client'
 import NavIcon from '../components/NavIcon.vue'
-import GuardBlueLoadingState from '../components/GuardBlueLoadingState.vue'
 import SecurityPinGateModal from '../components/SecurityPinGateModal.vue'
 import SubscriptionManagementPanel from '../components/SubscriptionManagementPanel.vue'
 import { useDashboardSection } from '../composables/useDashboardSection'
@@ -20,9 +19,128 @@ import {
   telegramVerticalSwipeGestureBegin,
   telegramVerticalSwipeGestureEnd,
   telegramVerticalSwipeGestureResetAll,
+  setTelegramDashboardCarouselLock,
 } from '../utils/telegramVerticalSwipeLock.js'
 import { useModalScrollLock } from '../composables/useModalScrollLock'
+import { readSessionJson, writeSessionJson, readLocalJson, writeLocalJson } from '../utils/sessionCache.js'
+import { prefetchChatsList } from '../utils/chatsListCache.js'
+import { prefetchReportsView } from '../utils/reportsViewCache.js'
+import { prefetchAdminCabinet, readMeProfileCache, writeMeProfileCache, readAurumTokensCache, writeAurumTokensCache, prefetchMeProfile } from '../utils/adminViewCache.js'
+import { prefetchSettingsBoot } from '../utils/settingsViewCache.js'
+import {
+  formatHistoryDateTime,
+  mergePaymentHistoryRows,
+  paymentProviderLabel,
+  paymentStatusLabel,
+  tokenReasonLabel,
+} from '../utils/historyLabels.js'
 
+const ACTIVITY_SUMMARY_CACHE_KEY = 'guard.activity.summary.v2'
+const ME_PREMIUM_CACHE_KEY = 'guard.me.is_premium.v1'
+const ME_TARIFF_CACHE_KEY = 'guard.me.tariff.v1'
+
+function readMePremiumCache() {
+  try {
+    const raw = localStorage.getItem(ME_PREMIUM_CACHE_KEY)
+    if (raw === '1') return true
+    if (raw === '0') return false
+  } catch {
+    //
+  }
+  return null
+}
+
+function writeMePremiumCache(isPremium) {
+  try {
+    localStorage.setItem(ME_PREMIUM_CACHE_KEY, isPremium ? '1' : '0')
+  } catch {
+    //
+  }
+}
+
+function readMeTariffCache() {
+  try {
+    return String(localStorage.getItem(ME_TARIFF_CACHE_KEY) || '').trim().toLowerCase()
+  } catch {
+    //
+  }
+  return ''
+}
+
+function writeMeTariffCache(tariff) {
+  try {
+    localStorage.setItem(ME_TARIFF_CACHE_KEY, String(tariff || 'free').toLowerCase())
+  } catch {
+    //
+  }
+}
+
+function isPremiumTariffCode(code) {
+  return ['premium', 'pro', 'business'].includes(String(code || '').toLowerCase())
+}
+
+function syncMeTariffHintsFromProfile(profile) {
+  if (!profile || typeof profile !== 'object') return
+  const tariff = String(profile.tariff || 'free').toLowerCase()
+  writeMeTariffCache(tariff)
+  writeMePremiumCache(!!profile.is_premium || isPremiumTariffCode(tariff))
+  meTariffHint.value = tariff
+  mePremiumHint.value = !!profile.is_premium || isPremiumTariffCode(tariff)
+}
+
+function syncMeTariffHintsFromTariffCode(tariff) {
+  const code = String(tariff || '').trim().toLowerCase()
+  if (!code) return
+  writeMeTariffCache(code)
+  meTariffHint.value = code
+  if (isPremiumTariffCode(code)) {
+    writeMePremiumCache(true)
+    mePremiumHint.value = true
+  }
+}
+
+function pickMaxNum(...vals) {
+  let best = 0
+  for (const v of vals) {
+    const n = Number(v)
+    if (Number.isFinite(n)) best = Math.max(best, n)
+  }
+  return best
+}
+
+function isUsableActivitySummaryCache(cached) {
+  if (!cached || typeof cached !== 'object') return false
+  if (!cached.today || typeof cached.today !== 'object') return false
+  return (
+    typeof cached.protection_active === 'boolean' &&
+    typeof cached.groups_count !== 'undefined' &&
+    typeof cached.groups_limit !== 'undefined'
+  )
+}
+
+function mergeActivitySummaryFromMe(summary, profile) {
+  if (!profile || typeof profile !== 'object') return summary
+  const s = summary && typeof summary === 'object' ? summary : {}
+  return {
+    ...s,
+    tariff: String(s.tariff || profile.tariff || 'free'),
+    chats_count: pickMaxNum(s.chats_count, s.chats_count_total, profile.chats_count, profile.chats_count_total),
+    chats_count_total: pickMaxNum(s.chats_count_total, s.chats_count, profile.chats_count_total, profile.chats_count),
+    groups_count: pickMaxNum(s.groups_count, profile.groups_count),
+    channels_count: pickMaxNum(s.channels_count, profile.channels_count),
+    groups_limit: pickMaxNum(s.groups_limit, s.group_limit, profile.groups_limit, profile.group_limit),
+    channels_limit: pickMaxNum(s.channels_limit, s.channel_limit, profile.channels_limit, profile.channel_limit),
+    group_limit: pickMaxNum(s.group_limit, s.groups_limit, profile.group_limit, profile.groups_limit),
+    channel_limit: pickMaxNum(s.channel_limit, s.channels_limit, profile.channel_limit, profile.channels_limit),
+    chat_limit: pickMaxNum(s.chat_limit, s.group_limit, profile.chat_limit, profile.group_limit),
+    groups_usage_progress:
+      Number(s.groups_usage_progress || profile.groups_usage_progress || s.usage_progress || profile.usage_progress || 0),
+    channels_usage_progress: Number(s.channels_usage_progress || profile.channels_usage_progress || 0),
+    usage_progress: Number(s.usage_progress || s.groups_usage_progress || profile.groups_usage_progress || profile.usage_progress || 0),
+    today: { ...(s.today || {}), ...(typeof s.today === 'object' ? s.today : {}) },
+    yesterday: { ...(s.yesterday || {}), ...(typeof s.yesterday === 'object' ? s.yesterday : {}) },
+  }
+}
 const router = useRouter()
 const route = useRoute()
 const { t, tm } = useI18n()
@@ -33,8 +151,44 @@ const bootError = ref('')
 const dashCtx = useDashboardSection()
 /** Единое сравниваемое значение для шаблона (вкладки главной). */
 const dashSection = computed(() => dashCtx.dashboardSection.value || 'account')
+const historyIsEn = computed(() => t('common.locale_code') === 'en')
+function fmtHistoryDate(iso) {
+  return formatHistoryDateTime(iso, historyIsEn.value)
+}
+function fmtHistoryProvider(item) {
+  return paymentProviderLabel(item, t)
+}
+function fmtHistoryPaymentStatus(status) {
+  return paymentStatusLabel(status, t)
+}
+function fmtHistoryTokenReason(reason) {
+  return tokenReasonLabel(reason, t)
+}
+function historyPaymentTitle(item) {
+  if (String(item?.kind || '').toLowerCase() === 'promo' || String(item?.provider || '').toLowerCase() === 'promo') {
+    const parts = []
+    const days = Number(item?.period_days || 0)
+    const months = Number(item?.months || 0)
+    if (days > 0) parts.push(t('history.promo_period_days', { n: days }))
+    else if (months > 0) parts.push(t('dashboard.billing.months_short', { n: months }))
+    const ga = Number(item?.grant_aurum || 0)
+    const gt = Number(item?.grant_tokens || 0)
+    if (ga > 0) parts.push(`${fmtAmount(ga)} AURUM ✨`)
+    if (gt > 0) parts.push(`${fmtAmount(gt)} ⚡`)
+    return parts.length ? parts.join(' · ') : t('billing.method.promo')
+  }
+  if (String(item?.tariff || '').toLowerCase() === 'tokens') {
+    return `${fmtAmount(item.amount_rub)} ₽ · ${item.months} ⚡`
+  }
+  return `${fmtAmount(item.amount_rub)} ₽ · ${t('dashboard.billing.months_short', { n: item.months })}`
+}
 const billingFromGroupStats = dashCtx.billingFromGroupStats
-const me = ref(null)
+const meCachedBoot = readMeProfileCache()
+const me = ref(meCachedBoot || null)
+const aurumTokensHint = ref(readAurumTokensCache())
+const meTariffHint = ref(readMeTariffCache())
+const mePremiumHint = ref(readMePremiumCache())
+if (meCachedBoot) syncMeTariffHintsFromProfile(meCachedBoot)
 const {
   pinGateOpen,
   pinGateInput,
@@ -87,6 +241,7 @@ const showPremiumAurumShowcaseModal = ref(false)
 const tokensInfoTitle = ref('')
 const tokensInfoParagraphs = ref([])
 const subscriptionInfoWrapRef = ref(null)
+const subscriptionInfoScrollRef = ref(null)
 /** Якорь: выбор периода подписки (лендинг Taplink → скролл сюда) */
 const billingPremiumPlansRef = ref(null)
 const billingPremiumPitchRef = ref(null)
@@ -256,6 +411,17 @@ const activitySummary = ref({
   today: { deleted: 0, muted: 0, banned: 0, enabled_metrics: { delete: true, mute: false, ban: false } },
   yesterday: { deleted: 0, muted: 0, banned: 0, observed: 0, joins: 0 },
 })
+try {
+  const cachedSummary =
+    readSessionJson(ACTIVITY_SUMMARY_CACHE_KEY, 10 * 60 * 1000) ||
+    readLocalJson(ACTIVITY_SUMMARY_CACHE_KEY, 24 * 60 * 60 * 1000)
+  if (isUsableActivitySummaryCache(cachedSummary)) {
+    activitySummary.value = { ...activitySummary.value, ...cachedSummary }
+    syncMeTariffHintsFromTariffCode(cachedSummary.tariff)
+  }
+} catch {
+  //
+}
 const activityJournal = ref([])
 const activityChats = ref([])
 const showActivityModal = ref(false)
@@ -282,8 +448,8 @@ const showPartnerPayoutModal = ref(false)
 const updatesRoadmapExpanded = ref({})
 let activityTimer = null
 let updatesTimer = null
-/** Счётчик запросов activitySummary: не применять устаревший ответ при гонке параллельных вызовов */
-let activitySummaryFetchGen = 0
+/** Один in-flight запрос summary — без гонок и «отмены» ответа. */
+let activitySummaryInFlight = null
 /** Время успешного ответа activity summary (для пропуска лишнего refetch при возврате на вкладку). */
 let lastActivitySummaryOkAt = 0
 
@@ -618,24 +784,32 @@ function onHomeHeroDocumentVisibilityChange() {
   syncHomeHeroAutoplay()
 }
 
+const STAT_BROADCAST_TRANS_MS = 460
+
 function stepStatBroadcast(delta) {
   if (!accountShowBroadcastMiniCard.value) return
   const cur = homeStatBroadcastSlide.value
   const n = cur + delta
   const next = n <= 0 ? 0 : n >= 1 ? 1 : n
   if (next === cur) return
-  if (delta < 0) {
-    homeStatBroadcastInstant.value = true
-    homeStatBroadcastSlide.value = next
-    void nextTick(() => {
-      requestAnimationFrame(() => {
-        homeStatBroadcastInstant.value = false
-      })
-    })
-  } else {
-    homeStatBroadcastInstant.value = false
-    homeStatBroadcastSlide.value = next
-  }
+  homeStatBroadcastInstant.value = false
+  homeStatBroadcastSlide.value = next
+}
+
+function clampStatBroadcastDragDx(rawDx) {
+  const cur = homeStatBroadcastSlide.value
+  let dx = Number(rawDx) || 0
+  const limit = 120
+  if (cur === 0 && dx > 0) dx = Math.min(limit, dx * 0.28)
+  if (cur === 1 && dx < 0) dx = Math.max(-limit, dx * 0.28)
+  return Math.max(-limit, Math.min(limit, dx))
+}
+
+function releaseStatBroadcastDragDx() {
+  homeStatBroadcastInstant.value = false
+  requestAnimationFrame(() => {
+    statBroadcastDragDx.value = 0
+  })
 }
 
 function statBroadcastTrackStyle() {
@@ -651,7 +825,7 @@ function statBroadcastTrackStyle() {
     transition:
       dragging || instant
         ? 'none'
-        : 'transform 0.45s cubic-bezier(0.22, 1, 0.36, 1)',
+        : `transform ${STAT_BROADCAST_TRANS_MS}ms cubic-bezier(0.22, 1, 0.36, 1)`,
   }
 }
 
@@ -683,7 +857,7 @@ function onStatBroadcastRailPointerDown(e) {
 
 function onStatBroadcastRailPointerMove(e) {
   if (!statBroadcastDragging.value || e.pointerId !== statBroadcastPointerId) return
-  const dx = e.clientX - statBroadcastPointerStartX
+  const dx = clampStatBroadcastDragDx(e.clientX - statBroadcastPointerStartX)
   statBroadcastDragDx.value = dx
   if (Math.abs(dx) > 14) {
     statBroadcastJustDragged.value = true
@@ -697,7 +871,7 @@ function onStatBroadcastRailPointerMove(e) {
 
 function onStatBroadcastRailPointerUp(e) {
   if (statBroadcastPointerId === null || e.pointerId !== statBroadcastPointerId) return
-  telegramVerticalSwipeGestureEnd(e.pointerId)
+  telegramVerticalSwipeGestureEnd(e.pointerId, { delayMs: STAT_BROADCAST_TRANS_MS })
   try {
     e.currentTarget?.releasePointerCapture?.(e.pointerId)
   } catch {
@@ -706,13 +880,16 @@ function onStatBroadcastRailPointerUp(e) {
   const dx = statBroadcastDragDx.value
   statBroadcastDragging.value = false
   statBroadcastPointerId = null
-  statBroadcastDragDx.value = 0
   const th = 52
   const cur = homeStatBroadcastSlide.value
   if (dx < -th && cur === 0) {
     stepStatBroadcast(1)
+    releaseStatBroadcastDragDx()
   } else if (dx > th && cur === 1) {
     stepStatBroadcast(-1)
+    releaseStatBroadcastDragDx()
+  } else {
+    releaseStatBroadcastDragDx()
   }
 }
 
@@ -795,7 +972,7 @@ function moderationReasonRu(reason) {
   }
   const knownKeys = new Set([
     'link', 'media', 'buttons', 'mention', 'stopword', 'profanity', 'jobs', 'casino',
-    'politics', 'religion', 'esoteric', 'silence', 'antinakrutka', 'captcha', 'flood',
+    'politics', 'religion', 'esoteric', 'silence', 'antinakrutka', 'captcha', 'flood', 'mech_flood',
     'global_antispam', 'raid', 'spam', 'forward',
   ])
   if (knownKeys.has(raw)) return keyFor(raw) || raw
@@ -979,10 +1156,26 @@ function filterStatCardTone(tone) {
 }
 
 const totalTokens = computed(() => {
-  const total = Number(me.value?.aurum_tokens || 0) + Number(me.value?.partner_tokens || 0)
+  const aurum = Number(me.value?.aurum_tokens ?? aurumTokensHint.value ?? 0)
+  const total = aurum + Number(me.value?.partner_tokens || 0)
   return String(Math.max(0, Math.round(total)))
 })
-const tariffIsPremium = computed(() => ['premium', 'pro', 'business'].includes((me.value?.tariff || 'free').toLowerCase()))
+
+const displayAurumTokens = computed(() => {
+  const live = me.value?.aurum_tokens
+  if (live != null && Number.isFinite(Number(live))) return Number(live)
+  if (aurumTokensHint.value != null) return Number(aurumTokensHint.value)
+  return 0
+})
+const effectiveTariffCode = computed(() => {
+  if (me.value?.tariff) return String(me.value.tariff).toLowerCase()
+  const summaryTariff = String(activitySummary.value?.tariff || '').toLowerCase()
+  if (summaryTariff && summaryTariff !== 'free') return summaryTariff
+  if (meTariffHint.value) return meTariffHint.value
+  if (mePremiumHint.value === true) return 'premium'
+  return 'free'
+})
+const tariffIsPremium = computed(() => isPremiumTariffCode(effectiveTariffCode.value))
 /** 7-дневный Premium-триал: можно ли активировать (FREE + ни разу не активировал + окно открыто). */
 const trialEligible = computed(() => !!me.value && !!me.value.trial_eligible)
 /** Триал сейчас идёт (юзер активировал, осталось N дней Premium бесплатно). */
@@ -1088,11 +1281,19 @@ const HOME_HERO_TRACK_SLIDES = computed(() => {
 })
 
 watch(
+  () => dashboardAvatarSrc.value,
+  () => {
+    preloadDashboardAvatar()
+  },
+)
+
+watch(
   () => HOME_HERO_SLIDES.value.map((s) => s.src).join('\0'),
   () => {
+    preloadHomeHeroLeadImage()
     homeHeroStartedAfterVisible = false
     resetHomeHeroToFirstSlide()
-    if (dashCtx.dashboardSection.value === 'account' && me.value) {
+    if (dashCtx.dashboardSection.value === 'account' && hasInitData.value) {
       void nextTick(() => {
         setupHomeHeroVisibilityObserver()
         syncHomeHeroAutoplay()
@@ -1112,14 +1313,37 @@ const dashboardAvatarSrc = computed(() => {
   const base = import.meta.env.BASE_URL
   return tariffIsPremium.value ? `${base}premium-guard-emblem.png` : `${base}avatar-free.png`
 })
+
+function preloadDashboardAvatar() {
+  if (typeof window === 'undefined') return
+  const img = new Image()
+  img.decoding = 'async'
+  img.loading = 'eager'
+  img.src = dashboardAvatarSrc.value
+}
+
+function preloadHomeHeroLeadImage() {
+  if (typeof window === 'undefined') return
+  const lead = HOME_HERO_SLIDES.value?.[0]
+  if (!lead?.src) return
+  const img = new Image()
+  img.decoding = 'async'
+  img.loading = 'eager'
+  img.src = lead.src
+}
 /** Уникальные id для SVG-градиентов статуса защиты */
 const protCheckGradId = `prot-ok-${Math.random().toString(36).slice(2, 11)}`
 const protOffGradId = `prot-off-${Math.random().toString(36).slice(2, 11)}`
 const activityChatsCount = computed(() => Number(activitySummary.value?.chats_count || 0))
 /** Группы с включённым Guard и активным подключением (не на паузе) — «Защищено сегодня». */
-const activityProtectedGroupsCount = computed(() =>
-  Math.max(0, Math.round(Number(activitySummary.value?.protected_groups_count ?? 0))),
-)
+const activityProtectedGroupsCount = computed(() => {
+  const protectedN = Math.max(0, Math.round(Number(activitySummary.value?.protected_groups_count ?? 0)))
+  if (protectedN > 0) return protectedN
+  if (activitySummary.value?.protection_active) {
+    return Math.max(0, Math.round(Number(activityGroupsCount.value || 0)))
+  }
+  return 0
+})
 const activityGroupsCount = computed(() => Number((activitySummary.value?.groups_count ?? activitySummary.value?.chats_count) || 0))
 const activityChannelsCount = computed(() => Number(activitySummary.value?.channels_count || 0))
 const activityGroupsLimit = computed(() => Number((activitySummary.value?.groups_limit ?? activitySummary.value?.group_limit ?? activitySummary.value?.chat_limit) || 0))
@@ -1350,6 +1574,8 @@ function ruGroupsProtectedLabel(count) {
 }
 
 function goManageChats() {
+  void prefetchChatsList(rawApi, 'all')
+  window.dispatchEvent(new CustomEvent('guard:prefetch-chats', { detail: { mode: 'all' } }))
   router.push({ path: '/chats' })
 }
 
@@ -1403,6 +1629,127 @@ watch(showUpdatesRoadmapModal, (open) => {
 const UPDATES_HOME_PREVIEW_N = 3
 
 const UPDATES_SLIDES = computed(() => [
+  {
+    key: 'forward_filter',
+    version: '3.3',
+    publishedAt: '2026-05-25T16:00:00+03:00',
+    headline: t('dashboard.feed_items.forward_filter.headline'),
+    teaser: t('dashboard.feed_items.forward_filter.teaser'),
+    body: t('dashboard.feed_items.forward_filter.body'),
+    primaryLabel: null,
+    primaryAction: null,
+    imageUrl: null,
+  },
+  {
+    key: 'antiflood',
+    version: '3.2',
+    publishedAt: '2026-05-24T14:00:00+03:00',
+    headline: t('dashboard.feed_items.antiflood.headline'),
+    teaser: t('dashboard.feed_items.antiflood.teaser'),
+    body: t('dashboard.feed_items.antiflood.body'),
+    primaryLabel: null,
+    primaryAction: null,
+    imageUrl: null,
+  },
+  {
+    key: 'mech_antispam',
+    version: '3.1',
+    publishedAt: '2026-05-23T17:30:00+03:00',
+    headline: t('dashboard.feed_items.mech_antispam.headline'),
+    teaser: t('dashboard.feed_items.mech_antispam.teaser'),
+    body: t('dashboard.feed_items.mech_antispam.body'),
+    primaryLabel: null,
+    primaryAction: null,
+    imageUrl: null,
+  },
+  {
+    key: 'antinakrutka',
+    version: '3.0',
+    publishedAt: '2026-05-23T10:00:00+03:00',
+    headline: t('dashboard.feed_items.antinakrutka.headline'),
+    teaser: t('dashboard.feed_items.antinakrutka.teaser'),
+    body: t('dashboard.feed_items.antinakrutka.body'),
+    primaryLabel: null,
+    primaryAction: null,
+    imageUrl: null,
+  },
+  {
+    key: 'chats_connected_ui',
+    version: '2.9',
+    publishedAt: '2026-05-19T21:30:00+03:00',
+    headline: t('dashboard.feed_items.chats_connected_ui.headline'),
+    teaser: t('dashboard.feed_items.chats_connected_ui.teaser'),
+    body: t('dashboard.feed_items.chats_connected_ui.body'),
+    primaryLabel: null,
+    primaryAction: null,
+    imageUrl: null,
+  },
+  {
+    key: 'join_requests_split',
+    version: '2.8',
+    publishedAt: '2026-05-19T11:00:00+03:00',
+    headline: t('dashboard.feed_items.join_requests_split.headline'),
+    teaser: t('dashboard.feed_items.join_requests_split.teaser'),
+    body: t('dashboard.feed_items.join_requests_split.body'),
+    primaryLabel: null,
+    primaryAction: null,
+    imageUrl: null,
+  },
+  {
+    key: 'join_filter_free',
+    version: '2.7',
+    publishedAt: '2026-05-18T15:00:00+03:00',
+    headline: t('dashboard.feed_items.join_filter_free.headline'),
+    teaser: t('dashboard.feed_items.join_filter_free.teaser'),
+    body: t('dashboard.feed_items.join_filter_free.body'),
+    primaryLabel: null,
+    primaryAction: null,
+    imageUrl: null,
+  },
+  {
+    key: 'join_captcha_free',
+    version: '2.6',
+    publishedAt: '2026-05-17T10:30:00+03:00',
+    headline: t('dashboard.feed_items.join_captcha_free.headline'),
+    teaser: t('dashboard.feed_items.join_captcha_free.teaser'),
+    body: t('dashboard.feed_items.join_captcha_free.body'),
+    primaryLabel: null,
+    primaryAction: null,
+    imageUrl: null,
+  },
+  {
+    key: 'chat_connect',
+    version: '2.5',
+    publishedAt: '2026-05-16T17:35:00+03:00',
+    headline: t('dashboard.feed_items.chat_connect.headline'),
+    teaser: t('dashboard.feed_items.chat_connect.teaser'),
+    body: t('dashboard.feed_items.chat_connect.body'),
+    primaryLabel: null,
+    primaryAction: null,
+    imageUrl: null,
+  },
+  {
+    key: 'broadcasts_adm',
+    version: '2.4.1',
+    publishedAt: '2026-05-15T13:50:00+03:00',
+    headline: t('dashboard.feed_items.broadcasts_adm.headline'),
+    teaser: t('dashboard.feed_items.broadcasts_adm.teaser'),
+    body: t('dashboard.feed_items.broadcasts_adm.body'),
+    primaryLabel: null,
+    primaryAction: null,
+    imageUrl: null,
+  },
+  {
+    key: 'broadcast_media',
+    version: '2.4.0',
+    publishedAt: '2026-05-14T09:15:00+03:00',
+    headline: t('dashboard.feed_items.broadcast_media.headline'),
+    teaser: t('dashboard.feed_items.broadcast_media.teaser'),
+    body: t('dashboard.feed_items.broadcast_media.body'),
+    primaryLabel: null,
+    primaryAction: null,
+    imageUrl: null,
+  },
   {
     key: 'stats_growth',
     version: '2.4',
@@ -1685,6 +2032,16 @@ function applyMeState(nextMe) {
   const wasPremium = !!me.value?.is_premium
   const prevUntilTs = Date.parse(String(me.value?.subscription_until || '')) || 0
   me.value = nextMe || null
+  if (me.value) {
+    writeMeProfileCache(me.value)
+    if (me.value.aurum_tokens != null) {
+      aurumTokensHint.value = Number(me.value.aurum_tokens || 0)
+      writeAurumTokensCache(aurumTokensHint.value)
+    }
+    syncMeTariffHintsFromProfile(me.value)
+    activitySummary.value = mergeActivitySummaryFromMe(activitySummary.value, me.value)
+    if (lastActivitySummaryOkAt <= 0) void loadActivitySummaryInitial()
+  }
   const nowPremium = !!me.value?.is_premium
   const nowUntilTs = Date.parse(String(me.value?.subscription_until || '')) || 0
   if (waitPremiumActivationAfterPayment.value && nowPremium) {
@@ -1786,33 +2143,142 @@ function updateBodyScrollLock() {
   }
 }
 
+async function fetchActivitySummary() {
+  if (activitySummaryInFlight) return activitySummaryInFlight
+  activitySummaryInFlight = (async () => {
+    try {
+      const data = await rawApi.activitySummary()
+      activitySummary.value = mergeActivitySummaryFromMe(data, me.value)
+      syncMeTariffHintsFromTariffCode(activitySummary.value?.tariff)
+      lastActivitySummaryOkAt = Date.now()
+      writeSessionJson(ACTIVITY_SUMMARY_CACHE_KEY, activitySummary.value)
+      writeLocalJson(ACTIVITY_SUMMARY_CACHE_KEY, activitySummary.value)
+      return data
+    } catch (e) {
+      try {
+        console.warn('[Guard] /api/activity/summary failed', e?.status, e?.body?.detail || e?.message || e)
+      } catch {
+        //
+      }
+      throw e
+    } finally {
+      activitySummaryInFlight = null
+    }
+  })()
+  return activitySummaryInFlight
+}
+
+async function loadActivitySummaryInitial() {
+  try {
+    await fetchActivitySummary()
+  } catch {
+    //
+  }
+}
+
 async function loadMeInitial() {
   if (!hasInitData.value) return
   bootError.value = ''
   error.value = null
-  loading.value = true
-  const actGen = ++activitySummaryFetchGen
   try {
-    const [meRes, actRes] = await Promise.allSettled([rawApi.me(), rawApi.activitySummary()])
-    if (meRes.status === 'fulfilled') {
-      applyMeState(meRes.value)
-    } else {
-      me.value = null
-      const e = meRes.reason
-      const d = String(e?.body?.detail || e?.message || '').trim()
-      bootError.value =
-        d && !/^load failed$/i.test(d)
-          ? d
-          : t('errors.cannot_load_profile')
-    }
-    if (actRes.status === 'fulfilled' && actGen === activitySummaryFetchGen) {
-      activitySummary.value = actRes.value
-      lastActivitySummaryOkAt = Date.now()
-    }
-  } finally {
-    loading.value = false
+    const meRes = await rawApi.me()
+    applyMeState(meRes)
+  } catch (e) {
+    me.value = null
+    const d = String(e?.body?.detail || e?.message || '').trim()
+    bootError.value =
+      d && !/^load failed$/i.test(d)
+        ? d
+        : t('errors.cannot_load_profile')
   }
 }
+
+let dashboardBootFetchStarted = false
+function startDashboardBootFetch() {
+  if (dashboardBootFetchStarted || !hasInitData.value) return
+  dashboardBootFetchStarted = true
+  preloadDashboardAvatar()
+  preloadHomeHeroLeadImage()
+  void prefetchMeProfile(rawApi)
+  void prefetchSettingsBoot(rawApi)
+  void loadActivitySummaryInitial()
+  void loadMeInitial()
+  void prefetchChatsList(rawApi, 'all')
+  void prefetchReportsView(rawApi)
+  void prefetchAdminCabinet(rawApi)
+}
+
+watch(
+  tariffIsPremium,
+  () => {
+    preloadDashboardAvatar()
+    preloadHomeHeroLeadImage()
+  },
+  { immediate: true },
+)
+
+watch(
+  hasInitData,
+  (ready) => {
+    if (ready) startDashboardBootFetch()
+  },
+  { immediate: true },
+)
+
+async function consumeDashboardDeepLinks() {
+  if (!me.value) return
+  if (String(route.query?.report || '') === '1') {
+    try {
+      await openActivityDetails()
+    } catch {
+      //
+    }
+    try {
+      const q = { ...route.query }
+      delete q.report
+      router.replace({ path: route.path, query: q }).catch(() => {})
+    } catch {
+      //
+    }
+  }
+  if (String(route.query?.topup || '') === '1') {
+    try {
+      if (tariffIsPremium.value) showPremiumAurumShowcaseModal.value = true
+      else showFreeAurumGateModal.value = true
+    } catch {
+      //
+    }
+    try {
+      const q = { ...route.query }
+      delete q.topup
+      router.replace({ path: route.path, query: q }).catch(() => {})
+    } catch {
+      //
+    }
+  }
+  if (String(route.query?.trial || '') === '1') {
+    try {
+      const q = { ...route.query }
+      delete q.trial
+      router.replace({ path: route.path, query: q }).catch(() => {})
+    } catch {
+      //
+    }
+    if (trialEligible.value && !tariffIsPremium.value) {
+      try {
+        await activateTrialClick()
+      } catch {
+        //
+      }
+    } else if (trialActive.value) {
+      showToast(t('dashboard.trial.already_active_toast'))
+    }
+  }
+}
+
+watch(me, (profile) => {
+  if (profile) void consumeDashboardDeepLinks()
+})
 
 async function loadSpikeAlertsState() {
   try {
@@ -1824,11 +2290,19 @@ async function loadSpikeAlertsState() {
 }
 
 function openSharedThreatChats() {
+  void prefetchChatsList(rawApi, 'shared')
+  window.dispatchEvent(new CustomEvent('guard:prefetch-chats', { detail: { mode: 'shared' } }))
   router.push({ path: '/chats', query: { cabinet: 'delegated', threat: '1' } })
 }
 
 onMounted(async () => {
-  await Promise.all([loadMeInitial(), loadSpikeAlertsState()])
+  void loadSpikeAlertsState()
+  if (dashCtx.dashboardSection.value === 'account') {
+    void nextTick(() => {
+      setupHomeHeroVisibilityObserver()
+      syncHomeHeroAutoplay()
+    })
+  }
   if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
     window.requestIdleCallback(() => preloadTokenLandingOrbit(), { timeout: 2500 })
   } else {
@@ -1839,43 +2313,6 @@ onMounted(async () => {
     await ensurePartnerData()
     await ensureReferralPeople()
     await ensurePartnerPayouts()
-  }
-  // Открыть модалку «Подробный отчёт по защите» из ?report=1
-  // (фиолетовый ADM → кнопка «Отчёты»).
-  if (String(route.query?.report || '') === '1') {
-    try { await openActivityDetails() } catch { /* */ }
-    try {
-      const q = { ...route.query }
-      delete q.report
-      router.replace({ path: route.path, query: q }).catch(() => {})
-    } catch { /* */ }
-  }
-  // Открыть модалку «Токены AURUM» из ?topup=1
-  // (синий ADM → «+ Пополнить» в настройках/состоянии подписки).
-  if (String(route.query?.topup || '') === '1') {
-    try {
-      if (tariffIsPremium.value) showPremiumAurumShowcaseModal.value = true
-      else showFreeAurumGateModal.value = true
-    } catch { /* */ }
-    try {
-      const q = { ...route.query }
-      delete q.topup
-      router.replace({ path: route.path, query: q }).catch(() => {})
-    } catch { /* */ }
-  }
-  // Открыть лендинг биллинга и автоматически активировать триал из ?trial=1
-  // (DM-кнопка «🚀 Попробовать 7 дней бесплатно» из reminders).
-  if (String(route.query?.trial || '') === '1') {
-    try {
-      const q = { ...route.query }
-      delete q.trial
-      router.replace({ path: route.path, query: q }).catch(() => {})
-    } catch { /* */ }
-    if (trialEligible.value && !tariffIsPremium.value) {
-      try { await activateTrialClick() } catch { /* */ }
-    } else if (trialActive.value) {
-      showToast(t('dashboard.trial.already_active_toast'))
-    }
   }
   if (String(route.query?.updates || '') === '1') {
     showUpdatesRoadmapModal.value = true
@@ -1939,9 +2376,9 @@ watch(
 )
 
 watch(
-  () => [dashCtx.dashboardSection.value, !!me.value],
-  async ([section, hasMe]) => {
-    if (section !== 'account' || !hasMe) {
+  () => [dashCtx.dashboardSection.value, hasInitData.value],
+  async ([section, ready]) => {
+    if (section !== 'account' || !ready) {
       teardownHomeHeroVisibilityObserver()
       homeHeroCarouselInView.value = false
       clearHomeHeroAutoplayFull()
@@ -1949,6 +2386,7 @@ watch(
     }
     await nextTick()
     setupHomeHeroVisibilityObserver()
+    syncHomeHeroAutoplay()
   },
   { immediate: true },
 )
@@ -1956,6 +2394,14 @@ watch(
 watch(accountShowBroadcastMiniCard, () => {
   homeStatBroadcastSlide.value = 0
 })
+
+watch(
+  () => route.path === '/' && dashCtx.dashboardSection.value === 'account',
+  (on) => {
+    setTelegramDashboardCarouselLock(!!on)
+  },
+  { immediate: true },
+)
 
 watch(
   () => [
@@ -2265,25 +2711,6 @@ function fmtAmount(v) {
   return Number.isInteger(n) ? String(n) : n.toFixed(2)
 }
 
-function providerLabel(v) {
-  const raw = String(v || '').toLowerCase()
-  if (!raw) return '—'
-  if (raw.includes('yookassa')) return 'YooKassa'
-  return raw
-}
-
-function tokenReasonLabel(v) {
-  const raw = String(v || '').trim().toLowerCase()
-  if (!raw) return '—'
-  if (raw === 'tokens_purchase') return t('history.kinds.tokens_purchase')
-  if (raw === 'broadcast_bonus') return t('history.kinds.broadcast_bonus')
-  if (raw === 'broadcast_sub') return t('history.kinds.broadcast_sub')
-  if (raw === 'daily_burn') return t('history.kinds.daily_burn')
-  if (raw === 'bonus_to_sub') return t('history.kinds.bonus_to_sub')
-  if (raw === 'bonus_to_sub_target') return t('history.kinds.bonus_to_sub_target')
-  return raw
-}
-
 async function ensurePartnerData() {
   if (partnerData.value || partnerLoading.value) return
   partnerLoading.value = true
@@ -2530,7 +2957,8 @@ watch(
     }
     if (section === 'account') {
       if (!hasInitData.value || !me.value) return
-      if (Date.now() - lastActivitySummaryOkAt > 4500) refreshActivitySummarySilent()
+      if (lastActivitySummaryOkAt <= 0) return
+      if (Date.now() - lastActivitySummaryOkAt > 4500) void refreshActivitySummarySilent()
     }
   },
   { immediate: true },
@@ -2687,12 +3115,8 @@ function onDashboardStatsPeriodChange(ev) {
 
 async function refreshActivitySummarySilent() {
   if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
-  const gen = ++activitySummaryFetchGen
   try {
-    const data = await rawApi.activitySummary()
-    if (gen !== activitySummaryFetchGen) return
-    activitySummary.value = data
-    lastActivitySummaryOkAt = Date.now()
+    await fetchActivitySummary()
     if (dashboardStatsPeriod.value !== 'today') {
       try {
         dashboardPeriodBreakdown.value = await rawApi.activityBreakdown(dashboardStatsPeriod.value, 'all')
@@ -2700,12 +3124,8 @@ async function refreshActivitySummarySilent() {
         dashboardPeriodBreakdown.value = null
       }
     }
-  } catch (e) {
-    try {
-      console.warn('[Guard] /api/activity/summary failed', e?.status, e?.body?.detail || e?.message || e)
-    } catch {
-      //
-    }
+  } catch {
+    //
   }
 }
 
@@ -2808,7 +3228,8 @@ function goBroadcastMiniCreate() {
     })
     return
   }
-  router.push({ path: '/admin', query: { admin_tab: 'broadcasts' } })
+  window.dispatchEvent(new CustomEvent('guard:prefetch-broadcasts'))
+  router.push({ path: '/admin', query: { ...route.query, tab: 'broadcasts', admin_tab: 'broadcasts' } })
 }
 
 function _apSchedActive(ap) {
@@ -3129,7 +3550,7 @@ function startActivityAutoRefresh() {
     }
     if (waitPremiumActivationAfterPayment.value) schedulePremiumActivationCheck()
   }
-  activityTimer = setInterval(tick, 3000)
+  activityTimer = setInterval(tick, 25000)
 }
 
 
@@ -3223,12 +3644,13 @@ async function loadHistoryIfNeeded() {
   if (historyLoadCompleted.value || historyLoading.value) return
   historyLoading.value = true
   try {
-    const [p, t] = await Promise.all([
+    const [p, tk, sub] = await Promise.all([
       fetchSilent(() => api.historyPayments()),
       fetchSilent(() => api.historyTokens()),
+      fetchSilent(() => api.historySubscription()).catch(() => ({ items: [] })),
     ])
-    historyPayments.value = p?.items || []
-    historyTokens.value = t?.items || []
+    historyPayments.value = mergePaymentHistoryRows(p?.items, sub?.items)
+    historyTokens.value = tk?.items || []
   } finally {
     historyLoading.value = false
     historyLoadCompleted.value = true
@@ -3452,11 +3874,11 @@ async function submitReceipt() {
     </div>
 
     <div
-      v-else-if="me"
+      v-else-if="hasInitData && !bootError && !error"
       class="relative isolate -mx-4 min-h-0 px-4 pb-1.5 pt-2 font-display md:-mx-6 md:px-6 md:pt-3"
     >
       <SubscriptionManagementPanel
-        v-if="dashSection === 'subscription'"
+        v-if="me && dashSection === 'subscription'"
         :profile="me"
         variant="page"
         @update:profile="applyMeState"
@@ -3486,6 +3908,9 @@ async function submitReceipt() {
                   :src="dashboardAvatarSrc"
                   alt=""
                   draggable="false"
+                  loading="eager"
+                  fetchpriority="high"
+                  decoding="async"
                   class="block h-28 w-28 max-h-[7rem] max-w-[7rem] object-contain object-top"
                   :class="!tariffIsPremium ? 'origin-top scale-[1.07]' : ''"
                   @dragstart.prevent
@@ -3634,7 +4059,7 @@ async function submitReceipt() {
                     <span aria-hidden="true">⚡</span> {{ t('dashboard.hero.aurum_heading') }}
                   </p>
                   <p class="mt-0.5 flex items-baseline gap-0.5 text-[18px] font-extrabold tabular-nums leading-none text-white">
-                    {{ fmtAmount(me?.aurum_tokens || 0) }}
+                    {{ fmtAmount(displayAurumTokens) }}
                     <span class="text-sm">✨</span>
                   </p>
                 </div>
@@ -4018,6 +4443,7 @@ async function submitReceipt() {
                       alt=""
                       draggable="false"
                       decoding="async"
+                      :loading="idx === 1 ? 'eager' : 'lazy'"
                       :fetchpriority="idx === 1 ? 'high' : 'low'"
                       class="pointer-events-none block h-full w-full max-w-none border-0 object-contain object-center outline-none ring-0 ring-offset-0 [box-shadow:none]"
                     />
@@ -5435,7 +5861,7 @@ async function submitReceipt() {
               {{ t('dashboard.billing.history_no_payments') }}
             </div>
             <div v-for="(item, idx) in historyPayments" :key="`dp-${idx}`" class="rounded-xl border border-slate-200 p-3 dark:border-white/[0.06] dark:bg-[#080a10]">
-              <p class="text-xs text-slate-500 dark:text-white/42">{{ item.created_at || '—' }}</p>
+              <p class="text-xs text-slate-500 dark:text-white/42">{{ fmtHistoryDate(item.created_at) }}</p>
               <div class="mt-1 flex items-center justify-between gap-2">
                 <div>
                   <p class="text-sm font-semibold text-slate-900 dark:text-white">
@@ -5443,14 +5869,14 @@ async function submitReceipt() {
                       {{ fmtAmount(item.amount_rub) }} ₽ · {{ item.months }} ⚡
                     </template>
                     <template v-else>
-                      {{ fmtAmount(item.amount_rub) }} ₽ · {{ t('dashboard.billing.months_short', { n: item.months }) }}
+                      {{ historyPaymentTitle(item) }}
                     </template>
                   </p>
                   <p class="text-xs text-slate-500 dark:text-white/42">
-                    {{ providerLabel(item.provider) }} · {{ item.status }}
+                    {{ fmtHistoryProvider(item) }} · {{ fmtHistoryPaymentStatus(item.status) }}
                   </p>
                 </div>
-                <div class="flex items-center gap-2">
+                <div v-if="String(item.kind || '').toLowerCase() !== 'promo'" class="flex items-center gap-2">
                   <button
                     v-if="item.receipt_url"
                     type="button"
@@ -5478,23 +5904,16 @@ async function submitReceipt() {
               {{ t('dashboard.billing.history_no_tokens') }}
             </div>
             <div v-for="(item, idx) in historyTokens" :key="`dt-${idx}`" class="rounded-xl border border-slate-200 p-3 dark:border-white/[0.06] dark:bg-[#080a10]">
-              <p class="text-xs text-slate-500 dark:text-white/42">{{ item.created_at || '—' }}</p>
+              <p class="text-xs text-slate-500 dark:text-white/42">{{ fmtHistoryDate(item.created_at) }}</p>
               <p class="mt-1 text-sm font-semibold" :class="item.delta >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'">
                 {{ item.delta >= 0 ? '+' : '' }}{{ fmtAmount(item.delta) }} ⚡
               </p>
-              <p class="text-xs text-slate-500 dark:text-white/42">{{ tokenReasonLabel(item.reason) }}</p>
+              <p class="text-xs text-slate-500 dark:text-white/42">{{ fmtHistoryTokenReason(item.reason) }}</p>
             </div>
           </div>
         </div>
       </div>
       </div>
-    </div>
-
-    <div
-      v-else-if="loading || (hasInitData && me === null && !error && !bootError)"
-      class="py-6"
-    >
-      <GuardBlueLoadingState />
     </div>
 
     <div
@@ -5555,7 +5974,7 @@ async function submitReceipt() {
           aria-modal="true"
           :aria-label="t('subscription.status_title')"
           @click.self="showSubscriptionInfo = false"
-          @touchmove.prevent
+          @touchmove.self.prevent
         >
           <div
             ref="subscriptionInfoWrapRef"
@@ -5573,12 +5992,16 @@ async function submitReceipt() {
                 <span aria-hidden="true" class="text-[18px] leading-none">✕</span>
               </button>
             </div>
-            <div class="min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-3 py-3 [-webkit-overflow-scrolling:touch]">
+            <div
+              ref="subscriptionInfoScrollRef"
+              class="min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-3 py-3 [-webkit-overflow-scrolling:touch]"
+            >
               <SubscriptionManagementPanel
                 v-if="me"
                 :profile="me"
                 variant="embedded"
                 hide-embedded-hint
+                :scroll-parent-ref="subscriptionInfoScrollRef"
                 @update:profile="applyMeState"
                 @open-tariff="() => { showSubscriptionInfo = false; openBillingSection({ scrollLanding: true }) }"
               />
@@ -5690,7 +6113,7 @@ async function submitReceipt() {
               :key="`mh-dp-${idx}`"
               class="rounded-[14px] border border-white/[0.1] bg-[#11151C]/85 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] ring-1 ring-white/[0.05] backdrop-blur-md"
             >
-              <p class="text-[13px] text-zinc-400">{{ item.created_at || '—' }}</p>
+              <p class="text-[13px] text-zinc-400">{{ fmtHistoryDate(item.created_at) }}</p>
               <div class="mt-1.5 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                 <div class="min-w-0">
                   <p class="text-[15px] font-semibold text-white">
@@ -5698,14 +6121,14 @@ async function submitReceipt() {
                       {{ fmtAmount(item.amount_rub) }} ₽ · {{ item.months }} ⚡
                     </template>
                     <template v-else>
-                      {{ fmtAmount(item.amount_rub) }} ₽ · {{ t('dashboard.billing.months_short', { n: item.months }) }}
+                      {{ historyPaymentTitle(item) }}
                     </template>
                   </p>
                   <p class="mt-0.5 text-[13px] text-zinc-400">
-                    {{ providerLabel(item.provider) }} · {{ item.status }}
+                    {{ fmtHistoryProvider(item) }} · {{ fmtHistoryPaymentStatus(item.status) }}
                   </p>
                 </div>
-                <div class="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+                <div v-if="String(item.kind || '').toLowerCase() !== 'promo'" class="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
                   <button
                     v-if="item.receipt_url"
                     type="button"
@@ -5730,11 +6153,11 @@ async function submitReceipt() {
               :key="`mh-dt-${idx}`"
               class="rounded-[14px] border border-white/[0.1] bg-[#11151C]/85 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] ring-1 ring-white/[0.05] backdrop-blur-md"
             >
-              <p class="text-[13px] font-medium text-zinc-400">{{ item.created_at || '—' }}</p>
+              <p class="text-[13px] font-medium text-zinc-400">{{ fmtHistoryDate(item.created_at) }}</p>
               <p class="mt-1 text-[15px] font-semibold tabular-nums" :class="item.delta >= 0 ? 'text-emerald-300' : 'text-rose-300'">
                 {{ item.delta >= 0 ? '+' : '' }}{{ fmtAmount(item.delta) }} ⚡
               </p>
-              <p class="mt-1 text-[13px] leading-snug text-zinc-200">{{ tokenReasonLabel(item.reason) }}</p>
+              <p class="mt-1 text-[13px] leading-snug text-zinc-200">{{ fmtHistoryTokenReason(item.reason) }}</p>
             </div>
           </div>
         </div>
@@ -6014,9 +6437,6 @@ async function submitReceipt() {
               ✕
             </button>
           </div>
-          <p class="mt-1 text-[12px] leading-snug text-slate-400/95">
-            {{ t('dashboard.home_shell.updates_roadmap.subtitle', { n: UPDATES_HOME_PREVIEW_N }) }}
-          </p>
         </div>
         <div class="min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-4 pb-4 [-webkit-overflow-scrolling:touch]">
           <ul class="space-y-3">
@@ -6247,7 +6667,7 @@ async function submitReceipt() {
               {{ t('dashboard.home_shell.funds_modal.no_payments') }}
             </div>
             <div v-for="(item, idx) in historyPayments" :key="`mf-dp-${idx}`" class="rounded-xl border border-slate-200 p-3 dark:border-white/[0.06] dark:bg-[#080a10]">
-              <p class="text-xs text-slate-500 dark:text-white/42">{{ item.created_at || '—' }}</p>
+              <p class="text-xs text-slate-500 dark:text-white/42">{{ fmtHistoryDate(item.created_at) }}</p>
               <div class="mt-1 flex items-center justify-between gap-2">
                 <div>
                   <p class="text-sm font-semibold text-slate-900 dark:text-white">
@@ -6255,14 +6675,14 @@ async function submitReceipt() {
                       {{ fmtAmount(item.amount_rub) }} ₽ · {{ item.months }} ⚡
                     </template>
                     <template v-else>
-                      {{ fmtAmount(item.amount_rub) }} ₽ · {{ t('dashboard.billing.months_short', { n: item.months }) }}
+                      {{ historyPaymentTitle(item) }}
                     </template>
                   </p>
                   <p class="text-xs text-slate-500 dark:text-white/42">
-                    {{ providerLabel(item.provider) }} · {{ item.status }}
+                    {{ fmtHistoryProvider(item) }} · {{ fmtHistoryPaymentStatus(item.status) }}
                   </p>
                 </div>
-                <div class="flex items-center gap-2">
+                <div v-if="String(item.kind || '').toLowerCase() !== 'promo'" class="flex items-center gap-2">
                   <button
                     v-if="item.receipt_url"
                     type="button"
@@ -6290,11 +6710,11 @@ async function submitReceipt() {
               {{ t('dashboard.billing.history_no_tokens') }}
             </div>
             <div v-for="(item, idx) in historyTokens" :key="`mf-dt-${idx}`" class="rounded-xl border border-slate-200 p-3 dark:border-white/[0.06] dark:bg-[#080a10]">
-              <p class="text-xs text-slate-500 dark:text-white/42">{{ item.created_at || '—' }}</p>
+              <p class="text-xs text-slate-500 dark:text-white/42">{{ fmtHistoryDate(item.created_at) }}</p>
               <p class="mt-1 text-sm font-semibold" :class="item.delta >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'">
                 {{ item.delta >= 0 ? '+' : '' }}{{ fmtAmount(item.delta) }} ⚡
               </p>
-              <p class="text-xs text-slate-500 dark:text-white/42">{{ tokenReasonLabel(item.reason) }}</p>
+              <p class="text-xs text-slate-500 dark:text-white/42">{{ fmtHistoryTokenReason(item.reason) }}</p>
             </div>
           </div>
         </div>
@@ -6861,7 +7281,9 @@ async function submitReceipt() {
   overscroll-behavior-x: contain;
 }
 .guard-stat-broadcast-rail {
+  touch-action: pan-x pinch-zoom;
   overscroll-behavior-x: contain;
+  overscroll-behavior-y: none;
 }
 .guard-hero-carousel img {
   border: 0 !important;

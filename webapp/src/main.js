@@ -2,6 +2,7 @@ import './bootstrapLocation.js'
 import './themeBootstrap.js'
 /** TMA WKWebView: touch по тексту внутри <button> часто не даёт @click — полифилл синтезирует click(). */
 import './telegramTapPolyfill.js'
+import { installMobileKeyboardDismiss } from './keyboardDismiss.js'
 import { createApp } from 'vue'
 import App from './App.vue'
 import router from './router'
@@ -73,6 +74,8 @@ if (tg && typeof tg.ready === 'function') {
     //
   }
 }
+
+installMobileKeyboardDismiss()
 
 const app = createApp(App)
 app.use(router)

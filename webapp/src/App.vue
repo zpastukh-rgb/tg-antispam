@@ -13,6 +13,9 @@ import { useDashboardSection } from './composables/useDashboardSection'
 import { routeTransitionOverlayActive } from './composables/useRouteTransitionLoader.js'
 import { useToast } from './composables/useToast'
 import { api, getInitData, hasConfiguredApiBase } from './api/client'
+import { prefetchChatsList } from './utils/chatsListCache.js'
+import { prefetchReportsView } from './utils/reportsViewCache.js'
+import { prefetchAdminCabinet, prefetchMeProfile, writeMeProfileCache } from './utils/adminViewCache.js'
 import { setLocale, getLocale, normalizeLocale } from './i18n'
 
 const route = useRoute()
@@ -45,6 +48,7 @@ async function syncLocaleFromProfile() {
   if (!getInitData()) return
   try {
     const me = await api.me()
+    if (me) writeMeProfileCache(me)
     if (me?.language) {
       const norm = normalizeLocale(me.language)
       if (getLocale() !== norm) {
@@ -67,10 +71,21 @@ onMounted(() => {
   window.addEventListener('guard-open-menu', onGuardOpenMenu)
   window.addEventListener('guard:session-terminated', onGuardSessionTerminated)
   if (getInitData()) {
+    void prefetchMeProfile(api)
     api.presencePing().catch(() => {})
     presenceTimer = setInterval(() => {
       api.presencePing().catch(() => {})
     }, 30000)
+    const warmChatsList = () => {
+      void prefetchChatsList(api, 'all')
+      void prefetchReportsView(api)
+      void prefetchAdminCabinet(api)
+    }
+    if (typeof window.requestIdleCallback === 'function') {
+      window.requestIdleCallback(warmChatsList, { timeout: 1500 })
+    } else {
+      setTimeout(warmChatsList, 400)
+    }
     void nextTick(() => {
       void syncLocaleFromProfile()
     })
@@ -118,12 +133,6 @@ const suppressAdmBadges = computed(
     subscriptionScreenActive.value ||
     (route.path === '/admin' && String(route.query.admin_tab || '') === 'subscription'),
 )
-
-function onSubscriptionBackFromHeader() {
-  setDashboardSection('account')
-  const q = { ...route.query, section: 'account' }
-  void router.replace({ path: '/', query: q }).catch(() => {})
-}
 </script>
 
 <template>
@@ -164,10 +173,8 @@ function onSubscriptionBackFromHeader() {
       <AppToast />
       <AppHeader
         :sidebar-open="sidebarOpen"
-        :subscription-screen="subscriptionScreenActive"
         :suppress-adm-badges="suppressAdmBadges"
         @menu-click="openMenu"
-        @subscription-back="onSubscriptionBackFromHeader"
       />
       <AppSidebar :open="sidebarOpen" @close="closeSidebar" />
       <main

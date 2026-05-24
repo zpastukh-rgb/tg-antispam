@@ -4,6 +4,9 @@ import { useI18n } from 'vue-i18n'
 import { navItems } from '../config/nav.js'
 import NavIcon from './NavIcon.vue'
 import { useDashboardSection } from '../composables/useDashboardSection'
+import { api } from '../api/client'
+import { prefetchReportsView } from '../utils/reportsViewCache.js'
+import { navQueryForPath } from '../utils/navQuery.js'
 
 const { t } = useI18n()
 
@@ -34,6 +37,10 @@ const isActive = (item) => {
 }
 
 function onNavClick(item) {
+  if (item.path === '/reports') {
+    void prefetchReportsView(api)
+    window.dispatchEvent(new CustomEvent('guard:prefetch-reports'))
+  }
   if (item.section) {
     setDashboardSection(item.section)
     router.push({ path: '/', query: { ...route.query, section: item.section } })
@@ -41,7 +48,7 @@ function onNavClick(item) {
     setDashboardSection('account')
     router.push({ path: '/', query: { ...route.query, section: 'account' } })
   } else {
-    router.push({ path: item.path, query: { ...route.query } })
+    router.push({ path: item.path, query: navQueryForPath(item.path, route.query) })
   }
   emit('close')
 }

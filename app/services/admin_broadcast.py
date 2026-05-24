@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import os
@@ -25,7 +26,7 @@ from aiogram.types import (
     InputMediaVideo,
     WebAppInfo,
 )
-from sqlalchemy import delete, or_, select, text
+from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
@@ -66,6 +67,7 @@ def _inline_btn_style_from_obj(b: Any) -> str | None:
     return normalize_button_style(getattr(b, "style", None))
 
 _MAX_UPLOAD_BYTES = int(os.getenv("BROADCAST_MAX_UPLOAD_MB", "50")) * 1024 * 1024
+_MAX_BROADCAST_MEDIA_ITEMS = 10
 _SEND_DELAY_SEC = float(os.getenv("BROADCAST_SEND_DELAY_SEC", "0.005"))
 _PROGRESS_COMMIT_EVERY = int(os.getenv("BROADCAST_PROGRESS_COMMIT_EVERY", "10"))
 
@@ -617,6 +619,139 @@ def _truncate(s: str, n: int) -> str:
     return s[: n - 1] + "…"
 
 
+_BROADCAST_STORAGE_CHAT_ID_CACHE: int | None = None
+_GUARD_STORAGE_TITLE = "guard storage"
+
+
+def _broadcast_storage_chat_id_from_env() -> int:
+    raw = (os.getenv("BROADCAST_STORAGE_CHAT_ID") or "").strip()
+    try:
+        return int(raw) if raw else 0
+    except ValueError:
+        return 0
+
+
+async def _lookup_guard_storage_chat_id(session: AsyncSession) -> int:
+    title_norm = func.lower(func.trim(func.coalesce(Chat.title, "")))
+    q = (
+        select(Chat.id)
+        .where(
+            Chat.id < 0,
+            or_(
+                title_norm == _GUARD_STORAGE_TITLE,
+                title_norm.like("%guard storage%"),
+            ),
+        )
+        .order_by(Chat.id.asc())
+        .limit(1)
+    )
+    row = (await session.execute(q)).scalar_one_or_none()
+    return int(row or 0)
+
+
+async def resolve_broadcast_storage_chat_id(session: AsyncSession | None = None) -> int:
+    """Storage-чат для file_id: env BROADCAST_STORAGE_CHAT_ID или группа Guard Storage в БД."""
+    global _BROADCAST_STORAGE_CHAT_ID_CACHE
+    env_id = _broadcast_storage_chat_id_from_env()
+    if env_id:
+        return env_id
+    if _BROADCAST_STORAGE_CHAT_ID_CACHE:
+        return _BROADCAST_STORAGE_CHAT_ID_CACHE
+
+    cid = 0
+    if session is not None:
+        cid = await _lookup_guard_storage_chat_id(session)
+    else:
+        from app.db.session import get_session
+
+        sess_cm = await get_session()
+        async with sess_cm as sess:
+            cid = await _lookup_guard_storage_chat_id(sess)
+
+    if cid:
+        _BROADCAST_STORAGE_CHAT_ID_CACHE = cid
+    return cid
+
+
+async def store_broadcast_media_file_id(
+    media_kind: str,
+    data: bytes,
+    filename: str,
+    session: AsyncSession | None = None,
+) -> str | None:
+    """Сразу после загрузки — file_id в storage-чат, чтобы пережить redeploy Railway."""
+    token = (os.getenv("BOT_TOKEN") or "").strip()
+    storage_id = await resolve_broadcast_storage_chat_id(session)
+    if not token:
+        log.warning("broadcast media storage: BOT_TOKEN missing")
+        return None
+    if not storage_id:
+        log.warning(
+            "broadcast media storage: Guard Storage chat not found — file_id won't persist after redeploy"
+        )
+        return None
+    if not data:
+        return None
+    from aiogram import Bot
+
+    upload_data, upload_name, upload_kind = prepare_broadcast_upload_bytes(media_kind, data, filename)
+    bot = Bot(token=token)
+    try:
+        fid = await upload_to_storage_get_file_id(bot, storage_id, upload_kind, upload_data, upload_name)
+        if not fid:
+            log.warning(
+                "broadcast media storage upload failed kind=%s chat=%s (bot admin in storage chat?)",
+                media_kind,
+                storage_id,
+            )
+        return fid
+    finally:
+        await bot.session.close()
+
+
+def broadcast_media_guess_content_type(media_kind: str, filename: str = "") -> str:
+    mk = str(media_kind or "photo").lower()
+    suffix = Path(filename).suffix.lower() if filename else ""
+    if mk in ("photo", "animation") or suffix in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+        if suffix == ".png":
+            return "image/png"
+        if suffix == ".webp":
+            return "image/webp"
+        if suffix == ".gif":
+            return "image/gif"
+        return "image/jpeg"
+    if mk == "video" or suffix in (".mp4", ".webm", ".mov"):
+        return "video/mp4" if suffix == ".mp4" else "video/webm"
+    if mk == "audio" or suffix in (".mp3", ".m4a", ".ogg"):
+        return "audio/mpeg"
+    return "application/octet-stream"
+
+
+async def broadcast_media_file_bytes(
+    media_kind: str,
+    *,
+    local_name: str | None,
+    telegram_file_id: str | None,
+    original_name: str | None = None,
+) -> tuple[bytes, str] | None:
+    """Локальный файл или скачивание из Telegram по file_id."""
+    path = broadcast_upload_root() / str(local_name or "")
+    if local_name and path.is_file():
+        return path.read_bytes(), broadcast_media_guess_content_type(
+            media_kind, str(original_name or local_name or "")
+        )
+    fid = str(telegram_file_id or "").strip()
+    if not fid:
+        return None
+    from app.services.telegram_bot_api import tg_download_file
+
+    got = await tg_download_file(fid)
+    if not got:
+        return None
+    body, _rel = got
+    return body, broadcast_media_guess_content_type(media_kind, str(original_name or _rel or ""))
+
+
 async def upload_to_storage_get_file_id(
     bot: Bot,
     storage_chat_id: int,
@@ -624,25 +759,36 @@ async def upload_to_storage_get_file_id(
     data: bytes,
     filename: str,
 ) -> str | None:
-    bio = BufferedInputFile(data, filename=filename or "file.bin")
+    mk = str(media_kind or "photo").lower()
+    upload_data, upload_name, upload_kind = prepare_broadcast_upload_bytes(mk, data, filename)
+    bio = BufferedInputFile(upload_data, filename=upload_name or "file.bin")
     try:
-        if media_kind == "photo":
-            m = await bot.send_photo(storage_chat_id, photo=bio)
-            if m.photo:
-                return m.photo[-1].file_id
-        elif media_kind == "video":
+        if upload_kind == "photo":
+            try:
+                m = await bot.send_photo(storage_chat_id, photo=bio)
+                if m.photo:
+                    return m.photo[-1].file_id
+            except Exception as photo_err:
+                err_s = str(photo_err).lower()
+                if "image_process_failed" in err_s or "bad request" in err_s:
+                    doc = BufferedInputFile(upload_data, filename="photo.jpg")
+                    m = await bot.send_document(storage_chat_id, document=doc)
+                    if m.document:
+                        return m.document.file_id
+                raise
+        elif upload_kind == "video":
             m = await bot.send_video(storage_chat_id, video=bio)
             if m.video:
                 return m.video.file_id
-        elif media_kind == "animation":
+        elif upload_kind == "animation":
             m = await bot.send_animation(storage_chat_id, animation=bio)
             if m.animation:
                 return m.animation.file_id
-        elif media_kind == "document":
+        elif upload_kind == "document":
             m = await bot.send_document(storage_chat_id, document=bio)
             if m.document:
                 return m.document.file_id
-        elif media_kind == "audio":
+        elif upload_kind == "audio":
             m = await bot.send_audio(storage_chat_id, audio=bio)
             if m.audio:
                 return m.audio.file_id
@@ -665,7 +811,14 @@ def _input_media_item(
     parse_mode: str | None = None,
 ):
     kind = str(media.get("kind") or "photo")
-    source = media.get("file_id") or BufferedInputFile(media["bytes"], filename=media.get("name") or "file.bin")
+    if media.get("file_id"):
+        source = media.get("file_id")
+    else:
+        raw, name, eff_kind = prepare_broadcast_upload_bytes(
+            kind, media["bytes"], media.get("name") or "file.bin"
+        )
+        source = BufferedInputFile(raw, filename=name)
+        kind = eff_kind
     if kind == "video":
         return InputMediaVideo(media=source, caption=caption, parse_mode=parse_mode)
     if kind == "audio":
@@ -685,24 +838,28 @@ async def _send_single_media(
     reply_markup: InlineKeyboardMarkup | None = None,
 ) -> int:
     kind = str(media.get("kind") or "photo")
-    def _source():
+
+    def _resolve_source() -> tuple[str, Any]:
         fid = media.get("file_id")
         if fid:
-            return fid
-        return BufferedInputFile(media["bytes"], filename=media.get("name") or "file.bin")
+            return kind, fid
+        raw, name, eff_kind = prepare_broadcast_upload_bytes(
+            kind, media["bytes"], media.get("name") or "file.bin"
+        )
+        return eff_kind, BufferedInputFile(raw, filename=name)
 
     async def _do_send(cap: str | None, pm: str | None, rm: InlineKeyboardMarkup | None) -> int:
-        source = _source()
-        if kind == "photo":
+        eff_kind, source = _resolve_source()
+        if eff_kind == "photo":
             msg = await bot.send_photo(chat_id, source, caption=cap, parse_mode=pm if cap else None, reply_markup=rm)
             return int(getattr(msg, "message_id", 0) or 0)
-        if kind == "video":
+        if eff_kind == "video":
             msg = await bot.send_video(chat_id, source, caption=cap, parse_mode=pm if cap else None, reply_markup=rm)
             return int(getattr(msg, "message_id", 0) or 0)
-        if kind == "audio":
+        if eff_kind == "audio":
             msg = await bot.send_audio(chat_id, source, caption=cap, parse_mode=pm if cap else None, reply_markup=rm)
             return int(getattr(msg, "message_id", 0) or 0)
-        if kind == "animation":
+        if eff_kind == "animation":
             msg = await bot.send_animation(chat_id, source, caption=cap, parse_mode=pm if cap else None, reply_markup=rm)
             return int(getattr(msg, "message_id", 0) or 0)
         msg = await bot.send_document(chat_id, source, caption=cap, parse_mode=pm if cap else None, reply_markup=rm)
@@ -788,37 +945,29 @@ async def _send_media_album_or_fallback(
     *,
     caption: str | None,
     parse_mode: str | None,
-    reply_markup: InlineKeyboardMarkup | None,
 ) -> int:
-    """
-    Отправка 2+ медиа с инлайн-кнопками у первого сообщения:
-    - первое медиа: caption + inline keyboard;
-    - остальные: album (sendMediaGroup) чанками по 10.
-    Если Telegram отвергает sendMediaGroup (смешанный/проблемный набор) —
-    fallback на отправку по одному в исходном порядке.
-    """
+    """Отправка 2+ медia одним альбомом (sendMediaGroup), подпись — на первом файле."""
     if not media_items:
         return 0
 
-    first_item = media_items[0]
-    rest_items = media_items[1:]
-    try:
-        primary_mid = await _send_single_media(
-            bot,
-            chat_id,
-            first_item,
-            caption=caption,
-            parse_mode=parse_mode,
-            reply_markup=reply_markup,
-        )
-        if not rest_items:
-            return int(primary_mid or 0)
-        for group in _chunks(rest_items, 10):
+    async def _send_album_groups() -> int:
+        primary_mid = 0
+        offset = 0
+        for group in _chunks(media_items, 10):
             media_group = []
-            for m in group:
-                media_group.append(_input_media_item(m, caption=None, parse_mode=None))
-            await bot.send_media_group(chat_id, media=media_group)
+            for j, m in enumerate(group):
+                idx = offset + j
+                cap_i = caption if idx == 0 else None
+                pm_i = parse_mode if cap_i else None
+                media_group.append(_input_media_item(m, caption=cap_i, parse_mode=pm_i))
+            msgs = await bot.send_media_group(chat_id, media=media_group)
+            if not primary_mid and msgs:
+                primary_mid = int(getattr(msgs[0], "message_id", 0) or 0)
+            offset += len(group)
         return int(primary_mid or 0)
+
+    try:
+        return await _send_album_groups()
     except Exception as e:
         log.warning("broadcast send_media_group fallback chat=%s: %s", chat_id, e)
         sent_caption = False
@@ -826,14 +975,13 @@ async def _send_media_album_or_fallback(
         for idx, m in enumerate(media_items):
             cap_i = caption if (not sent_caption and idx == 0) else None
             parse_i = parse_mode if cap_i else None
-            rm_i = reply_markup if idx == 0 else None
             mid_i = await _send_single_media(
                 bot,
                 chat_id,
                 m,
                 caption=cap_i,
                 parse_mode=parse_i,
-                reply_markup=rm_i,
+                reply_markup=None,
             )
             if not primary_mid:
                 primary_mid = int(mid_i or 0)
@@ -1459,8 +1607,7 @@ async def run_broadcast_job(
             if not row or row.status != "sending":
                 return
 
-            storage_raw = (os.getenv("BROADCAST_STORAGE_CHAT_ID") or "").strip()
-            storage_id = int(storage_raw) if storage_raw else 0
+            storage_id = await resolve_broadcast_storage_chat_id(session)
 
             media_rows_q = await session.execute(
                 select(AdminBroadcastMedia)
@@ -1482,24 +1629,40 @@ async def run_broadcast_job(
             prepared_media: list[dict[str, Any]] = []
             for m in media_rows:
                 mk = str(m.media_kind or "photo").lower()
-                if mk == "animation":
-                    mk = "document"
                 fid = str(m.telegram_file_id or "").strip() or None
                 raw_bytes: bytes | None = None
                 raw_name: str | None = None
                 if not fid:
-                    path = broadcast_upload_root() / str(m.media_local_name or "")
-                    if not path.is_file():
+                    got = await broadcast_media_file_bytes(
+                        mk,
+                        local_name=str(m.media_local_name or ""),
+                        telegram_file_id=None,
+                        original_name=str(m.media_original_name or ""),
+                    )
+                    if not got:
+                        log.warning(
+                            "broadcast id=%s media id=%s: no local file and no telegram file_id",
+                            int(row.id),
+                            int(getattr(m, "id", 0) or 0),
+                        )
                         continue
-                    raw_bytes = path.read_bytes()
-                    raw_name = str(m.media_local_name or "")
+                    raw_bytes, _ct = got
+                    raw_name = str(m.media_local_name or m.media_original_name or "file.bin")
+                    raw_bytes, raw_name, eff_mk = prepare_broadcast_upload_bytes(mk, raw_bytes, raw_name)
+                    mk = eff_mk
                     if storage_id and isinstance(m, AdminBroadcastMedia):
-                        new_fid = await upload_to_storage_get_file_id(bot, storage_id, mk, raw_bytes, raw_name)
+                        storage_kind = mk
+                        new_fid = await upload_to_storage_get_file_id(
+                            bot, storage_id, storage_kind, raw_bytes, raw_name
+                        )
                         if new_fid:
                             m.telegram_file_id = new_fid
                             session.add(m)
                             await session.commit()
                             fid = new_fid
+                            raw_bytes = None
+                if not fid and not raw_bytes:
+                    continue
                 prepared_media.append({"kind": mk, "file_id": fid, "bytes": raw_bytes, "name": raw_name})
             has_media_intent = bool(media_rows) or (
                 (row.media_kind or "none").lower() != "none"
@@ -1507,7 +1670,7 @@ async def run_broadcast_job(
             )
             if has_media_intent and not prepared_media:
                 log.error(
-                    "broadcast id=%s: media configured but files unavailable — aborting send (no text-only fallback)",
+                    "broadcast id=%s: media configured but files unavailable (local missing, no telegram file_id) — aborting send",
                     int(row.id),
                 )
                 row.status = "failed"
@@ -1698,8 +1861,18 @@ async def run_broadcast_job(
                             reply_markup=kb_target,
                         )
                     else:
-                        # 1 media -> keep keyboard on media message.
                         if len(prepared_media) == 1:
+                            m = prepared_media[0]
+                            sent_message_id = await _send_single_media(
+                                bot,
+                                tid,
+                                m,
+                                caption=cap_for_send or None,
+                                parse_mode=pm if cap_for_send else None,
+                                reply_markup=kb_target,
+                            )
+                        elif kb_target:
+                            # Telegram: кнопки нельзя на альбом — только первое фото.
                             m = prepared_media[0]
                             sent_message_id = await _send_single_media(
                                 bot,
@@ -1716,7 +1889,6 @@ async def run_broadcast_job(
                                 prepared_media,
                                 caption=cap_for_send or None,
                                 parse_mode=pm if cap_for_send else None,
-                                reply_markup=kb_target,
                             )
                         if remainder_for_send.strip():
                             await _send_broadcast_remainder_after_media(
@@ -1866,16 +2038,102 @@ def datetime_now():
 
 def safe_media_kind(v: str) -> str | None:
     s = (v or "").strip().lower()
-    if s in ("photo", "video", "document", "audio"):
+    if s in ("photo", "video", "document", "audio", "animation"):
         return s
     return None
+
+
+_heif_opener_registered = False
+
+
+def _ensure_heif_opener() -> None:
+    global _heif_opener_registered
+    if _heif_opener_registered:
+        return
+    try:
+        from pillow_heif import register_heif_opener
+
+        register_heif_opener()
+        _heif_opener_registered = True
+    except Exception:
+        pass
+
+
+def try_normalize_broadcast_photo_bytes(data: bytes) -> bytes | None:
+    """JPEG для Telegram sendPhoto. None — если формат не распознан (HEIC без декодера и т.д.)."""
+    from PIL import Image, ImageOps, UnidentifiedImageError
+
+    if not data or len(data) < 12:
+        return None
+    _ensure_heif_opener()
+    max_long_side = 2560
+    target_max_bytes = 8 * 1024 * 1024
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            img = ImageOps.exif_transpose(img)
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            elif img.mode == "L":
+                img = img.convert("RGB")
+            w, h = img.size
+            if w <= 0 or h <= 0:
+                return None
+            long_side = max(w, h)
+            if long_side > max_long_side:
+                scale = max_long_side / float(long_side)
+                img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.Resampling.LANCZOS)
+            out: bytes | None = None
+            for quality in (92, 88, 84, 80, 76, 72, 68, 64, 60):
+                bio = io.BytesIO()
+                img.save(bio, format="JPEG", quality=quality, optimize=True, progressive=True)
+                candidate = bio.getvalue()
+                out = candidate
+                if len(candidate) <= target_max_bytes:
+                    return candidate
+            return out
+    except (UnidentifiedImageError, OSError, ValueError):
+        return None
+
+
+def prepare_broadcast_upload_bytes(
+    media_kind: str,
+    data: bytes,
+    filename: str,
+) -> tuple[bytes, str, str]:
+    """Подготовка байтов, имени и фактического kind перед сохранением и отправкой в Telegram."""
+    mk = str(media_kind or "photo").lower()
+    if mk != "photo":
+        return data, filename or "file.bin", mk
+    normalized = try_normalize_broadcast_photo_bytes(data)
+    if normalized:
+        stem = Path(filename or "photo").stem or uuid.uuid4().hex
+        return normalized, f"{stem}.jpg", "photo"
+    # Не JPEG/PNG/WebP/HEIC — отправим как документ (Telegram примет сырой файл).
+    stem = Path(filename or "upload").stem or uuid.uuid4().hex
+    ext = Path(filename or "").suffix.lower()
+    if ext in (
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+        ".gif",
+        ".heic",
+        ".heif",
+        ".bmp",
+        ".jfif",
+        ".avif",
+    ):
+        upload_name = f"{stem}{ext}"
+    else:
+        upload_name = f"{stem}.jpg"
+    return data, upload_name, "document"
 
 
 def guess_media_kind_from_name(name: str, content_type: str | None = None) -> str:
     """Определяет тип медиа для Telegram: фото как sendPhoto, GIF как animation, не документ."""
     n = (name or "").lower()
     if re.search(r"\.gif$", n):
-        return "document"
+        return "animation"
     if re.search(r"\.(jpg|jpeg|png|webp|bmp|heic|heif|jfif|avif)$", n):
         return "photo"
     if re.search(r"\.(mp4|mov|webm|mkv|m4v)$", n):
@@ -1884,7 +2142,7 @@ def guess_media_kind_from_name(name: str, content_type: str | None = None) -> st
         return "audio"
     ct = (content_type or "").split(";")[0].strip().lower()
     if ct == "image/gif":
-        return "document"
+        return "animation"
     if ct.startswith("image/"):
         return "photo"
     if ct.startswith("video/"):

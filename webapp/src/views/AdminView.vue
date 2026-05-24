@@ -29,6 +29,10 @@ import OwnerCabinetProtectionStats from '../components/OwnerCabinetProtectionSta
 import CabinetPremiumTitleBar from '../components/CabinetPremiumTitleBar.vue'
 import SecurityPinGateModal from '../components/SecurityPinGateModal.vue'
 import GuardTeleport from '../components/GuardTeleport.vue'
+import BroadcastMediaStrip from '../components/BroadcastMediaStrip.vue'
+import BroadcastRecipientsPanel from '../components/BroadcastRecipientsPanel.vue'
+import BroadcastTextLinksStrip from '../components/BroadcastTextLinksStrip.vue'
+import { BC_MAX_MEDIA_ITEMS } from '../constants/broadcastMedia.js'
 import { normalizeHtmlForTelegram, sanitizeEditorLinksNoUnderline, telegramHtmlToEditorInnerHtml } from '../utils/telegramHtmlForTg'
 import {
   editorSplitBlockquoteAtCaret,
@@ -41,14 +45,27 @@ import {
 } from '../utils/richEditorDom'
 import { useSecurityPinGate } from '../composables/useSecurityPinGate'
 import { shouldAskPinForAction } from '../utils/settingsSecurity'
+import { readSessionJson, writeSessionJson } from '../utils/sessionCache.js'
+import {
+  readAdminMeCache,
+  writeAdminMeCache,
+  readAdminOverviewCache,
+  writeAdminOverviewCache,
+  readActivitySummaryCache,
+  writeActivitySummaryCache,
+  readReferralLiteCache,
+  writeReferralLiteCache,
+  isUsableActivitySummaryCache,
+  prefetchAdminCabinet,
+} from '../utils/adminViewCache.js'
 
+const BC_RECENT_SEND_EVENTS_CACHE_KEY = 'guard.bc.recent_send_events.v1'
 const { api, fetch, fetchSilent, hasInitData } = useApi()
 const { openLock: openPremiumFeatureLock } = usePremiumLock()
 const route = useRoute()
 const router = useRouter()
 const { cabinetMode, setCabinetMode } = useCabinetMode()
-/** С первого кадра при открытии из Telegram — не мелькает полная админка до загрузки /me */
-const loading = ref(!!getInitData())
+/** Не блокируем кабинет целиком — оболочка и цифры из кэша сразу, затем фоновое обновление. */
 const error = ref('')
 const data = ref(null)
 const tab = ref('overview')
@@ -143,6 +160,36 @@ function goOwnerSubscriptionPage() {
   router.push({ path: '/', query: { section: 'subscription' } }).catch(() => {})
 }
 
+function adminTabFromRouteQuery() {
+  return String(route.query.admin_tab || route.query.tab || 'overview').toLowerCase()
+}
+
+function adminTabRouteMatches(tabName) {
+  const nt = String(tabName || 'overview').toLowerCase()
+  if (nt === 'overview') return adminTabFromRouteQuery() === 'overview'
+  return String(route.query.tab || '') === nt && String(route.query.admin_tab || '') === nt
+}
+
+function buildAdminTabRouteQuery(tabName) {
+  const q = { ...route.query }
+  const nt = String(tabName || 'overview').toLowerCase()
+  if (nt === 'overview') {
+    delete q.tab
+    delete q.admin_tab
+  } else {
+    q.tab = nt
+    q.admin_tab = nt
+  }
+  return q
+}
+
+function syncAdminTabRouteQuery(tabName) {
+  if (String(route.path || '') !== '/admin') return
+  const nt = String(tabName || 'overview').toLowerCase()
+  if (adminTabRouteMatches(nt)) return
+  router.replace({ path: '/admin', query: buildAdminTabRouteQuery(nt) }).catch(() => {})
+}
+
 function onGuardHeaderBack(ev) {
   if (String(route.path || '') !== '/admin') return
   if (showFullAdminShell.value && adminOverviewEmbed.value) {
@@ -167,13 +214,61 @@ function onGuardHeaderBack(ev) {
 
 watch(tab, (v) => {
   if (v !== 'overview') premiumAdmSection.value = ''
-  if (String(route.path || '') === '/admin') {
-    const nt = String(v || 'overview')
-    if (String(route.query.admin_tab || '') !== nt) {
-      router.replace({ path: '/admin', query: { ...route.query, admin_tab: nt } }).catch(() => {})
-    }
-  }
+  syncAdminTabRouteQuery(v)
 })
+
+let syncingAdminRouteQuery = false
+
+watch(
+  () => premiumAdmSection.value,
+  (v) => {
+    if (String(route.path || '') !== '/admin') return
+    const s = String(v || '').trim()
+    const cur = String(route.query.adm_section || '').trim()
+    if (s === cur) return
+    syncingAdminRouteQuery = true
+    const q = { ...route.query }
+    if (s) q.adm_section = s
+    else delete q.adm_section
+    router.replace({ path: '/admin', query: q }).catch(() => {}).finally(() => {
+      syncingAdminRouteQuery = false
+    })
+  },
+)
+
+watch(
+  () => adminOverviewEmbed.value,
+  (v) => {
+    if (String(route.path || '') !== '/admin') return
+    const e = String(v || '').trim()
+    const cur = String(route.query.admin_embed || '').trim()
+    if (e === cur) return
+    syncingAdminRouteQuery = true
+    const q = { ...route.query }
+    if (e) q.admin_embed = e
+    else delete q.admin_embed
+    router.replace({ path: '/admin', query: q }).catch(() => {}).finally(() => {
+      syncingAdminRouteQuery = false
+    })
+  },
+)
+
+watch(
+  () => [route.query.adm_section, route.query.admin_embed, route.path],
+  () => {
+    if (syncingAdminRouteQuery) return
+    if (String(route.path || '') !== '/admin') return
+    const admSec = String(route.query.adm_section || '').trim()
+    if (admSec !== String(premiumAdmSection.value || '').trim()) {
+      premiumAdmSection.value = admSec
+    }
+    const embed = String(route.query.admin_embed || '').trim()
+    if (embed !== String(adminOverviewEmbed.value || '').trim()) {
+      adminOverviewEmbed.value = embed
+    }
+  },
+  { immediate: true },
+)
 
 const payouts = ref([])
 const referralsTop = ref([])
@@ -272,6 +367,11 @@ const bcSendScheduleAtLocal = ref('')
 /** Ошибка quote / валидации на шаге «Куда отправить» без нативного alert под стеком модалок */
 const bcSendQuoteError = ref('')
 const bcRecentPulseById = ref({})
+const bcRecentPulseLoadingById = ref({})
+const bcRecentPulseFailedById = ref({})
+let bcRecentPulseHydrateSeq = 0
+let bcDraftThumbPrefetchSeq = 0
+const BC_BROADCASTS_POLL_MS = 18000
 const bcSendTargetChannels = ref(false)
 const bcSendTargetGroups = ref(false)
 const bcSendTargetBots = ref(false)
@@ -463,12 +563,10 @@ const bcKeyboardLayoutActive = computed(() => {
 
 const bcSendTargetSummary = computed(() => {
   const rows = []
-  if (bcSendTargetChannels.value) {
-    rows.push(tt('admin.broadcast_send.target_channels', { n: Number(bcSelectedChannelIds.value?.length || 0) }))
-  }
-  if (bcSendTargetGroups.value) {
-    rows.push(tt('admin.broadcast_send.target_groups', { n: Number(bcSelectedGroupIds.value?.length || 0) }))
-  }
+  const nCh = Number(bcSelectedChannelIds.value?.length || 0)
+  const nGr = Number(bcSelectedGroupIds.value?.length || 0)
+  if (nCh > 0) rows.push(tt('admin.broadcast_send.target_channels', { n: nCh }))
+  if (nGr > 0) rows.push(tt('admin.broadcast_send.target_groups', { n: nGr }))
   if (showFullAdminShell.value && bcAdminIncludeBotRecipients.value) {
     rows.push(tt('admin.broadcast_ui.include_bot_users_short'))
   }
@@ -763,13 +861,11 @@ const bcFilteredBots = computed(() => {
   if (!q) return list
   return list.filter((b) => bcBotRowTitle(b).toLowerCase().includes(q))
 })
-/** ID каналов/групп только для включённых галочек «Куда отправить» (старый выбор не тащим). */
+/** ID каналов/групп из выбранных получателей. */
 const bcActiveSendChannelIds = computed(() => {
-  if (!bcSendTargetChannels.value) return []
   return (bcSelectedChannelIds.value || []).map((x) => Number(x || 0)).filter((x) => x !== 0)
 })
 const bcActiveSendGroupIds = computed(() => {
-  if (!bcSendTargetGroups.value) return []
   return (bcSelectedGroupIds.value || []).map((x) => Number(x || 0)).filter((x) => x !== 0)
 })
 const bcSelectedTargetsCount = computed(
@@ -983,45 +1079,59 @@ async function bcLoadRecentBroadcastStats(broadcastId, opts = {}) {
 async function bcOpenRecentBroadcastStats(item) {
   const id = Number(item?.id || 0)
   if (!id) return
-  try {
-    await loadAutopostCampaigns()
-  } catch {
-    //
-  }
+
   const cid = Number(item?.autopost_campaign_id || 0)
   if (cid > 0) {
-    const camp =
+    const cachedCamp =
       (bcAutopostCampaigns.value || []).find((c) => Number(c?.id || 0) === cid) ||
       (item.campaign_title ? { id: cid, title: item.campaign_title, autopost: {} } : null)
-    if (camp) {
+    if (cachedCamp) {
       bcShowAllRecentModal.value = false
       bcCloseRecentBroadcastStats()
       tab.value = 'broadcasts'
-      await openBcCampaignUxManage(camp)
+      void openBcCampaignUxManage(cachedCamp)
+      void loadAutopostCampaigns({ silent: true })
       return
     }
   }
-  const camp = bcCampaignForRecentBroadcast(item)
-  if (camp) {
+
+  const campKnown = bcCampaignForRecentBroadcast(item)
+  if (campKnown) {
     bcShowAllRecentModal.value = false
     bcCloseRecentBroadcastStats()
     tab.value = 'broadcasts'
-    const freshId = Number(camp?.id || 0)
-    const fresh = freshId ? (bcAutopostCampaigns.value || []).find((c) => Number(c?.id || 0) === freshId) : null
-    await openBcCampaignUxManage(fresh || camp)
+    void openBcCampaignUxManage(campKnown)
     return
   }
 
+  bcShowAllRecentModal.value = false
   bcRecentStatsBroadcastId.value = id
   bcRecentStatsBroadcastMeta.value = item ? { ...item } : null
   bcRecentStatsModalOpen.value = true
   bcRecentStatsSnapshot.value = null
-  await bcLoadRecentBroadcastStats(id)
+  void bcLoadRecentBroadcastStats(id)
   bcPulseBroadcastStats(
     bcLoadRecentBroadcastStats,
     id,
     () => bcRecentStatsModalOpen.value && Number(bcRecentStatsBroadcastId.value || 0) === id,
   )
+
+  if (bcRecentBroadcastKindIsCampaign(item)) {
+    void (async () => {
+      try {
+        if (!(bcAutopostCampaigns.value || []).length) {
+          await loadAutopostCampaigns({ silent: true })
+        }
+        const camp = bcCampaignForRecentBroadcast(item)
+        if (!camp || !bcRecentStatsModalOpen.value || bcRecentStatsBroadcastId.value !== id) return
+        bcCloseRecentBroadcastStats()
+        tab.value = 'broadcasts'
+        void openBcCampaignUxManage(camp)
+      } catch {
+        //
+      }
+    })()
+  }
 }
 
 function bcCloseRecentBroadcastStats() {
@@ -1120,8 +1230,6 @@ async function openQuickBroadcastDraft() {
 
 async function openSendTargetModal() {
   bcSendQuoteError.value = ''
-  bcSendTargetChannels.value = false
-  bcSendTargetGroups.value = false
   bcSendTargetBots.value = false
   bcAdminIncludeBotRecipients.value = false
   bcBroadcastGroupScope.value = 'mine'
@@ -1178,16 +1286,13 @@ function bcConfirmBuildPayload() {
   const wantBotsAlso = !!(showFullAdminShell.value && bcAdminIncludeBotRecipients.value && mergedIds.length > 0)
 
   if (!mergedIds.length) {
-    if (wantBotsDmOnly && !bcSendTargetChannels.value && !bcSendTargetGroups.value) {
+    if (wantBotsDmOnly) {
       return {
         mode: 'users',
         ids: [],
         recipientLabel: tt('admin.broadcast_send.all_bot_users'),
       }
     }
-    return null
-  }
-  if (!bcSendTargetChannels.value && !bcSendTargetGroups.value) {
     return null
   }
   const chSet = new Set((bcBroadcastChannels.value || []).map((c) => bcNormalizeChatId(c)))
@@ -1343,6 +1448,14 @@ async function submitBcConfirmedSend() {
     if (!sendPayload) {
       throw new Error(tt('admin.broadcast_ui.nothing_selected'))
     }
+    if ((bcMediaHistory.value || []).length > 0) {
+      const full = await fetch(() => api.adminBroadcast(bid))
+      const items = Array.isArray(full?.media_items) ? full.media_items : []
+      if (items.length > 0 && !items.some((m) => m?.has_file_id)) {
+        alert(tt('admin.broadcast_ui.media_send_missing'))
+        return
+      }
+    }
     const chatIdsPayload =
       sendPayload.mode === 'groups' || sendPayload.mode === 'all' ? sendPayload.ids : []
     if (bcSendTimingMode.value === 'scheduled') {
@@ -1424,14 +1537,13 @@ const showFullAdminShell = computed(() => {
 const bcSendBotsDmOnlyEligible = computed(() => {
   if (!showFullAdminShell.value || !bcAdminIncludeBotRecipients.value) return false
   if (Number(bcSelectedTargetsCount.value || 0) > 0) return false
-  if (bcSendTargetChannels.value || bcSendTargetGroups.value) return false
   return true
 })
 
 const bcCanProceedSendTargets = computed(() => {
   if (bcSendBotsDmOnlyEligible.value) return true
-  if (bcSendTargetChannels.value && bcActiveSendChannelIds.value.length > 0) return true
-  if (bcSendTargetGroups.value && bcActiveSendGroupIds.value.length > 0) return true
+  if (bcActiveSendChannelIds.value.length > 0) return true
+  if (bcActiveSendGroupIds.value.length > 0) return true
   return false
 })
 
@@ -1523,6 +1635,28 @@ const showAutopostCampaignsUi = computed(
   () => showFullAdminShell.value || isBroadcastShellLite.value,
 )
 const plActivitySummary = ref(null)
+const plActivitySummaryLoading = ref(false)
+const referralLiteLoading = ref(false)
+
+function hydrateAdminCabinetFromCache() {
+  const meCached = readAdminMeCache()
+  if (meCached) meAdminProfile.value = meCached
+
+  const summaryCached = readActivitySummaryCache()
+  if (isUsableActivitySummaryCache(summaryCached)) {
+    plActivitySummary.value = summaryCached
+  }
+
+  const overviewCached = readAdminOverviewCache()
+  if (overviewCached) data.value = overviewCached
+
+  const referralCached = readReferralLiteCache()
+  if (referralCached) referralInfo.value = referralCached
+}
+
+if (hasInitData.value) {
+  hydrateAdminCabinetFromCache()
+}
 const plActivityBreakdown = ref(null)
 const plActivityJournal = ref([])
 const showPartnerGroupsModal = ref(false)
@@ -1672,17 +1806,30 @@ function partnerReasonLabel(reason) {
   return raw.replace(/_/g, ' ')
 }
 
-async function loadPartnerLiteActivity() {
+async function loadPartnerLiteActivity(opts = {}) {
+  const silent = opts?.silent !== false
+  if (!silent) plActivitySummaryLoading.value = true
+  try {
+    const s = await fetchSilent(() => api.activitySummary())
+    plActivitySummary.value = s
+    writeActivitySummaryCache(s)
+  } catch {
+    if (!silent && !plActivitySummary.value) plActivitySummary.value = null
+  } finally {
+    if (!silent) plActivitySummaryLoading.value = false
+  }
+  void loadPartnerLiteActivityExtras()
+}
+
+async function loadPartnerLiteActivityExtras() {
   const to0 = new Date()
   const from0 = new Date()
   from0.setHours(0, 0, 0, 0)
-  const [s, b, j, jr] = await Promise.all([
-    api.activitySummary(),
+  const [b, j, jr] = await Promise.all([
     api.activityBreakdown('today', 'all').catch(() => null),
     fetchSilent(() => api.activityJournal(null, 150, from0.toISOString(), to0.toISOString())).catch(() => ({ items: [] })),
     api.ownerJoinReportSettings().catch(() => ({ periods: [] })),
   ])
-  plActivitySummary.value = s
   plActivityBreakdown.value = b
   plActivityJournal.value = j?.items || []
   ownerJoinReportPeriods.value = Array.isArray(jr?.periods) ? jr.periods : []
@@ -2577,10 +2724,22 @@ function ownerProtectionReportTimeLabel(iso) {
   })
 }
 
-async function loadReferralLite() {
-  const [info, people] = await Promise.all([api.referral(), api.referralPeople()])
-  referralInfo.value = info || null
-  referralsTop.value = (people?.full_list || []).filter((x) => !!x?.is_paid)
+async function loadReferralLite(opts = {}) {
+  const silent = opts?.silent !== false
+  if (!silent) referralLiteLoading.value = true
+  try {
+    const [info, people] = await Promise.all([
+      fetchSilent(() => api.referral()),
+      fetchSilent(() => api.referralPeople()),
+    ])
+    referralInfo.value = info || null
+    if (info) writeReferralLiteCache(info)
+    referralsTop.value = (people?.full_list || []).filter((x) => !!x?.is_paid)
+  } catch {
+    if (!silent && !referralInfo.value) referralInfo.value = null
+  } finally {
+    if (!silent) referralLiteLoading.value = false
+  }
 }
 
 async function loadMyPartnerStatsLite() {
@@ -2631,6 +2790,10 @@ const bcActiveLinkUrl = ref('')
 const bcShowSpoilerInfo = ref(false)
 const bcShowLinkInfo = ref(false)
 const bcMediaHistory = ref([])
+const bcHasActiveButtons = computed(() => bcQuickButtonPreview.value.length > 0)
+const bcMediaButtonsAlbumWarning = computed(
+  () => (bcMediaHistory.value || []).length > 1 && bcHasActiveButtons.value,
+)
 /** Превью первого визуального медиа в карточке черновика (id → { previewUrl, kind }) */
 const bcDraftThumbById = shallowRef({})
 /** Полноэкранный просмотр медиа из редактора / модалки файлов */
@@ -2965,23 +3128,18 @@ const bcCampaignUxWizardCanNext = computed(() => {
     return true
   }
   if (bcCampaignUxStep.value === 4) {
-    if (botsOk && !w.targetChannels && !w.targetGroups) return true
-    if (!w.targetChannels && !w.targetGroups) return false
-    if (w.targetChannels && !(w.selectedChannels || []).length) return false
-    if (w.targetGroups && !(w.selectedGroups || []).length) return false
-    return true
+    const ch = (w.selectedChannels || []).length
+    const gr = (w.selectedGroups || []).length
+    if (botsOk && !ch && !gr) return true
+    return ch > 0 || gr > 0
   }
   return true
 })
 function bcCampaignUxWizardActiveChannelIds() {
-  const w = bcCampaignUxWizard.value
-  if (!w.targetChannels) return []
-  return (w.selectedChannels || []).map((x) => Number(x || 0)).filter((x) => x !== 0)
+  return (bcCampaignUxWizard.value.selectedChannels || []).map((x) => Number(x || 0)).filter((x) => x !== 0)
 }
 function bcCampaignUxWizardActiveGroupIds() {
-  const w = bcCampaignUxWizard.value
-  if (!w.targetGroups) return []
-  return (w.selectedGroups || []).map((x) => Number(x || 0)).filter((x) => x !== 0)
+  return (bcCampaignUxWizard.value.selectedGroups || []).map((x) => Number(x || 0)).filter((x) => x !== 0)
 }
 const bcCampaignUxSelectedSummary = computed(() => {
   return {
@@ -3308,6 +3466,18 @@ function bcBroadcastRowHasTrackables(item) {
   return bcBroadcastRowHasKeyboardButtons(item) || bcBroadcastRowHasHttpLink(item)
 }
 
+function bcRecentCardPrimaryNeedsPulse(item) {
+  return bcBroadcastRowHasTrackables(item)
+}
+
+function bcRecentCardPrimaryPending(item) {
+  const id = Number(item?.id || 0)
+  if (!id || !bcRecentCardPrimaryNeedsPulse(item)) return false
+  if (bcRecentPulseEntry(id)) return false
+  if (bcRecentPulseFailedById.value[id]) return false
+  return true
+}
+
 function bcRecentPulseEntry(bid) {
   const id = Number(bid || 0)
   if (!id) return null
@@ -3327,42 +3497,67 @@ function bcRecentCardPrimaryValue(item, pulse) {
   const linkT = Number(p?.real_link_clicks_total || 0)
   const cbT = Number(p?.real_callback_clicks_total || 0)
   if (lt === 'channels') {
-    const aud = Number(p?.audience_ok || 0)
+    const aud = Number(p?.audience_ok ?? item?.audience_ok ?? 0)
     return Math.max(aud, Number(item?.recipient_total || 0))
   }
   if (bcBroadcastRowHasTrackables(item)) return linkT + cbT
   return Number(item?.recipient_ok || 0)
 }
 
-async function bcRecentPulseHydrateQuiet() {
+async function bcRecentPulseHydrateQuiet(opts = {}) {
+  const onlyMissing = Boolean(opts?.onlyMissing)
   const src = bcRecentBroadcasts.value || []
-  const cap = bcShowAllRecentModal.value ? Math.min(120, src.length) : 12
-  const ids = src
+  const cap = bcShowAllRecentModal.value ? Math.min(120, src.length) : Math.min(3, src.length)
+  let ids = src
     .slice(0, cap)
     .filter((b) => !Number(b?.autopost_campaign_id || 0))
     .filter((b) => String(b?.list_kind || '').toLowerCase() !== 'oneshot_scheduled')
     .map((b) => Number(b?.id || 0))
     .filter((x) => x > 0)
+  if (onlyMissing) {
+    ids = ids.filter((bid) => !bcRecentPulseById.value[bid] && !bcRecentPulseFailedById.value[bid])
+  }
   if (!ids.length) return
   const tk = bcBroadcastStatsTargetKindForRecentModal()
-  await Promise.all(
-    ids.map(async (bid) => {
-      try {
-        const r = await fetchSilent(() => api.adminBroadcastStats(bid, '', '', '', tk))
-        if (!r || typeof r !== 'object') return
-        bcRecentPulseById.value = {
-          ...bcRecentPulseById.value,
-          [bid]: {
-            audience_ok: Number(r.audience_ok || 0),
-            real_link_clicks_total: Number(r.real_link_clicks_total || 0),
-            real_callback_clicks_total: Number(r.real_callback_clicks_total || 0),
-          },
+  const seq = ++bcRecentPulseHydrateSeq
+  const batchSize = 3
+  for (let i = 0; i < ids.length; i += batchSize) {
+    if (seq !== bcRecentPulseHydrateSeq) return
+    const chunk = ids.slice(i, i + batchSize)
+    for (const bid of chunk) {
+      bcRecentPulseLoadingById.value = { ...bcRecentPulseLoadingById.value, [bid]: true }
+    }
+    await Promise.all(
+      chunk.map(async (bid) => {
+        try {
+          const r = await fetchSilent(() => api.adminBroadcastStats(bid, '', '', '', tk))
+          if (seq !== bcRecentPulseHydrateSeq) return
+          if (!r || typeof r !== 'object') {
+            bcRecentPulseFailedById.value = { ...bcRecentPulseFailedById.value, [bid]: true }
+            return
+          }
+          bcRecentPulseById.value = {
+            ...bcRecentPulseById.value,
+            [bid]: {
+              audience_ok: Number(r.audience_ok || 0),
+              real_link_clicks_total: Number(r.real_link_clicks_total || 0),
+              real_callback_clicks_total: Number(r.real_callback_clicks_total || 0),
+            },
+          }
+        } catch {
+          if (seq === bcRecentPulseHydrateSeq) {
+            bcRecentPulseFailedById.value = { ...bcRecentPulseFailedById.value, [bid]: true }
+          }
+        } finally {
+          if (seq === bcRecentPulseHydrateSeq) {
+            const next = { ...bcRecentPulseLoadingById.value }
+            delete next[bid]
+            bcRecentPulseLoadingById.value = next
+          }
         }
-      } catch {
-        //
-      }
-    }),
-  )
+      }),
+    )
+  }
 }
 
 function bcCampaignUxPostsPerDayFromAutopost(ap) {
@@ -4235,19 +4430,16 @@ async function bcCampaignUxStatsOpenPostEditor() {
 async function openBcCampaignUxManage(camp) {
   const id = Number(camp?.id || 0)
   if (!id) return
+  bcCampaignUxManageId.value = id
+  bcCampaignUxScreen.value = 'manage'
+  bcCampaignUxOpen.value = true
   const ap = camp?.autopost || {}
   const savedG = Array.isArray(ap?.group_chat_ids) ? ap.group_chat_ids : []
   const savedCh = Array.isArray(ap?.channel_chat_ids) ? ap.channel_chat_ids : []
   bcBroadcastGroupScope.value = 'mine'
-  try {
-    await Promise.all([loadBroadcastEligibleGroups(), loadBroadcastEligibleChannels()])
-    await bcExpandBroadcastScopeIfSavedTargetsMissing(savedG, savedCh)
-  } catch {
-    /* ignore */
-  }
-  bcCampaignUxManageId.value = id
-  bcCampaignUxScreen.value = 'manage'
-  bcCampaignUxOpen.value = true
+  void Promise.all([loadBroadcastEligibleGroups(), loadBroadcastEligibleChannels()])
+    .then(() => bcExpandBroadcastScopeIfSavedTargetsMissing(savedG, savedCh))
+    .catch(() => {})
 }
 async function openBcCampaignUxList() {
   if (isOwnerCabinet.value && !meAdminProfile.value?.is_premium) {
@@ -4362,7 +4554,11 @@ function bcCampaignUxNextStep() {
     bcCampaignUxScreen.value = 'review'
     return
   }
-  bcCampaignUxStep.value += 1
+  const next = bcCampaignUxStep.value + 1
+  bcCampaignUxStep.value = next
+  if (next === 4) {
+    void Promise.all([loadBroadcastEligibleGroups(), loadBroadcastEligibleChannels()])
+  }
 }
 
 function bcRunShakeClass(el) {
@@ -4656,8 +4852,8 @@ async function bcCampaignUxCreateCampaign() {
       showFullAdminShell.value &&
       !isBroadcastShellLite.value &&
       w.targetBots &&
-      !w.targetGroups &&
-      !w.targetChannels
+      !activeG.length &&
+      !activeCh.length
     if (!usersOnly && !activeG.length && !activeCh.length) {
       window.alert(tt('admin.bc_campaign.err_pick_recipients'))
       return
@@ -4674,13 +4870,13 @@ async function bcCampaignUxCreateCampaign() {
         showFullAdminShell.value &&
         !isBroadcastShellLite.value &&
         w.targetBots &&
-        !w.targetGroups &&
-        !w.targetChannels
+        !activeG.length &&
+        !activeCh.length
           ? 'users'
           : 'groups',
-      group_chat_ids: [...bcCampaignUxWizardActiveGroupIds()],
-      channel_chat_ids: [...bcCampaignUxWizardActiveChannelIds()],
-      autopost_channels_disabled: !w.targetChannels,
+      group_chat_ids: [...activeG],
+      channel_chat_ids: [...activeCh],
+      autopost_channels_disabled: activeCh.length === 0,
       use_all_broadcasts: false,
       broadcast_ids: [...postIds],
     }
@@ -5576,7 +5772,7 @@ const BC_PARSE_MODE = 'HTML'
 function bcMediaKindLabel(kind) {
   const k = String(kind || 'none').toLowerCase()
   const path = `admin.media_kind.${k}`
-  if (['none', 'photo', 'video', 'animation', 'document'].includes(k) && te(path)) return tt(path)
+  if (['none', 'photo', 'video', 'animation', 'document', 'audio'].includes(k) && te(path)) return tt(path)
   return k
 }
 
@@ -5586,7 +5782,8 @@ function bcMediaIcon(kind) {
   if (k === 'video') return '🎬'
   if (k === 'animation') return '🎞'
   if (k === 'document') return '📄'
-  return '—'
+  if (k === 'audio') return '🎵'
+  return '📎'
 }
 
 function bcNormalizeChatId(c) {
@@ -6883,8 +7080,17 @@ const payoutRequestsSummary = computed(() => {
   }
 })
 
-async function loadOverview() {
-  data.value = await fetch(() => api.adminOverview())
+async function loadOverview(opts = {}) {
+  const silent = opts?.silent !== false
+  try {
+    const r = silent
+      ? await fetchSilent(() => api.adminOverview())
+      : await fetch(() => api.adminOverview())
+    data.value = r
+    writeAdminOverviewCache(r)
+  } catch {
+    if (!data.value) data.value = null
+  }
 }
 
 async function loadPayouts() {
@@ -7820,37 +8026,52 @@ function revokeBcDraftListThumbs() {
 }
 
 async function prefetchBcDraftListThumbs() {
-  revokeBcDraftListThumbs()
+  const seq = ++bcDraftThumbPrefetchSeq
   const list = (broadcasts.value || []).slice(0, 36)
-  const next = {}
-  for (const b of list) {
-    const bid = Number(b?.id || 0)
-    if (!bid) continue
-    let items = Array.isArray(b?.media_items) ? b.media_items : []
-    if (!items.length) {
-      try {
-        const full = await fetch(() => api.adminBroadcast(bid))
-        items = Array.isArray(full?.media_items) ? full.media_items : []
-      } catch {
-        continue
-      }
-    }
-    const first = (items || []).find((m) => {
-      const k = String(m?.media_kind || '').toLowerCase()
-      return Number(m?.id) > 0 && (k.includes('photo') || k.includes('video') || k === 'animation')
-    })
-    if (!first) continue
-    const mid = Number(first.id)
-    const mk = String(first.media_kind || '').toLowerCase()
-    const kind = mk.includes('photo') ? 'photo' : 'video'
-    try {
-      const previewUrl = await fetchAdminBroadcastMediaPreviewUrl(bid, mid)
-      next[bid] = { previewUrl, kind }
-    } catch {
-      //
+  const keepIds = new Set(list.map((b) => Number(b?.id || 0)).filter((x) => x > 0))
+  const next = { ...(bcDraftThumbById.value || {}) }
+  for (const [k, v] of Object.entries(bcDraftThumbById.value || {})) {
+    if (!keepIds.has(Number(k))) {
+      if (v?.previewUrl) revokeBroadcastMediaPreviewUrl(v.previewUrl)
+      delete next[k]
     }
   }
   bcDraftThumbById.value = next
+  await Promise.all(
+    list.map(async (b) => {
+      if (seq !== bcDraftThumbPrefetchSeq) return
+      const bid = Number(b?.id || 0)
+      if (!bid || bcDraftThumbById.value[bid]?.previewUrl) return
+      let items = Array.isArray(b?.media_items) ? b.media_items : []
+      if (!items.length) {
+        try {
+          const full = await fetchSilent(() => api.adminBroadcast(bid))
+          items = Array.isArray(full?.media_items) ? full.media_items : []
+        } catch {
+          return
+        }
+      }
+      if (seq !== bcDraftThumbPrefetchSeq) return
+      const first = (items || []).find((m) => {
+        const k = String(m?.media_kind || '').toLowerCase()
+        return Number(m?.id) > 0 && (k.includes('photo') || k.includes('video') || k === 'animation')
+      })
+      if (!first) return
+      const mid = Number(first.id)
+      const mk = String(first.media_kind || '').toLowerCase()
+      const kind = mk.includes('photo') ? 'photo' : 'video'
+      try {
+        const previewUrl = await fetchAdminBroadcastMediaPreviewUrl(bid, mid)
+        if (seq !== bcDraftThumbPrefetchSeq) {
+          revokeBroadcastMediaPreviewUrl(previewUrl)
+          return
+        }
+        bcDraftThumbById.value = { ...bcDraftThumbById.value, [bid]: { previewUrl, kind } }
+      } catch {
+        //
+      }
+    }),
+  )
 }
 
 async function setBcBroadcastDraftListScope(scope) {
@@ -7865,7 +8086,9 @@ async function loadRecentSendEvents(opts = {}) {
     const r = silent
       ? await fetchSilent(() => api.adminBroadcastRecentSendEvents(80))
       : await fetch(() => api.adminBroadcastRecentSendEvents(80))
-    bcRecentSendEvents.value = Array.isArray(r?.items) ? r.items : []
+    const items = Array.isArray(r?.items) ? r.items : []
+    bcRecentSendEvents.value = items
+    if (items.length) writeSessionJson(BC_RECENT_SEND_EVENTS_CACHE_KEY, items)
   } catch {
     if (!silent) bcRecentSendEvents.value = []
   }
@@ -7874,12 +8097,27 @@ async function loadRecentSendEvents(opts = {}) {
 async function loadBroadcasts(opts = {}) {
   const silent = Boolean(opts?.silent)
   if (!silent) bcLoading.value = true
+  if (!silent && !bcRecentSendEvents.value.length) {
+    const cached = readSessionJson(BC_RECENT_SEND_EVENTS_CACHE_KEY, 5 * 60 * 1000)
+    if (Array.isArray(cached) && cached.length) {
+      bcRecentSendEvents.value = cached
+      bcLoading.value = false
+    }
+  }
   try {
     const listScope =
       bcBroadcastDraftListScope.value === 'all' && bcBroadcastCanScopeAll.value ? 'all' : 'mine'
-    const r = await fetch(() => api.adminBroadcasts(listScope))
+    const doFetch = silent ? fetchSilent : fetch
+    const recentPromise = fetchSilent(() => api.adminBroadcastRecentSendEvents(80))
+    const listPromise = doFetch(() => api.adminBroadcasts(listScope))
+    const recentRes = await recentPromise
+    const recentItems = Array.isArray(recentRes?.items) ? recentRes.items : []
+    bcRecentSendEvents.value = recentItems
+    if (recentItems.length) writeSessionJson(BC_RECENT_SEND_EVENTS_CACHE_KEY, recentItems)
+    if (!silent) bcLoading.value = false
+
+    const r = await listPromise
     broadcasts.value = r?.items || []
-    await loadRecentSendEvents({ silent: true })
     if (r?.scope === 'mine' && bcBroadcastDraftListScope.value === 'all') {
       bcBroadcastDraftListScope.value = 'mine'
     }
@@ -7887,11 +8125,20 @@ async function loadBroadcasts(opts = {}) {
     if (!silent) broadcasts.value = []
   } finally {
     if (!silent) bcLoading.value = false
-    if (!silent) await loadAutopostCampaigns()
   }
   bcCampaignUxPruneStalePostIds()
-  if (!silent) await prefetchBcDraftListThumbs()
+  if (!silent) {
+    void loadAutopostCampaigns({ silent: true })
+    void prefetchBcDraftListThumbs()
+    void bcRecentPulseHydrateQuiet()
+  } else {
+    void bcRecentPulseHydrateQuiet({ onlyMissing: true })
+  }
   if (silent) return
+
+  const skipFormHydrate =
+    tab.value === 'broadcasts' && !bcQuickDraftModalOpen.value && !bcCampaignUxOpen.value
+  if (skipFormHydrate) return
 
   const currentId = Number(bcSelectedId.value || 0)
   if (currentId && broadcasts.value.some((x) => Number(x?.id || 0) === currentId)) return
@@ -8125,20 +8372,39 @@ async function loadBcMediaThumbnails() {
       //
     }
   }
-  const next = []
-  for (const m of bcMediaHistory.value) {
-    const row = { ...m, previewUrl: null }
-    const kid = String(m.kind || '').toLowerCase()
-    const canThumb = !!m.id && (kid.includes('photo') || kid.includes('video') || kid === 'animation')
-    if (canThumb) {
-      try {
-        row.previewUrl = await fetchAdminBroadcastMediaPreviewUrl(bid, m.id)
-      } catch {
-        row.previewUrl = null
+  const rows = await Promise.all(
+    bcMediaHistory.value.map(async (m) => {
+      const row = { ...m, previewUrl: null }
+      const kid = String(m.kind || '').toLowerCase()
+      const canThumb = !!m.id && bcMediaCanLoadPreview(kid, m.name)
+      if (canThumb) {
+        try {
+          row.previewUrl = await fetchAdminBroadcastMediaPreviewUrl(bid, m.id)
+        } catch {
+          row.previewUrl = m.previewUrl || null
+        }
       }
+      return row
+    }),
+  )
+  bcMediaHistory.value = rows
+}
+
+function bcAttachLocalPreviewUrls(files) {
+  const picked = [...(files || [])].filter((f) => f instanceof File)
+  if (!picked.length) return
+  const start = Math.max(0, bcMediaHistory.value.length - picked.length)
+  const next = bcMediaHistory.value.map((m, i) => {
+    const file = picked[i - start]
+    if (!file || m?.previewUrl) return m
+    const kid = String(m?.kind || '').toLowerCase()
+    if (!kid.includes('photo') && kid !== 'animation' && !String(file.type || '').startsWith('image/')) return m
+    try {
+      return { ...m, previewUrl: URL.createObjectURL(file) }
+    } catch {
+      return m
     }
-    next.push(row)
-  }
+  })
   bcMediaHistory.value = next
 }
 
@@ -8160,32 +8426,89 @@ async function clearBcMedia() {
   }
 }
 
-async function uploadBcMedia(ev) {
-  const id = bcSelectedId.value
-  const f = ev.target?.files?.[0]
-  if (ev.target) ev.target.value = ''
-  if (!id || !f) return
+function bcSyncMediaHistoryFromRow(r) {
+  const items = Array.isArray(r?.media_items) ? r.media_items : []
+  bcMediaKindStored.value = r?.media_kind || 'none'
+  bcMediaOriginalName.value = r?.media_original_name || ''
+  bcMediaHistory.value = items.map((m) => ({
+    id: Number(m?.id || 0),
+    name: String(m?.media_original_name || ''),
+    kind: String(m?.media_kind || 'photo'),
+    previewUrl: null,
+  }))
+}
+
+function bcMediaCanLoadPreview(kind, name) {
+  const k = String(kind || '').toLowerCase()
+  const n = String(name || '').toLowerCase()
+  return k.includes('photo') || k.includes('video') || k === 'animation' || (k === 'document' && n.endsWith('.gif'))
+}
+
+async function ensureBcDraftForMediaUpload() {
+  if (Number(bcSelectedId.value || 0) > 0) return true
+  const scope =
+    bcCampaignUxOpen.value && bcCampaignUxScreen.value === 'postEditor' ? 'autopost' : 'oneshot'
+  return createBcDraft(scope)
+}
+
+async function uploadBcMediaFiles(fileList) {
+  const files = [...(fileList || [])].filter((f) => f instanceof File)
+  if (!files.length) return
+  if (!(await ensureBcDraftForMediaUpload())) return
+  const id = Number(bcSelectedId.value || 0)
+  if (!id) return
+  const room = BC_MAX_MEDIA_ITEMS - (bcMediaHistory.value?.length || 0)
+  if (room <= 0) {
+    window.alert(tt('admin.broadcast_ui.media_limit', { max: BC_MAX_MEDIA_ITEMS }))
+    return
+  }
+  const batch = files.slice(0, room)
+  if (batch.length < files.length) {
+    window.alert(tt('admin.broadcast_ui.media_limit', { max: BC_MAX_MEDIA_ITEMS }))
+  }
   bcUploading.value = true
+  let lastRow = null
   try {
-    const r = await adminBroadcastUploadMedia(id, f, '')
-    bcMediaKindStored.value = r?.media_kind || bcMediaKindStored.value
-    bcMediaOriginalName.value = r?.media_original_name || bcMediaOriginalName.value
-    const items = Array.isArray(r?.media_items) ? r.media_items : []
-    bcMediaHistory.value = items.map((m) => ({
-      id: Number(m?.id || 0),
-      name: String(m?.media_original_name || ''),
-      kind: String(m?.media_kind || 'photo'),
-      previewUrl: null,
-    }))
-    bcSavedTick.value = false
-    upsertBroadcastInList(r)
-    await loadBcMediaThumbnails()
-    await prefetchBcDraftListThumbs()
+    let okCount = 0
+    let lastErr = null
+    for (const f of batch) {
+      try {
+        lastRow = await adminBroadcastUploadMedia(id, f, '')
+        okCount += 1
+      } catch (e) {
+        lastErr = e
+      }
+    }
+    if (lastRow) {
+      bcSyncMediaHistoryFromRow(lastRow)
+      bcAttachLocalPreviewUrls(batch)
+      bcSavedTick.value = false
+      upsertBroadcastInList(lastRow)
+    }
+    if (lastErr && okCount < batch.length) {
+      const detail = String(lastErr?.body?.detail || lastErr?.message || tt('admin.dlg.upload_failed'))
+      if (okCount > 0) {
+        alert(`${detail}\n${tt('admin.broadcast_ui.media_partial_upload', { ok: okCount, total: batch.length })}`)
+      } else {
+        alert(detail)
+      }
+    }
   } catch (e) {
     alert(String(e?.body?.detail || e?.message || tt('admin.dlg.upload_failed')))
   } finally {
     bcUploading.value = false
   }
+  if (lastRow) {
+    void loadBcMediaThumbnails()
+    void prefetchBcDraftListThumbs()
+  }
+}
+
+async function uploadBcMedia(ev) {
+  const f = ev.target?.files?.[0]
+  if (ev.target) ev.target.value = ''
+  if (!f) return
+  await uploadBcMediaFiles([f])
 }
 
 async function removeBcMediaItem(mediaId) {
@@ -8193,15 +8516,7 @@ async function removeBcMediaItem(mediaId) {
   if (!id || !mediaId) return
   try {
     const r = await fetch(() => adminBroadcastDeleteMediaItem(id, mediaId))
-    bcMediaKindStored.value = r?.media_kind || 'none'
-    bcMediaOriginalName.value = r?.media_original_name || ''
-    const items = Array.isArray(r?.media_items) ? r.media_items : []
-    bcMediaHistory.value = items.map((m) => ({
-      id: Number(m?.id || 0),
-      name: String(m?.media_original_name || ''),
-      kind: String(m?.media_kind || 'photo'),
-      previewUrl: null,
-    }))
+    bcSyncMediaHistoryFromRow(r)
     await loadBcMediaThumbnails()
   } catch (e) {
     alert(String(e?.body?.detail || e?.message || tt('admin.dlg.bc_delete_media_failed')))
@@ -8734,24 +9049,41 @@ async function saveBcEditModal() {
   }
 }
 
-onMounted(async () => {
-  if (String(route.query.cabinet || '').toLowerCase() === 'delegated') {
-    setCabinetMode('delegated')
+function onGuardPrefetchBroadcasts() {
+  void prefetchAdminCabinet(api)
+  if (!bcRecentSendEvents.value.length) {
+    const cached = readSessionJson(BC_RECENT_SEND_EVENTS_CACHE_KEY, 5 * 60 * 1000)
+    if (Array.isArray(cached) && cached.length) bcRecentSendEvents.value = cached
   }
-  window.addEventListener('click', onGlobalClickForEmoji)
-  document.addEventListener('selectionchange', onBcEditorSelectionChange)
-  window.addEventListener('guard:header-back', onGuardHeaderBack)
-  if (!hasInitData.value) {
-    loading.value = false
-    return
+  void loadRecentSendEvents({ silent: true })
+  if (!(broadcasts.value || []).length) {
+    void fetchSilent(() => api.adminBroadcasts('mine'))
+      .then((r) => {
+        if (Array.isArray(r?.items) && r.items.length) broadcasts.value = r.items
+      })
+      .catch(() => {})
   }
-  resetPayoutDatesToToday()
-  loading.value = true
+}
+
+let adminBootInFlight = null
+
+async function bootstrapAdminCabinet() {
+  if (adminBootInFlight) return adminBootInFlight
+  adminBootInFlight = (async () => {
   error.value = ''
+  resetPayoutDatesToToday()
   try {
-    meAdminProfile.value = await api.me()
+    try {
+      const freshMe = await fetchSilent(() => api.me())
+      meAdminProfile.value = freshMe
+      writeAdminMeCache(freshMe)
+    } catch (e) {
+      if (!meAdminProfile.value) throw e
+    }
+
     bcLastSendTargetByPost.value = bcLoadLastTargetsMap()
-    const bcDeepTab = String(route.query.tab || '').toLowerCase() === 'broadcasts'
+    const bcDeepTab =
+      String(route.query.tab || route.query.admin_tab || '').toLowerCase() === 'broadcasts'
     let bcDeepChannel = 0
     try {
       bcDeepChannel = Number(localStorage.getItem(BC_OPEN_CHANNEL_KEY) || 0)
@@ -8762,7 +9094,7 @@ onMounted(async () => {
       tab.value = 'broadcasts'
       bcStatsTab.value = 'groups'
       bcBroadcastGroupScope.value = 'mine'
-      await Promise.allSettled([
+      void Promise.allSettled([
         loadBroadcasts(),
         loadBroadcastEligibleGroups(),
         loadBroadcastEligibleChannels(),
@@ -8771,17 +9103,16 @@ onMounted(async () => {
       tab.value = 'overview'
       bcStatsTab.value = 'groups'
       bcBroadcastGroupScope.value = 'mine'
-      await Promise.allSettled([
+      void Promise.allSettled([
         loadPartnerLiteActivity(),
         loadReferralLite(),
         loadBroadcasts(),
         loadMyPartnerStatsLite(),
       ])
-    } else {
-      // Быстрый первый экран админки: сначала обзор/пользователи.
-      await Promise.all([loadOverview(), loadUsers()])
-      // Остальные данные догружаем в фоне, чтобы вкладка открывалась заметно быстрее.
-      Promise.allSettled([
+    } else if (showFullAdminShell.value) {
+      void Promise.allSettled([
+        loadOverview(),
+        loadUsers(),
         loadPayouts(),
         loadReferralsTop(),
         loadCommissions(),
@@ -8798,18 +9129,23 @@ onMounted(async () => {
       ]).catch(() => {
         //
       })
+    } else {
+      void Promise.allSettled([loadPartnerLiteActivity(), loadReferralLite()]).catch(() => {
+        //
+      })
     }
     if (bcDeepTab || bcDeepChannel) {
       tab.value = 'broadcasts'
-      try {
-        await ensureEmojiPicker()
-      } catch {
-        //
-      }
-      await Promise.all([loadBroadcasts(), loadBroadcastEligibleGroups(), loadBroadcastEligibleChannels()])
-      tryApplyDelegatedPreferredGroup()
-      tryApplyOpenChannelPref()
-    } else if (showFullAdminShell.value && String(route.query.tab || '').toLowerCase() === 'ops') {
+      void ensureEmojiPicker()
+      void Promise.allSettled([
+        loadBroadcasts(),
+        loadBroadcastEligibleGroups(),
+        loadBroadcastEligibleChannels(),
+      ]).then(() => {
+        tryApplyDelegatedPreferredGroup()
+        tryApplyOpenChannelPref()
+      })
+    } else if (showFullAdminShell.value && String(route.query.tab || route.query.admin_tab || '').toLowerCase() === 'ops') {
       tab.value = 'ops'
       opsInnerTab.value = String(route.query.ops || '').toLowerCase() === 'journal' ? 'journal' : 'pulse'
     }
@@ -8821,9 +9157,37 @@ onMounted(async () => {
   } catch (e) {
     error.value = String(e?.body?.detail || e?.message || tt('admin.dlg.no_access'))
   } finally {
-    loading.value = false
+    adminBootInFlight = null
   }
+  })()
+  return adminBootInFlight
+}
+
+onMounted(() => {
+  if (String(route.query.cabinet || '').toLowerCase() === 'delegated') {
+    setCabinetMode('delegated')
+  }
+  window.addEventListener('click', onGlobalClickForEmoji)
+  document.addEventListener('selectionchange', onBcEditorSelectionChange)
+  window.addEventListener('guard:header-back', onGuardHeaderBack)
+  window.addEventListener('guard:prefetch-broadcasts', onGuardPrefetchBroadcasts)
+  if (!bcRecentSendEvents.value.length) {
+    const cachedRecent = readSessionJson(BC_RECENT_SEND_EVENTS_CACHE_KEY, 5 * 60 * 1000)
+    if (Array.isArray(cachedRecent) && cachedRecent.length) bcRecentSendEvents.value = cachedRecent
+  }
+  if (!hasInitData.value) return
+  void bootstrapAdminCabinet()
 })
+
+watch(
+  hasInitData,
+  (ready) => {
+    if (!ready) return
+    hydrateAdminCabinetFromCache()
+    void bootstrapAdminCabinet()
+  },
+  { immediate: false },
+)
 
 watch(
   () => premiumAdmSection.value,
@@ -8843,7 +9207,6 @@ watch(
   () => bcAuxModal.value,
   (v) => {
     if (v !== 'keyboard') bcKeyboardInfoOpen.value = false
-    if (v === 'media') loadBcMediaThumbnails()
   },
 )
 
@@ -8855,6 +9218,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('click', onGlobalClickForEmoji)
   document.removeEventListener('selectionchange', onBcEditorSelectionChange)
   window.removeEventListener('guard:header-back', onGuardHeaderBack)
+  window.removeEventListener('guard:prefetch-broadcasts', onGuardPrefetchBroadcasts)
   if (bcStatsReloadTimer.value) {
     clearTimeout(bcStatsReloadTimer.value)
     bcStatsReloadTimer.value = null
@@ -8951,17 +9315,13 @@ watch(
       return
     }
     if (v === 'broadcasts') {
-      try {
-        await ensureEmojiPicker()
-      } catch {
-        //
-      }
-      await loadBroadcasts()
-      await loadBroadcastEligibleGroups()
-      await loadBroadcastEligibleChannels()
-      tryApplyDelegatedPreferredGroup()
-      tryApplyOpenChannelPref()
-      void bcRecentPulseHydrateQuiet()
+      void ensureEmojiPicker()
+      void (async () => {
+        await loadBroadcasts()
+        void Promise.allSettled([loadBroadcastEligibleGroups(), loadBroadcastEligibleChannels()])
+        tryApplyDelegatedPreferredGroup()
+        tryApplyOpenChannelPref()
+      })()
     }
   }
 )
@@ -9147,9 +9507,21 @@ watch(
     }
     if (v !== 'broadcasts') return
     bcBroadcastsListPollTimer.value = window.setInterval(() => {
-      void loadBroadcasts({ silent: true })
-      void bcRecentPulseHydrateQuiet()
-    }, 3500)
+      void loadRecentSendEvents({ silent: true }).then(() => {
+        void bcRecentPulseHydrateQuiet({ onlyMissing: true })
+      })
+    }, BC_BROADCASTS_POLL_MS)
+  },
+  { immediate: true },
+)
+
+watch(
+  () => [route.query.tab, route.query.admin_tab, route.path],
+  () => {
+    if (String(route.path || '') !== '/admin') return
+    const q = adminTabFromRouteQuery()
+    if (q === tab.value) return
+    if (q === 'broadcasts' || q === 'overview') tab.value = q
   },
   { immediate: true },
 )
@@ -9188,21 +9560,6 @@ watch(
     <div class="relative z-10 space-y-3 pb-[calc(5.25rem+env(safe-area-inset-bottom,0px))]">
     <div v-if="!hasInitData" class="rounded-xl border border-amber-200 bg-amber-50 p-4 text-amber-800 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-200">
       {{ tt('app.init_required') }}
-    </div>
-    <div
-      v-else-if="loading"
-      class="relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-slate-900/88 via-slate-950/90 to-black/95 p-6 text-center text-slate-100 shadow-[0_16px_50px_-16px_rgba(0,0,0,0.85)] backdrop-blur-xl ring-1 ring-white/10"
-      aria-busy="true"
-    >
-      <div class="mx-auto mb-3 inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/8 px-3 py-1.5 text-xs font-semibold text-slate-100 shadow-[0_0_20px_-10px_rgba(255,255,255,0.35)]">
-        <span class="inline-block bc-hourglass">⏳</span>
-        {{ tt('admin.shell.loading_cabinet') }}
-      </div>
-      <div class="space-y-2.5">
-        <div class="mx-auto h-3 w-2/3 max-w-[14rem] animate-pulse rounded bg-white/15" />
-        <div class="h-20 animate-pulse rounded-xl bg-white/10" />
-        <div class="h-20 animate-pulse rounded-xl bg-white/10" />
-      </div>
     </div>
     <div v-else-if="error" class="rounded-xl border border-rose-300 bg-rose-50 p-4 text-rose-700 dark:border-rose-700 dark:bg-rose-900/20 dark:text-rose-300">
       {{ error }}
@@ -9259,10 +9616,12 @@ watch(
         <template v-if="!premiumAdmSection">
           <div class="col-span-2">
             <OwnerCabinetHome
-              :summary="plActivitySummary"
+              :summary="plActivitySummary || {}"
               :profile="meAdminProfile"
               :referral-paid-count="referralInfo?.paid_count != null ? referralInfo.paid_count : null"
               :broadcast-spend-tokens="meAdminProfile?.broadcast_spend_tokens != null ? meAdminProfile.broadcast_spend_tokens : null"
+              :summary-loading="false"
+              :referral-loading="false"
               @open-section="openPremiumAdmCard"
               @open-main="goOwnerSubscriptionPage"
             />
@@ -10615,7 +10974,15 @@ watch(
                 <span class="text-lg leading-none text-zinc-500">›</span>
               </div>
               <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-zinc-300">
-                <span>{{ bcRecentCardPrimaryLabel(item) }} <b class="text-zinc-100">{{ fmtIntSpace(bcRecentCardPrimaryValue(item, bcRecentPulseEntry(item.id))) }}</b></span>
+                <span class="inline-flex items-center gap-1">
+                  {{ bcRecentCardPrimaryLabel(item) }}
+                  <span
+                    v-if="bcRecentCardPrimaryPending(item)"
+                    class="inline-block h-3 w-3 animate-spin rounded-full border-2 border-zinc-500/25 border-t-zinc-200"
+                    :aria-label="tt('admin.broadcast_shell.stats_loading')"
+                  />
+                  <b v-else class="text-zinc-100">{{ fmtIntSpace(bcRecentCardPrimaryValue(item, bcRecentPulseEntry(item.id))) }}</b>
+                </span>
                 <span>{{ tt('admin.broadcast_shell.delivered_ok') }} <b class="text-zinc-100">{{ Number(item.recipient_ok || 0) }}</b></span>
                 <span>{{ tt('admin.broadcast_shell.errors') }} <b class="text-zinc-100">{{ Number(item.recipient_fail || 0) }}</b></span>
               </div>
@@ -10722,6 +11089,8 @@ watch(
             <button type="button" class="bc-tool-btn !px-2 !text-[11px]" :class="!bcCanRedo() ? 'opacity-40' : ''" :disabled="!bcCanRedo()" @mousedown.prevent @click="bcRedo">↷</button>
           </div>
 
+          <BroadcastTextLinksStrip :html="bcBodyHtml" />
+
           <p class="mt-1 text-[11px]" :class="bcCurrentLen() > bcCurrentMaxLen() ? 'text-rose-400' : 'text-slate-500'">
             {{ tt('admin.broadcast_ui.chars_count', { current: bcCurrentLen(), max: bcCurrentMaxLen() }) }}
           </p>
@@ -10745,42 +11114,26 @@ watch(
               </div>
             </div>
             <button type="button" class="bc-tool-btn mt-1.5 !text-[12px]" @click="bcAuxModal = 'keyboard'">{{ tt('admin.broadcast_ui.add_post_buttons') }}</button>
+            <p
+              v-if="bcMediaButtonsAlbumWarning"
+              class="mt-2 rounded-lg border border-amber-400/35 bg-amber-500/10 px-2.5 py-2 text-[11px] leading-snug text-amber-100/95"
+            >
+              {{ tt('admin.broadcast_ui.media_buttons_album_warning', { max: BC_MAX_MEDIA_ITEMS }) }}
+            </p>
           </div>
 
           <div class="mt-3">
             <p class="text-[12px] font-semibold text-zinc-300">{{ tt('admin.broadcast_ui.attachments') }}</p>
-            <div v-if="bcMediaHistory.length" class="mt-1.5 flex flex-wrap gap-2">
-              <div v-for="(m, mi) in bcMediaHistory.slice(0, 4)" :key="`quick-pv-${mi}-${m.id || mi}`" class="relative shrink-0">
-                <button
-                  v-if="m.previewUrl && (String(m.kind || '').toLowerCase().includes('photo') || String(m.kind || '').toLowerCase().includes('video') || String(m.kind || '').toLowerCase() === 'animation')"
-                  type="button"
-                  class="group relative block h-14 w-14 overflow-hidden rounded-lg border border-white/15 bg-slate-950/80 shadow-md ring-1 ring-white/[0.06] transition hover:border-cyan-400/35 hover:ring-cyan-400/25"
-                  :title="tt('admin.broadcast_ui.open_large')"
-                  @click="openBcMediaViewer(m)"
-                >
-                  <img
-                    v-if="String(m.kind || '').toLowerCase().includes('photo')"
-                    :src="m.previewUrl"
-                    class="h-full w-full object-cover"
-                    alt=""
-                  />
-                  <video
-                    v-else
-                    :src="m.previewUrl"
-                    class="h-full w-full object-cover"
-                    muted
-                    playsinline
-                  />
-                </button>
-                <div
-                  v-else
-                  class="flex h-14 w-14 flex-col items-center justify-center gap-0.5 rounded-lg border border-white/10 bg-slate-950/75 p-1 text-center shadow-inner ring-1 ring-white/[0.04]"
-                >
-                  <span class="text-base leading-none">{{ bcMediaIcon(m.kind) }}</span>
-                </div>
-              </div>
-            </div>
-            <button type="button" class="bc-tool-btn mt-1.5 !text-[12px]" @click="bcAuxModal = 'media'">{{ tt('admin.broadcast_ui.file_and_media') }}</button>
+            <BroadcastMediaStrip
+              class="mt-1.5"
+              size="sm"
+              :items="bcMediaHistory"
+              :uploading="bcUploading"
+              :disabled="bcUploading"
+              @upload="uploadBcMediaFiles"
+              @remove="removeBcMediaItem"
+              @view="openBcMediaViewer"
+            />
           </div>
 
           <button
@@ -10813,67 +11166,28 @@ watch(
           </div>
           <p class="mt-2 text-[13px] text-zinc-400">{{ tt('admin.broadcast_ui.choose_recipients') }}</p>
 
-          <div class="mt-4 space-y-2.5">
-            <button
-              type="button"
-              class="flex w-full items-center justify-between gap-3 rounded-xl bg-white/[0.035] px-3 py-2.5 text-left"
-              @click="bcToggleSendTargetChannels"
-            >
-              <span class="min-w-0">
-                <span class="block text-[18px] font-extrabold text-white">{{ tt('admin.broadcast_ui.channels_title') }}</span>
-                <span class="block text-[12px] text-slate-200/90">{{ tt('admin.broadcast_ui.channels_sub') }}</span>
-              </span>
-              <span class="inline-flex h-6 w-6 items-center justify-center rounded-md border text-[14px] font-black" :class="bcSendTargetChannels ? 'border-violet-300/55 bg-violet-600/85 text-white' : 'border-white/35 bg-transparent text-transparent'">✓</span>
-            </button>
-
-            <button
-              type="button"
-              class="flex w-full items-center justify-between gap-3 rounded-xl bg-white/[0.035] px-3 py-2.5 text-left"
-              @click="bcToggleSendTargetGroups"
-            >
-              <span class="min-w-0">
-                <span class="block text-[18px] font-extrabold text-white">{{ tt('admin.broadcast_ui.groups_title') }}</span>
-                <span class="block text-[12px] text-slate-200/90">{{ tt('admin.broadcast_ui.groups_sub') }}</span>
-              </span>
-              <span class="inline-flex h-6 w-6 items-center justify-center rounded-md border text-[14px] font-black" :class="bcSendTargetGroups ? 'border-violet-300/55 bg-violet-600/85 text-white' : 'border-white/35 bg-transparent text-transparent'">✓</span>
-            </button>
-
-            <label
-              v-if="showFullAdminShell"
-              class="flex cursor-pointer items-start gap-3 rounded-xl border border-cyan-500/28 bg-white/[0.04] px-3 py-2.5 text-left"
-            >
-              <input v-model="bcAdminIncludeBotRecipients" type="checkbox" class="mt-1 size-5 shrink-0 rounded border-white/25 bg-transparent text-indigo-500 focus:ring-indigo-500/40" />
-              <span class="min-w-0">
-                <span class="block text-[16px] font-extrabold text-white">{{ tt('admin.broadcast_ui.include_bot_users') }}</span>
-                <span class="mt-0.5 block text-[12px] text-slate-300/95">{{ tt('admin.broadcast_ui.include_bot_users_sub') }}</span>
-              </span>
-            </label>
+          <div class="mt-4">
+            <BroadcastRecipientsPanel
+              v-model:selected-group-ids="bcSelectedGroupIds"
+              v-model:selected-channel-ids="bcSelectedChannelIds"
+              :groups="bcBroadcastGroups"
+              :channels="bcBroadcastChannels"
+              :normalize-chat-id="bcNormalizeChatId"
+              :show-paused-badge="!bcCurrentBroadcastIsOneshot"
+              list-max-height="max-h-[min(48dvh,20rem)]"
+            />
           </div>
 
-          <div class="mt-5">
-            <p class="text-[13px] font-semibold text-zinc-300">{{ tt('admin.broadcast_ui.selected') }}</p>
-            <div class="mt-1.5 space-y-1.5">
-              <button
-                v-if="bcSendTargetChannels"
-                type="button"
-                class="flex w-full items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2 text-left text-[14px] font-semibold text-zinc-100"
-                @click="openBcBroadcastChannelsPickerInFlow()"
-              >
-                <span>{{ tt('admin.broadcast_send.target_channels', { n: Number(bcSelectedChannelIds.length || 0) }) }}</span>
-                <span>›</span>
-              </button>
-              <button
-                v-if="bcSendTargetGroups"
-                type="button"
-                class="flex w-full items-center justify-between rounded-xl bg-white/[0.04] px-3 py-2 text-left text-[14px] font-semibold text-zinc-100"
-                @click="openBcBroadcastGroupsPickerInFlow()"
-              >
-                <span>{{ tt('admin.broadcast_send.target_groups', { n: Number(bcSelectedGroupIds.length || 0) }) }}</span>
-                <span>›</span>
-              </button>
-              <p v-if="!bcSendTargetSummary.length" class="rounded-xl bg-white/[0.03] px-3 py-2 text-[12px] text-zinc-400">{{ tt('admin.broadcast_ui.nothing_selected') }}</p>
-            </div>
-          </div>
+          <label
+            v-if="showFullAdminShell"
+            class="mt-4 flex cursor-pointer items-start gap-3 rounded-xl border border-cyan-500/28 bg-white/[0.04] px-3 py-2.5 text-left"
+          >
+            <input v-model="bcAdminIncludeBotRecipients" type="checkbox" class="mt-1 size-5 shrink-0 rounded border-white/25 bg-transparent text-indigo-500 focus:ring-indigo-500/40" />
+            <span class="min-w-0">
+              <span class="block text-[16px] font-extrabold text-white">{{ tt('admin.broadcast_ui.include_bot_users') }}</span>
+              <span class="mt-0.5 block text-[12px] text-slate-300/95">{{ tt('admin.broadcast_ui.include_bot_users_sub') }}</span>
+            </span>
+          </label>
 
           <div v-if="bcSendQuoteError" class="mt-3 rounded-xl border border-rose-500/35 bg-rose-950/40 px-3 py-2 text-[12px] leading-snug text-rose-50">
             {{ bcSendQuoteError }}
@@ -11012,6 +11326,13 @@ watch(
             </div>
           </div>
 
+          <p
+            v-if="bcMediaButtonsAlbumWarning"
+            class="mt-3 rounded-xl border border-amber-400/35 bg-amber-500/10 px-3 py-2.5 text-[12px] leading-snug text-amber-100/95"
+          >
+            {{ tt('admin.broadcast_ui.media_buttons_album_warning', { max: BC_MAX_MEDIA_ITEMS }) }}
+          </p>
+
           <div class="mt-2.5 flex items-center justify-between gap-3 rounded-xl border border-white/[0.07] bg-white/[0.02] px-3 py-2">
             <span class="text-[14px] font-semibold text-zinc-100">{{ tt('admin.broadcast_ui.cost') }}</span>
             <span class="text-[15px] font-black text-amber-300">{{ bcConfirmLoading ? '...' : `${bcConfirmQuoteTokens} AURUM` }}</span>
@@ -11056,7 +11377,15 @@ watch(
                 ><span> · {{ bcRecentWhenLabel(item) }}</span>
               </p>
               <div class="mt-1.5 flex flex-wrap items-center gap-3 text-[11px] text-zinc-300">
-                <span>{{ bcRecentCardPrimaryLabel(item) }} <b class="text-zinc-100">{{ fmtIntSpace(bcRecentCardPrimaryValue(item, bcRecentPulseEntry(item.id))) }}</b></span>
+                <span class="inline-flex items-center gap-1">
+                  {{ bcRecentCardPrimaryLabel(item) }}
+                  <span
+                    v-if="bcRecentCardPrimaryPending(item)"
+                    class="inline-block h-3 w-3 animate-spin rounded-full border-2 border-zinc-500/25 border-t-zinc-200"
+                    :aria-label="tt('admin.broadcast_shell.stats_loading')"
+                  />
+                  <b v-else class="text-zinc-100">{{ fmtIntSpace(bcRecentCardPrimaryValue(item, bcRecentPulseEntry(item.id))) }}</b>
+                </span>
                 <span>{{ tt('admin.broadcast_shell.delivered_ok') }} <b class="text-zinc-100">{{ Number(item.recipient_ok || 0) }}</b></span>
                 <span>{{ tt('admin.broadcast_shell.errors') }} <b class="text-zinc-100">{{ Number(item.recipient_fail || 0) }}</b></span>
               </div>
@@ -11410,50 +11739,24 @@ watch(
             </div>
             <div class="mt-2 flex flex-wrap gap-1.5">
               <button type="button" class="bc-tool-btn text-[11px]" @click="bcAuxModal = 'keyboard'">＋ Кнопки под постом</button>
-              <button type="button" class="bc-tool-btn text-[11px]" @click="bcAuxModal = 'media'">📎 Файл и медиа</button>
             </div>
-            <div v-if="bcMediaHistory.length" class="mt-2 flex flex-wrap gap-2">
-              <div v-for="(m, mi) in bcMediaHistory" :key="`pv-${mi}-${m.id || mi}`" class="relative shrink-0">
-                <button
-                  v-if="m.previewUrl && (String(m.kind || '').toLowerCase().includes('photo') || String(m.kind || '').toLowerCase().includes('video') || String(m.kind || '').toLowerCase() === 'animation')"
-                  type="button"
-                  class="group relative block h-16 w-16 overflow-hidden rounded-xl border border-white/15 bg-slate-950/80 shadow-md ring-1 ring-white/[0.06] transition hover:border-cyan-400/35 hover:ring-cyan-400/25"
-                  :title="tt('admin.broadcast_ui.open_large')"
-                  @click="openBcMediaViewer(m)"
-                >
-                  <img
-                    v-if="String(m.kind || '').toLowerCase().includes('photo')"
-                    :src="m.previewUrl"
-                    class="h-full w-full object-cover"
-                    alt=""
-                  />
-                  <video
-                    v-else
-                    :src="m.previewUrl"
-                    class="h-full w-full object-cover"
-                    muted
-                    playsinline
-                  />
-                  <span
-                    class="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/55 via-transparent to-white/[0.04] opacity-80 group-hover:opacity-100"
-                  />
-                </button>
-                <div
-                  v-else
-                  class="flex h-16 w-16 flex-col items-center justify-center gap-0.5 rounded-xl border border-white/10 bg-slate-950/75 p-1 text-center shadow-inner ring-1 ring-white/[0.04]"
-                >
-                  <span class="text-lg leading-none">{{ bcMediaIcon(m.kind) }}</span>
-                  <span class="line-clamp-2 max-w-[4.5rem] text-[9px] leading-tight text-slate-400">{{ m.name }}</span>
-                </div>
-                <button
-                  v-if="m.id"
-                  type="button"
-                  class="absolute -right-1 -top-1 z-[1] flex h-5 w-5 items-center justify-center rounded-full bg-rose-600 text-[10px] text-white shadow ring-1 ring-white/20"
-                  @click.stop="removeBcMediaItem(m.id)"
-                >
-                  ✕
-                </button>
-              </div>
+            <p
+              v-if="bcMediaButtonsAlbumWarning"
+              class="mt-2 rounded-lg border border-amber-400/35 bg-amber-500/10 px-2.5 py-2 text-[11px] leading-snug text-amber-100/95"
+            >
+              {{ tt('admin.broadcast_ui.media_buttons_album_warning', { max: BC_MAX_MEDIA_ITEMS }) }}
+            </p>
+            <div class="mt-3">
+              <p class="text-[11px] font-semibold text-slate-400">{{ tt('admin.broadcast_ui.attachments') }}</p>
+              <BroadcastMediaStrip
+                class="mt-1.5"
+                :items="bcMediaHistory"
+                :uploading="bcUploading"
+                :disabled="!bcSelectedId"
+                @upload="uploadBcMediaFiles"
+                @remove="removeBcMediaItem"
+                @view="openBcMediaViewer"
+              />
             </div>
 
             <label class="mt-4 block text-xs font-semibold text-slate-400">Текст поста</label>
@@ -11476,6 +11779,7 @@ watch(
               @mouseup="bcUpdateFormatState"
               @keyup="bcUpdateFormatState"
             />
+            <BroadcastTextLinksStrip :html="bcBodyHtml" />
             <div class="mt-4 flex flex-wrap gap-2 border-t border-white/[0.08] pt-4">
               <button
                 type="button"
@@ -11938,23 +12242,26 @@ watch(
           <template v-else-if="bcCampaignUxStep === 4">
             <p class="text-[12px] text-slate-400">{{ tt('admin.bc_campaign.step_n_of_5', { n: 4 }) }}</p>
             <p class="mt-2 text-[16px] font-bold">{{ tt('admin.bc_campaign.where_heading') }}</p>
-            <div class="mt-3 space-y-2">
-              <label class="flex cursor-pointer items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-sm transition hover:bg-[#151A22]"><span>{{ tt('admin.bc_campaign.target_channels') }}</span><input :checked="bcCampaignUxWizard.targetChannels" type="checkbox" @change="bcCampaignUxToggleWizardTargetChannels" /></label>
-              <label class="flex cursor-pointer items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-sm transition hover:bg-[#151A22]"><span>{{ tt('admin.bc_campaign.target_groups') }}</span><input :checked="bcCampaignUxWizard.targetGroups" type="checkbox" @change="bcCampaignUxToggleWizardTargetGroups" /></label>
-              <label
-                v-if="showFullAdminShell && !isBroadcastShellLite"
-                class="flex items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-sm transition hover:bg-[#151A22]"
-                ><span>{{ tt('admin.bc_campaign.target_bots') }}</span><input v-model="bcCampaignUxWizard.targetBots" type="checkbox"
-              /></label>
+            <div class="mt-3">
+              <BroadcastRecipientsPanel
+                v-model:selected-group-ids="bcCampaignUxWizard.selectedGroups"
+                v-model:selected-channel-ids="bcCampaignUxWizard.selectedChannels"
+                :groups="bcBroadcastGroups"
+                :channels="bcBroadcastChannels"
+                :normalize-chat-id="bcNormalizeChatId"
+                list-max-height="max-h-[min(46dvh,18rem)]"
+              />
             </div>
-            <div class="mt-3 rounded-2xl border border-white/10 bg-[#11151C] px-3 py-2 text-[12px] text-slate-300">
-              <p>{{ tt('admin.bc_campaign.selected_heading') }}</p>
-              <p class="mt-1">{{ tt('admin.bc_campaign.selected_counts', { ch: bcCampaignUxSelectedSummary.channels, gr: bcCampaignUxSelectedSummary.groups }) }}</p>
-            </div>
-            <div class="mt-2 flex gap-2">
-              <button type="button" class="flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxOpenRecipientPicker('channels')">{{ tt('admin.bc_campaign.pick_channels') }}</button>
-              <button type="button" class="flex-1 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxOpenRecipientPicker('groups')">{{ tt('admin.bc_campaign.pick_groups') }}</button>
-            </div>
+            <label
+              v-if="showFullAdminShell && !isBroadcastShellLite"
+              class="mt-3 flex cursor-pointer items-center justify-between rounded-2xl border border-white/10 bg-[#11151C] px-3 py-3 text-sm transition hover:bg-[#151A22]"
+            >
+              <span>{{ tt('admin.bc_campaign.target_bots') }}</span>
+              <input v-model="bcCampaignUxWizard.targetBots" type="checkbox" />
+            </label>
+            <p class="mt-2 text-[12px] text-slate-400">
+              {{ tt('admin.bc_campaign.selected_counts', { ch: bcCampaignUxSelectedSummary.channels, gr: bcCampaignUxSelectedSummary.groups }) }}
+            </p>
           </template>
 
           </div>
@@ -12154,6 +12461,7 @@ watch(
             <button type="button" class="bc-tool-btn !px-2 !text-[11px]" :class="!bcCanUndo() ? 'opacity-40' : ''" :disabled="!bcCanUndo()" @mousedown.prevent @click="bcUndo">↶</button>
             <button type="button" class="bc-tool-btn !px-2 !text-[11px]" :class="!bcCanRedo() ? 'opacity-40' : ''" :disabled="!bcCanRedo()" @mousedown.prevent @click="bcRedo">↷</button>
           </div>
+          <BroadcastTextLinksStrip :html="bcBodyHtml" />
           <p class="mt-1 text-[11px]" :class="bcCurrentLen() > bcCurrentMaxLen() ? 'text-rose-400' : 'text-slate-500'">
             {{ tt('admin.broadcast_ui.chars_count', { current: bcCurrentLen(), max: bcCurrentMaxLen() }) }}
           </p>
@@ -12174,40 +12482,27 @@ watch(
               </div>
             </div>
           </div>
-          <div class="mt-3 grid grid-cols-2 gap-2">
+          <div class="mt-3 grid grid-cols-1 gap-2">
             <button type="button" class="bc-tool-btn !w-full !justify-center text-[12px]" @click="bcAuxModal = 'keyboard'">{{ tt('admin.broadcast_ui.add_post_buttons') }}</button>
-            <button type="button" class="bc-tool-btn !w-full !justify-center text-[12px]" @click="bcAuxModal = 'media'">{{ tt('admin.broadcast_ui.file_and_media') }}</button>
           </div>
-          <div v-if="bcMediaHistory.length" class="mt-2 flex flex-wrap gap-2">
-            <div v-for="(m, mi) in bcMediaHistory.slice(0, 8)" :key="`camp-pe-m-${mi}-${m.id || mi}`" class="relative shrink-0">
-              <button
-                v-if="m.previewUrl && (String(m.kind || '').toLowerCase().includes('photo') || String(m.kind || '').toLowerCase().includes('video') || String(m.kind || '').toLowerCase() === 'animation')"
-                type="button"
-                class="group relative block h-14 w-14 overflow-hidden rounded-lg border border-white/15 bg-slate-950/80 shadow-md ring-1 ring-white/[0.06] transition hover:border-cyan-400/35 hover:ring-cyan-400/25"
-                :title="tt('admin.broadcast_ui.open_large')"
-                @click="openBcMediaViewer(m)"
-              >
-                <img
-                  v-if="String(m.kind || '').toLowerCase().includes('photo')"
-                  :src="m.previewUrl"
-                  class="h-full w-full object-cover"
-                  alt=""
-                />
-                <video
-                  v-else
-                  :src="m.previewUrl"
-                  class="h-full w-full object-cover"
-                  muted
-                  playsinline
-                />
-              </button>
-              <div
-                v-else
-                class="flex h-14 w-14 flex-col items-center justify-center gap-0.5 rounded-lg border border-white/10 bg-slate-950/75 p-1 text-center shadow-inner ring-1 ring-white/[0.04]"
-              >
-                <span class="text-base leading-none">{{ bcMediaIcon(m.kind) }}</span>
-              </div>
-            </div>
+          <p
+            v-if="bcMediaButtonsAlbumWarning"
+            class="mt-2 rounded-lg border border-amber-400/35 bg-amber-500/10 px-2.5 py-2 text-[11px] leading-snug text-amber-100/95"
+          >
+            {{ tt('admin.broadcast_ui.media_buttons_album_warning', { max: BC_MAX_MEDIA_ITEMS }) }}
+          </p>
+          <div class="mt-3">
+            <p class="text-[11px] font-semibold text-slate-400">{{ tt('admin.broadcast_ui.attachments') }}</p>
+            <BroadcastMediaStrip
+              class="mt-1.5"
+              size="sm"
+              :items="bcMediaHistory"
+              :uploading="bcUploading"
+              :disabled="!bcSelectedId"
+              @upload="uploadBcMediaFiles"
+              @remove="removeBcMediaItem"
+              @view="openBcMediaViewer"
+            />
           </div>
           <div class="mt-6 flex gap-2">
             <button type="button" class="bc-tool-btn flex-1 !justify-center py-2.5 text-sm font-semibold" @click="bcCampaignUxBack">{{ tt('admin.bc_campaign.back') }}</button>
@@ -12663,41 +12958,6 @@ watch(
             </div>
           </div>
         </div>
-    </GuardTeleport>
-
-    <GuardTeleport guard-to="body">
-      <div
-        v-if="bcCampaignUxRecipientPickerOpen && bcCampaignUxOpen"
-        class="fixed inset-0 z-[100240] flex h-[100dvh] min-w-0 flex-col overflow-hidden bg-[#0b0d14] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] text-white"
-      >
-        <div class="flex items-center justify-between border-b border-white/10 bg-[#12141c] px-4 py-3">
-          <p class="text-[16px] font-bold">{{ bcCampaignUxRecipientPickerKind === 'channels' ? tt('admin.bc_campaign.picker_channels') : tt('admin.bc_campaign.picker_groups') }}</p>
-          <button type="button" class="rounded-lg px-2 py-1 text-sm text-zinc-300 transition hover:bg-white/10" @click="bcCampaignUxRecipientPickerOpen = false">✕</button>
-        </div>
-        <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3 pb-[max(5.5rem,calc(5.75rem+env(safe-area-inset-bottom,0px)))]">
-          <input v-model="bcCampaignUxRecipientQuery" type="text" :placeholder="tt('admin.bc_campaign.search_ph')" class="w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm placeholder:text-slate-500 focus:border-indigo-400/45 focus:outline-none" />
-          <div class="mt-3 space-y-1.5">
-            <label
-              v-for="c in bcCampaignUxRecipientsFiltered"
-              :key="`ux-r-${bcCampaignUxRecipientPickerKind}-${bcNormalizeChatId(c)}`"
-              class="flex items-center gap-2 rounded-xl border border-white/10 bg-[#11151C] px-3 py-2 text-sm transition hover:bg-[#151A22]"
-            >
-              <input
-                type="checkbox"
-                :checked="(bcCampaignUxRecipientPickerKind === 'channels' ? bcCampaignUxWizard.selectedChannels : bcCampaignUxWizard.selectedGroups).includes(bcNormalizeChatId(c))"
-                @change="bcCampaignUxToggleRecipient(bcNormalizeChatId(c))"
-              />
-              <span class="truncate">{{ c.title || c.username || bcNormalizeChatId(c) }}</span>
-            </label>
-            <p v-if="!bcCampaignUxRecipientsFiltered.length" class="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-[12px] text-slate-400">{{ tt('admin.bc_campaign.nothing_found') }}</p>
-          </div>
-        </div>
-        <div class="grid grid-cols-3 gap-2 border-t border-white/10 bg-black/20 px-4 py-3">
-          <button type="button" class="rounded-xl border border-white/10 bg-white/[0.04] px-2 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxSelectAllRecipients">{{ tt('admin.bc_campaign.select_all') }}</button>
-          <button type="button" class="rounded-xl border border-white/10 bg-white/[0.04] px-2 py-2 text-xs font-semibold transition hover:bg-white/[0.08]" @click="bcCampaignUxClearRecipients">{{ tt('admin.bc_campaign.clear') }}</button>
-          <button type="button" class="rounded-xl border border-emerald-400/40 bg-gradient-to-r from-[#27b35f] to-[#36D67A] px-2 py-2 text-xs font-bold text-[#04130a] shadow-[0_16px_28px_-18px_rgba(54,214,122,0.95)] transition hover:brightness-110" @click="bcCampaignUxRecipientPickerOpen = false">{{ tt('admin.bc_campaign.done') }}</button>
-        </div>
-      </div>
     </GuardTeleport>
 
     <div
@@ -13569,86 +13829,6 @@ watch(
           </div>
         </div>
       </GuardTeleport>
-    </div>
-    </GuardTeleport>
-
-    <GuardTeleport>
-    <div
-      v-if="bcAuxModal === 'media'"
-      style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:100250;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);padding:16px" class="flex items-center justify-center bg-black/75 p-3 py-6 pt-[max(0.75rem,calc(env(safe-area-inset-top,0px)+52px))] pb-[max(1rem,calc(5rem+env(safe-area-inset-bottom,0px)))] backdrop-blur-sm"
-      @click.self="bcAuxModal = ''"
-    >
-      <div
-        class="flex max-h-[min(86vh,34rem)] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-white/[0.1] bg-slate-950/[0.94] shadow-[0_28px_80px_-24px_rgba(0,0,0,0.85)] ring-1 ring-violet-400/20 backdrop-blur-2xl"
-        @click.stop
-      >
-        <div class="flex shrink-0 items-center justify-between border-b border-slate-700/60 p-3">
-          <p class="text-sm font-semibold text-white">Файл и медиа</p>
-          <button type="button" class="bc-tool-btn" @click="bcAuxModal = ''">✕</button>
-        </div>
-        <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-2 touch-pan-y">
-          <div class="flex flex-wrap gap-2">
-            <div v-for="(m, mi) in bcMediaHistory" :key="`mm-${mi}-${m.id || mi}`" class="relative shrink-0">
-              <button
-                v-if="m.previewUrl && (String(m.kind || '').toLowerCase().includes('photo') || String(m.kind || '').toLowerCase().includes('video') || String(m.kind || '').toLowerCase() === 'animation')"
-                type="button"
-                class="group relative block h-24 w-24 overflow-hidden rounded-xl border border-white/15 bg-slate-950/80 shadow-md ring-1 ring-white/[0.06] transition hover:border-cyan-400/35"
-                title="Открыть крупно"
-                @click="openBcMediaViewer(m)"
-              >
-                <img
-                  v-if="String(m.kind || '').toLowerCase().includes('photo')"
-                  :src="m.previewUrl"
-                  class="h-full w-full object-cover"
-                  alt=""
-                />
-                <video
-                  v-else
-                  :src="m.previewUrl"
-                  class="h-full w-full object-cover"
-                  muted
-                  playsinline
-                />
-                <span class="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/50 to-transparent opacity-90 group-hover:opacity-100" />
-              </button>
-              <div
-                v-else
-                class="flex h-24 w-24 flex-col items-center justify-center gap-1 rounded-xl border border-white/10 bg-slate-950/75 p-1 text-center ring-1 ring-white/[0.04]"
-              >
-                <span class="text-2xl">{{ bcMediaIcon(m.kind) }}</span>
-                <span class="line-clamp-3 text-[10px] text-slate-400">{{ m.name }}</span>
-              </div>
-              <button
-                v-if="m.id"
-                type="button"
-                class="absolute -right-1 -top-1 z-[1] flex h-6 w-6 items-center justify-center rounded-full bg-rose-600 text-xs text-white shadow ring-1 ring-white/20"
-                @click.stop="removeBcMediaItem(m.id)"
-              >
-                ✕
-              </button>
-            </div>
-          </div>
-          <div v-if="!bcMediaHistory.length" class="py-6 text-center text-sm text-slate-500">Файл ещё не добавлен</div>
-          <div class="mt-4 flex flex-wrap items-center gap-2">
-            <label
-              class="cursor-pointer rounded-xl border border-violet-400/40 bg-gradient-to-br from-violet-600/95 to-indigo-800/90 px-3 py-2 text-xs font-semibold text-white shadow-[0_10px_32px_-8px_rgba(124,58,237,0.55)] ring-1 ring-white/10 transition hover:brightness-110 disabled:opacity-50"
-              :class="bcUploading ? 'pointer-events-none opacity-60' : ''"
-            >
-              <span class="inline-flex items-center gap-2">
-                <span v-if="bcUploading" class="bc-spinner" />
-                {{ bcUploading ? 'Загрузка…' : 'Выбрать файл' }}
-              </span>
-              <input
-                type="file"
-                class="hidden"
-                accept="image/png,image/jpeg,image/webp,image/heic,image/heif,image/avif,image/bmp,video/mp4,video/quicktime,video/webm,video/x-matroska,audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/aac,audio/ogg,audio/flac,.png,.jpg,.jpeg,.webp,.heic,.heif,.avif,.bmp,.mp4,.mov,.webm,.mkv,.mp3,.wav,.m4a,.aac,.ogg,.flac,.pdf"
-                @change="uploadBcMedia"
-              />
-            </label>
-            <button type="button" class="text-xs font-medium text-rose-400 hover:text-rose-300" :disabled="bcUploading" @click="clearBcMedia">Убрать медиа</button>
-          </div>
-        </div>
-      </div>
     </div>
     </GuardTeleport>
 
@@ -14869,6 +15049,7 @@ watch(
           @mouseup="bcUpdateFormatState"
           @keyup="bcUpdateFormatState"
         />
+        <BroadcastTextLinksStrip :html="bcEditBodyHtml" />
         <div class="mt-3 flex gap-2">
           <button type="button" class="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white" :disabled="bcSaving" @click="saveBcEditModal">{{ tt('common.save') }}</button>
           <button type="button" class="bc-tool-btn" @click="bcEditModalOpen = false">{{ tt('common.close') }}</button>

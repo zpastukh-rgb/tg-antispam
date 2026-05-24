@@ -97,6 +97,8 @@ DEFAULT_VULGAR_ROOTS = (
     "сиська", "сиськ", "сися", "сиси", "сисяст", "сисек", "сисят",
     "сосок", "соски",
     "жопа", "жоп", "попа", "попк",
+    "пердун", "перд", "пердуч",
+    "писюн", "письк", "писеч",
     "вагина", "вагин",
     "пенис",
     "очко", "очк",
@@ -125,8 +127,24 @@ DEFAULT_POLITICS_ROOTS = (
     "террор", "теракт",
     "путин", "владимир путин", "ленин", "сталин", "хрущев", "брежнев", "горбачев", "ельцин",
     "зеленск", "залужн", "трамп", "байден", "макрон", "меркель", "саркози",
-    "си цзиньпин", "ким чен", "эрдоган", "нетаньяху", "саддам", "каддафи", "че гевара",
+    "си цзиньпин", "ким чен", "ким чен ын", "эрдоган", "нетаньяху", "саддам", "каддафи", "че гевара",
+    "лукашен", "мадуро", "мао дзед", "мао цзедун", "кастро", "чавес", "орбан", "лавров", "шойгу", "песков",
+    "слава вожд", "слава великому",
     "гитлер", "муссолини",
+)
+
+# Наркотики / ПАВ (отдельный фильтр). Без коротких «мет», «чай», «грибы», «соль», «гера» — слишком много FP.
+DEFAULT_DRUGS_ROOTS = (
+    "наркот", "наркоман", "нарколаб", "наркошоп", "наркодилер",
+    "закладк", "барыг",
+    "мефедрон", "мефед", "меф",
+    "метамфет", "амфетамин", "амфет",
+    "героин", "герыч", "опиат", "опиой", "фентанил",
+    "кокаин", "экстаз", "мдма",
+    "лсд", "марихуан", "конопл", "гашиш", "каннабис",
+    "спайс", "альфа pvp", "альфаpvp",
+    "псило", "психодел", "магические грибы",
+    "продаю нарк", "закладки нарк",
 )
 
 # Религиозная тематика / конфессиональные обсуждения.
@@ -136,8 +154,9 @@ DEFAULT_RELIGION_ROOTS = (
     "католик", "протестант", "библи", "евангел", "церков", "храм", "монастыр",
     "священ", "патриарх", "митрополит", "икон", "крест", "молитв", "исповед", "причаст",
     "ислам", "мусульман", "коран", "намаз", "мечет", "мулла", "имам", "суннит", "шиит", "рамадан",
+    "аллах", "алах", "мухаммад", "махом", "шариат", "хадис", "халяль", "харам",
     "иудаизм", "иудеи", "иудей", "тора", "талмуд", "синагог", "раввин", "кашрут",
-    "будд", "буддизм", "лама", "далай", "нирван", "сангх",
+    "будд", "буддизм", "буда", "лама", "далай", "нирван", "сангх",
     "индуизм", "вед", "кришн", "шива", "вишну", "мантр", "пудж",
     "сикх", "джайн", "баха", "языч", "пастафари",
 )
@@ -185,11 +204,22 @@ DEFAULT_INSULT_ROOTS = (
     "выскочк", "пустозвон",
     "чмо", "чмош", "чмышк",
     "урод", "уродин", "уродц",
-    "ублюд", "ублюдок",
+    "ублюд", "ублюдок", "ублюди",
     "гнид", "гнида",
     "тупица",
     "имбецил",
     "обормот",
+    # Кал / «говно» (+ формы из чатов)
+    "говн", "говнюк", "говноед", "говножуй", "говняш", "каках", "какаш",
+    # Петух (унизительный ярлык)
+    "петух", "петуш", "петушк",
+    # Анатомия / унизительные (дублируем для фильтра «обзывательства»)
+    "жопа", "жоп", "жопаст", "жопник",
+    "попа", "попк", "попой",
+    "пердун", "перд", "пердуч", "пердяч",
+    "писюн", "писю", "письк", "писеч",
+    # Частые в чатах
+    "жиробас", "жироб", "сосун", "потаскун", "полудурок",
     # Часто встречающиеся в чатах
     "идитнах", "иди отсюда", "пошёл вон", "пошел вон",
     "ты дурак", "ты идиот", "ты тупой", "ты дебил",
@@ -207,13 +237,33 @@ DEFAULT_JOBS_ROOTS = (
     "удаленк", "удаленнаяработа", "работанадому", "занятост",
     "легкийзаработок", "быстрыйдоход", "доход", "доходвдень", "безвложен", "безопыта",
     "пассивныйдоход", "обучениеснуля", "менеджерпеписок", "кураторчата", "переписки",
-    "арбитражтрафика", "криптосигнал", "инвестпроект", "гарантированныйдоход",
+    "арбитражтрафика", "гарантированныйдоход",
     "заработоквтелеграм", "выплатыкаждыйдень", "осталосьпарумест", "график22", "график33",
     "2часавдень", "3часавдень", "4часавдень", "вариантзаработка", "рабочийвариант",
     "пишивличку", "пишивлс", "пишивпрофиль", "био", "смотривбио", "смотривпрофиле", "заподробностями",
     "пару людей", "кто бы смог", "кто интересно", "хочешь зарабатывать", "вариант неплохо заработать",
     "выплаты каждый день", "оплата на руки", "безнал", "давай ко мне за деталями",
     "есть свободные", "время менять жизнь", "узнай в био", "смотри описание", "схема приносит",
+)
+
+DEFAULT_CRYPTO_ROOTS = (
+    "крипт", "крипто", "криптовалют", "криптовалюта", "криптосигнал", "криптосхем", "криптокошел",
+    "биткоин", "bitcoin", "btc",
+    "эфир", "ethereum", "eth ",
+    "usdt", "tether", "usdc",
+    "binance", "бинанс", "bybit", "байбит",
+    "blockchain", "блокчейн",
+    "airdrop", "эйрдроп",
+    "nft", "нфт",
+    "токен", "altcoin", "альткоин", "мемкоин", "memecoin",
+    "стейкинг", "staking", "defi", "web3",
+    "майнинг", "mining", "майнер",
+    "tron", "trx", "solana", " doge", "dogecoin", "догкоин",
+    "seed phrase", "seedphrase", "сид фраз", "сидфраз", "mnemonic",
+    "p2p обмен", "p2p сделк", "pump and dump", "pump", "dump",
+    "инвестпроект", "инвест проект",
+    "кошелек", "кошелёк", "wallet",
+    "cryptopump", "cryptosignal", "cryptocurrency",
 )
 
 DEFAULT_ADS_ROOTS = (
@@ -305,6 +355,7 @@ DEFAULT_POLITICS_ROOTS_EN = (
     "democrat", "republican", "left wing", "right wing",
     "putin", "zelensky", "biden", "trump", "merkel", "macron",
     "stalin", "lenin", "hitler", "mussolini",
+    "lukashenko", "maduro", "mao zedong", "kim jong",
     "ukraine war", "russia war", "donbas", "crimea",
     "nato", "kremlin", "white house",
     "sanction", "embargo", "protest", "revolution",
@@ -318,11 +369,21 @@ DEFAULT_RELIGION_ROOTS_EN = (
     "bible", "gospel", "church", "chapel",
     "priest", "pastor", "monk", "nun",
     "islam", "muslim", "quran", "koran", "mosque",
+    "allah", "muhammad", "sharia",
     "imam", "mullah", "ramadan",
     "judaism", "jewish", "torah", "talmud", "synagogue", "rabbi",
     "buddh", "buddhism", "dalai lama", "nirvana",
     "hindu", "krishna", "shiva", "vishnu",
     "sikh", "jain",
+)
+
+DEFAULT_DRUGS_ROOTS_EN = (
+    "narcotic", "narcotics", "drug dealer", "drug dealing",
+    "heroin", "cocaine", "methamphet", "amphetamine",
+    "fentanyl", "mdma", "ecstasy", "lsd",
+    "marijuana", "cannabis", "hashish",
+    "psychedelic", "psilocybin", "magic mushroom",
+    "mephedrone",
 )
 
 DEFAULT_ESOTERIC_ROOTS_EN = (
@@ -370,7 +431,24 @@ DEFAULT_JOBS_ROOTS_EN = (
     "dm for details", "dm me", "pm for details",
     "link in bio", "check my bio",
     "join my channel", "join my team",
-    "telegram earning", "crypto signals",
+    "telegram earning",
+)
+
+DEFAULT_CRYPTO_ROOTS_EN = (
+    "crypto", "cryptocurrency", "cryptocurrenc",
+    "bitcoin", "btc", "ethereum", " eth ", "ether",
+    "usdt", "tether", "usdc", "binance", "bybit", "coinbase",
+    "blockchain", "web3", "defi",
+    "airdrop", "nft",
+    "altcoin", "memecoin", "shitcoin",
+    "staking", "yield farm", "liquidity pool",
+    "crypto mining", "mining rig",
+    "seed phrase", "recovery phrase", "mnemonic",
+    "p2p trade", "otc deal",
+    "pump and dump", "crypto signal", "crypto signals",
+    "wallet address", "send usdt",
+    "solana", " doge", "dogecoin", "xrp", "ripple",
+    "copy trading crypto", "trading bot",
 )
 
 DEFAULT_ADS_ROOTS_EN = (
@@ -407,11 +485,13 @@ DEFAULT_RACISM_ROOTS_FULL = _combine_roots(DEFAULT_RACISM_ROOTS, DEFAULT_RACISM_
 DEFAULT_NAZI_ROOTS_FULL = _combine_roots(DEFAULT_NAZI_ROOTS, DEFAULT_NAZI_ROOTS_EN)
 DEFAULT_VULGAR_ROOTS_FULL = _combine_roots(DEFAULT_VULGAR_ROOTS, DEFAULT_VULGAR_ROOTS_EN)
 DEFAULT_POLITICS_ROOTS_FULL = _combine_roots(DEFAULT_POLITICS_ROOTS, DEFAULT_POLITICS_ROOTS_EN)
+DEFAULT_DRUGS_ROOTS_FULL = _combine_roots(DEFAULT_DRUGS_ROOTS, DEFAULT_DRUGS_ROOTS_EN)
 DEFAULT_RELIGION_ROOTS_FULL = _combine_roots(DEFAULT_RELIGION_ROOTS, DEFAULT_RELIGION_ROOTS_EN)
 DEFAULT_ESOTERIC_ROOTS_FULL = _combine_roots(DEFAULT_ESOTERIC_ROOTS, DEFAULT_ESOTERIC_ROOTS_EN)
 DEFAULT_INSULT_ROOTS_FULL = _combine_roots(DEFAULT_INSULT_ROOTS, DEFAULT_INSULT_ROOTS_EN)
 DEFAULT_CASINO_ROOTS_FULL = _combine_roots(DEFAULT_CASINO_ROOTS, DEFAULT_CASINO_ROOTS_EN)
 DEFAULT_JOBS_ROOTS_FULL = _combine_roots(DEFAULT_JOBS_ROOTS, DEFAULT_JOBS_ROOTS_EN)
+DEFAULT_CRYPTO_ROOTS_FULL = _combine_roots(DEFAULT_CRYPTO_ROOTS, DEFAULT_CRYPTO_ROOTS_EN)
 DEFAULT_ADS_ROOTS_FULL = _combine_roots(DEFAULT_ADS_ROOTS, DEFAULT_ADS_ROOTS_EN)
 
 
@@ -614,7 +694,10 @@ async def ensure_chats_chat_kind_column(engine: AsyncEngine) -> None:
 
 async def ensure_chats_linked_discussion_chat_id_column(engine: AsyncEngine) -> None:
     """Колонка chats.linked_discussion_chat_id — связка канал → группа обсуждения (делегат канала → API правил комментариев)."""
-    sql_blocks = ("ALTER TABLE chats ADD COLUMN IF NOT EXISTS linked_discussion_chat_id BIGINT",)
+    sql_blocks = (
+        "ALTER TABLE chats ADD COLUMN IF NOT EXISTS linked_discussion_chat_id BIGINT",
+        "ALTER TABLE chats ADD COLUMN IF NOT EXISTS linked_discussion_title VARCHAR(255)",
+    )
     try:
         async with engine.begin() as conn:
             for sql in sql_blocks:
@@ -1447,6 +1530,8 @@ async def ensure_rules_channel_posts_filter_columns(engine: AsyncEngine) -> None
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_channel_posts_enabled BOOLEAN DEFAULT FALSE",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_channel_posts_action VARCHAR(16) DEFAULT 'delete'",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_politics_enabled BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_drugs_enabled BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_crypto_enabled BOOLEAN DEFAULT FALSE",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_religion_enabled BOOLEAN DEFAULT FALSE",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_religion_promo_only BOOLEAN DEFAULT FALSE",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_esoteric_enabled BOOLEAN DEFAULT FALSE",
@@ -2226,3 +2311,162 @@ async def ensure_pdf_exports_schema(engine: AsyncEngine) -> None:
                 await conn.execute(text(sql))
     except Exception as e:
         log.warning("ensure_pdf_exports_schema skipped: %s", e)
+
+
+async def ensure_join_requests_survey_schema(engine: AsyncEngine) -> None:
+    stmts = (
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS join_requests_mode VARCHAR(24) DEFAULT 'off'",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS join_requests_welcome_text TEXT DEFAULT NULL",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS join_requests_done_text TEXT DEFAULT NULL",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS join_requests_questions_text TEXT DEFAULT NULL",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS join_requests_report_mode VARCHAR(16) DEFAULT 'full'",
+        """
+        CREATE TABLE IF NOT EXISTS join_request_survey_sessions (
+            id SERIAL PRIMARY KEY,
+            chat_id BIGINT NOT NULL,
+            user_id BIGINT NOT NULL,
+            question_index INTEGER NOT NULL DEFAULT 0,
+            answers_json TEXT DEFAULT '[]',
+            expires_at TIMESTAMPTZ NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+        """,
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_join_request_survey_chat_user ON join_request_survey_sessions (chat_id, user_id)",
+        """
+        UPDATE rules SET join_requests_mode = 'auto'
+        WHERE COALESCE(auto_approve_join_requests, FALSE) = TRUE
+          AND COALESCE(join_requests_mode, 'off') = 'off'
+        """,
+    )
+    try:
+        async with engine.begin() as conn:
+            for sql in stmts:
+                await conn.execute(text(sql))
+        log.info("ensure_join_requests_survey_schema: ok")
+    except Exception as e:
+        log.warning("ensure_join_requests_survey_schema skipped: %s", e)
+
+
+async def ensure_forward_filter_schema(engine: AsyncEngine) -> None:
+    stmts = (
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_forward_block_channels BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_forward_block_chats BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_forward_block_bots BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_forward_block_users BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_forward_block_with_links BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_forward_block_stories BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_forward_block_with_button BOOLEAN DEFAULT FALSE",
+    )
+    try:
+        async with engine.begin() as conn:
+            for sql in stmts:
+                await conn.execute(text(sql))
+        log.info("ensure_forward_filter_schema: ok")
+    except Exception as e:
+        log.warning("ensure_forward_filter_schema skipped: %s", e)
+
+
+async def ensure_mechanical_antispam_schema(engine: AsyncEngine) -> None:
+    stmts = (
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS mech_filter_block_apk BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS mech_filter_guest_bots BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS mech_filter_symbol_subst BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS mech_filter_text_spam BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS mech_filter_strict_edit BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS mech_filter_flood_enabled BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS mech_filter_flood_threshold INTEGER DEFAULT 3",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS mech_filter_flood_window_minutes INTEGER DEFAULT 5",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS filter_actions_json TEXT DEFAULT NULL",
+    )
+    try:
+        async with engine.begin() as conn:
+            for sql in stmts:
+                await conn.execute(text(sql))
+        log.info("ensure_mechanical_antispam_schema: ok")
+    except Exception as e:
+        log.warning("ensure_mechanical_antispam_schema skipped: %s", e)
+
+
+async def ensure_flood_text_events_schema(engine: AsyncEngine) -> None:
+    stmts = (
+        """
+        CREATE TABLE IF NOT EXISTS flood_text_events (
+            id SERIAL PRIMARY KEY,
+            chat_id BIGINT NOT NULL,
+            user_id BIGINT NOT NULL,
+            text_norm_hash VARCHAR(64) NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_flood_text_events_lookup ON flood_text_events (chat_id, user_id, text_norm_hash, created_at DESC)",
+    )
+    try:
+        async with engine.begin() as conn:
+            for sql in stmts:
+                await conn.execute(text(sql))
+        log.info("ensure_flood_text_events_schema: ok")
+    except Exception as e:
+        log.warning("ensure_flood_text_events_schema skipped: %s", e)
+
+
+async def ensure_antiflood_schema(engine: AsyncEngine) -> None:
+    stmts = (
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS mech_filter_flood_mode VARCHAR(16) DEFAULT 'soft'",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS mech_filter_flood_action VARCHAR(16) DEFAULT 'mute'",
+        """
+        CREATE TABLE IF NOT EXISTS flood_rate_events (
+            id SERIAL PRIMARY KEY,
+            chat_id BIGINT NOT NULL,
+            user_id BIGINT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_flood_rate_events_lookup ON flood_rate_events (chat_id, user_id, created_at DESC)",
+    )
+    try:
+        async with engine.begin() as conn:
+            for sql in stmts:
+                await conn.execute(text(sql))
+        log.info("ensure_antiflood_schema: ok")
+    except Exception as e:
+        log.warning("ensure_antiflood_schema skipped: %s", e)
+
+
+async def ensure_post_comment_keywords_schema(engine: AsyncEngine) -> None:
+    stmts = (
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS post_comment_keywords_enabled BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS post_comment_keywords_json TEXT DEFAULT NULL",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS post_comment_keywords_action VARCHAR(16) DEFAULT 'delete'",
+    )
+    try:
+        async with engine.begin() as conn:
+            for sql in stmts:
+                await conn.execute(text(sql))
+        log.info("ensure_post_comment_keywords_schema: ok")
+    except Exception as e:
+        log.warning("ensure_post_comment_keywords_schema skipped: %s", e)
+
+
+async def ensure_network_join_events_schema(engine: AsyncEngine) -> None:
+    stmts = (
+        """
+        CREATE TABLE IF NOT EXISTS network_join_events (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            chat_id BIGINT NOT NULL,
+            joined_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_network_join_events_user_joined ON network_join_events (user_id, joined_at DESC)",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS join_filter_cas BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS join_filter_network_mass_join BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS join_filter_network_join_threshold INTEGER DEFAULT 4",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS join_filter_network_join_window_minutes INTEGER DEFAULT 10",
+    )
+    try:
+        async with engine.begin() as conn:
+            for sql in stmts:
+                await conn.execute(text(sql))
+        log.info("ensure_network_join_events_schema: ok")
+    except Exception as e:
+        log.warning("ensure_network_join_events_schema skipped: %s", e)

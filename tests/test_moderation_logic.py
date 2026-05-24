@@ -950,3 +950,52 @@ def test_coerce_orphan_legacy_filters_keeps_legacy_when_granular_on():
     assert coerce_orphan_legacy_filters(rule) is False
     assert rule.filter_mentions is True
     assert rule.filter_media_mode == "forbid"
+
+
+def test_politics_and_drugs_lexicon_hits():
+    from app.db.ensure_defaults import DEFAULT_DRUGS_ROOTS_FULL, DEFAULT_POLITICS_ROOTS_FULL
+    from app.handlers.moderation import _builtin_words
+
+    politics = _builtin_words(DEFAULT_POLITICS_ROOTS_FULL)
+    drugs = _builtin_words(DEFAULT_DRUGS_ROOTS_FULL)
+
+    assert profanity_hit("мадуро правит венесуэлой", politics, None) == "мадуро"
+    assert profanity_hit("лукашенко сегодня выступил", politics, None) == "лукашен"
+    assert profanity_hit("мао цзедун история", politics, None) == "мао цзедун"
+    assert profanity_hit("ким чен ын", politics, None) == "ким чен"
+    assert profanity_hit("слава вождю", politics, None) == "слава вожд"
+
+    assert profanity_hit("наркотики продаю", drugs, None) == "наркот"
+    assert profanity_hit("меф в наличии", drugs, None) == "меф"
+    assert profanity_hit("герыч качественный", drugs, None) == "герыч"
+    assert profanity_hit("героин", drugs, None) == "героин"
+
+
+def test_crypto_lexicon_hits():
+    from app.db.ensure_defaults import DEFAULT_CRYPTO_ROOTS_FULL
+    from app.handlers.moderation import _builtin_words
+
+    crypto = _builtin_words(DEFAULT_CRYPTO_ROOTS_FULL)
+    assert profanity_hit("заработок на usdt p2p", crypto, None) == "usdt"
+    assert profanity_hit("free bitcoin airdrop", crypto, None) == "bitcoin"
+    assert profanity_hit("криптосигнал в лс", crypto, None) == "криптосигнал"
+
+
+def test_politics_and_drugs_lexicon_false_positives():
+    from app.db.ensure_defaults import DEFAULT_DRUGS_ROOTS_FULL, DEFAULT_POLITICS_ROOTS_FULL
+    from app.handlers.moderation import _builtin_words
+
+    politics = _builtin_words(DEFAULT_POLITICS_ROOTS_FULL)
+    drugs = _builtin_words(DEFAULT_DRUGS_ROOTS_FULL)
+
+    for txt in (
+        "метро рядом с домом",
+        "метод решения задачи",
+        "чай с лимоном",
+        "жареные грибы с картошкой",
+        "добавьте соль по вкусу",
+        "герасим пришёл на работу",
+    ):
+        assert profanity_hit(txt, drugs, None) is None, txt
+
+    assert profanity_hit("погода сегодня отличная", politics, None) is None

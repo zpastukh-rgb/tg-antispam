@@ -11,9 +11,38 @@ import SecurityPinGateModal from '../components/SecurityPinGateModal.vue'
 import GuardTeleport from '../components/GuardTeleport.vue'
 import GuardAutoApproveJoinSetting from '../components/GuardAutoApproveJoinSetting.vue'
 import PremiumLockBadge from '../components/PremiumLockBadge.vue'
+import ChatAvatar from '../components/ChatAvatar.vue'
 import { useSecurityPinGate } from '../composables/useSecurityPinGate'
 import { usePremiumLock } from '../composables/usePremiumLock'
 import { shouldAskPinForAction } from '../utils/settingsSecurity'
+import {
+  readChatsListCache,
+  writeChatsListCache,
+  sortChatsRows,
+  prefetchChatsList,
+  fetchAndCacheChatsList,
+} from '../utils/chatsListCache.js'
+
+const ME_PREMIUM_CACHE_KEY = 'guard.me.is_premium.v1'
+
+function readMePremiumCache() {
+  try {
+    const raw = localStorage.getItem(ME_PREMIUM_CACHE_KEY)
+    if (raw === '1') return true
+    if (raw === '0') return false
+  } catch {
+    //
+  }
+  return null
+}
+
+function writeMePremiumCache(isPremium) {
+  try {
+    localStorage.setItem(ME_PREMIUM_CACHE_KEY, isPremium ? '1' : '0')
+  } catch {
+    //
+  }
+}
 
 const { t } = useI18n()
 const isEn = computed(() => t('common.locale_code') === 'en')
@@ -280,9 +309,9 @@ function delegatedPermissionsLine(chat) {
   if (!labels.length) return t('chats.delegate_access_none')
   return labels.join(' · ')
 }
-const isPremium = ref(false)
+const isPremium = ref(readMePremiumCache() ?? false)
 /** Для проверки PIN при отключении чата */
-const viewerTelegramId = ref(0)
+const viewerTelegramId = ref(extractTelegramIdFromInitUnsafe())
 const {
   pinGateOpen,
   pinGateInput,
@@ -306,8 +335,10 @@ const autoApproveModalChat = ref(null)
 
 function canManageAutoApprove(chat) {
   if (!chat || chat.locked_by_limit) return false
-  if (isChannelRow(chat)) return delegatedCan(chat, 'first_post_settings')
-  return delegatedCan(chat, 'protection')
+  // Группы: заявки настраиваются в «Защита» (опрос, ручной приём, отчёты).
+  // Каналы: в «Защите» нет — здесь только простой автоприём заявок на подписку.
+  if (!isChannelRow(chat)) return false
+  return delegatedCan(chat, 'first_post_settings')
 }
 
 async function toggleAutoApproveJoin(chat, next) {
@@ -317,7 +348,12 @@ async function toggleAutoApproveJoin(chat, next) {
   chat.auto_approve_join_requests = !!next
   autoApproveSavingId.value = id
   try {
-    await fetchSilent(() => api.updateRule(id, { auto_approve_join_requests: !!next }))
+    await fetchSilent(() =>
+      api.updateRule(id, {
+        join_requests_mode: next ? 'auto' : 'off',
+        auto_approve_join_requests: !!next,
+      }),
+    )
   } catch (e) {
     chat.auto_approve_join_requests = prev
     showToast(messageFromApiError(e) || t('chats.toasts.auto_approve_failed'))
@@ -427,6 +463,37 @@ watch(
 
 let stopVis = null
 let managersPollTimer = null
+let chatsLoadInFlight = null
+
+function currentChatsMode() {
+  return delegatedChatsOnly.value ? 'shared' : 'all'
+}
+
+function hydrateChatsFromCache(mode = currentChatsMode()) {
+  const cached = readChatsListCache(mode)
+  if (!cached || !Array.isArray(cached.rows)) return false
+  chats.value = cached.rows
+  selectedChatId.value = cached.selected_chat_id ?? null
+  pendingCount.value = Number(cached.pending_count || 0)
+  if (cached.spike_alerts && typeof cached.spike_alerts === 'object') {
+    spikeAlertsByChat.value = cached.spike_alerts
+  }
+  chatsFirstLoad.value = false
+  return true
+}
+
+function saveChatsCacheSnapshot(mode = currentChatsMode()) {
+  writeChatsListCache(mode, {
+    rows: chats.value,
+    selected_chat_id: selectedChatId.value,
+    pending_count: pendingCount.value,
+    spike_alerts: spikeAlertsByChat.value,
+  })
+}
+
+if (hasInitData.value) {
+  hydrateChatsFromCache()
+}
 
 async function scrollToFirstThreatChat() {
   if (!focusThreatOnly.value) return
@@ -441,55 +508,86 @@ async function scrollToFirstThreatChat() {
   })
 }
 
-async function loadChats() {
+async function loadSpikeAlertsQuiet(mode = currentChatsMode()) {
+  try {
+    const a = await fetchSilent(() => api.spikeAlerts())
+    const map = {}
+    for (const row of a?.items || []) {
+      const cid = Number(row?.chat_id || 0)
+      if (!cid) continue
+      map[cid] = row
+    }
+    spikeAlertsByChat.value = map
+    saveChatsCacheSnapshot(mode)
+  } catch {
+    spikeAlertsByChat.value = {}
+  }
+}
+
+async function loadChatsExtras(mode = currentChatsMode()) {
+  try {
+    const [p, me] = await Promise.all([
+      fetchSilent(() => api.connectPending()).catch(() => ({ chats: [] })),
+      fetchSilent(() => api.me()).catch(() => null),
+    ])
+    pendingCount.value = Array.isArray(p?.chats) ? p.chats.length : 0
+    if (me) {
+      isPremium.value = !!me.is_premium
+      writeMePremiumCache(!!me.is_premium)
+      lastMeForPremiumLock.value = me
+      const fromMe = Number(me.telegram_id || 0)
+      viewerTelegramId.value = fromMe > 0 ? fromMe : extractTelegramIdFromInitUnsafe()
+      chats.value = sortChatsRows(chats.value, mode === 'shared', viewerTelegramId.value)
+    }
+    saveChatsCacheSnapshot(mode)
+  } catch (e) {
+    guardWarn('Chats', 'loadChatsExtras failed', e)
+  }
+  void loadSpikeAlertsQuiet(mode)
+}
+
+function loadChats() {
   if (!hasInitData.value) {
     guardLog('Chats', 'loadChats: skip (no initData)')
-    return
+    return Promise.resolve()
   }
-  guardLog('Chats', 'loadChats: start')
-  const mode = delegatedChatsOnly.value ? 'shared' : 'all'
-  try {
-    const [data, p, me] = await Promise.all([
-      fetchSilent(() => api.chats(mode)),
-      fetchSilent(() => api.connectPending()).catch(() => ({ chats: [] })),
-      fetchSilent(() => api.me()).catch(() => ({ is_premium: false })),
-    ])
-    const rows = data.chats || []
-    isPremium.value = !!me?.is_premium
-    lastMeForPremiumLock.value = me || null
-    const fromMe = Number(me?.telegram_id || 0)
-    viewerTelegramId.value = fromMe > 0 ? fromMe : extractTelegramIdFromInitUnsafe()
-    chats.value = delegatedChatsOnly.value
-      ? rows
-      : [...rows].sort((a, b) => Number(isDelegatedCabinetChat(b)) - Number(isDelegatedCabinetChat(a)))
-    if (!delegatedChatsOnly.value && focusThreatOnly.value) {
-      cabinetTab.value = 'shared'
-    }
-    selectedChatId.value = data.selected_chat_id ?? null
-    pendingCount.value = Array.isArray(p?.chats) ? p.chats.length : 0
+  if (chatsLoadInFlight) return chatsLoadInFlight
+
+  const mode = currentChatsMode()
+  guardLog('Chats', 'loadChats: start', { mode })
+
+  chatsLoadInFlight = (async () => {
     try {
-      const a = await fetchSilent(() => api.spikeAlerts())
-      const map = {}
-      for (const row of a?.items || []) {
-        const cid = Number(row?.chat_id || 0)
-        if (!cid) continue
-        map[cid] = row
+      const { data, rows } = await fetchSilent(() =>
+        fetchAndCacheChatsList(api, mode, viewerTelegramId.value),
+      )
+      chats.value = rows
+      selectedChatId.value = data?.selected_chat_id ?? null
+      if (mode !== 'shared' && focusThreatOnly.value) {
+        cabinetTab.value = 'shared'
       }
-      spikeAlertsByChat.value = map
-    } catch {
-      spikeAlertsByChat.value = {}
+      saveChatsCacheSnapshot(mode)
+      chatsFirstLoad.value = false
+      void scrollToFirstThreatChat()
+      void loadChatsExtras(mode)
+      guardLog('Chats', 'loadChats OK', {
+        count: chats.value.length,
+        selected: selectedChatId.value,
+        pending: pendingCount.value,
+      })
+    } catch (e) {
+      guardWarn('Chats', 'loadChats failed', e)
+    } finally {
+      chatsFirstLoad.value = false
+      chatsLoadInFlight = null
     }
-    await scrollToFirstThreatChat()
-    guardLog('Chats', 'loadChats OK', {
-      count: chats.value.length,
-      selected: selectedChatId.value,
-      pending: pendingCount.value,
-    })
-  } catch (e) {
-    guardWarn('Chats', 'loadChats failed', e)
-  } finally {
-    chatsFirstLoad.value = false
-  }
+  })()
+  return chatsLoadInFlight
+}
+
+function onPrefetchChats(ev) {
+  const mode = String(ev?.detail?.mode || 'all') === 'shared' ? 'shared' : 'all'
+  void prefetchChatsList(api, mode)
 }
 
 function chatSpikeAlert(chat) {
@@ -498,14 +596,27 @@ function chatSpikeAlert(chat) {
   return spikeAlertsByChat.value[cid] || null
 }
 
-onMounted(async () => {
+watch(
+  hasInitData,
+  (ready) => {
+    if (!ready) return
+    if (!chats.value.length) hydrateChatsFromCache()
+    void loadChats()
+  },
+  { immediate: true },
+)
+
+onMounted(() => {
   error.value = null
-  await loadChats()
+  window.addEventListener('guard:prefetch-chats', onPrefetchChats)
   const onVis = () => {
     if (document.visibilityState === 'visible') loadChats()
   }
   document.addEventListener('visibilitychange', onVis)
-  stopVis = () => document.removeEventListener('visibilitychange', onVis)
+  stopVis = () => {
+    document.removeEventListener('visibilitychange', onVis)
+    window.removeEventListener('guard:prefetch-chats', onPrefetchChats)
+  }
 })
 
 onUnmounted(() => {
@@ -520,6 +631,10 @@ onUnmounted(() => {
 watch(
   () => route.query.cabinet,
   () => {
+    if (!hydrateChatsFromCache(currentChatsMode())) {
+      chatsFirstLoad.value = true
+      chats.value = []
+    }
     loadChats()
   },
 )
@@ -530,8 +645,9 @@ watch(cabinetTab, () => {
 
 watch(
   () => delegatedChatsOnly.value,
-  () => {
+  (only) => {
     kindPreset.value = 'all'
+    if (!only) cabinetTab.value = 'all'
   },
 )
 
@@ -568,6 +684,7 @@ async function removeChat(chat) {
     if (selectedChatId.value === chat.id) {
       selectedChatId.value = data?.selected_chat_id ?? null
     }
+    saveChatsCacheSnapshot()
     guardLog('Chats', 'removeChat OK', { removedId: chat.id })
   } catch (e) {
     guardWarn('Chats', 'removeChat failed', e)
@@ -606,7 +723,11 @@ async function activatePendingFromEmpty() {
     const data = await fetchSilent(() => api.connectActivatePending())
     await loadChats()
     if (!data?.connected) {
-      window.alert(t('chats.toasts.bot_must_be_admin'))
+      window.alert(
+        Number(data?.skipped_rights || 0) > 0
+          ? t('chats.toasts.bot_need_full_rights')
+          : t('chats.toasts.bot_must_be_admin'),
+      )
     }
   } finally {
     pendingLoading.value = false
@@ -662,6 +783,21 @@ function isChannelRow(c) {
   return String(c?.chat_kind || 'group').toLowerCase() === 'channel'
 }
 
+function discussionTitleForChat(chat) {
+  const id = Number(chat?.linked_discussion_chat_id || 0)
+  const title = String(chat?.linked_discussion_title || '').trim()
+  if (!title) return ''
+  if (id && (title === String(id) || /^-?\d+$/.test(title))) return ''
+  return title
+}
+
+function discussionLineForChat(chat) {
+  const title = discussionTitleForChat(chat)
+  if (title) return title
+  const id = chat?.linked_discussion_chat_id
+  return id ? `#${id}` : ''
+}
+
 const DISMISS_DISCUSSION_IDS_KEY = 'guard.dismissDiscussBanner.ids'
 
 function loadDismissedDiscussionChannelIds() {
@@ -705,7 +841,7 @@ const discussionConnectAlerts = computed(() => {
     out.push({
       channelId: cid,
       channelTitle: String(c.title || '').trim() || String(cid),
-      discussionTitle: String(c.linked_discussion_title || '').trim() || String(did),
+      discussionTitle: discussionTitleForChat(c) || String(did),
     })
   }
   return out
@@ -1384,7 +1520,14 @@ function openChannelBroadcast(chat) {
             </span>
           </div>
           <div v-for="chat in frameDelegated" :key="'fd-' + chat.id" :data-chat-id="chat.id" :class="chatCardClass(chat)">
-            <div class="flex items-start gap-2">
+            <div class="flex items-start gap-3">
+              <ChatAvatar
+                :chat-id="chat.id"
+                :title="chat.title || String(chat.id)"
+                :username="chat.username || ''"
+                size-class="h-11 w-11"
+                text-class="text-[14px] font-bold"
+              />
               <div class="min-w-0 flex-1">
                 <p class="truncate text-sm font-bold leading-tight text-white">{{ chat.title }}</p>
                 <div class="mt-0.5 flex flex-wrap items-center gap-1">
@@ -1417,7 +1560,7 @@ function openChannelBroadcast(chat) {
                   class="mt-0.5 text-[10px] text-slate-400"
                 >
                   {{ t('chats.labels.discussion') }}
-                  <span class="font-medium text-slate-200">{{ chat.linked_discussion_title || ('#' + chat.linked_discussion_chat_id) }}</span>
+                  <span class="font-medium text-slate-200">{{ discussionLineForChat(chat) }}</span>
                 </p>
                 <p v-if="chat.locked_by_limit" class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">{{ t('chats.labels.free_limit') }}</p>
                 <p v-else-if="protectionActive(chat)" class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-lime-300">
@@ -1528,7 +1671,14 @@ function openChannelBroadcast(chat) {
             >{{ t('chats.sections.channels_mine') }}</span>
           </div>
           <div v-for="chat in frameOwnChannels" :key="'oc-' + chat.id" :data-chat-id="chat.id" :class="chatCardClass(chat)">
-            <div class="flex items-start gap-2">
+            <div class="flex items-start gap-3">
+              <ChatAvatar
+                :chat-id="chat.id"
+                :title="chat.title || String(chat.id)"
+                :username="chat.username || ''"
+                size-class="h-11 w-11"
+                text-class="text-[14px] font-bold"
+              />
               <div class="min-w-0 flex-1">
                 <p class="truncate text-sm font-bold leading-tight text-white">{{ chat.title }}</p>
                 <div class="mt-0.5 flex flex-wrap items-center gap-1">
@@ -1537,7 +1687,7 @@ function openChannelBroadcast(chat) {
                 </div>
                 <p v-if="chat.linked_discussion_title || chat.linked_discussion_chat_id" class="mt-0.5 text-[10px] text-slate-400">
                   {{ t('chats.labels.discussion') }}
-                  <span class="font-medium text-slate-200">{{ chat.linked_discussion_title || ('#' + chat.linked_discussion_chat_id) }}</span>
+                  <span class="font-medium text-slate-200">{{ discussionLineForChat(chat) }}</span>
                 </p>
                 <p v-if="chat.locked_by_limit" class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">{{ t('chats.labels.free_limit') }}</p>
                 <p v-else-if="protectionActive(chat)" class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-lime-300">{{ t('chats.labels.connected') }}</p>
@@ -1571,7 +1721,7 @@ function openChannelBroadcast(chat) {
                 @click="openAutoApproveModal(chat)"
               >{{ t('chats.actions.auto_approve') }}</button>
               <button
-                v-else
+                v-if="chat.locked_by_limit"
                 type="button"
                 class="inline-flex items-center gap-1 rounded-lg border border-amber-400/40 bg-amber-900/30 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-100"
                 @click="onChatActivationPremiumClick"
@@ -1614,7 +1764,14 @@ function openChannelBroadcast(chat) {
             >{{ t('chats.sections.groups_mine') }}</span>
           </div>
           <div v-for="chat in frameOwnGroups" :key="'og-' + chat.id" :data-chat-id="chat.id" :class="chatCardClass(chat)">
-            <div class="flex items-start gap-2">
+            <div class="flex items-start gap-3">
+              <ChatAvatar
+                :chat-id="chat.id"
+                :title="chat.title || String(chat.id)"
+                :username="chat.username || ''"
+                size-class="h-11 w-11"
+                text-class="text-[14px] font-bold"
+              />
               <div class="min-w-0 flex-1">
                 <p class="truncate text-sm font-bold leading-tight text-white">{{ chat.title }}</p>
                 <div class="mt-0.5 flex flex-wrap items-center gap-1">
@@ -1644,13 +1801,7 @@ function openChannelBroadcast(chat) {
                 @click="goToProtection(chat.id)"
               >{{ t('chats.actions.protection') }} <span v-if="chatSpikeAlert(chat)">⚠</span></button>
               <button
-                v-if="canManageAutoApprove(chat)"
-                type="button"
-                :class="autoApproveButtonClass(chat)"
-                @click="openAutoApproveModal(chat)"
-              >{{ t('chats.actions.auto_approve') }}</button>
-              <button
-                v-else
+                v-else-if="chat.locked_by_limit"
                 type="button"
                 class="inline-flex items-center gap-1 rounded-lg border border-amber-400/40 bg-amber-900/30 px-2 py-1 text-[11px] font-semibold leading-tight text-amber-100"
                 @click="onChatActivationPremiumClick"

@@ -93,7 +93,8 @@ MESSAGES: dict[str, dict] = {
             ),
             "addgroup_text": (
                 "➕ *Add the bot to a group*\n\n"
-                "Tap the *button below the input field* — you’ll pick a group, then Telegram will prompt you to promote the bot.\n"
+                "Tap the *button below the input field* — pick a group. Telegram will pre-select admin rights: "
+                "delete messages, restrict members, invite users (join requests), and pin messages."
             ),
             "btn_add_bot": "➕ Add bot to group",
             "btn_connect": "➕ Connect protection",
@@ -101,18 +102,24 @@ MESSAGES: dict[str, dict] = {
             "btn_rules": "📜 What I do",
             "btn_back": "⬅️ Back",
             "addgroup_step1": "1️⃣ Tap the *button below the input* — the group picker opens.",
-            "addgroup_step2": "2️⃣ Pick a group and grant the bot admin rights.",
+            "addgroup_step2": (
+                "2️⃣ Pick a group and confirm bot rights: delete, restrict members, invite (join requests), and pin."
+            ),
             "inline_pick_group_admin": "📋 Pick group and grant rights",
             "group_reports_connected": (
                 "✅ Reports chat connected.\n"
                 "Reports for «{title}» will be sent here."
             ),
             "group_need_bot_admin": "To enable protection, make me an administrator in this group.",
+            "group_need_bot_rights": (
+                "For protection the bot needs admin rights: delete messages, restrict members, "
+                "invite users (join requests), and pin messages. "
+                "Open the bot’s admin settings in the group and enable all four."
+            ),
             "group_actor_denied": (
-                "Only an *administrator* can connect protection from the group, "
-                "or a message *from the linked channel* (if this is a channel discussion group).\n\n"
-                "If “anonymous admin” is on and the post is not from the channel — disable anonymity for admins "
-                "or send /start from your personal Telegram (group creator)."
+                "Only the group *creator* (owner) can connect protection from the group, "
+                "or a message *from the linked channel* in a discussion group.\n\n"
+                "If you are an admin but not the owner — ask the group creator to connect Guard from the cabinet."
             ),
             "group_creator_resolve_fail": (
                 "Could not resolve the group creator for Guard. "
@@ -559,6 +566,7 @@ MESSAGES: dict[str, dict] = {
                 "jobs": "🕵️ sketchy job ads",
                 "jobs_newbie": "🕵️ sketchy job ads (newbie)",
                 "casino": "🎰 casino/betting",
+                "crypto": "🪙 crypto schemes",
                 "casino_newbie": "🎰 casino/betting (newbie)",
                 "ads": "📢 ads",
                 "ads_newbie": "📢 ads (newbie)",
@@ -583,8 +591,22 @@ MESSAGES: dict[str, dict] = {
                 "buttons": "🔘 message with buttons",
                 "buttons_newbie": "🔘 message with buttons (newbie)",
                 "channel_post_actor": "📣 channel/chat post",
+                "forward_channels": "↪️ forward from channel",
+                "forward_chats": "↪️ forward from chat",
+                "forward_bots": "↪️ forward from bot",
+                "forward_users": "↪️ forward from user",
+                "forward_with_links": "↪️ forward with link",
+                "forward_stories": "↪️ forward from story",
+                "forward_with_button": "↪️ forward with button",
                 "silence": "🔇 join silence",
                 "edited_clean": "✏️ edited (clean)",
+                "mech_flood": "🌊 anti-flood",
+                "mech_apk": "📦 APK",
+                "mech_guest_bot": "🤖 guest bot",
+                "mech_symbol_subst": "🔤 symbol substitution",
+                "mech_text_spam": "📝 text spam",
+                "mech_strict_edit": "✏️ message edit",
+                "post_comment_keyword": "💬 post comment",
             },
         },
         "join_captcha": {
@@ -1103,7 +1125,8 @@ MESSAGES: dict[str, dict] = {
         "addgroup": {
             "body": (
                 "➕ *Add the bot to a group*\n\n"
-                "Tap the *button below the input field* — you’ll pick a group, then Telegram will prompt you to grant admin rights to the bot."
+                "Tap the *button below the input field* — pick a group. Telegram will pre-select rights: "
+                "delete, restrict members, invite (join requests), and pin."
             ),
             "fallback_btn": "➕ Add bot to group (with admin rights)",
             "fallback_hint": (
@@ -1533,8 +1556,15 @@ MESSAGES: dict[str, dict] = {
             "bad_data": "Bad data 😈",
             "groups_only": "Groups only 😈",
             "admin_only": "Only a group admin can connect the chat 😈",
-            "bot_need_admin": "First make the bot admin with permission to delete messages 😈",
+            "creator_only": "Only the group owner (creator) can connect Guard 😈",
+            "bot_need_admin": "Make the bot an administrator first 😈",
             "bot_need_delete": "Give the bot “Delete messages” permission 😈",
+            "bot_need_restrict": "Give the bot “Restrict members” — mutes, bans and captcha need it 😈",
+            "bot_need_invite": "Give the bot “Invite users” — required for join requests 😈",
+            "bot_need_pin": "Give the bot “Pin messages” — for auto-pinned rules 😈",
+            "bot_need_rights": (
+                "The bot needs delete, restrict, invite and pin permissions — enable all in bot admin settings 😈"
+            ),
             "verify_fail": "Could not verify the chat 😈",
             "groups_only_dm": "Only groups can be connected 😈",
         },

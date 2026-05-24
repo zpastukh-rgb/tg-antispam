@@ -7,6 +7,7 @@ export const GUARD_SECURITY_ACTIONS = [
   { id: 'purge_data', label: 'Очистка данных и истории' },
   { id: 'protection_settings', label: 'Пауза / выключение защиты и правила чата' },
   { id: 'chat_remove', label: 'Отключение чата от Guard' },
+  { id: 'chat_transfer', label: 'Передача владения чатом' },
   { id: 'payments', label: 'Оплата и покупки' },
   { id: 'broadcast', label: 'Запуск и отправка рассылки' },
 ]

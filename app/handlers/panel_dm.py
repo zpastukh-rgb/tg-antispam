@@ -24,7 +24,6 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
     KeyboardButtonRequestChat,
-    ChatAdministratorRights,
     WebAppInfo,
     FSInputFile,
     InputMediaPhoto,
@@ -36,7 +35,17 @@ from sqlalchemy import select, or_, func, update
 from app.db.session import get_session
 from app.db.models import Chat, Rule, UserContext, StopWord, Payment, CreditLedger, PromoCode, PromoCodeRedemption
 from app.db.ensure_defaults import DEFAULT_PREMIUM7_PROMO_CODE, DEFAULT_PREMIUM14_PROMO_CODE
-from app.services.group_connect_actor import resolve_guard_connect_actor_for_group, telegram_user_is_chat_creator
+from app.services.group_connect_actor import (
+    actor_may_connect_chat_as_owner,
+    resolve_guard_connect_actor_for_group,
+)
+from app.services.group_connect_rights import (
+    GROUP_CONNECT_ADMIN_QUERY,
+    aiogram_bot_administrator_rights,
+    aiogram_user_group_administrator_rights,
+    first_missing_i18n_key,
+)
+from app.services.chat_owner_guard import apply_chat_owner_on_connect
 from app.services.user_service import (
     get_or_create_user,
     can_add_chat,
@@ -438,6 +447,8 @@ def _human_mode(mode: str, lang: str = "ru") -> str:
         return i18n_t(lang, "panel.action.mute")
     if mode == "observe":
         return i18n_t(lang, "panel.action.observe")
+    if mode == "off":
+        return i18n_t(lang, "panel.action.off") if i18n_t(lang, "panel.action.off") != "panel.action.off" else "только фильтры"
     return i18n_t(lang, "panel.action.delete")
 
 
@@ -821,12 +832,13 @@ async def _build_referral_screen(bot, tg_user_id: int, from_user) -> tuple[str, 
         paid=paid,
     )
     kb = InlineKeyboardBuilder()
-    referral_info_url = _mini_app_partner_url()
-    if referral_info_url:
+    me = await bot.get_me()
+    uname = str(getattr(me, "username", "") or "").strip()
+    if uname:
         kb.row(
             InlineKeyboardButton(
                 text=i18n_t(lang, "panel.referral.kb_program"),
-                web_app=WebAppInfo(url=referral_info_url),
+                url=_mini_app_startapp_link(uname, "referral"),
             )
         )
     else:
@@ -856,27 +868,23 @@ def _kb_cancel(lang: str = "ru") -> InlineKeyboardMarkup:
 
 
 def _kb_main(bot_username: str | None = None, lang: str = "ru") -> InlineKeyboardMarkup:
-    """Главное меню: Подключённые чаты, Тариф, Подключить группу."""
-    mini_chats_url = _mini_app_chats_url()
-    mini_connect_url = _mini_app_connect_url()
-    mini_billing_url = _mini_app_billing_url()
+    """Главное меню. startapp deep-link — стабильнее web_app с прямым URL Railway."""
+    uname = (bot_username or "").strip().lstrip("@")
     txt_chats = i18n_t(lang, "panel.kb.chats")
     txt_plan = i18n_t(lang, "panel.kb.plan")
     txt_ref = i18n_t(lang, "panel.kb.ref")
     txt_connect_group = i18n_t(lang, "panel.kb.connect_group")
     txt_connect_chat = i18n_t(lang, "panel.kb.connect_chat")
     b = InlineKeyboardBuilder()
-    if mini_chats_url:
-        b.row(InlineKeyboardButton(text=txt_chats, web_app=WebAppInfo(url=mini_chats_url)))
+    if uname:
+        b.row(InlineKeyboardButton(text=txt_chats, url=_mini_app_startapp_link(uname, "chats")))
+        b.row(InlineKeyboardButton(text=txt_plan, url=_mini_app_startapp_link(uname, "billing")))
     else:
         b.button(text=txt_chats, callback_data=CB_CHATS)
-    if mini_billing_url:
-        b.row(InlineKeyboardButton(text=txt_plan, web_app=WebAppInfo(url=mini_billing_url)))
-    else:
         b.button(text=txt_plan, callback_data=CB_BILLING)
     b.button(text=txt_ref, callback_data=CB_REF)
-    if mini_connect_url:
-        b.row(InlineKeyboardButton(text=txt_connect_group, web_app=WebAppInfo(url=mini_connect_url)))
+    if uname:
+        b.row(InlineKeyboardButton(text=txt_connect_group, url=_mini_app_startapp_link(uname, "connect")))
     else:
         b.button(text=txt_connect_chat, callback_data=CB_CONNECT)
     b.adjust(1)
@@ -927,10 +935,18 @@ def _kb_chats_modes(lang: str = "ru") -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
-def _kb_chat_manage(open_protection_url: str | None = None, lang: str = "ru") -> InlineKeyboardMarkup:
+def _kb_chat_manage(open_protection_url: str | None = None, lang: str = "ru", *, bot_username: str | None = None) -> InlineKeyboardMarkup:
     """Внутри выбранного чата: одна кнопка открытия защиты + выбор чата."""
     b = InlineKeyboardBuilder()
-    if open_protection_url:
+    uname = (bot_username or "").strip().lstrip("@")
+    if uname:
+        b.row(
+            InlineKeyboardButton(
+                text=i18n_t(lang, "panel.kb.protection_selected"),
+                url=_mini_app_startapp_link(uname, "protection"),
+            )
+        )
+    elif open_protection_url:
         b.row(
             InlineKeyboardButton(
                 text=i18n_t(lang, "panel.kb.protection_selected"),
@@ -1485,6 +1501,22 @@ async def connect_chat_after_bot_added(
     except Exception:
         pass
     try:
+        me = await bot.get_me()
+        bot_member = await bot.get_chat_member(chat_id, me.id)
+        miss_key = first_missing_i18n_key(bot_member)
+        if miss_key:
+            try:
+                lang_rights = await get_user_language(int(user_id))
+                await bot.send_message(
+                    int(user_id),
+                    i18n_t(lang_rights, f"panel.connect_verify.{miss_key}"),
+                )
+            except Exception:
+                pass
+            return False, "rights"
+    except Exception:
+        return False, "rights"
+    try:
         lang = await get_user_language(int(user_id))
         async with await get_session() as session:
             await get_or_create_user(session, user_id, username=username, first_name=first_name)
@@ -1502,14 +1534,10 @@ async def connect_chat_after_bot_added(
 
             chat_row = await session.get(Chat, chat_id)
             rule = await session.get(Rule, chat_id)
-            prev_ow = int(getattr(chat_row, "owner_user_id", 0) or 0) if chat_row else 0
-            if chat_row and prev_ow not in (0, int(user_id)):
-                # «Ожидающий» чат мог остаться на менеджера (кто добавил бота); создатель группы забирает к себе
-                if (not bool(getattr(chat_row, "is_active", False))) and await telegram_user_is_chat_creator(
-                    bot, chat_id, int(user_id)
-                ):
-                    chat_row.owner_user_id = int(user_id)
-                else:
+            owner_id = int(user_id or 0)
+            if chat_row:
+                ow_ok, ow_err = await apply_chat_owner_on_connect(bot, chat_row, owner_id)
+                if not ow_ok:
                     try:
                         await bot.send_message(
                             user_id,
@@ -1518,20 +1546,20 @@ async def connect_chat_after_bot_added(
                         )
                     except Exception:
                         pass
-                    return False, "owner"
+                    return False, ow_err or "owner"
             # Чат уже в БД как активный (например после chat_shared) — догоняем приветствие один раз
             if chat_row and chat_row.is_active and rule is not None:
                 chat_row.title = chat_title
                 await _set_selected_chat(session, user_id, chat_id)
                 await session.commit()
-                await _send_connect_welcome_once(bot, chat_id, chat_title, user_id)
+                await _send_connect_welcome_once(bot, chat_id, chat_title, owner_id)
                 return True, None
 
             if not chat_row:
                 chat_row = Chat(
                     id=chat_id,
                     title=chat_title,
-                    owner_user_id=user_id,
+                    owner_user_id=owner_id,
                     is_active=True,
                     is_log_chat=False,
                 )
@@ -1540,6 +1568,7 @@ async def connect_chat_after_bot_added(
                 chat_row.title = chat_title
                 chat_row.is_active = True
                 chat_row.is_log_chat = False
+                chat_row.owner_user_id = owner_id
 
             if not rule:
                 rule = Rule(
@@ -1561,7 +1590,7 @@ async def connect_chat_after_bot_added(
             await _set_selected_chat(session, user_id, chat_id)
             await session.commit()
 
-        await _send_connect_welcome_once(bot, chat_id, chat_title, user_id)
+        await _send_connect_welcome_once(bot, chat_id, chat_title, owner_id)
         return True, None
     except Exception:
         return False, "error"
@@ -1613,7 +1642,12 @@ async def render_chat_manage(bot, user_id: int) -> Tuple[str, InlineKeyboardMark
         f"• {i18n_t(lang, f'{cm}.silence')}: *{silence_txt}*\n\n"
         f"{i18n_t(lang, f'{cm}.footer')}"
     )
-    return txt, _kb_chat_manage(_mini_app_protection_url(), lang=lang)
+    me = await bot.get_me()
+    return txt, _kb_chat_manage(
+        _mini_app_protection_url(),
+        lang=lang,
+        bot_username=getattr(me, "username", None),
+    )
 
 
 # =========================================================
@@ -1973,15 +2007,19 @@ async def cmd_guard_help(message: Message):
         await message.answer(_cmd_private_only(lang))
         return
     lang = await _user_lang(message.from_user.id) if message.from_user else "ru"
-    base = _mini_app_base_url()
     txt = i18n_t(lang, "panel.guard_help.body")
-    if base:
+    me = await message.bot.get_me()
+    uname = str(getattr(me, "username", "") or "").strip()
+    if uname:
         from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
         await message.answer(
             txt,
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=i18n_t(lang, "panel.guard_help.open_panel_btn"), web_app=WebAppInfo(url=base))],
+                [InlineKeyboardButton(
+                    text=i18n_t(lang, "panel.guard_help.open_panel_btn"),
+                    url=_mini_app_startapp_link(uname, "panel"),
+                )],
             ]),
         )
     else:
@@ -2821,7 +2859,16 @@ async def cb_clean_deleted(cb: CallbackQuery):
         )
     except Exception as e:
         text = i18n_t(lang, "panel.cleanup.error", error=str(e))
-    await _edit_or_send(cb, text, _kb_chat_manage(_mini_app_protection_url(), lang=lang))
+    me = await cb.bot.get_me()
+    await _edit_or_send(
+        cb,
+        text,
+        _kb_chat_manage(
+            _mini_app_protection_url(),
+            lang=lang,
+            bot_username=getattr(me, "username", None),
+        ),
+    )
 
 
 @router.callback_query(F.data == CB_GLOBAL_ANTISPAM)
@@ -2937,7 +2984,16 @@ async def cb_copy_target(cb: CallbackQuery):
     title_src = await _get_chat_title(cb.bot, chat_id)
     title_dst = await _get_chat_title(cb.bot, target_chat_id)
     text = i18n_t(lang, f"{ts}.done", src=title_src, dst=title_dst)
-    await _edit_or_send(cb, text, _kb_chat_manage(_mini_app_protection_url(), lang=lang))
+    me = await cb.bot.get_me()
+    await _edit_or_send(
+        cb,
+        text,
+        _kb_chat_manage(
+            _mini_app_protection_url(),
+            lang=lang,
+            bot_username=getattr(me, "username", None),
+        ),
+    )
 
 
 @router.callback_query(F.data == CB_PROFANITY)
@@ -3649,21 +3705,8 @@ async def cb_reports_help(cb: CallbackQuery):
 # =========================================================
 
 # ТЗ ЧЕККК: права бота при добавлении через выбор чата (минимум для модерации).
-# user_administrator_rights не задаём — иначе Telegram показывает только чаты, где у вас есть ВСЕ эти права (список режется).
-BOT_ADMIN_RIGHTS = ChatAdministratorRights(
-    is_anonymous=False,
-    can_manage_chat=False,
-    can_delete_messages=True,
-    can_manage_video_chats=False,
-    can_restrict_members=True,
-    can_promote_members=False,
-    can_change_info=False,
-    can_invite_users=True,
-    can_post_stories=False,
-    can_edit_stories=False,
-    can_delete_stories=False,
-    can_pin_messages=True,
-)
+BOT_ADMIN_RIGHTS = aiogram_bot_administrator_rights()
+USER_GROUP_ADMIN_RIGHTS = aiogram_user_group_administrator_rights()
 
 
 def _kb_connect_reports_chat(lang: str = "ru") -> ReplyKeyboardMarkup:
@@ -3723,6 +3766,7 @@ def _kb_connect_request_chat_with_admin(lang: str = "ru") -> ReplyKeyboardMarkup
                         chat_is_channel=False,
                         request_title=True,
                         bot_administrator_rights=BOT_ADMIN_RIGHTS,
+                        user_administrator_rights=USER_GROUP_ADMIN_RIGHTS,
                         bot_is_member=False,
                     ),
                 )
@@ -3759,7 +3803,7 @@ async def cb_addgroup(cb: CallbackQuery):
         from aiogram.types import InlineKeyboardButton
         me = await cb.bot.get_me()
         username = me.username or "bot"
-        admin_q = "delete_messages+restrict_members+invite_users+pin_messages"
+        admin_q = GROUP_CONNECT_ADMIN_QUERY
         add_url = f"https://t.me/{username}?startgroup=connect&admin={admin_q}"
         fallback_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=i18n_t(lang, "panel.addgroup.fallback_btn"), url=add_url)],
@@ -3803,7 +3847,7 @@ async def cb_connect_pick_modal(cb: CallbackQuery):
     try:
         await cb.message.answer(
             i18n_t(lang, "panel.connect.pick_modal_prompt"),
-            reply_markup=_kb_connect_request_chat(lang=lang),
+            reply_markup=_kb_connect_request_chat_with_admin(lang=lang),
         )
     except Exception as e:
         import logging
@@ -3842,13 +3886,14 @@ async def cb_connect_confirm(cb: CallbackQuery):
         if member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
             await cb.answer(i18n_t(actor_lang, f"{cv}.admin_only"), show_alert=True)
             return
+        if not await actor_may_connect_chat_as_owner(bot, chat_id, actor_id):
+            await cb.answer(i18n_t(actor_lang, f"{cv}.creator_only"), show_alert=True)
+            return
         me = await bot.get_me()
         bot_member = await bot.get_chat_member(chat_id, me.id)
-        if bot_member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
-            await cb.answer(i18n_t(actor_lang, f"{cv}.bot_need_admin"), show_alert=True)
-            return
-        if not getattr(bot_member, "can_delete_messages", False):
-            await cb.answer(i18n_t(actor_lang, f"{cv}.bot_need_delete"), show_alert=True)
+        miss_key = first_missing_i18n_key(bot_member)
+        if miss_key:
+            await cb.answer(i18n_t(actor_lang, f"{cv}.{miss_key}"), show_alert=True)
             return
     except Exception:
         await cb.answer(i18n_t(actor_lang, f"{cv}.verify_fail"), show_alert=True)
@@ -3883,16 +3928,13 @@ async def cb_connect_confirm(cb: CallbackQuery):
                 )
                 session.add(chat_row)
             else:
-                ow = int(getattr(chat_row, "owner_user_id", 0) or 0)
-                if ow not in (0, int(owner_id)):
-                    if (not bool(chat_row.is_active)) and await telegram_user_is_chat_creator(bot, chat_id, owner_id):
-                        chat_row.owner_user_id = int(owner_id)
-                    else:
-                        await cb.answer(
-                            i18n_t(actor_lang, "panel.connect.owner_bind_alert"),
-                            show_alert=True,
-                        )
-                        return
+                ow_ok, ow_err = await apply_chat_owner_on_connect(bot, chat_row, int(owner_id))
+                if not ow_ok:
+                    await cb.answer(
+                        i18n_t(actor_lang, "panel.connect.owner_bind_alert"),
+                        show_alert=True,
+                    )
+                    return
                 chat_row.title = chat.title
                 chat_row.is_active = True
                 chat_row.is_log_chat = False
@@ -4097,19 +4139,20 @@ async def on_chat_shared(message: Message):
                 reply_markup=ReplyKeyboardRemove(),
             )
             return
-        me = await bot.get_me()
-        bot_member = await bot.get_chat_member(chat_id, me.id)
-        if bot_member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
+        if not await actor_may_connect_chat_as_owner(bot, chat_id, actor_id):
             dm_quick_reply_kb_clear(actor_id)
             await message.answer(
-                i18n_t(actor_lang, f"{cv}.bot_need_admin"),
+                i18n_t(actor_lang, f"{cv}.creator_only"),
                 reply_markup=ReplyKeyboardRemove(),
             )
             return
-        if not getattr(bot_member, "can_delete_messages", False):
+        me = await bot.get_me()
+        bot_member = await bot.get_chat_member(chat_id, me.id)
+        miss_key = first_missing_i18n_key(bot_member)
+        if miss_key:
             dm_quick_reply_kb_clear(actor_id)
             await message.answer(
-                i18n_t(actor_lang, f"{cv}.bot_need_delete"),
+                i18n_t(actor_lang, f"{cv}.{miss_key}"),
                 reply_markup=ReplyKeyboardRemove(),
             )
             return
@@ -4148,17 +4191,14 @@ async def on_chat_shared(message: Message):
                 )
                 session.add(chat_row)
             else:
-                ow = int(getattr(chat_row, "owner_user_id", 0) or 0)
-                if ow not in (0, int(owner_id)):
-                    if (not bool(chat_row.is_active)) and await telegram_user_is_chat_creator(bot, chat_id, owner_id):
-                        chat_row.owner_user_id = int(owner_id)
-                    else:
-                        dm_quick_reply_kb_clear(actor_id)
-                        await message.answer(
-                            i18n_t(actor_lang, "panel.connect.owner_conflict"),
-                            reply_markup=ReplyKeyboardRemove(),
-                        )
-                        return
+                ow_ok, ow_err = await apply_chat_owner_on_connect(bot, chat_row, int(owner_id))
+                if not ow_ok:
+                    dm_quick_reply_kb_clear(actor_id)
+                    await message.answer(
+                        i18n_t(actor_lang, "panel.connect.owner_conflict"),
+                        reply_markup=ReplyKeyboardRemove(),
+                    )
+                    return
                 chat_row.title = chat.title
                 chat_row.is_active = True
                 chat_row.is_log_chat = False

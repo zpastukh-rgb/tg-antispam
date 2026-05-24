@@ -13,29 +13,22 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Chat
+from app.services.group_connect_rights import (
+    BOT_ADMIN_RIGHTS_PAYLOAD,
+    CHANNEL_BOT_ADMIN_RIGHTS_PAYLOAD,
+    USER_CHANNEL_ADMIN_RIGHTS_PAYLOAD,
+    USER_GROUP_ADMIN_RIGHTS_PAYLOAD,
+)
 
 logger = logging.getLogger(__name__)
 
 # Должен совпадать с CONNECT_REQUEST_ID в app/handlers/panel_dm.py (обработчик chat_shared).
 _CONNECT_REQUEST_CHAT_ID = 0x7E17
+_CONNECT_REQUEST_CHANNEL_ID = 0x7E18
 
 
 def _connect_group_keyboard_button() -> Dict[str, Any]:
-    """Как _kb_connect_request_chat_with_admin: только bot_administrator_rights (без user_* — иначе список групп сильно режется)."""
-    bot_rights: Dict[str, Any] = {
-        "is_anonymous": False,
-        "can_manage_chat": False,
-        "can_delete_messages": True,
-        "can_manage_video_chats": False,
-        "can_restrict_members": True,
-        "can_promote_members": False,
-        "can_change_info": False,
-        "can_invite_users": True,
-        "can_post_stories": False,
-        "can_edit_stories": False,
-        "can_delete_stories": False,
-        "can_pin_messages": True,
-    }
+    """Как _kb_connect_request_chat_with_admin: bot + user administrator_rights."""
     return {
         "text": "➕ Выбрать группу",
         "request_chat": {
@@ -43,7 +36,22 @@ def _connect_group_keyboard_button() -> Dict[str, Any]:
             "chat_is_channel": False,
             "bot_is_member": False,
             "request_title": True,
-            "bot_administrator_rights": bot_rights,
+            "bot_administrator_rights": dict(BOT_ADMIN_RIGHTS_PAYLOAD),
+            "user_administrator_rights": dict(USER_GROUP_ADMIN_RIGHTS_PAYLOAD),
+        },
+    }
+
+
+def _connect_channel_keyboard_button() -> Dict[str, Any]:
+    return {
+        "text": "➕ Подключить канал",
+        "request_chat": {
+            "request_id": _CONNECT_REQUEST_CHANNEL_ID,
+            "chat_is_channel": True,
+            "bot_is_member": False,
+            "request_title": True,
+            "bot_administrator_rights": dict(CHANNEL_BOT_ADMIN_RIGHTS_PAYLOAD),
+            "user_administrator_rights": dict(USER_CHANNEL_ADMIN_RIGHTS_PAYLOAD),
         },
     }
 
@@ -59,6 +67,21 @@ async def tg_save_prepared_add_group_button(telegram_user_id: int) -> Optional[s
     )
     if not data.get("ok"):
         logger.warning("savePreparedKeyboardButton failed: %s", data.get("description") or data)
+        return None
+    result = data.get("result") or {}
+    bid = result.get("id")
+    return str(bid) if bid else None
+
+
+async def tg_save_prepared_add_channel_button(telegram_user_id: int) -> Optional[str]:
+    """Подготовленная кнопка выбора канала для Telegram.WebApp.requestChat (Bot API 9.6+)."""
+    data = await _tg_request(
+        "savePreparedKeyboardButton",
+        user_id=int(telegram_user_id),
+        button=_connect_channel_keyboard_button(),
+    )
+    if not data.get("ok"):
+        logger.warning("savePreparedKeyboardButton (channel) failed: %s", data.get("description") or data)
         return None
     result = data.get("result") or {}
     bid = result.get("id")
@@ -85,6 +108,62 @@ async def tg_get_chat(chat_id: int) -> Optional[Dict[str, Any]]:
         return None
     return data.get("result") or {}
 
+
+async def tg_download_file(file_id: str) -> tuple[bytes, str] | None:
+    """Скачать файл по telegram file_id (getFile + download)."""
+    fid = str(file_id or "").strip()
+    if not fid:
+        return None
+    token = os.getenv("BOT_TOKEN")
+    if not token:
+        return None
+    data = await _tg_request("getFile", file_id=fid)
+    if not data.get("ok"):
+        return None
+    result = data.get("result") or {}
+    rel = str(result.get("file_path") or "").strip()
+    if not rel:
+        return None
+    url = f"https://api.telegram.org/file/bot{token}/{rel}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=45)) as resp:
+                if resp.status != 200:
+                    return None
+                body = await resp.read()
+                if not body:
+                    return None
+                return body, rel
+    except Exception as e:
+        logger.debug("tg_download_file failed: %s", e)
+        return None
+
+
+def _guess_image_media_type(file_path: str) -> str:
+    low = str(file_path or "").lower()
+    if low.endswith(".png"):
+        return "image/png"
+    if low.endswith(".webp"):
+        return "image/webp"
+    return "image/jpeg"
+
+
+async def tg_get_chat_photo_bytes(chat_id: int) -> tuple[bytes, str] | None:
+    """Аватар чата/канала из getChat.photo (small → big)."""
+    info = await tg_get_chat(int(chat_id))
+    if not info:
+        return None
+    photo = info.get("photo") or {}
+    fid = str(photo.get("small_file_id") or photo.get("big_file_id") or "").strip()
+    if not fid:
+        return None
+    got = await tg_download_file(fid)
+    if not got:
+        return None
+    body, rel = got
+    return body, _guess_image_media_type(rel)
+
+
 async def tg_get_me() -> Optional[Dict[str, Any]]:
     data = await _tg_request("getMe")
     if not data.get("ok"):
@@ -97,6 +176,33 @@ async def tg_get_chat_member(chat_id: int, user_id: int) -> Optional[Dict[str, A
         return None
     return data.get("result") or {}
 
+
+async def tg_get_chat_administrators(chat_id: int) -> List[Dict[str, Any]]:
+    data = await _tg_request("getChatAdministrators", chat_id=int(chat_id))
+    if not data.get("ok"):
+        return []
+    rows = data.get("result") or []
+    return rows if isinstance(rows, list) else []
+
+
+async def tg_resolve_group_creator_id(chat_id: int) -> Optional[int]:
+    for row in await tg_get_chat_administrators(chat_id):
+        status = str(row.get("status") or "").lower()
+        if status == "creator":
+            user = row.get("user") or {}
+            uid = int(user.get("id") or 0)
+            if uid > 0:
+                return uid
+    return None
+
+
+async def tg_user_is_group_admin(chat_id: int, user_id: int) -> bool:
+    row = await tg_get_chat_member(int(chat_id), int(user_id))
+    if not row:
+        return False
+    status = str(row.get("status") or "").lower()
+    return status in ("administrator", "creator")
+
 async def tg_bot_is_admin_in_chat(chat_id: int) -> bool:
     me = await tg_get_me()
     if not me or not me.get("id"):
@@ -106,6 +212,16 @@ async def tg_bot_is_admin_in_chat(chat_id: int) -> bool:
         return False
     status = str(row.get("status") or "").lower()
     return status in ("administrator", "creator")
+
+
+async def tg_bot_has_group_connect_rights(chat_id: int) -> bool:
+    from app.services.group_connect_rights import bot_has_group_connect_rights
+
+    me = await tg_get_me()
+    if not me or not me.get("id"):
+        return False
+    row = await tg_get_chat_member(chat_id, int(me["id"]))
+    return bot_has_group_connect_rights(row)
 
 
 async def tg_unban_chat_member(chat_id: int, user_id: int) -> bool:

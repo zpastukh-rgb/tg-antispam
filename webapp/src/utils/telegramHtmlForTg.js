@@ -206,3 +206,27 @@ export function normalizeHtmlForTelegram(raw) {
     .replace(/\n{3,}/g, '\n\n')
     .trim()
 }
+
+/**
+ * Ссылки из HTML редактора / сохранённого Telegram HTML (порядок как в тексте).
+ * @param {string} html
+ * @returns {{ text: string, url: string }[]}
+ */
+export function extractEditorTextLinks(html) {
+  const raw = String(html || '').trim()
+  if (!raw) return []
+  const host = document.createElement('div')
+  host.innerHTML = raw
+  const out = []
+  host.querySelectorAll('a[href]').forEach((node) => {
+    if (!(node instanceof HTMLAnchorElement)) return
+    const url = String(node.getAttribute('href') || '').trim()
+    if (!url) return
+    const text = String(node.textContent || '')
+      .replace(/\u00a0/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+    out.push({ text: text || url, url })
+  })
+  return out
+}

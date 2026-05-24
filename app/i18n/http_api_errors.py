@@ -32,7 +32,8 @@ RU: dict[str, str] = {
         "пользователя, который уже запускал Guard."
     ),
     "chat_needs_premium": "Для этого чата нужен Premium",
-    "image_process_failed": "Не удалось обработать изображение: {error}",
+    "image_process_failed": "Не удалось обработать изображение. Попробуйте JPG или PNG.",
+    "broadcast_media_upload_failed": "Не удалось загрузить вложение. Попробуйте другое фото (JPG/PNG) или файл меньшего размера.",
     "need_image_file": "Нужен image-файл",
     "empty_file": "Пустой файл",
     "file_too_big_8mb": "Файл слишком большой (до 8MB)",
@@ -99,6 +100,7 @@ RU: dict[str, str] = {
     "cannot_change_media_active_send": "Нельзя менять медиа во время активной рассылки",
     "file_too_large": "Файл слишком большой",
     "gif_disabled": "GIF отключены. Используйте PNG/JPEG/MP4/MP3 и другие поддерживаемые форматы.",
+    "broadcast_media_limit": "Не больше {max} вложений в одном посте (лимит Telegram).",
     "attach_not_found": "Файл не найден",
     "cannot_delete_during_active_send": "Нельзя удалить во время активной рассылки",
     "invalid_send_type": "Недопустимый тип отправки",
@@ -190,6 +192,7 @@ RU: dict[str, str] = {
     "user_id_required": "Параметр user_id обязателен",
     "welcome_photo_file_not_found": "Файл приветственного фото не найден",
     "welcome_photo_not_set": "Приветственное фото не задано",
+    "chat_avatar_not_set": "У чата нет аватара",
     "yoomoney_notifications_not_configured": "Уведомления YooMoney не настроены",
     "yoomoney_secret_not_configured": "Секрет YooMoney не настроен",
     "admin_global_template_duplicate": "Шаблон уже в базе",
@@ -198,6 +201,11 @@ RU: dict[str, str] = {
         "а автосписание станет доступно после активации recurring."
     ),
     "payment_provider_error": "Ошибка платёжной системы",
+    "transfer_not_owner": "Передать владение может только текущий владелец чата в Guard.",
+    "transfer_same_owner": "Нельзя передать чат самому себе.",
+    "transfer_target_required": "Укажите Telegram ID или @username нового владельца.",
+    "transfer_target_chat_limit": "У получателя исчерпан лимит чатов ({current}/{limit}). Освободите слот или подключите Premium.",
+    "transfer_failed": "Не удалось передать владение чатом.",
 }
 
 EN: dict[str, str] = {
@@ -226,7 +234,8 @@ EN: dict[str, str] = {
         "Cannot invite: user not recognized. Provide a valid Telegram ID or @username of someone who has started Guard."
     ),
     "chat_needs_premium": "This chat requires Premium",
-    "image_process_failed": "Could not process image: {error}",
+    "image_process_failed": "Could not process image. Try JPG or PNG.",
+    "broadcast_media_upload_failed": "Could not upload attachment. Try another photo (JPG/PNG) or a smaller file.",
     "need_image_file": "An image file is required",
     "empty_file": "Empty file",
     "file_too_big_8mb": "File too large (max 8MB)",
@@ -293,6 +302,7 @@ EN: dict[str, str] = {
     "cannot_change_media_active_send": "Cannot change media while a send is active",
     "file_too_large": "File too large",
     "gif_disabled": "GIFs are disabled. Use PNG/JPEG/MP4/MP3 and other supported formats.",
+    "broadcast_media_limit": "At most {max} attachments per post (Telegram limit).",
     "attach_not_found": "File not found",
     "cannot_delete_during_active_send": "Cannot delete while a send is active",
     "invalid_send_type": "Invalid send type",
@@ -380,6 +390,7 @@ EN: dict[str, str] = {
     "user_id_required": "user_id required",
     "welcome_photo_file_not_found": "Welcome photo file not found",
     "welcome_photo_not_set": "Welcome photo not set",
+    "chat_avatar_not_set": "Chat has no avatar",
     "yoomoney_notifications_not_configured": "YooMoney notifications not configured",
     "yoomoney_secret_not_configured": "YooMoney secret not configured",
     "admin_global_template_duplicate": "Pattern already in the database",
@@ -388,4 +399,9 @@ EN: dict[str, str] = {
         "Payment was taken as one-off; auto-renew will work after recurring is activated."
     ),
     "payment_provider_error": "Payment provider error",
+    "transfer_not_owner": "Only the current Guard owner of this chat can transfer ownership.",
+    "transfer_same_owner": "You cannot transfer the chat to yourself.",
+    "transfer_target_required": "Provide the new owner's Telegram ID or @username.",
+    "transfer_target_chat_limit": "Recipient has reached their chat limit ({current}/{limit}). Free a slot or upgrade to Premium.",
+    "transfer_failed": "Could not transfer chat ownership.",
 }

@@ -11,7 +11,7 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 from aiogram import Router, F
@@ -27,6 +27,8 @@ from app.db.session import get_session
 from app.db.ensure_defaults import (
     DEFAULT_ADS_ROOTS_FULL as DEFAULT_ADS_ROOTS,
     DEFAULT_CASINO_ROOTS_FULL as DEFAULT_CASINO_ROOTS,
+    DEFAULT_CRYPTO_ROOTS_FULL as DEFAULT_CRYPTO_ROOTS,
+    DEFAULT_DRUGS_ROOTS_FULL as DEFAULT_DRUGS_ROOTS,
     DEFAULT_ESOTERIC_ROOTS_FULL as DEFAULT_ESOTERIC_ROOTS,
     DEFAULT_INSULT_ROOTS_FULL as DEFAULT_INSULT_ROOTS,
     DEFAULT_JOBS_ROOTS_FULL as DEFAULT_JOBS_ROOTS,
@@ -62,6 +64,20 @@ from app.services.global_bad_urls import get_effective_global_bad_url_patterns
 from app.services.admin_roles import is_full_admin_user as _is_full_admin_user_role
 from app.services.chat_cleanup import record_seen_member as record_seen_member_cleanup
 from app.services.global_antispam import is_in_global_antispam
+from app.services.join_filter import evaluate_join_name_filter, join_close_entry_action
+from app.services.cas_check import is_user_cas_banned
+from app.services.network_join_filter import (
+    is_network_mass_joiner,
+    record_network_join,
+)
+from app.services.forward_filter import forward_filter_applies, matched_forward_filter_kind
+from app.services.mechanical_antispam import matched_mech_filter_kind, mech_filter_applies
+from app.services.flood_filter import check_flood, normalize_flood_action
+from app.services.filter_actions import resolve_violation_action
+from app.services.post_comment_keywords import (
+    matched_post_comment_keyword,
+    normalize_post_comment_action,
+)
 from app.services.chat_owner_premium import chat_owner_has_miniapp_premium
 from app.services.spam_spike_notify import SPAM_MODERATION_REASONS, trigger_spam_spike_for_chat
 from app.services.telegram_notify import send_user_dm
@@ -576,6 +592,7 @@ _NB_FILTER_REASONS = frozenset(
         "profanity",
         "jobs",
         "casino",
+        "crypto",
         "link",
         "link_blacklist",
         "global_bad_url",
@@ -617,6 +634,68 @@ async def delete_member_join_marker(session, chat_id: int, user_id: int) -> None
 # chat_id -> [(user_id, join_time), ...], храним только за последние window_minutes
 _ANTINAKRUTKA_JOINS: Dict[int, List[Tuple[int, datetime]]] = {}
 _ANTINAKRUTKA_MAX_LIST = 500  # макс. записей на чат
+_ANTINAKRUTKA_LAST_TRIGGER: Dict[int, datetime] = {}
+_ANTINAKRUTKA_LOCKDOWN_UNTIL: Dict[int, datetime] = {}
+_ANTINAKRUTKA_SILENCE_UNTIL: Dict[int, datetime] = {}
+
+_ANTINAKRUTKA_ACTIONS = frozenset({"alert", "alert_restrict", "alert_kick", "alert_ban"})
+_ANTINAKRUTKA_PREMIUM_ACTIONS = frozenset({"alert_restrict", "alert_kick", "alert_ban"})
+
+
+def _antinakrutka_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _antinakrutka_prune_until(store: Dict[int, datetime], chat_id: int) -> Optional[datetime]:
+    until = store.get(chat_id)
+    if until is None:
+        return None
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=timezone.utc)
+    if _antinakrutka_now() >= until:
+        store.pop(chat_id, None)
+        return None
+    return until
+
+
+def antinakrutka_lockdown_active(chat_id: int) -> bool:
+    return _antinakrutka_prune_until(_ANTINAKRUTKA_LOCKDOWN_UNTIL, int(chat_id)) is not None
+
+
+def antinakrutka_should_pause_welcomes(chat_id: int, rule: Any) -> bool:
+    if not bool(getattr(rule, "antinakrutka_pause_welcomes", False)):
+        return False
+    return antinakrutka_lockdown_active(int(chat_id))
+
+
+def antinakrutka_force_join_captcha(chat_id: int, rule: Any) -> bool:
+    if not bool(getattr(rule, "antinakrutka_force_captcha", False)):
+        return False
+    return antinakrutka_lockdown_active(int(chat_id))
+
+
+def antinakrutka_global_silence_active(chat_id: int) -> bool:
+    return _antinakrutka_prune_until(_ANTINAKRUTKA_SILENCE_UNTIL, int(chat_id)) is not None
+
+
+def antinakrutka_global_silence_remaining_minutes(chat_id: int) -> Optional[int]:
+    until = _antinakrutka_prune_until(_ANTINAKRUTKA_SILENCE_UNTIL, int(chat_id))
+    if until is None:
+        return None
+    rem = until - _antinakrutka_now()
+    return max(1, int((rem.total_seconds() + 59) // 60))
+
+
+def _antinakrutka_start_lockdown(chat_id: int, rule: Any) -> None:
+    lockdown_min = max(0, min(120, int(getattr(rule, "antinakrutka_lockdown_minutes", 0) or 0)))
+    if lockdown_min <= 0:
+        return
+    now = _antinakrutka_now()
+    _ANTINAKRUTKA_LOCKDOWN_UNTIL[int(chat_id)] = now + timedelta(minutes=lockdown_min)
+    auto_silence = max(0, min(120, int(getattr(rule, "antinakrutka_auto_silence_minutes", 0) or 0)))
+    if auto_silence > 0:
+        silence_min = min(auto_silence, lockdown_min)
+        _ANTINAKRUTKA_SILENCE_UNTIL[int(chat_id)] = now + timedelta(minutes=silence_min)
 
 
 def _antinakrutka_add_join(chat_id: int, user_id: int, window_minutes: int) -> List[Tuple[int, datetime]]:
@@ -822,6 +901,8 @@ def _normalize_action_mode(raw: str | None) -> str:
     first = parts[0] if parts else ""
     if "observe" in v or "замеч" in v or "наблюд" in v or "log_only" in v or "logonly" in v.replace(" ", ""):
         return "observe"
+    if first == "off" or v in ("off", "выкл", "only_filters", "per_filter", "filters_only"):
+        return "off"
     if first == "kick" or "кик" in v:
         return "kick"
     if "ban" in v or "бан" in v:
@@ -2502,6 +2583,97 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
         and await _in_newbie_period(session, chat_id, user_id, newbie_min)
     )
 
+    # Пересылки / цитаты извне (отдельный фильтр в блоке «Фильтры»).
+    if forward_filter_applies(rule, owner_premium_features=owner_premium_features):
+        _fwd_kind = matched_forward_filter_kind(
+            message,
+            rule,
+            chat_id,
+            owner_premium_features=owner_premium_features,
+            has_links_fn=lambda m: bool(find_links_in_message(m)),
+        )
+        if _fwd_kind:
+            return Verdict(
+                True,
+                f"forward_{_fwd_kind}",
+                f"forward:{_fwd_kind}",
+                action,
+                mute_minutes=mute_min,
+                log_it=log_enabled,
+                log_extra=("anti-edit" if edited else ""),
+            )
+
+    # Механический антиспам (apk, гостевые боты, подмена символов, текстовый спам).
+    if mech_filter_applies(rule, owner_premium_features=owner_premium_features):
+        _mech_kind = matched_mech_filter_kind(
+            message,
+            rule,
+            edited=edited,
+            owner_premium_features=owner_premium_features,
+        )
+        if _mech_kind:
+            return Verdict(
+                True,
+                f"mech_{_mech_kind}",
+                f"mech:{_mech_kind}",
+                action,
+                mute_minutes=mute_min,
+                log_it=log_enabled,
+                log_extra=("anti-edit" if edited else ""),
+            )
+
+    # Флуд: повтор текста и/или массовая отправка (режим «АнтиФлуд»).
+    if user and bool(getattr(rule, "mech_filter_flood_enabled", False)):
+        _flood_hit, _flood_kind = await check_flood(
+            session,
+            chat_id,
+            user_id,
+            rule,
+            text=str(text or ""),
+            has_media_msg=has_media(message),
+        )
+        if _flood_hit:
+            _flood_act = normalize_flood_action(getattr(rule, "mech_filter_flood_action", "mute"))
+            return Verdict(
+                True,
+                "mech_flood",
+                f"flood:{_flood_kind}",
+                _flood_act,
+                mute_minutes=mute_min,
+                log_it=log_enabled,
+                log_extra=("anti-edit" if edited else ""),
+            )
+
+    if user and bool(getattr(user, "is_bot", False)):
+        return Verdict(False, "bot_skip", "", "delete", log_it=False)
+
+    # Ключевые слова в комментариях к постам канала (Premium, только linked discussion).
+    if user and bool(getattr(rule, "post_comment_keywords_enabled", False)):
+        chat_row = await session.get(Chat, chat_id)
+        linked_ch = int(getattr(chat_row, "linked_channel_chat_id", 0) or 0) if chat_row else 0
+        if linked_ch <= 0:
+            link_id = int(getattr(message.chat, "linked_chat_id", 0) or 0)
+            lc = getattr(message.chat, "linked_chat", None)
+            if not link_id and lc:
+                link_id = int(getattr(lc, "id", 0) or 0)
+            if link_id > 0:
+                linked_ch = link_id
+        if linked_ch > 0:
+            _kw_hit = matched_post_comment_keyword(message, rule, text)
+            if _kw_hit:
+                _kw_act = normalize_post_comment_action(
+                    getattr(rule, "post_comment_keywords_action", "delete")
+                )
+                return Verdict(
+                    True,
+                    "post_comment_keyword",
+                    _kw_hit,
+                    _kw_act,
+                    mute_minutes=mute_min,
+                    log_it=log_enabled,
+                    log_extra=("anti-edit" if edited else ""),
+                )
+
     # -------------------------------------------------
     # 1) stopwords (без учёта токенов внутри URL) — раньше режима тишины:
     # иначе при тишине срабатывал только мут без удаления, а стоп-слово оставалось в чате.
@@ -2626,18 +2798,20 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
     use_profanity = bool(getattr(rule, "filter_profanity_enabled", True))
     use_jobs = bool(getattr(rule, "filter_jobs_enabled", True))
     use_casino = bool(getattr(rule, "filter_casino_enabled", True))
+    use_crypto = bool(getattr(rule, "filter_crypto_enabled", False))
     use_ads = bool(getattr(rule, "filter_ads_enabled", False))
     use_insults = bool(getattr(rule, "filter_insults_enabled", False))
     use_racism = bool(getattr(rule, "filter_racism_enabled", False))
     use_nazi = bool(getattr(rule, "filter_nazi_enabled", False))
     use_vulgar = bool(getattr(rule, "filter_vulgar_enabled", False))
     use_politics = bool(getattr(rule, "filter_politics_enabled", False))
+    use_drugs = bool(getattr(rule, "filter_drugs_enabled", False))
     use_religion = bool(getattr(rule, "filter_religion_enabled", False))
     religion_promo_only = bool(getattr(rule, "filter_religion_promo_only", False))
     use_esoteric = bool(getattr(rule, "filter_esoteric_enabled", False))
     esoteric_promo_only = bool(getattr(rule, "filter_esoteric_promo_only", False))
     if not owner_premium_features:
-        use_racism = use_nazi = use_vulgar = use_politics = use_religion = use_esoteric = False
+        use_racism = use_nazi = use_vulgar = use_politics = use_drugs = use_religion = use_esoteric = False
         religion_promo_only = False
         esoteric_promo_only = False
 
@@ -2690,6 +2864,16 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
         if hit_politics:
             return Verdict(
                 True, _with_newbie_reason("politics", newbie_win), hit_politics, action,
+                mute_minutes=mute_min,
+                log_it=log_enabled,
+                log_extra=("anti-edit" if edited else ""),
+            )
+    if use_drugs:
+        drugs_set = _builtin_words(DEFAULT_DRUGS_ROOTS)
+        hit_drugs = profanity_hit(text_norm, drugs_set, text_without_urls_norm=text_for_stopwords_norm)
+        if hit_drugs:
+            return Verdict(
+                True, _with_newbie_reason("drugs", newbie_win), hit_drugs, action,
                 mute_minutes=mute_min,
                 log_it=log_enabled,
                 log_extra=("anti-edit" if edited else ""),
@@ -2754,6 +2938,16 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
                 log_it=log_enabled,
                 log_extra=("anti-edit" if edited else ""),
             )
+    if use_crypto:
+        crypto_set = _builtin_words(DEFAULT_CRYPTO_ROOTS)
+        hit_crypto = profanity_hit(text_norm, crypto_set, text_without_urls_norm=text_for_stopwords_norm)
+        if hit_crypto:
+            return Verdict(
+                True, _with_newbie_reason("crypto", newbie_win), hit_crypto, action,
+                mute_minutes=mute_min,
+                log_it=log_enabled,
+                log_extra=("anti-edit" if edited else ""),
+            )
     if use_jobs:
         jobs_set = _builtin_words(DEFAULT_JOBS_ROOTS)
         hit_jobs = profanity_hit(text_norm, jobs_set, text_without_urls_norm=text_for_stopwords_norm)
@@ -2775,12 +2969,14 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
             mat_set
             - _builtin_words(DEFAULT_JOBS_ROOTS)
             - _builtin_words(DEFAULT_CASINO_ROOTS)
+            - _builtin_words(DEFAULT_CRYPTO_ROOTS)
             - _builtin_words(DEFAULT_ADS_ROOTS)
             - _builtin_words(DEFAULT_INSULT_ROOTS)
             - _builtin_words(DEFAULT_RACISM_ROOTS)
             - _builtin_words(DEFAULT_NAZI_ROOTS)
             - _builtin_words(DEFAULT_VULGAR_ROOTS)
             - _builtin_words(DEFAULT_POLITICS_ROOTS)
+            - _builtin_words(DEFAULT_DRUGS_ROOTS)
             - _builtin_words(DEFAULT_RELIGION_ROOTS)
             - _builtin_words(DEFAULT_ESOTERIC_ROOTS)
         )
@@ -2791,6 +2987,22 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
                 mute_minutes=mute_min,
                 log_it=log_enabled,
                 log_extra=("anti-edit" if edited else ""),
+            )
+
+    # -------------------------------------------------
+    # 0a) Антинакрутка: режим обороны — временная тишина для всех (кроме админов)
+    # -------------------------------------------------
+    if user and antinakrutka_global_silence_active(chat_id):
+        silence_rem = antinakrutka_global_silence_remaining_minutes(chat_id)
+        if silence_rem is not None:
+            return Verdict(
+                True,
+                "antinakrutka_silence",
+                "режим обороны: тишина",
+                "mute",
+                mute_minutes=silence_rem,
+                log_it=log_enabled,
+                log_extra=f"антинакрутка, тишина ~{silence_rem} мин",
             )
 
     # -------------------------------------------------
@@ -2925,17 +3137,19 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
         prof_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_PROFANITY_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
         jobs_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_JOBS_ROOTS), text_without_urls_norm=text_for_stopwords_norm) or jobs_offer_hit(text_norm, text_without_urls_norm=text_for_stopwords_norm)
         casino_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_CASINO_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
+        crypto_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_CRYPTO_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
         ads_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_ADS_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
         insult_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_INSULT_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
         racism_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_RACISM_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
         nazi_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_NAZI_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
         vulgar_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_VULGAR_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
         politics_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_POLITICS_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
+        drugs_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_DRUGS_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
         religion_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_RELIGION_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
         esoteric_probe = profanity_hit(text_norm, _builtin_words(DEFAULT_ESOTERIC_ROOTS), text_without_urls_norm=text_for_stopwords_norm)
-        if has_linkish or prof_probe or jobs_probe or casino_probe or ads_probe or insult_probe or racism_probe or nazi_probe or vulgar_probe or politics_probe or religion_probe or esoteric_probe:
+        if has_linkish or prof_probe or jobs_probe or casino_probe or crypto_probe or ads_probe or insult_probe or racism_probe or nazi_probe or vulgar_probe or politics_probe or drugs_probe or religion_probe or esoteric_probe:
             logger.warning(
-                "[moderation clean diag] chat=%s user=%s link_mode=%s filter_links=%s action=%s prof_on=%s jobs_on=%s casino_on=%s ads_on=%s insults_on=%s politics_on=%s religion_on=%s esoteric_on=%s probes(link=%s,prof=%s,jobs=%s,casino=%s,ads=%s,insult=%s,politics=%s,religion=%s,esoteric=%s) text=%r",
+                "[moderation clean diag] chat=%s user=%s link_mode=%s filter_links=%s action=%s prof_on=%s jobs_on=%s casino_on=%s ads_on=%s insults_on=%s politics_on=%s drugs_on=%s religion_on=%s esoteric_on=%s probes(link=%s,prof=%s,jobs=%s,casino=%s,ads=%s,insult=%s,politics=%s,drugs=%s,religion=%s,esoteric=%s) text=%r",
                 chat_id,
                 user_id,
                 _links_mode,
@@ -2947,6 +3161,7 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
                 use_ads,
                 use_insults,
                 use_politics,
+                use_drugs,
                 use_religion,
                 use_esoteric,
                 has_linkish,
@@ -2956,6 +3171,7 @@ async def evaluate(session, message: Message, *, edited: bool = False) -> Verdic
                 bool(ads_probe),
                 bool(insult_probe),
                 bool(politics_probe),
+                bool(drugs_probe),
                 bool(religion_probe),
                 bool(esoteric_probe),
                 (text[:180] + "…") if len(text) > 180 else text,
@@ -3538,10 +3754,18 @@ async def pipeline(message: Message, *, edited: bool = False) -> None:
     # если сообщение от имени канала/чата — from_user может быть None
     if not message.from_user and not getattr(message, "sender_chat", None):
         return
-    # Сообщения от любых ботов не гоняем через антиспам: иначе при выключенном privacy
-    # бот получает свои же посты (например правила в комментариях) и удаляет их как «ссылки/кнопки».
+    # Сообщения от ботов пропускаем, кроме режима «гостевые боты».
     if message.from_user and bool(getattr(message.from_user, "is_bot", False)):
-        return
+        allow_bot = False
+        try:
+            async with await get_session() as session:
+                rule = await get_rule(session, int(message.chat.id))
+                if rule and bool(getattr(rule, "mech_filter_guest_bots", False)):
+                    allow_bot = True
+        except Exception:
+            allow_bot = False
+        if not allow_bot:
+            return
     # обрабатываем сообщения с текстом, подписью, медиа или кнопками (иначе стикеры/фото без подписи не проверяются)
     if not (message.text or message.caption or has_media(message) or has_buttons(message)):
         return
@@ -3577,6 +3801,15 @@ async def pipeline(message: Message, *, edited: bool = False) -> None:
                 pass
             if not v.should_act:
                 return
+
+            rule_act = await get_rule(session, message.chat.id)
+            act, mute_res = resolve_violation_action(
+                rule_act,
+                v.reason,
+                default_mute=int(v.mute_minutes or 30),
+            )
+            v.action = act
+            v.mute_minutes = mute_res
 
             owner_loc = await owner_locale_for_chat(session, message.chat.id)
             ok_action, action_label, deleted_ok = await apply_action(message, v, locale=owner_loc)
@@ -3881,6 +4114,15 @@ async def on_chat_member(event: ChatMemberUpdated):
         ChatMemberStatus.ADMINISTRATOR,
         ChatMemberStatus.CREATOR,
     ) and new in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
+        if leave_user and not bool(getattr(leave_user, "is_bot", False)):
+            try:
+                from app.services.chat_owner_guard import revoke_guard_access_on_admin_loss
+
+                async with await get_session() as session:
+                    await revoke_guard_access_on_admin_loss(bot, session, chat_id, int(leave_user.id))
+                    await session.commit()
+            except Exception as e:
+                logger.debug("guard access revoke on leave chat=%s: %s", chat_id, e)
         if leave_user:
             try:
                 async with await get_session() as session:
@@ -3891,6 +4133,19 @@ async def on_chat_member(event: ChatMemberUpdated):
                 SILENCE_JOIN_LRU.pop((chat_id, leave_user.id), None)
             except Exception as e:
                 logger.exception("on_chat_member leave: %s", e)
+        return
+
+    if old in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR) and new == ChatMemberStatus.MEMBER:
+        demoted = getattr(event.new_chat_member, "user", None)
+        if demoted and not bool(getattr(demoted, "is_bot", False)):
+            try:
+                from app.services.chat_owner_guard import revoke_guard_access_on_admin_loss
+
+                async with await get_session() as session:
+                    await revoke_guard_access_on_admin_loss(bot, session, chat_id, int(demoted.id))
+                    await session.commit()
+            except Exception as e:
+                logger.debug("guard access revoke on demotion chat=%s: %s", chat_id, e)
         return
 
     if old not in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
@@ -3909,8 +4164,51 @@ async def on_chat_member(event: ChatMemberUpdated):
             await record_seen_member_cleanup(session, chat_id, user_id)
 
             rule = await get_rule(session, chat_id)
+            owner_premium = await chat_owner_has_miniapp_premium(session, int(chat_id))
+
+            if owner_premium and bool(getattr(user, "is_bot", False)) is False:
+                if await is_admin(bot, chat_id, user_id) is False:
+                    if bool(getattr(rule, "join_filter_close_entry", False)):
+                        act = join_close_entry_action(rule)
+                        try:
+                            if act == "ban":
+                                await bot.ban_chat_member(chat_id, user_id)
+                            else:
+                                await bot.ban_chat_member(chat_id, user_id)
+                                await bot.unban_chat_member(chat_id, user_id)
+                        except Exception as e:
+                            logger.debug("join_filter close_entry %s: %s", user_id, e)
+                        return
+                    if bool(getattr(rule, "join_filter_enabled", False)):
+                        if bool(getattr(rule, "join_filter_cas", False)):
+                            cas_hit = await is_user_cas_banned(user_id)
+                            if cas_hit is True:
+                                try:
+                                    await bot.ban_chat_member(chat_id, user_id)
+                                    await bot.unban_chat_member(chat_id, user_id)
+                                except Exception as e:
+                                    logger.debug("join_filter cas %s: %s", user_id, e)
+                                return
+                        if bool(getattr(rule, "join_filter_network_mass_join", False)):
+                            try:
+                                await record_network_join(session, user_id, chat_id)
+                                if await is_network_mass_joiner(session, user_id, rule):
+                                    await bot.ban_chat_member(chat_id, user_id)
+                                    await bot.unban_chat_member(chat_id, user_id)
+                                    return
+                            except Exception as e:
+                                logger.debug("join_filter network_mass %s: %s", user_id, e)
+                    jf_reason = evaluate_join_name_filter(user, rule)
+                    if jf_reason:
+                        try:
+                            await bot.ban_chat_member(chat_id, user_id)
+                            await bot.unban_chat_member(chat_id, user_id)
+                        except Exception as e:
+                            logger.debug("join_filter %s %s: %s", jf_reason, user_id, e)
+                        return
+
             if bool(getattr(rule, "use_global_antispam_db", False)):
-                owner_glob = await chat_owner_has_miniapp_premium(session, int(chat_id))
+                owner_glob = owner_premium
                 if owner_glob and await is_in_global_antispam(session, user_id):
                     try:
                         await bot.ban_chat_member(chat_id, user_id)
@@ -3924,7 +4222,10 @@ async def on_chat_member(event: ChatMemberUpdated):
             try:
                 from app.handlers.join_captcha import maybe_start_join_captcha
 
-                await maybe_start_join_captcha(bot, session, event.chat, chat_row, rule, user)
+                force_jc = antinakrutka_force_join_captcha(int(chat_id), rule)
+                await maybe_start_join_captcha(
+                    bot, session, event.chat, chat_row, rule, user, force=force_jc,
+                )
             except Exception as jc_err:
                 logger.exception("join_captcha start: %s", jc_err)
 
@@ -3932,8 +4233,12 @@ async def on_chat_member(event: ChatMemberUpdated):
             try:
                 welcome_owner_premium = await chat_owner_has_miniapp_premium(session, int(chat_id))
                 if bool(getattr(rule, "welcome_enabled", False)) and not bool(getattr(user, "is_bot", False)):
-                    if bool(getattr(rule, "join_captcha_enabled", False)):
+                    if bool(getattr(rule, "join_captcha_enabled", False)) or antinakrutka_force_join_captcha(
+                        int(chat_id), rule,
+                    ):
                         raise RuntimeError("welcome_wait_join_captcha")
+                    if antinakrutka_should_pause_welcomes(int(chat_id), rule):
+                        raise RuntimeError("welcome_antinakrutka_lockdown")
                     if welcome_owner_premium:
                         every_n = max(1, min(500, int(getattr(rule, "welcome_every_n_joins", 1) or 1)))
                     else:
@@ -4016,6 +4321,7 @@ async def on_chat_member(event: ChatMemberUpdated):
                 if reason in (
                     "welcome_every_n_joins_skip",
                     "welcome_silent_on_raid",
+                    "welcome_antinakrutka_lockdown",
                     "welcome_rate_limited",
                     "welcome_wait_join_captcha",
                 ):
@@ -4029,11 +4335,27 @@ async def on_chat_member(event: ChatMemberUpdated):
             threshold = max(2, min(100, int(getattr(rule, "antinakrutka_joins_threshold", 10) or 10)))
             window_min = max(1, min(60, int(getattr(rule, "antinakrutka_window_minutes", 5) or 5)))
             action = (getattr(rule, "antinakrutka_action", None) or "alert").strip().lower()
+            if action not in _ANTINAKRUTKA_ACTIONS:
+                action = "alert"
             restrict_min = max(1, min(1440, int(getattr(rule, "antinakrutka_restrict_minutes", 30) or 30)))
+            cooldown_min = max(0, min(60, int(getattr(rule, "antinakrutka_cooldown_minutes", 5) or 5)))
 
             joins_list = _antinakrutka_add_join(chat_id, user_id, window_min)
             if len(joins_list) < threshold:
                 return
+
+            now_anti = _antinakrutka_now()
+            if cooldown_min > 0:
+                last_trig = _ANTINAKRUTKA_LAST_TRIGGER.get(int(chat_id))
+                if last_trig is not None:
+                    if last_trig.tzinfo is None:
+                        last_trig = last_trig.replace(tzinfo=timezone.utc)
+                    if (now_anti - last_trig).total_seconds() < cooldown_min * 60:
+                        return
+
+            owner_premium = await chat_owner_has_miniapp_premium(session, int(chat_id))
+            if action in _ANTINAKRUTKA_PREMIUM_ACTIONS and not owner_premium:
+                action = "alert"
 
             # Срабатывание: массовый вход
             chat_title = (event.chat.title or "").strip() or str(chat_id)
@@ -4058,8 +4380,8 @@ async def on_chat_member(event: ChatMemberUpdated):
             except Exception as e:
                 logger.debug("antinakrutka chat send: %s", e)
 
-            if action == "alert_restrict" and await chat_owner_has_miniapp_premium(session, int(chat_id)):
-                until = datetime.now(timezone.utc) + timedelta(minutes=restrict_min)
+            if action == "alert_restrict" and owner_premium:
+                until = now_anti + timedelta(minutes=restrict_min)
                 for uid, _ in joins_list:
                     if uid == user_id or await is_admin(bot, chat_id, uid):
                         continue
@@ -4072,6 +4394,26 @@ async def on_chat_member(event: ChatMemberUpdated):
                         )
                     except Exception as e:
                         logger.debug("antinakrutka restrict %s: %s", uid, e)
+            elif action == "alert_kick" and owner_premium:
+                for uid, _ in joins_list:
+                    if uid == user_id or await is_admin(bot, chat_id, uid):
+                        continue
+                    try:
+                        await bot.ban_chat_member(chat_id, uid)
+                        await bot.unban_chat_member(chat_id, uid)
+                    except Exception as e:
+                        logger.debug("antinakrutka kick %s: %s", uid, e)
+            elif action == "alert_ban" and owner_premium:
+                for uid, _ in joins_list:
+                    if uid == user_id or await is_admin(bot, chat_id, uid):
+                        continue
+                    try:
+                        await bot.ban_chat_member(chat_id, uid)
+                    except Exception as e:
+                        logger.debug("antinakrutka ban %s: %s", uid, e)
+
+            _ANTINAKRUTKA_LAST_TRIGGER[int(chat_id)] = now_anti
+            _antinakrutka_start_lockdown(int(chat_id), rule)
 
             _antinakrutka_clear(chat_id)
     except Exception as e:

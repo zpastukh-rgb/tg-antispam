@@ -2,7 +2,13 @@
 import { ref, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useApi } from '../composables/useApi'
-import { formatDateTimeRu } from '../utils/formatDateTime'
+import {
+  formatHistoryDateTime,
+  mergePaymentHistoryRows,
+  paymentProviderLabel,
+  paymentStatusLabel,
+  tokenReasonLabel,
+} from '../utils/historyLabels.js'
 
 const { t } = useI18n()
 const { api, fetchSilent, hasInitData } = useApi()
@@ -18,15 +24,51 @@ function fmtAmount(v) {
   return Number.isInteger(n) ? String(n) : n.toFixed(2)
 }
 
+function fmtDate(iso) {
+  return formatHistoryDateTime(iso, isEn.value)
+}
+
+function fmtProvider(item) {
+  return paymentProviderLabel(item, t)
+}
+
+function fmtStatus(status) {
+  return paymentStatusLabel(status, t)
+}
+
+function fmtReason(reason) {
+  return tokenReasonLabel(reason, t)
+}
+
+function paymentTitle(item) {
+  if (String(item?.kind || '').toLowerCase() === 'promo' || String(item?.provider || '').toLowerCase() === 'promo') {
+    const parts = []
+    const days = Number(item?.period_days || 0)
+    const months = Number(item?.months || 0)
+    if (days > 0) parts.push(t('history.promo_period_days', { n: days }))
+    else if (months > 0) parts.push(isEn.value ? `${months} mo` : `${months} мес.`)
+    const ga = Number(item?.grant_aurum || 0)
+    const gt = Number(item?.grant_tokens || 0)
+    if (ga > 0) parts.push(`${fmtAmount(ga)} AURUM ✨`)
+    if (gt > 0) parts.push(`${fmtAmount(gt)} ⚡`)
+    return parts.length ? parts.join(' · ') : t('billing.method.promo')
+  }
+  if (String(item?.tariff || '').toLowerCase() === 'tokens') {
+    return `${fmtAmount(item.amount_rub)} ${isEn.value ? 'RUB' : '₽'} · ${item.months} ⚡`
+  }
+  return `${fmtAmount(item.amount_rub)} ${isEn.value ? 'RUB' : '₽'} · ${isEn.value ? `${item.months} mo` : `${item.months} мес.`}`
+}
+
 async function loadAll() {
   if (!hasInitData.value) return
   loading.value = true
   try {
-    const [p, tk] = await Promise.all([
+    const [p, tk, sub] = await Promise.all([
       fetchSilent(() => api.historyPayments()),
       fetchSilent(() => api.historyTokens()),
+      fetchSilent(() => api.historySubscription()).catch(() => ({ items: [] })),
     ])
-    payments.value = p?.items || []
+    payments.value = mergePaymentHistoryRows(p?.items, sub?.items)
     tokens.value = tk?.items || []
   } finally {
     loading.value = false
@@ -75,10 +117,13 @@ onMounted(loadAll)
         >
           {{ isEn ? 'No payments yet.' : 'Платежей пока нет.' }}
         </div>
-        <div v-for="(item, idx) in payments" :key="`p-${idx}`" class="rounded-xl border border-slate-200 p-3 dark:border-white/[0.06] dark:bg-[#080a10]">
-          <p class="text-xs text-slate-500 dark:text-white/42">{{ formatDateTimeRu(item.created_at) }}</p>
+        <div v-for="(item, idx) in payments" :key="'p-' + idx" class="rounded-xl border border-slate-200 p-3 dark:border-white/[0.06] dark:bg-[#080a10]">
+          <p class="text-xs text-slate-500 dark:text-white/42">{{ fmtDate(item.created_at) }}</p>
           <p class="mt-1 text-sm font-semibold text-slate-900 dark:text-white">
-            {{ fmtAmount(item.amount_rub) }} {{ isEn ? 'RUB' : '₽' }} · {{ item.months }} {{ isEn ? 'mo' : 'мес.' }} · {{ item.status }}
+            {{ paymentTitle(item) }}
+          </p>
+          <p class="mt-0.5 text-xs text-slate-500 dark:text-white/42">
+            {{ fmtProvider(item) }} · {{ fmtStatus(item.status) }}
           </p>
         </div>
       </div>
@@ -90,12 +135,12 @@ onMounted(loadAll)
         >
           {{ isEn ? 'No AURUM / token movements yet.' : 'Движений AURUM/токенов пока нет.' }}
         </div>
-        <div v-for="(item, idx) in tokens" :key="`t-${idx}`" class="rounded-xl border border-slate-200 p-3 dark:border-white/[0.06] dark:bg-[#080a10]">
-          <p class="text-xs text-slate-500 dark:text-white/42">{{ formatDateTimeRu(item.created_at) }}</p>
+        <div v-for="(item, idx) in tokens" :key="'t-' + idx" class="rounded-xl border border-slate-200 p-3 dark:border-white/[0.06] dark:bg-[#080a10]">
+          <p class="text-xs text-slate-500 dark:text-white/42">{{ fmtDate(item.created_at) }}</p>
           <p class="mt-1 text-sm font-semibold" :class="item.delta >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'">
             {{ item.delta >= 0 ? '+' : '' }}{{ fmtAmount(item.delta) }} ⚡
           </p>
-          <p class="text-xs text-slate-500 dark:text-white/42">{{ item.reason }}</p>
+          <p class="text-xs text-slate-500 dark:text-white/42">{{ fmtReason(item.reason) }}</p>
         </div>
       </div>
     </div>

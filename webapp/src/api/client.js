@@ -345,7 +345,7 @@ export const api = {
     if (chatId != null && chatId !== '') q.set('chat_id', String(chatId))
     return api.get(`/api/activity/slot-detail?${q.toString()}`)
   },
-  activityGrowthEvents: (period = 'today', scope = 'all', chatId = null, kind = 'joined', limit = 250) => {
+  activityGrowthEvents: (period = 'today', scope = 'all', chatId = null, kind = 'joined', limit = 250, chatKind = null) => {
     const q = new URLSearchParams()
     q.set('period', String(period || 'today'))
     q.set('scope', ['all', 'own', 'delegated'].includes(String(scope)) ? String(scope) : 'all')
@@ -353,11 +353,28 @@ export const api = {
     q.set('limit', String(Math.max(1, Math.min(500, Number(limit) || 250))))
     const cidStr = chatId != null && chatId !== '' ? String(chatId).trim() : ''
     if (cidStr && /^-?\d+$/.test(cidStr)) q.set('chat_id', cidStr)
+    const ck = String(chatKind || '').trim().toLowerCase()
+    if (ck === 'channel' || ck === 'group') q.set('chat_kind', ck)
     try {
       const tz = -new Date().getTimezoneOffset()
       if (Number.isFinite(tz)) q.set('tz_offset_min', String(tz))
     } catch (_) {}
     return api.get(`/api/activity/growth-events?${q.toString()}`)
+  },
+  activityModerationEvents: (period = 'today', scope = 'all', chatId = null, reason = '', limit = 200, offset = 0) => {
+    const q = new URLSearchParams()
+    q.set('period', String(period || 'today'))
+    q.set('scope', ['all', 'own', 'delegated'].includes(String(scope)) ? String(scope) : 'all')
+    q.set('reason', String(reason || '').trim())
+    q.set('limit', String(Math.max(1, Math.min(500, Number(limit) || 200))))
+    q.set('offset', String(Math.max(0, Number(offset) || 0)))
+    const cidStr = chatId != null && chatId !== '' ? String(chatId).trim() : ''
+    if (cidStr && /^-?\d+$/.test(cidStr)) q.set('chat_id', cidStr)
+    try {
+      const tz = -new Date().getTimezoneOffset()
+      if (Number.isFinite(tz)) q.set('tz_offset_min', String(tz))
+    } catch (_) {}
+    return api.get(`/api/activity/moderation-events?${q.toString()}`)
   },
   activityAudienceGender: (chatId = null) => {
     const q = new URLSearchParams()
@@ -474,6 +491,7 @@ export const api = {
   chatManagerActivity: (chatId, managerUserId) =>
     api.get(`/api/chat/${chatId}/managers/${managerUserId}/activity`),
   copySettings: (chatId, targetChatId) => api.post(`/api/chat/${chatId}/copy-settings`, { target_chat_id: targetChatId }),
+  transferOwnership: (chatId, body) => api.post(`/api/chat/${chatId}/transfer-ownership`, body),
   chatMemberUnban: (chatId, targetUserId) =>
     api.post(`/api/chat/${chatId}/member-unban`, { user_id: Number(targetUserId) }),
   chatMemberUnmute: (chatId, targetUserId) =>
@@ -613,6 +631,22 @@ export async function uploadChatWelcomePhoto(chatId, file) {
     throw err
   }
   return res.json()
+}
+
+export async function fetchChatAvatarBlobUrl(chatId) {
+  const base = getBaseUrl()
+  const cid = String(chatId || '').trim()
+  if (!cid || !base) return ''
+  const url = `${base}/api/chat/${encodeURIComponent(cid)}/avatar`
+  const initData = getInitData()
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: initData ? { 'X-Telegram-Init-Data': initData } : {},
+  })
+  if (!res.ok) return ''
+  const blob = await res.blob()
+  if (!blob || !blob.size) return ''
+  return URL.createObjectURL(blob)
 }
 
 export async function fetchChatWelcomePhotoPreviewUrl(chatId) {

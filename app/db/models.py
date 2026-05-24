@@ -255,6 +255,7 @@ class Chat(Base):
 
     # Для chat_kind=channel: id супергруппы обсуждения (getChat.linked_chat), чтобы делегат канала имел доступ к API правил комментариев.
     linked_discussion_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    linked_discussion_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # Для группы/супергруппы: id привязанного канала (getChat.linked_chat.type=channel) — обратная связь для Mini App без повторного getChat.
     linked_channel_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -419,6 +420,11 @@ class Rule(Base):
     delete_join_messages: Mapped[bool] = mapped_column(Boolean, default=True)
     delete_left_messages: Mapped[bool] = mapped_column(Boolean, default=True)
     auto_approve_join_requests: Mapped[bool] = mapped_column(Boolean, default=False)
+    join_requests_mode: Mapped[str] = mapped_column(String(24), default="off")  # off|auto|survey_auto|survey_manual
+    join_requests_welcome_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    join_requests_done_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    join_requests_questions_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    join_requests_report_mode: Mapped[str] = mapped_column(String(16), default="full")  # off|brief|full
     silence_minutes: Mapped[int] = mapped_column(Integer, default=0)
     master_anti_spam: Mapped[bool] = mapped_column(Boolean, default=True)
 
@@ -426,8 +432,29 @@ class Rule(Base):
     antinakrutka_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     antinakrutka_joins_threshold: Mapped[int] = mapped_column(Integer, default=10)
     antinakrutka_window_minutes: Mapped[int] = mapped_column(Integer, default=5)
-    antinakrutka_action: Mapped[str] = mapped_column(String(32), default="alert")  # alert | alert_restrict
+    antinakrutka_action: Mapped[str] = mapped_column(String(32), default="alert")  # alert | alert_restrict | alert_kick | alert_ban
     antinakrutka_restrict_minutes: Mapped[int] = mapped_column(Integer, default=30)
+    antinakrutka_lockdown_minutes: Mapped[int] = mapped_column(Integer, default=0)
+    antinakrutka_pause_welcomes: Mapped[bool] = mapped_column(Boolean, default=False)
+    antinakrutka_force_captcha: Mapped[bool] = mapped_column(Boolean, default=False)
+    antinakrutka_cooldown_minutes: Mapped[int] = mapped_column(Integer, default=5)
+    antinakrutka_auto_silence_minutes: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Фильтрация входящих (имя / username / закрытие входа)
+    join_filter_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    join_filter_arab: Mapped[bool] = mapped_column(Boolean, default=False)
+    join_filter_cjk: Mapped[bool] = mapped_column(Boolean, default=False)
+    join_filter_zalgo: Mapped[bool] = mapped_column(Boolean, default=False)
+    join_filter_spam_nick: Mapped[bool] = mapped_column(Boolean, default=False)
+    join_filter_require_username: Mapped[bool] = mapped_column(Boolean, default=False)
+    join_filter_name_stopwords_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    join_filter_name_stopwords: Mapped[str | None] = mapped_column(Text, nullable=True)
+    join_filter_close_entry: Mapped[bool] = mapped_column(Boolean, default=False)
+    join_filter_close_action: Mapped[str] = mapped_column(String(16), default="kick")  # kick | ban
+    join_filter_cas: Mapped[bool] = mapped_column(Boolean, default=False)
+    join_filter_network_mass_join: Mapped[bool] = mapped_column(Boolean, default=False)
+    join_filter_network_join_threshold: Mapped[int] = mapped_column(Integer, default=4)
+    join_filter_network_join_window_minutes: Mapped[int] = mapped_column(Integer, default=10)
     # Всплеск спама: подсветка «чат под угрозой» + уведомления владельцу/делегату.
     spam_spike_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     spam_spike_min_deletes: Mapped[int] = mapped_column(Integer, default=15)
@@ -453,17 +480,47 @@ class Rule(Base):
     filter_channel_post_no_username: Mapped[bool] = mapped_column(Boolean, default=False)  # приватные каналы без @
     filter_channel_post_hidden_fwd: Mapped[bool] = mapped_column(Boolean, default=False)  # скрытые форварды (hidden_user)
 
+    # Пересылки и цитаты извне (True = запрещено / удалять)
+    filter_forward_block_channels: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_forward_block_chats: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_forward_block_bots: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_forward_block_users: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_forward_block_with_links: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_forward_block_stories: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_forward_block_with_button: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Механический антиспам (сообщения без ссылок)
+    mech_filter_block_apk: Mapped[bool] = mapped_column(Boolean, default=False)
+    mech_filter_guest_bots: Mapped[bool] = mapped_column(Boolean, default=False)
+    mech_filter_symbol_subst: Mapped[bool] = mapped_column(Boolean, default=False)
+    mech_filter_text_spam: Mapped[bool] = mapped_column(Boolean, default=False)
+    mech_filter_strict_edit: Mapped[bool] = mapped_column(Boolean, default=False)
+    mech_filter_flood_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    mech_filter_flood_threshold: Mapped[int] = mapped_column(Integer, default=3)
+    mech_filter_flood_window_minutes: Mapped[int] = mapped_column(Integer, default=5)
+    mech_filter_flood_mode: Mapped[str] = mapped_column(String(16), default="soft")
+    mech_filter_flood_action: Mapped[str] = mapped_column(String(16), default="mute")
+    # JSON: {"mech_flood": "mute", "stopword": "ban", ...} — override наказания по фильтру
+    filter_actions_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Автоудаление комментариев к постам канала по ключевым словам (Premium, только linked discussion)
+    post_comment_keywords_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    post_comment_keywords_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    post_comment_keywords_action: Mapped[str] = mapped_column(String(16), default="delete")
+
     # Guard жёсткий словарь: мат / подработки / казино / реклама / обзывательства /
     # антирасист / антифашист / антипошлость / анти-политика / религия / эзотерика
     filter_profanity_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     filter_jobs_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     filter_casino_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    filter_crypto_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     filter_ads_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     filter_insults_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     filter_racism_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     filter_nazi_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     filter_vulgar_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     filter_politics_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    filter_drugs_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     filter_religion_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     # True: ловить только объявления/услуги/призывы (цена, лс, «запишись», и т.п.).
     filter_religion_promo_only: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -566,6 +623,22 @@ class JoinCaptchaSession(Base):
     )
 
     __table_args__ = (Index("ix_join_captcha_chat_user", "chat_id", "user_id"),)
+
+
+class JoinRequestSurveySession(Base):
+    """Активный опрос пользователя по заявке на вступление (ответы в ЛС боту)."""
+
+    __tablename__ = "join_request_survey_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    question_index: Mapped[int] = mapped_column(Integer, default=0)
+    answers_json: Mapped[str | None] = mapped_column(Text, nullable=True, default="[]")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (Index("ux_join_request_survey_chat_user", "chat_id", "user_id", unique=True),)
 
 
 # =========================================================
@@ -1014,6 +1087,37 @@ class NewMember(Base):
     __table_args__ = (
         UniqueConstraint("chat_id", "user_id", name="uq_new_member"),
     )
+
+
+class FloodTextEvent(Base):
+    """Повторы текста пользователя — для детекции флуда."""
+    __tablename__ = "flood_text_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    text_norm_hash: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class FloodRateEvent(Base):
+    """Счётчик сообщений пользователя — массовая отправка (текст + медиа)."""
+    __tablename__ = "flood_rate_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class NetworkJoinEvent(Base):
+    """Событие входа user_id в chat_id — для детекции массового входа по сети Guard."""
+    __tablename__ = "network_join_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
 class MemberLeft(Base):

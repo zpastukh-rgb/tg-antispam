@@ -636,8 +636,8 @@ async def _materialize_join_style_captcha(
     asyncio.create_task(_expire_join_captcha(bot, token, delay_sec))
 
 
-async def maybe_start_join_captcha(bot, session, tg_chat: Chat, chat_row: Any, rule: Any, user: User) -> None:
-    if not bool(getattr(rule, "join_captcha_enabled", False)):
+async def maybe_start_join_captcha(bot, session, tg_chat: Chat, chat_row: Any, rule: Any, user: User, *, force: bool = False) -> None:
+    if not force and not bool(getattr(rule, "join_captcha_enabled", False)):
         return
     if getattr(user, "is_bot", False):
         return

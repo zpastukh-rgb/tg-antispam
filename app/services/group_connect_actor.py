@@ -59,18 +59,22 @@ async def is_post_as_linked_channel_in_discussion(bot: Bot, chat_id: int, messag
 async def actor_may_init_group_connect_from_group(bot: Bot, chat_id: int, message: Message) -> bool:
     """
     Кто может запустить connect из группы:
-    - личный Telegram (не бот) в статусе администратор/создатель, или
-    - пост от привязанного к этому чату канала (владелец пишет «от канала» в обсуждении).
+    - создатель группы (владелец), или
+    - пост от привязанного канала в группе-обсуждении (владелец канала пишет «от канала»).
     """
     fu = message.from_user
     if fu is not None and not bool(getattr(fu, "is_bot", False)):
-        try:
-            m = await bot.get_chat_member(chat_id, fu.id)
-            if m.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
-                return True
-        except Exception as e:
-            logger.debug("actor_may_init_group_connect member check failed chat=%s: %s", chat_id, e)
+        if await telegram_user_is_chat_creator(bot, chat_id, int(fu.id)):
+            return True
     return await is_post_as_linked_channel_in_discussion(bot, chat_id, message)
+
+
+async def actor_may_connect_chat_as_owner(bot: Bot, chat_id: int, telegram_user_id: int) -> bool:
+    """Подключить чат/канал в Guard может только создатель (владелец) в Telegram."""
+    uid = int(telegram_user_id or 0)
+    if uid <= 0:
+        return False
+    return await telegram_user_is_chat_creator(bot, int(chat_id), uid)
 
 
 async def resolve_guard_connect_actor_for_group(

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useApi } from '../composables/useApi'
 import { useToast } from '../composables/useToast'
@@ -17,6 +17,8 @@ const props = defineProps({
   readOnly: { type: Boolean, default: false },
   /** Скрыть серую подсказку «данные по аккаунту…» (модалка просмотра юзера) */
   hideEmbeddedHint: { type: Boolean, default: false },
+  /** Прокручиваемый контейнер модалки (ref родителя) — для «История оплат». */
+  scrollParentRef: { type: Object, default: null },
 })
 
 const useDarkShell = computed(() => props.variant === 'page')
@@ -30,6 +32,7 @@ const subscriptionHistoryLoading = ref(false)
 const subscriptionHistoryItems = ref([])
 const subscriptionHistoryOpen = ref(false)
 const subscriptionHistoryLoadedOnce = ref(false)
+const historySectionRef = ref(null)
 
 const isPremium = computed(() => !!props.profile?.is_premium)
 
@@ -227,12 +230,38 @@ async function loadSubscriptionHistory() {
   }
 }
 
-function toggleSubscriptionHistory() {
-  subscriptionHistoryOpen.value = !subscriptionHistoryOpen.value
-  if (subscriptionHistoryOpen.value && !subscriptionHistoryLoadedOnce.value) {
+function scrollHistorySectionIntoView() {
+  nextTick(() => {
+    requestAnimationFrame(() => {
+      const section = historySectionRef.value
+      if (!section) return
+      const scrollParent = props.scrollParentRef?.value
+      if (scrollParent instanceof Element) {
+        const sectionRect = section.getBoundingClientRect()
+        const parentRect = scrollParent.getBoundingClientRect()
+        const overflowBottom = sectionRect.bottom - parentRect.bottom
+        const overflowTop = parentRect.top - sectionRect.top
+        if (overflowBottom > 4) {
+          scrollParent.scrollTop += overflowBottom + 12
+        } else if (overflowTop > 4) {
+          scrollParent.scrollTop -= overflowTop + 12
+        }
+        return
+      }
+      section.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    })
+  })
+}
+
+async function toggleSubscriptionHistory() {
+  const opening = !subscriptionHistoryOpen.value
+  subscriptionHistoryOpen.value = opening
+  if (!opening) return
+  if (!subscriptionHistoryLoadedOnce.value) {
     subscriptionHistoryLoadedOnce.value = true
-    void loadSubscriptionHistory()
+    await loadSubscriptionHistory()
   }
+  scrollHistorySectionIntoView()
 }
 
 async function toggleAutorenew() {
@@ -263,6 +292,15 @@ function renewSubscriptionButton() {
   if (props.readOnly) return
   emit('open-tariff')
 }
+
+watch(
+  () => subscriptionHistoryView.value.length,
+  () => {
+    if (subscriptionHistoryOpen.value && !subscriptionHistoryLoading.value) {
+      scrollHistorySectionIntoView()
+    }
+  },
+)
 
 watch(
   () => props.profile?.telegram_id,
@@ -377,7 +415,7 @@ watch(
       </div>
     </div>
 
-    <div>
+    <div ref="historySectionRef">
       <button
         type="button"
         :class="variant === 'embedded' ? 'flex w-full items-center justify-between gap-2 rounded-2xl bg-zinc-900/45 px-3 py-3 text-left text-[13px] font-semibold text-lime-100/95 transition hover:bg-zinc-900/70 active:scale-[0.99]' : 'flex w-full items-center justify-between gap-2 rounded-2xl border border-lime-500/20 bg-zinc-900/55 px-3 py-3 text-left text-[13px] font-semibold text-lime-100/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] transition hover:border-lime-400/35 hover:bg-zinc-900/80 active:scale-[0.99]'"

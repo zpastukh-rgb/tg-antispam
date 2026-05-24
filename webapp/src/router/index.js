@@ -12,6 +12,8 @@ import ReferralView from '../views/ReferralView.vue'
 import GiftsView from '../views/GiftsView.vue'
 import CommunityView from '../views/CommunityView.vue'
 import { useDashboardSection } from '../composables/useDashboardSection'
+import { api } from '../api/client'
+import { prefetchReportsView } from '../utils/reportsViewCache.js'
 
 /** Vite base './' даёт относительные ассеты; history оставляем от корня сайта. Явный префикс — через import.meta.env.BASE_URL. */
 function routerHistoryBase() {
@@ -64,6 +66,9 @@ router.beforeEach((to) => {
     ) {
       setDashboardSection(wanted)
     }
+  }
+  if (to.path === '/reports') {
+    void prefetchReportsView(api)
   }
   return true
 })

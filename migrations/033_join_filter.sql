@@ -1,0 +1,11 @@
+-- Фильтрация входящих пользователей (имя / username / закрытие входа)
+ALTER TABLE rules ADD COLUMN IF NOT EXISTS join_filter_enabled BOOLEAN DEFAULT FALSE;
+ALTER TABLE rules ADD COLUMN IF NOT EXISTS join_filter_arab BOOLEAN DEFAULT FALSE;
+ALTER TABLE rules ADD COLUMN IF NOT EXISTS join_filter_cjk BOOLEAN DEFAULT FALSE;
+ALTER TABLE rules ADD COLUMN IF NOT EXISTS join_filter_zalgo BOOLEAN DEFAULT FALSE;
+ALTER TABLE rules ADD COLUMN IF NOT EXISTS join_filter_spam_nick BOOLEAN DEFAULT FALSE;
+ALTER TABLE rules ADD COLUMN IF NOT EXISTS join_filter_require_username BOOLEAN DEFAULT FALSE;
+ALTER TABLE rules ADD COLUMN IF NOT EXISTS join_filter_name_stopwords_enabled BOOLEAN DEFAULT FALSE;
+ALTER TABLE rules ADD COLUMN IF NOT EXISTS join_filter_name_stopwords TEXT DEFAULT NULL;
+ALTER TABLE rules ADD COLUMN IF NOT EXISTS join_filter_close_entry BOOLEAN DEFAULT FALSE;
+ALTER TABLE rules ADD COLUMN IF NOT EXISTS join_filter_close_action VARCHAR(16) DEFAULT 'kick';

@@ -78,6 +78,13 @@ from app.db.ensure_defaults import (
     ensure_users_language_column,
     ensure_profanity_lang_column,
     ensure_admin_incident_feed_schema,
+    ensure_network_join_events_schema,
+    ensure_forward_filter_schema,
+    ensure_mechanical_antispam_schema,
+    ensure_flood_text_events_schema,
+    ensure_antiflood_schema,
+    ensure_post_comment_keywords_schema,
+    ensure_join_requests_survey_schema,
 )
 from app.db.session import engine
 from app.db.models import Base
@@ -173,16 +180,60 @@ _RULES_COLUMNS_008 = (
     ("antinakrutka_window_minutes", "INTEGER", "5"),
     ("antinakrutka_action", "VARCHAR(32)", "'alert'"),
     ("antinakrutka_restrict_minutes", "INTEGER", "30"),
+    ("antinakrutka_lockdown_minutes", "INTEGER", "0"),
+    ("antinakrutka_pause_welcomes", "BOOLEAN", "FALSE"),
+    ("antinakrutka_force_captcha", "BOOLEAN", "FALSE"),
+    ("antinakrutka_cooldown_minutes", "INTEGER", "5"),
+    ("antinakrutka_auto_silence_minutes", "INTEGER", "0"),
+    ("join_filter_enabled", "BOOLEAN", "FALSE"),
+    ("join_filter_arab", "BOOLEAN", "FALSE"),
+    ("join_filter_cjk", "BOOLEAN", "FALSE"),
+    ("join_filter_zalgo", "BOOLEAN", "FALSE"),
+    ("join_filter_spam_nick", "BOOLEAN", "FALSE"),
+    ("join_filter_require_username", "BOOLEAN", "FALSE"),
+    ("join_filter_name_stopwords_enabled", "BOOLEAN", "FALSE"),
+    ("join_filter_name_stopwords", "TEXT", "NULL"),
+    ("join_filter_close_entry", "BOOLEAN", "FALSE"),
+    ("join_filter_close_action", "VARCHAR(16)", "'kick'"),
+    ("join_filter_cas", "BOOLEAN", "FALSE"),
+    ("join_filter_network_mass_join", "BOOLEAN", "FALSE"),
+    ("join_filter_network_join_threshold", "INTEGER", "4"),
+    ("join_filter_network_join_window_minutes", "INTEGER", "10"),
+    ("filter_forward_block_channels", "BOOLEAN", "FALSE"),
+    ("filter_forward_block_chats", "BOOLEAN", "FALSE"),
+    ("filter_forward_block_bots", "BOOLEAN", "FALSE"),
+    ("filter_forward_block_users", "BOOLEAN", "FALSE"),
+    ("filter_forward_block_with_links", "BOOLEAN", "FALSE"),
+    ("filter_forward_block_stories", "BOOLEAN", "FALSE"),
+    ("filter_forward_block_with_button", "BOOLEAN", "FALSE"),
+    ("mech_filter_block_apk", "BOOLEAN", "FALSE"),
+    ("mech_filter_guest_bots", "BOOLEAN", "FALSE"),
+    ("mech_filter_symbol_subst", "BOOLEAN", "FALSE"),
+    ("mech_filter_text_spam", "BOOLEAN", "FALSE"),
+    ("mech_filter_strict_edit", "BOOLEAN", "FALSE"),
+    ("mech_filter_flood_enabled", "BOOLEAN", "FALSE"),
+    ("mech_filter_flood_threshold", "INTEGER", "3"),
+    ("mech_filter_flood_window_minutes", "INTEGER", "5"),
+    ("mech_filter_flood_mode", "VARCHAR(16)", "'soft'"),
+    ("mech_filter_flood_action", "VARCHAR(16)", "'mute'"),
+    ("filter_actions_json", "TEXT", "NULL"),
+    ("post_comment_keywords_enabled", "BOOLEAN", "FALSE"),
+    ("post_comment_keywords_json", "TEXT", "NULL"),
+    ("post_comment_keywords_action", "VARCHAR(16)", "'delete'"),
+    ("join_requests_mode", "VARCHAR(24)", "'off'"),
+    ("join_requests_report_mode", "VARCHAR(16)", "'full'"),
     ("use_global_antispam_db", "BOOLEAN", "FALSE"),
     ("filter_profanity_enabled", "BOOLEAN", "FALSE"),
     ("filter_jobs_enabled", "BOOLEAN", "FALSE"),
     ("filter_casino_enabled", "BOOLEAN", "FALSE"),
+    ("filter_crypto_enabled", "BOOLEAN", "FALSE"),
     ("filter_ads_enabled", "BOOLEAN", "FALSE"),
     ("filter_insults_enabled", "BOOLEAN", "FALSE"),
     ("filter_racism_enabled", "BOOLEAN", "FALSE"),
     ("filter_nazi_enabled", "BOOLEAN", "FALSE"),
     ("filter_vulgar_enabled", "BOOLEAN", "FALSE"),
     ("filter_politics_enabled", "BOOLEAN", "FALSE"),
+    ("filter_drugs_enabled", "BOOLEAN", "FALSE"),
     ("filter_religion_enabled", "BOOLEAN", "FALSE"),
     ("filter_religion_promo_only", "BOOLEAN", "FALSE"),
     ("filter_esoteric_enabled", "BOOLEAN", "FALSE"),
@@ -343,6 +394,13 @@ async def on_startup() -> None:
     await ensure_users_language_column(engine)
     await ensure_profanity_lang_column(engine)
     await ensure_admin_incident_feed_schema(engine)
+    await ensure_network_join_events_schema(engine)
+    await ensure_forward_filter_schema(engine)
+    await ensure_mechanical_antispam_schema(engine)
+    await ensure_flood_text_events_schema(engine)
+    await ensure_antiflood_schema(engine)
+    await ensure_post_comment_keywords_schema(engine)
+    await ensure_join_requests_survey_schema(engine)
     try:
         from app.services.pii_user_store import ensure_pii_schema
 

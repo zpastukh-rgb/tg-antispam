@@ -2,6 +2,11 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { api } from '../api/client'
+import { useModalScrollLock } from '../composables/useModalScrollLock.js'
+import { formatDateTimeShortRu } from '../utils/formatDateTime'
+import { openTelegramDeepLink } from '../utils/openTelegramDeepLink'
+import { resolveModerationTrigger } from '../utils/moderationTrigger.js'
+import ChatAvatar from './ChatAvatar.vue'
 
 const { t: tt, te } = useI18n()
 
@@ -52,6 +57,8 @@ const statsType = ref('all')
 const statsSubView = ref('timeline')
 const statsScope = ref('all')
 const selectedChatId = ref('all')
+/** all | groups | channels — фильтр списка чатов в пресетах */
+const chatKindFilter = ref('all')
 const hoverIndex = ref(-1)
 const threatOpen = ref(false)
 const threatLoadingId = ref('')
@@ -61,6 +68,14 @@ const growthModalKind = ref('joined')
 const growthModalLoading = ref(false)
 const growthModalItems = ref([])
 const growthModalPeriod = ref({ from: '', to: '' })
+const reasonHitsModalOpen = ref(false)
+const reasonHitsModalLoading = ref(false)
+const reasonHitsModalItems = ref([])
+const reasonHitsModalLabel = ref('')
+const reasonHitsModalReason = ref('')
+const reasonHitsModalTotal = ref(0)
+const reasonHitsModalHasMore = ref(false)
+const reasonHitsModalOffset = ref(0)
 let silentRefreshTimer = null
 
 /** Какая pill сейчас грузится по клику пользователя (не тихое автообновление). */
@@ -70,6 +85,19 @@ function isPillBusy(kind, isActive) {
   if (!isActive) return false
   if (kind === 'period') return Boolean(props.loading) || filterBusyKey.value === 'period'
   return filterBusyKey.value === kind
+}
+
+function growthApiChatKind() {
+  if (selectedChatId.value !== 'all') return null
+  if (chatKindFilter.value === 'channels') return 'channel'
+  if (chatKindFilter.value === 'groups') return 'group'
+  return null
+}
+
+function growthRowAllowed(row) {
+  const allowedIds = new Set(activeStatsChatRows.value.map((c) => String(c?.id)))
+  if (!allowedIds.size) return true
+  return allowedIds.has(String(row?.chat_id))
 }
 
 function growthApiPeriod() {
@@ -84,6 +112,134 @@ function growthUserLabel(row) {
   if (un) return `@${un}`
   const uid = Number(row?.user_id || 0)
   return uid > 0 ? `id ${uid}` : '—'
+}
+
+function moderationUsername(row) {
+  return String(row?.username || '').trim().replace(/^@+/, '')
+}
+
+function moderationFirstName(row) {
+  return String(row?.first_name || '').trim()
+}
+
+function moderationHitTime(iso) {
+  return formatDateTimeShortRu(iso)
+}
+
+function openModerationUserProfile(row) {
+  const u = moderationUsername(row)
+  const uid = Number(row?.user_id || 0)
+  if (u) {
+    openTelegramDeepLink(`https://t.me/${encodeURIComponent(u)}`)
+    return
+  }
+  if (uid > 0) {
+    openTelegramDeepLink(`https://t.me/user?id=${uid}`)
+  }
+}
+
+function normalizeModerationAction(action) {
+  const a = String(action || '').toLowerCase()
+  if (a.includes('observe') || a.includes('замеч')) return 'observe'
+  if (a.includes('ban')) return 'ban'
+  if (a.includes('mute') || a.includes('restrict')) return 'mute'
+  return 'delete'
+}
+
+function moderationStatusLabel(row) {
+  const key = normalizeModerationAction(row?.action)
+  const path = `cabinet_stats.protection.hit_status_${key}`
+  if (te(path)) return tt(path)
+  return tt('cabinet_stats.protection.hit_status_delete')
+}
+
+function moderationStatusClass(row) {
+  const key = normalizeModerationAction(row?.action)
+  if (key === 'ban') return 'bg-rose-500/15 text-rose-200 ring-1 ring-rose-400/30'
+  if (key === 'mute') return 'bg-amber-500/15 text-amber-200 ring-1 ring-amber-400/30'
+  if (key === 'observe') return 'bg-red-500/15 text-red-200 ring-1 ring-red-400/30'
+  return 'bg-slate-500/15 text-slate-200 ring-1 ring-white/10'
+}
+
+function moderationTriggerText(row) {
+  const raw = resolveModerationTrigger(row)
+  if (raw && raw !== '—') return raw
+  const k = normalizeReason(row?.reason || '')
+  if (k.startsWith('media_')) {
+    const sub = k.slice('media_'.length)
+    const path = `filters.media_kinds.${sub}`
+    if (te(path)) return tt(path)
+  }
+  if (k.startsWith('button_')) {
+    const sub = k.slice('button_'.length)
+    const path = `filters.button_kinds.${sub}`
+    if (te(path)) return tt(path)
+  }
+  if (k.startsWith('mention_')) {
+    const sub = k.slice('mention_'.length)
+    const path = `filters.mention_kinds_short.${sub}`
+    if (te(path)) return tt(path)
+  }
+  return '—'
+}
+
+function moderationApiPeriod() {
+  const k = String(statsPeriod.value || 'today')
+  if (k === '6m') return '180d'
+  if (k === '1y') return '365d'
+  return k
+}
+
+async function loadReasonHitsModal(reset = true) {
+  if (!reasonHitsModalReason.value) return
+  if (reset) {
+    reasonHitsModalLoading.value = true
+    reasonHitsModalItems.value = []
+    reasonHitsModalOffset.value = 0
+    reasonHitsModalTotal.value = 0
+    reasonHitsModalHasMore.value = false
+  }
+  try {
+    const chatId = selectedChatId.value === 'all' ? null : Number(selectedChatId.value || 0)
+    const r = await api.activityModerationEvents(
+      moderationApiPeriod(),
+      statsScope.value,
+      chatId,
+      reasonHitsModalReason.value,
+      200,
+      reasonHitsModalOffset.value,
+    )
+    const batch = Array.isArray(r?.items) ? r.items : []
+    reasonHitsModalTotal.value = Math.max(0, Number(r?.total || 0))
+    reasonHitsModalHasMore.value = Boolean(r?.has_more)
+    reasonHitsModalItems.value = reset ? batch : [...reasonHitsModalItems.value, ...batch]
+    reasonHitsModalOffset.value = reasonHitsModalItems.value.length
+  } catch {
+    if (reset) {
+      reasonHitsModalItems.value = []
+      reasonHitsModalTotal.value = 0
+      reasonHitsModalHasMore.value = false
+    }
+  } finally {
+    reasonHitsModalLoading.value = false
+  }
+}
+
+async function openReasonHitsModal(card) {
+  reasonHitsModalLabel.value = String(card?.label || '')
+  reasonHitsModalReason.value = String(card?.reason || '')
+  reasonHitsModalOpen.value = true
+  await loadReasonHitsModal(true)
+}
+
+function closeReasonHitsModal() {
+  reasonHitsModalOpen.value = false
+}
+
+async function loadMoreReasonHits() {
+  if (reasonHitsModalLoading.value || !reasonHitsModalHasMore.value) return
+  reasonHitsModalLoading.value = true
+  await loadReasonHitsModal(false)
 }
 
 function growthChatKindLabel(kind) {
@@ -114,8 +270,10 @@ async function openGrowthEventsModal(kind) {
       chatId,
       k,
       k === 'net' ? 300 : 250,
+      growthApiChatKind(),
     )
-    growthModalItems.value = Array.isArray(r?.items) ? r.items : []
+    const batch = Array.isArray(r?.items) ? r.items : []
+    growthModalItems.value = batch.filter((row) => growthRowAllowed(row))
     growthModalPeriod.value = { from: String(r?.period_from || ''), to: String(r?.period_to || '') }
   } catch {
     growthModalItems.value = []
@@ -175,22 +333,46 @@ function isChannelChat(c) {
   const kind = String(c?.chat_kind || c?.kind || 'group').toLowerCase()
   return kind === 'channel'
 }
+function isDelegatedChat(c) {
+  return !!(c?.is_delegated || c?.is_shared)
+}
+/** Делегированные — только во вкладке «Делегированные»; в «Все» и «Свои» их нет. */
+function chatMatchesStatsScope(c) {
+  const scope = String(statsScope.value || 'all')
+  const delegated = isDelegatedChat(c)
+  if (scope === 'delegated') return delegated
+  return !delegated
+}
 const availableScopeChats = computed(() => {
   const rows = Array.isArray(breakdownData.value?.chats) ? breakdownData.value.chats : []
-  if (statsScope.value === 'delegated') {
-    return rows.filter((c) => (c?.is_delegated || c?.is_shared) && !isChannelChat(c))
-  }
-  if (statsScope.value === 'own') {
-    return rows.filter((c) => !(c?.is_delegated || c?.is_shared))
-  }
+  return rows.filter((c) => chatMatchesStatsScope(c))
+})
+const scopeChatGroups = computed(() => availableScopeChats.value.filter((c) => !isChannelChat(c)))
+const scopeChatChannels = computed(() => availableScopeChats.value.filter((c) => isChannelChat(c)))
+const showChatKindFilter = computed(() => scopeChatGroups.value.length > 0 && scopeChatChannels.value.length > 0)
+const filteredScopeChats = computed(() => {
+  const rows = availableScopeChats.value
+  if (chatKindFilter.value === 'groups') return rows.filter((c) => !isChannelChat(c))
+  if (chatKindFilter.value === 'channels') return rows.filter((c) => isChannelChat(c))
   return rows
 })
+/** Чаты, по которым считаются карточки и модалки (scope + тип + выбранный чат). */
+const activeStatsChatRows = computed(() => {
+  if (selectedChatId.value !== 'all') {
+    const row = selectedScopeChatRow.value
+    return row ? [row] : []
+  }
+  return filteredScopeChats.value
+})
+function sumActiveChatField(field) {
+  return activeStatsChatRows.value.reduce((acc, c) => acc + Math.max(0, toNum(c?.[field] || 0)), 0)
+}
+const anyStatsModalOpen = computed(() => growthModalOpen.value || reasonHitsModalOpen.value)
+useModalScrollLock(anyStatsModalOpen)
 const selectedScopeChatRow = computed(() => {
   if (selectedChatId.value === 'all') return null
   const id = String(selectedChatId.value)
-  const inScoped = availableScopeChats.value.find((c) => String(c?.id) === id)
-  if (inScoped) return inScoped
-  return chats.value.find((c) => String(c?.id) === id) || null
+  return availableScopeChats.value.find((c) => String(c?.id) === id) || null
 })
 
 /** id из ModerationLog (канал + обсуждение и т.д.) для выбранной в пресетах группы. */
@@ -267,10 +449,42 @@ function hasAnyBreakdownDetails(payload) {
 function prettifyReason(reason) {
   const k = normalizeReason(reason)
   if (!k) return tt('cabinet_stats.reasons.unknown')
+  if (k.startsWith('mention_')) {
+    const sub = k.slice('mention_'.length)
+    const path = `cabinet_stats.reasons.mention_${sub}`
+    if (te(path)) return tt(path)
+  }
+  if (k.startsWith('media_')) {
+    const sub = k.slice('media_'.length)
+    const path = `cabinet_stats.reasons.media_${sub}`
+    if (te(path)) return tt(path)
+  }
+  if (k.startsWith('button_')) {
+    const sub = k.slice('button_'.length)
+    const path = `cabinet_stats.reasons.button_${sub}`
+    if (te(path)) return tt(path)
+  }
   const path = `cabinet_stats.reasons.${k}`
   if (te(path)) return tt(path)
   return k.replace(/_/g, ' ')
 }
+
+const statsPeriodLabel = computed(() => {
+  const row = PERIOD_ROWS.value.find((p) => p.key === statsPeriod.value)
+  return row?.label || statsPeriod.value
+})
+
+function growthEventTime(iso) {
+  return formatDateTimeShortRu(iso)
+}
+
+const growthModalPeriodLabel = computed(() => {
+  const from = growthModalPeriod.value?.from
+  const to = growthModalPeriod.value?.to
+  if (!from && !to) return ''
+  if (from && to) return `${formatDateTimeShortRu(from)} — ${formatDateTimeShortRu(to)}`
+  return formatDateTimeShortRu(from || to)
+})
 function reasonColor(reason) {
   const key = normalizeReason(reason)
   if (key === 'media') return '#ef4444'
@@ -322,6 +536,7 @@ async function loadBreakdown(opts = {}) {
 }
 watch(statsScope, () => {
   selectedChatId.value = 'all'
+  chatKindFilter.value = 'all'
   // Не показываем список из прошлого scope до загрузки нового.
   breakdownData.value = null
 })
@@ -329,6 +544,14 @@ watch(availableScopeChats, (rows) => {
   if (!Array.isArray(rows) || rows.length === 0) return
   if (selectedChatId.value === 'all') return
   const ok = rows.some((c) => String(c?.id) === String(selectedChatId.value))
+  if (!ok) selectedChatId.value = 'all'
+})
+watch(showChatKindFilter, (on) => {
+  if (!on && chatKindFilter.value !== 'all') chatKindFilter.value = 'all'
+})
+watch(chatKindFilter, () => {
+  if (selectedChatId.value === 'all') return
+  const ok = filteredScopeChats.value.some((c) => String(c?.id) === String(selectedChatId.value))
   if (!ok) selectedChatId.value = 'all'
 })
 watch(
@@ -408,10 +631,19 @@ const donutGradient = computed(() => {
   return `conic-gradient(${donutSlices.value.map((p) => `${p.color} ${p.start}% ${p.end}%`).join(', ')})`
 })
 
-const growthJoined = computed(() => Math.max(0, toNum(breakdownData.value?.total_joined || 0)))
-const growthLeft = computed(() => Math.max(0, toNum(breakdownData.value?.total_left || 0)))
+const growthJoined = computed(() => {
+  if (isGrowthMode.value && activeStatsChatRows.value.length) return sumActiveChatField('joined')
+  return Math.max(0, toNum(breakdownData.value?.total_joined || 0))
+})
+const growthLeft = computed(() => {
+  if (isGrowthMode.value && activeStatsChatRows.value.length) return sumActiveChatField('left')
+  return Math.max(0, toNum(breakdownData.value?.total_left || 0))
+})
 const growthNet = computed(() => growthJoined.value - growthLeft.value)
-const growthMessages = computed(() => Math.max(0, toNum(breakdownData.value?.total_messages || 0)))
+const growthMessages = computed(() => {
+  if (isGrowthMode.value && activeStatsChatRows.value.length) return sumActiveChatField('messages')
+  return Math.max(0, toNum(breakdownData.value?.total_messages || 0))
+})
 const growthTopChat = computed(() => {
   if (selectedScopeChatRow.value) {
     return {
@@ -421,7 +653,7 @@ const growthTopChat = computed(() => {
       left: Math.max(0, toNum(selectedScopeChatRow.value?.left || 0)),
     }
   }
-  const rows = Array.isArray(connectionsRows.value) ? connectionsRows.value : []
+  const rows = Array.isArray(activeStatsChatRows.value) ? activeStatsChatRows.value : []
   if (!rows.length) return { title: tt('cabinet_stats.reasons.no_data'), messages: 0, joins: 0, left: 0 }
   const best = [...rows].sort((a, b) => Number(b?.messages || 0) - Number(a?.messages || 0))[0]
   return {
@@ -432,24 +664,6 @@ const growthTopChat = computed(() => {
   }
 })
 
-const chatRowsForStats = computed(() => {
-  const rows = Array.isArray(breakdownData.value?.chats) && breakdownData.value.chats.length
-    ? breakdownData.value.chats
-    : chats.value
-  return Array.isArray(rows) ? rows : []
-})
-const channelRowsForStats = computed(() => chatRowsForStats.value.filter((c) => isChannelChat(c)))
-const groupRowsForStats = computed(() => chatRowsForStats.value.filter((c) => !isChannelChat(c)))
-const channelMessagesTotal = computed(() =>
-  channelRowsForStats.value.reduce((acc, c) => acc + Math.max(0, toNum(c?.messages || 0)), 0),
-)
-const channelGrowthNet = computed(() =>
-  channelRowsForStats.value.reduce((acc, c) => acc + Math.max(0, toNum(c?.joined || 0)) - Math.max(0, toNum(c?.left || 0)), 0),
-)
-const topChannelByMessages = computed(() => {
-  if (!channelRowsForStats.value.length) return null
-  return [...channelRowsForStats.value].sort((a, b) => toNum(b?.messages || 0) - toNum(a?.messages || 0))[0] || null
-})
 const audienceGenderCard = computed(() => {
   const g = props.audienceGender || {}
   const maleCount = Math.max(0, Number(g?.maleCount || 0))
@@ -496,26 +710,97 @@ const byHour = computed(() => {
   return Array.from({ length: 24 }, () => 0)
 })
 const xTickLabels = ['00:00', '06:00', '12:00', '18:00', '24:00']
-const yMax = computed(() => Math.max(4, ...byHour.value))
-const yTicks = computed(() => [yMax.value, Math.round(yMax.value * 0.66), Math.round(yMax.value * 0.33), 0])
+const CHART = { w: 360, h: 188, pad: { l: 34, r: 4, t: 6, b: 20 } }
 
-function linePathFor(values) {
-  const vals = (values || []).map((v) => Number(v || 0))
-  const w = 320
-  const h = 132
-  const padL = 28
-  const padR = 8
-  const padT = 8
-  const padB = 18
-  const maxV = Math.max(1, ...vals)
-  const step = vals.length > 1 ? (w - padL - padR) / (vals.length - 1) : 0
-  return vals.map((v, i) => {
-    const x = padL + i * step
-    const y = padT + (h - padT - padB) * (1 - Math.min(1, v / maxV))
-    return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)} ${y.toFixed(1)}`
-  }).join(' ')
+function niceChartMax(raw) {
+  const v = Math.max(0, Number(raw || 0))
+  if (v <= 4) return 4
+  const exp = 10 ** Math.floor(Math.log10(v))
+  const f = v / exp
+  let niceF = 10
+  if (f <= 1) niceF = 1
+  else if (f <= 2) niceF = 2
+  else if (f <= 5) niceF = 5
+  return niceF * exp
 }
-const linePath = computed(() => linePathFor(byHour.value))
+
+function linePathFromCoords(coords) {
+  if (!coords.length) return ''
+  return coords.map((p, i) => `${i ? 'L' : 'M'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')
+}
+
+function smoothLinePathFromCoords(coords) {
+  if (coords.length < 2) return linePathFromCoords(coords)
+  let d = `M${coords[0].x.toFixed(1)},${coords[0].y.toFixed(1)}`
+  for (let i = 0; i < coords.length - 1; i += 1) {
+    const p0 = coords[i - 1] || coords[i]
+    const p1 = coords[i]
+    const p2 = coords[i + 1]
+    const p3 = coords[i + 2] || p2
+    const cp1x = p1.x + (p2.x - p0.x) / 6
+    const cp1y = p1.y + (p2.y - p0.y) / 6
+    const cp2x = p2.x - (p3.x - p1.x) / 6
+    const cp2y = p2.y - (p3.y - p1.y) / 6
+    d += ` C${cp1x.toFixed(1)},${cp1y.toFixed(1)} ${cp2x.toFixed(1)},${cp2y.toFixed(1)} ${p2.x.toFixed(1)},${p2.y.toFixed(1)}`
+  }
+  return d
+}
+
+function areaPathFromCoords(coords, smooth = true) {
+  if (!coords.length) return ''
+  const baseY = CHART.h - CHART.pad.b
+  const first = coords[0]
+  const last = coords[coords.length - 1]
+  const top = smooth ? smoothLinePathFromCoords(coords) : linePathFromCoords(coords)
+  return `${top} L${last.x.toFixed(1)},${baseY} L${first.x.toFixed(1)},${baseY} Z`
+}
+
+function chartCoords(vals, maxY) {
+  const { w, h, pad } = CHART
+  const plotW = w - pad.l - pad.r
+  const plotH = h - pad.t - pad.b
+  const denom = Math.max(1, maxY)
+  const n = Math.max(1, vals.length - 1)
+  return vals.map((v, i) => ({
+    x: pad.l + (i / n) * plotW,
+    y: pad.t + plotH - (Math.max(0, v) / denom) * plotH,
+  }))
+}
+const yMax = computed(() => niceChartMax(Math.max(...byHour.value, 0)))
+const yTicks = computed(() => {
+  const m = yMax.value
+  return [m, Math.round(m * 0.75), Math.round(m * 0.5), Math.round(m * 0.25), 0]
+})
+
+const singleSeriesCoords = computed(() => chartCoords(byHour.value, yMax.value))
+const linePath = computed(() => smoothLinePathFromCoords(singleSeriesCoords.value))
+const singleAreaPath = computed(() => areaPathFromCoords(singleSeriesCoords.value, true))
+
+const singleGridLines = computed(() => {
+  const { h, pad } = CHART
+  const plotH = h - pad.t - pad.b
+  return yTicks.value.map((tick) => ({
+    y: pad.t + plotH - (tick / Math.max(1, yMax.value)) * plotH,
+    label: tick,
+  }))
+})
+
+const chartHoverLineX = computed(() => {
+  if (hoverIndex.value < 0) return null
+  const { w, pad } = CHART
+  const plotW = w - pad.l - pad.r
+  return pad.l + (hoverIndex.value / 23) * plotW
+})
+
+const timelineXAxisTicks = computed(() => {
+  const { w, pad } = CHART
+  const plotW = w - pad.l - pad.r
+  const n = xTickLabels.length - 1
+  return xTickLabels.map((label, i) => ({
+    label,
+    x: pad.l + (i / n) * plotW,
+  }))
+})
 
 const top3Reasons = computed(() => reasonRows.value.slice(0, 6))
 const growthTypeRows = computed(() => {
@@ -535,19 +820,68 @@ const byHourByReason = computed(() => {
   }
   return out
 })
-const timelineMultiSeries = computed(() =>
+const timelineMultiSeriesBase = computed(() =>
   isGrowthMode.value
     ? [
       { reason: 'joined', label: tt('cabinet_stats.reasons.subscriptions'), color: '#10b981', vals: Array.isArray(breakdownData.value?.by_hour_joins) ? breakdownData.value.by_hour_joins.map((x) => Math.max(0, toNum(x))) : Array.from({ length: 24 }, () => 0) },
       { reason: 'left', label: tt('cabinet_stats.reasons.unsubscriptions'), color: '#f97316', vals: Array.isArray(breakdownData.value?.by_hour_leaves) ? breakdownData.value.by_hour_leaves.map((x) => Math.max(0, toNum(x))) : Array.from({ length: 24 }, () => 0) },
       { reason: 'messages', label: tt('cabinet_stats.growth.row_messages'), color: '#8b5cf6', vals: Array.isArray(breakdownData.value?.by_hour_messages) ? breakdownData.value.by_hour_messages.map((x) => Math.max(0, toNum(x))) : Array.from({ length: 24 }, () => 0) },
-    ].map((r) => ({ ...r, path: linePathFor(r.vals) }))
+    ]
     : top3Reasons.value.map((r) => ({
       ...r,
       vals: byHourByReason.value[r.reason] || Array.from({ length: 24 }, () => 0),
-      path: linePathFor(byHourByReason.value[r.reason] || Array.from({ length: 24 }, () => 0)),
     })),
 )
+
+const timelineYMax = computed(() => {
+  let max = 0
+  for (const r of timelineMultiSeriesBase.value) {
+    for (const v of r.vals || []) max = Math.max(max, Number(v || 0))
+  }
+  return niceChartMax(max)
+})
+
+const timelineYTicks = computed(() => {
+  const m = timelineYMax.value
+  return [m, Math.round(m * 0.75), Math.round(m * 0.5), Math.round(m * 0.25), 0]
+})
+
+const timelineGridLines = computed(() => {
+  const { h, pad } = CHART
+  const plotH = h - pad.t - pad.b
+  return timelineYTicks.value.map((tick) => ({
+    y: pad.t + plotH - (tick / Math.max(1, timelineYMax.value)) * plotH,
+    label: tick,
+  }))
+})
+
+const timelineMultiSeries = computed(() =>
+  timelineMultiSeriesBase.value.map((r) => {
+    const coords = chartCoords(r.vals, timelineYMax.value)
+    return {
+      ...r,
+      coords,
+      path: smoothLinePathFromCoords(coords),
+      areaPath: areaPathFromCoords(coords, true),
+    }
+  }),
+)
+
+const timelineBottomRows = computed(() => {
+  if (hoverIndex.value >= 0 && hoverData.value?.rows?.length) {
+    return hoverData.value.rows
+  }
+  return timelineMultiSeries.value.map((r) => ({
+    label: r.label,
+    color: r.color,
+    n: (r.vals || []).reduce((a, b) => a + Number(b || 0), 0),
+  }))
+})
+
+const timelineBottomCaption = computed(() => {
+  if (hoverIndex.value >= 0 && hoverData.value?.hour) return hoverData.value.hour
+  return tt('cabinet_stats.protection.legend_period_total')
+})
 
 const weekdayRows = computed(() => {
   const src = Array.from({ length: 7 }, () => 0)
@@ -646,13 +980,7 @@ const hoverData = computed(() => {
 const connectionsRows = computed(() => {
   const scoped = availableScopeChats.value
   if (scoped.length) return scoped
-  const fallback = chats.value
-  if (statsScope.value === 'delegated') {
-    return fallback.filter((c) => (c?.is_delegated || c?.is_shared) && !isChannelChat(c))
-  }
-  if (statsScope.value === 'own') {
-    return fallback.filter((c) => !(c?.is_delegated || c?.is_shared))
-  }
+  const fallback = chats.value.filter((c) => chatMatchesStatsScope(c))
   return fallback
 })
 
@@ -835,13 +1163,24 @@ onUnmounted(() => {
           <span v-else>{{ s.label }}</span>
         </button>
       </div>
-      <div v-if="statsScope !== 'all' && availableScopeChats.length" class="flex gap-2 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      <div v-if="showChatKindFilter" class="grid grid-cols-3 gap-2">
+        <button type="button" class="rounded-xl border px-2.5 py-2 text-[11px] font-semibold transition" :class="chatKindFilter === 'all' ? 'border-cyan-400/50 bg-cyan-500/10 text-cyan-100' : 'border-white/10 bg-white/[0.04] text-slate-300'" @click="chatKindFilter = 'all'">
+          {{ tt('cabinet_stats.all_chats') }}
+        </button>
+        <button type="button" class="rounded-xl border px-2.5 py-2 text-[11px] font-semibold transition" :class="chatKindFilter === 'groups' ? 'border-emerald-400/50 bg-emerald-500/10 text-emerald-100' : 'border-white/10 bg-white/[0.04] text-slate-300'" @click="chatKindFilter = 'groups'">
+          {{ tt('cabinet_stats.growth.groups') }}
+        </button>
+        <button type="button" class="rounded-xl border px-2.5 py-2 text-[11px] font-semibold transition" :class="chatKindFilter === 'channels' ? 'border-violet-400/50 bg-violet-500/10 text-violet-100' : 'border-white/10 bg-white/[0.04] text-slate-300'" @click="chatKindFilter = 'channels'">
+          {{ tt('cabinet_stats.growth.channels') }}
+        </button>
+      </div>
+      <div v-if="availableScopeChats.length" class="flex gap-2 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         <button type="button" class="shrink-0 rounded-full px-3 py-1.5 text-[11px] font-semibold transition" :class="pillActiveClass(selectedChatId === 'all')" :disabled="isPillBusy('chat', selectedChatId === 'all')" @click="pickScopeAllChats()">
           <span v-if="isPillBusy('chat', selectedChatId === 'all')" class="hourglass-flip inline-block" aria-hidden="true">⏳</span>
-          <span v-else>{{ tt('cabinet_stats.all_groups') }}</span>
+          <span v-else>{{ tt('cabinet_stats.all_chats') }}</span>
         </button>
         <button
-          v-for="c in availableScopeChats"
+          v-for="c in filteredScopeChats"
           :key="`sc-${c.id}`"
           type="button"
           class="shrink-0 rounded-full px-3 py-1.5 text-[11px] font-semibold transition"
@@ -850,45 +1189,59 @@ onUnmounted(() => {
           @click="pickScopeChat(c.id)"
         >
           <span v-if="isPillBusy('chat', String(selectedChatId) === String(c.id))" class="hourglass-flip inline-block" aria-hidden="true">⏳</span>
-          <span v-else>{{ c.title || c.id }}</span>
+          <span v-else class="inline-flex max-w-[11rem] items-center gap-1 truncate">
+            <span v-if="isChannelChat(c)" class="shrink-0 text-[10px]" aria-hidden="true">📢</span>
+            <span class="truncate">{{ c.title || c.id }}</span>
+          </span>
         </button>
       </div>
       <p v-if="false && loading" class="px-0.5 text-[11px] text-emerald-300/80">{{ tt('cabinet_stats.updating') }}</p>
     </div>
 
-    <div class="min-h-0 flex-1 touch-pan-y overflow-y-auto overscroll-contain px-1 pb-4 pt-3" @touchstart.passive="onTouchStart" @touchend="onTouchEnd">
+    <div
+      class="min-h-0 flex-1 overscroll-contain px-1 pb-4 pt-3"
+      :class="anyStatsModalOpen ? 'overflow-hidden touch-none' : 'touch-pan-y overflow-y-auto'"
+      @touchstart.passive="onTouchStart"
+      @touchend="onTouchEnd"
+    >
       <div v-if="statsType === 'all'" class="space-y-3">
         <template v-if="isGrowthMode">
-          <div class="rounded-2xl border border-white/10 bg-[#10141a]/95 p-4 backdrop-blur-md">
-            <p class="text-[12px] font-semibold text-white">{{ tt('cabinet_stats.growth.audience_title') }}</p>
+          <div class="overflow-hidden rounded-2xl border border-emerald-400/20 bg-gradient-to-br from-[#0c1410] via-[#10141a] to-[#0a1018] p-4 shadow-[0_16px_48px_-28px_rgba(16,185,129,0.55)] backdrop-blur-md">
+            <div>
+              <p class="text-[13px] font-semibold text-white">{{ tt('cabinet_stats.growth.audience_title') }}</p>
+              <p class="mt-0.5 text-[10px] text-slate-400">{{ tt('cabinet_stats.growth.period_label', { label: statsPeriodLabel }) }}</p>
+            </div>
             <div class="mt-3 grid grid-cols-2 gap-2">
               <button
                 type="button"
-                class="rounded-xl border border-white/10 bg-black/20 p-2.5 text-left transition hover:border-emerald-400/45 hover:bg-emerald-950/25 active:scale-[0.99]"
+                class="group rounded-xl border border-emerald-400/25 bg-gradient-to-br from-emerald-950/40 to-black/30 p-3 text-left transition hover:border-emerald-300/45 hover:from-emerald-900/35 active:scale-[0.99]"
                 @click="openGrowthEventsModal('joined')"
               >
-                <p class="text-[10px] text-emerald-200/85">{{ tt('cabinet_stats.growth.joined') }}</p>
-                <p class="mt-0.5 text-lg font-black tabular-nums text-white">{{ growthJoined }}</p>
+                <p class="text-[10px] font-semibold uppercase tracking-wide text-emerald-200/85">{{ tt('cabinet_stats.growth.joined') }}</p>
+                <p class="mt-1 text-xl font-black tabular-nums text-white">{{ growthJoined }}</p>
+                <p class="mt-1 text-[9px] text-emerald-200/60 group-hover:text-emerald-100/80">{{ tt('cabinet_stats.growth.open_list') }}</p>
               </button>
               <button
                 type="button"
-                class="rounded-xl border border-white/10 bg-black/20 p-2.5 text-left transition hover:border-orange-400/40 hover:bg-orange-950/20 active:scale-[0.99]"
+                class="group rounded-xl border border-orange-400/25 bg-gradient-to-br from-orange-950/35 to-black/30 p-3 text-left transition hover:border-orange-300/45 hover:from-orange-900/30 active:scale-[0.99]"
                 @click="openGrowthEventsModal('left')"
               >
-                <p class="text-[10px] text-orange-200/85">{{ tt('cabinet_stats.growth.left') }}</p>
-                <p class="mt-0.5 text-lg font-black tabular-nums text-white">{{ growthLeft }}</p>
+                <p class="text-[10px] font-semibold uppercase tracking-wide text-orange-200/85">{{ tt('cabinet_stats.growth.left') }}</p>
+                <p class="mt-1 text-xl font-black tabular-nums text-white">{{ growthLeft }}</p>
+                <p class="mt-1 text-[9px] text-orange-200/60 group-hover:text-orange-100/80">{{ tt('cabinet_stats.growth.open_list') }}</p>
               </button>
             </div>
             <button
               type="button"
-              class="mt-2 w-full rounded-xl border border-violet-400/25 bg-violet-950/20 p-2.5 text-left transition hover:border-emerald-400/40 hover:bg-violet-950/35 active:scale-[0.99]"
+              class="group mt-2 w-full rounded-xl border border-violet-400/30 bg-gradient-to-r from-violet-950/35 via-indigo-950/25 to-black/20 p-3 text-left transition hover:border-violet-300/45 active:scale-[0.99]"
               @click="openGrowthEventsModal('net')"
             >
-              <p class="text-[10px] text-violet-200/85">{{ tt('cabinet_stats.growth.net') }}</p>
-              <p class="mt-0.5 text-lg font-black tabular-nums" :class="growthNet >= 0 ? 'text-emerald-200' : 'text-rose-200'">
+              <p class="text-[10px] font-semibold uppercase tracking-wide text-violet-200/85">{{ tt('cabinet_stats.growth.net') }}</p>
+              <p class="mt-1 text-xl font-black tabular-nums" :class="growthNet >= 0 ? 'text-emerald-200' : 'text-rose-200'">
                 {{ growthNet >= 0 ? '+' : '' }}{{ growthNet }}
               </p>
-              <p class="mt-1 text-[10px] text-violet-100/80">{{ tt('cabinet_stats.growth.messages_n', { n: growthMessages }) }}</p>
+              <p class="mt-1 text-[10px] text-violet-100/75">{{ tt('cabinet_stats.growth.messages_n', { n: growthMessages }) }}</p>
+              <p class="mt-0.5 text-[9px] text-violet-200/55 group-hover:text-violet-100/75">{{ tt('cabinet_stats.growth.open_list') }}</p>
             </button>
           </div>
           <div class="rounded-2xl border border-white/10 bg-[#10141a]/95 p-4 backdrop-blur-md">
@@ -896,36 +1249,6 @@ onUnmounted(() => {
             <p class="mt-2 truncate text-[14px] font-bold text-white">{{ growthTopChat.title }}</p>
             <p class="mt-1 text-[11px] text-slate-300">
               {{ tt('cabinet_stats.growth.top_chat_line', { messages: growthTopChat.messages, joins: growthTopChat.joins, left: growthTopChat.left }) }}
-            </p>
-          </div>
-          <div class="rounded-2xl border border-white/10 bg-[#10141a]/95 p-4 backdrop-blur-md">
-            <div class="flex items-center justify-between gap-2">
-              <p class="text-[12px] font-semibold text-white">{{ tt('cabinet_stats.growth.chats_channels_title') }}</p>
-              <span class="text-[10px] text-slate-400">{{ tt('cabinet_stats.growth.total_n', { n: chatRowsForStats.length }) }}</span>
-            </div>
-            <div class="mt-3 grid grid-cols-2 gap-2">
-              <div class="rounded-xl border border-white/10 bg-black/20 p-2.5">
-                <p class="text-[10px] text-slate-300/90">{{ tt('cabinet_stats.growth.groups') }}</p>
-                <p class="mt-0.5 text-lg font-black tabular-nums text-white">{{ groupRowsForStats.length }}</p>
-              </div>
-              <div class="rounded-xl border border-cyan-400/20 bg-cyan-950/20 p-2.5">
-                <p class="text-[10px] text-cyan-100/90">{{ tt('cabinet_stats.growth.channels') }}</p>
-                <p class="mt-0.5 text-lg font-black tabular-nums text-cyan-100">{{ channelRowsForStats.length }}</p>
-              </div>
-            </div>
-            <div class="mt-2 grid grid-cols-2 gap-2">
-              <div class="rounded-xl border border-white/10 bg-black/20 p-2.5">
-                <p class="text-[10px] text-slate-300/90">{{ tt('cabinet_stats.growth.channel_messages') }}</p>
-                <p class="mt-0.5 text-lg font-black tabular-nums text-white">{{ channelMessagesTotal }}</p>
-              </div>
-              <div class="rounded-xl border border-emerald-400/20 bg-emerald-950/15 p-2.5">
-                <p class="text-[10px] text-emerald-100/90">{{ tt('cabinet_stats.growth.channel_net') }}</p>
-                <p class="mt-0.5 text-lg font-black tabular-nums" :class="channelGrowthNet >= 0 ? 'text-emerald-200' : 'text-rose-200'">{{ channelGrowthNet >= 0 ? '+' : '' }}{{ channelGrowthNet }}</p>
-              </div>
-            </div>
-            <p class="mt-2 truncate text-[11px] text-slate-400">
-              {{ tt('cabinet_stats.growth.top_channel', { title: topChannelByMessages?.title || '—' }) }}
-              <span v-if="topChannelByMessages">{{ tt('cabinet_stats.growth.top_channel_msgs', { n: Math.max(0, toNum(topChannelByMessages?.messages || 0)) }) }}</span>
             </p>
           </div>
           <div class="rounded-2xl border border-white/10 bg-[#10141a]/95 p-4 backdrop-blur-md">
@@ -979,19 +1302,99 @@ onUnmounted(() => {
 
         <div class="rounded-2xl border border-white/10 bg-[#10141a]/95 p-4 backdrop-blur-md">
           <p class="text-[12px] font-semibold text-white">{{ tt('cabinet_stats.protection.deletion_trend') }}</p>
-          <div class="relative mt-3 overflow-hidden rounded-xl border border-white/[0.06] bg-[#0b0e11] px-2 py-3" @mousemove="onChartMove" @mouseleave="onChartLeave" @touchmove.prevent="onChartMove" @touchend="onChartLeave">
-            <svg class="h-[148px] w-full" viewBox="0 0 320 132" preserveAspectRatio="none">
-              <line x1="28" y1="114" x2="312" y2="114" stroke="rgba(148,163,184,0.15)" stroke-width="1" />
-              <text v-for="(yv, yi) in yTicks" :key="`y-${yi}`" x="2" :y="10 + yi * 34" fill="rgba(148,163,184,0.52)" font-size="9">{{ yv }}</text>
-              <text x="28" y="126" fill="rgba(148,163,184,0.45)" font-size="9">{{ xTickLabels[0] }}</text>
-              <text x="96" y="126" fill="rgba(148,163,184,0.45)" font-size="9">{{ xTickLabels[1] }}</text>
-              <text x="164" y="126" fill="rgba(148,163,184,0.45)" font-size="9">{{ xTickLabels[2] }}</text>
-              <text x="232" y="126" fill="rgba(148,163,184,0.45)" font-size="9">{{ xTickLabels[3] }}</text>
-              <text x="286" y="126" fill="rgba(148,163,184,0.45)" font-size="9">{{ xTickLabels[4] }}</text>
-              <path :d="linePath" fill="none" stroke="#7dff3a" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" />
-            </svg>
-            <div class="pointer-events-none absolute right-2 top-2 rounded-lg border border-slate-600/80 bg-slate-900/95 px-2.5 py-1.5 text-[10px] text-slate-200">
-              {{ tt('cabinet_stats.protection.hover_deletions', { hour: hoverData.hour, count: hoverData.total }) }}
+          <div class="mt-3 overflow-hidden rounded-2xl border border-white/[0.08] bg-gradient-to-b from-[#0c1018] to-[#080a0f] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+            <div
+              class="relative cursor-crosshair px-1 pt-1.5"
+              @mousemove="onChartMove"
+              @mouseleave="onChartLeave"
+              @touchmove.prevent="onChartMove"
+              @touchend="onChartLeave"
+            >
+              <div class="aspect-[360/188] w-full">
+                <svg class="h-full w-full" :viewBox="`0 0 ${CHART.w} ${CHART.h}`" preserveAspectRatio="xMidYMid meet">
+                <defs>
+                  <linearGradient id="del-trend-area" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color="#7dff3a" stop-opacity="0.28" />
+                    <stop offset="100%" stop-color="#7dff3a" stop-opacity="0" />
+                  </linearGradient>
+                </defs>
+                <line
+                  v-for="(g, gi) in singleGridLines"
+                  :key="`sg-${gi}`"
+                  :x1="CHART.pad.l"
+                  :y1="g.y"
+                  :x2="CHART.w - CHART.pad.r"
+                  :y2="g.y"
+                  stroke="rgba(148,163,184,0.1)"
+                  stroke-width="1"
+                  stroke-dasharray="4 4"
+                />
+                <path :d="singleAreaPath" fill="url(#del-trend-area)" />
+                <path
+                  :d="linePath"
+                  fill="none"
+                  stroke="#7dff3a"
+                  stroke-width="2.6"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  style="filter: drop-shadow(0 0 5px rgba(125,255,58,0.45))"
+                />
+                <circle
+                  v-if="hoverIndex >= 0 && singleSeriesCoords[hoverIndex]"
+                  :cx="singleSeriesCoords[hoverIndex].x"
+                  :cy="singleSeriesCoords[hoverIndex].y"
+                  r="4"
+                  fill="#7dff3a"
+                  stroke="#0b0e11"
+                  stroke-width="1.5"
+                />
+                <line
+                  v-if="chartHoverLineX != null"
+                  :x1="chartHoverLineX"
+                  :y1="CHART.pad.t"
+                  :x2="chartHoverLineX"
+                  :y2="CHART.h - CHART.pad.b"
+                  stroke="rgba(125,255,58,0.35)"
+                  stroke-width="1"
+                  stroke-dasharray="3 3"
+                />
+                <text
+                  v-for="(g, gi) in singleGridLines"
+                  :key="`syl-${gi}`"
+                  x="2"
+                  :y="g.y + 3"
+                  fill="rgba(148,163,184,0.52)"
+                  font-size="9"
+                >{{ g.label }}</text>
+                <line
+                  :x1="CHART.pad.l"
+                  :y1="CHART.h - CHART.pad.b"
+                  :x2="CHART.w - CHART.pad.r"
+                  :y2="CHART.h - CHART.pad.b"
+                  stroke="rgba(148,163,184,0.2)"
+                  stroke-width="1"
+                />
+                <text
+                  v-for="(t, ti) in timelineXAxisTicks"
+                  :key="`sxl-${ti}`"
+                  :x="t.x"
+                  :y="CHART.h - 6"
+                  text-anchor="middle"
+                  fill="rgba(148,163,184,0.45)"
+                  font-size="9"
+                >{{ t.label }}</text>
+                </svg>
+              </div>
+            </div>
+            <div class="border-t border-white/[0.06] px-2 py-2">
+              <div class="flex items-center justify-between gap-2 text-[10px]">
+                <span class="font-semibold tabular-nums text-slate-300">{{ hoverIndex >= 0 ? hoverData.hour : tt('cabinet_stats.protection.legend_period_total') }}</span>
+                <span v-if="hoverIndex < 0" class="text-slate-600">{{ tt('cabinet_stats.protection.legend_hover_hint') }}</span>
+              </div>
+              <p class="mt-1 text-xl font-black tabular-nums text-[#7dff3a]">
+                {{ hoverIndex >= 0 ? hoverData.total : deletedTotal }}
+              </p>
+              <p class="mt-0.5 text-[10px] text-slate-500">{{ tt('cabinet_stats.protection.total') }}</p>
             </div>
           </div>
         </div>
@@ -1043,24 +1446,119 @@ onUnmounted(() => {
         <template v-if="statsSubView === 'timeline'">
           <div class="rounded-2xl border border-white/10 bg-[#10141a]/95 p-4 backdrop-blur-md">
             <p class="text-[12px] font-semibold text-white">{{ isGrowthMode ? tt('cabinet_stats.protection.title_growth_time') : tt('cabinet_stats.protection.title_del_time') }}</p>
-            <div class="mt-3 overflow-hidden rounded-xl border border-white/[0.06] bg-[#0b0e11] px-2 py-3" @mousemove="onChartMove" @mouseleave="onChartLeave" @touchmove.prevent="onChartMove" @touchend="onChartLeave">
-              <svg class="h-[150px] w-full" viewBox="0 0 320 132" preserveAspectRatio="none">
-                <line x1="28" y1="114" x2="312" y2="114" stroke="rgba(148,163,184,0.15)" stroke-width="1" />
-                <text v-for="(yv, yi) in yTicks" :key="`dy-${yi}`" x="2" :y="10 + yi * 34" fill="rgba(148,163,184,0.52)" font-size="9">{{ yv }}</text>
-                <path v-for="r in timelineMultiSeries" :key="r.reason" :d="r.path" fill="none" :stroke="r.color" stroke-width="2.1" stroke-linecap="round" />
-              </svg>
-              <div class="pointer-events-none absolute right-2 top-2 rounded-lg border border-slate-600/80 bg-slate-900/95 px-2.5 py-1.5 text-[10px] text-slate-200">
-                {{ hoverData.hour }}
-                <div v-for="row in hoverData.rows" :key="row.label" class="flex items-center gap-1">
-                  <span class="inline-block h-2 w-2 rounded-full" :style="{ backgroundColor: row.color }" />
-                  <span>{{ row.label }}: {{ row.n }}</span>
+            <div class="mt-3 overflow-hidden rounded-2xl border border-white/[0.08] bg-gradient-to-b from-[#0c1018] to-[#080a0f] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+              <div
+                class="relative cursor-crosshair px-1 pt-1.5"
+                @mousemove="onChartMove"
+                @mouseleave="onChartLeave"
+                @touchmove.prevent="onChartMove"
+                @touchend="onChartLeave"
+              >
+                <div class="aspect-[360/188] w-full">
+                  <svg class="h-full w-full" :viewBox="`0 0 ${CHART.w} ${CHART.h}`" preserveAspectRatio="xMidYMid meet">
+                  <defs>
+                    <linearGradient v-for="r in timelineMultiSeries" :id="`tl-area-${r.reason}`" :key="`g-${r.reason}`" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" :stop-color="r.color" stop-opacity="0.22" />
+                      <stop offset="100%" :stop-color="r.color" stop-opacity="0" />
+                    </linearGradient>
+                  </defs>
+                  <line
+                    v-for="(g, gi) in timelineGridLines"
+                    :key="`hg-${gi}`"
+                    :x1="CHART.pad.l"
+                    :y1="g.y"
+                    :x2="CHART.w - CHART.pad.r"
+                    :y2="g.y"
+                    stroke="rgba(148,163,184,0.1)"
+                    stroke-width="1"
+                    stroke-dasharray="4 4"
+                  />
+                  <path
+                    v-for="r in [...timelineMultiSeries].reverse()"
+                    :key="`a-${r.reason}`"
+                    :d="r.areaPath"
+                    :fill="`url(#tl-area-${r.reason})`"
+                  />
+                  <path
+                    v-for="r in timelineMultiSeries"
+                    :key="r.reason"
+                    :d="r.path"
+                    fill="none"
+                    :stroke="r.color"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    :style="{ filter: `drop-shadow(0 0 3px ${r.color}66)` }"
+                  />
+                  <template v-if="hoverIndex >= 0">
+                    <circle
+                      v-for="r in timelineMultiSeries"
+                      :key="`dot-${r.reason}`"
+                      :cx="r.coords[hoverIndex]?.x"
+                      :cy="r.coords[hoverIndex]?.y"
+                      r="3.5"
+                      :fill="r.color"
+                      stroke="#0b0e11"
+                      stroke-width="1.5"
+                    />
+                  </template>
+                  <line
+                    v-if="chartHoverLineX != null"
+                    :x1="chartHoverLineX"
+                    :y1="CHART.pad.t"
+                    :x2="chartHoverLineX"
+                    :y2="CHART.h - CHART.pad.b"
+                    stroke="rgba(125,255,58,0.35)"
+                    stroke-width="1"
+                    stroke-dasharray="3 3"
+                  />
+                  <text
+                    v-for="(g, gi) in timelineGridLines"
+                    :key="`yl-${gi}`"
+                    x="2"
+                    :y="g.y + 3"
+                    fill="rgba(148,163,184,0.52)"
+                    font-size="9"
+                  >{{ g.label }}</text>
+                  <line
+                    :x1="CHART.pad.l"
+                    :y1="CHART.h - CHART.pad.b"
+                    :x2="CHART.w - CHART.pad.r"
+                    :y2="CHART.h - CHART.pad.b"
+                    stroke="rgba(148,163,184,0.2)"
+                    stroke-width="1"
+                  />
+                  <text
+                    v-for="(t, ti) in timelineXAxisTicks"
+                    :key="`xl-${ti}`"
+                    :x="t.x"
+                    :y="CHART.h - 6"
+                    text-anchor="middle"
+                    fill="rgba(148,163,184,0.45)"
+                    font-size="9"
+                  >{{ t.label }}</text>
+                  </svg>
                 </div>
               </div>
-              <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-slate-300">
-                <span v-for="r in timelineMultiSeries" :key="`l-${r.reason}`" class="inline-flex items-center gap-1.5">
-                  <span class="h-2 w-2 rounded-full" :style="{ backgroundColor: r.color }" />
-                  {{ r.label }}
-                </span>
+              <div class="border-t border-white/[0.06] px-2 py-2">
+                <div class="mb-1.5 flex items-center justify-between gap-2 text-[10px]">
+                  <span class="font-semibold tabular-nums text-slate-300">{{ timelineBottomCaption }}</span>
+                  <span v-if="hoverIndex < 0" class="text-slate-600">{{ tt('cabinet_stats.protection.legend_hover_hint') }}</span>
+                </div>
+                <div class="grid grid-cols-3 gap-1.5">
+                  <div
+                    v-for="row in timelineBottomRows"
+                    :key="row.label"
+                    class="flex items-center justify-between gap-1 rounded-lg border border-white/[0.08] bg-white/[0.03] px-2 py-1 transition-colors"
+                    :class="hoverIndex >= 0 ? 'border-white/12 bg-white/[0.05]' : ''"
+                  >
+                    <span class="flex min-w-0 items-center gap-1 truncate text-[10px] text-slate-300">
+                      <span class="h-1.5 w-1.5 shrink-0 rounded-full" :style="{ backgroundColor: row.color, boxShadow: `0 0 5px ${row.color}88` }" />
+                      <span class="truncate">{{ row.label }}</span>
+                    </span>
+                    <span class="shrink-0 text-[11px] font-bold tabular-nums text-white">{{ row.n }}</span>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -1112,6 +1610,14 @@ onUnmounted(() => {
               <div v-if="!isGrowthMode && card.examples?.length" class="mt-2 flex flex-wrap gap-1.5">
                 <span v-for="ex in card.examples.slice(0, 8)" :key="`${card.reason}-${ex}`" class="rounded-full border border-white/10 bg-black/35 px-2 py-0.5 text-[10px] text-slate-300">{{ ex }}</span>
               </div>
+              <button
+                v-if="!isGrowthMode && card.n > 0"
+                type="button"
+                class="mt-2.5 w-full rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-3 py-2 text-[11px] font-semibold text-cyan-100 transition hover:bg-cyan-500/15"
+                @click="openReasonHitsModal(card)"
+              >
+                {{ tt('cabinet_stats.protection.show_full_list') }}
+              </button>
             </div>
           </div>
         </template>
@@ -1153,7 +1659,11 @@ onUnmounted(() => {
 
       <div v-else-if="statsType === 'connections'" class="space-y-2">
         <div v-for="c in connectionsRows.slice(0, 12)" :key="c.id" class="flex items-center gap-3 rounded-2xl border border-white/10 bg-[#12161c]/90 p-3 backdrop-blur-md">
-          <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-emerald-500/15 text-lg">💬</div>
+          <ChatAvatar
+            :chat-id="c.id"
+            :title="c.title || String(c.id)"
+            :username="c.username || ''"
+          />
           <div class="min-w-0 flex-1">
             <p class="truncate text-[14px] font-semibold text-white">{{ c.title || c.id }}</p>
             <p class="text-[11px] text-slate-500">
@@ -1175,8 +1685,9 @@ onUnmounted(() => {
   <Teleport to="body">
     <div
       v-if="growthModalOpen"
-      class="fixed inset-0 z-[96000] flex items-end justify-center bg-black/75 p-3 pb-[max(1rem,env(safe-area-inset-bottom))] backdrop-blur-sm sm:items-center"
+      class="fixed inset-0 z-[96000] flex items-end justify-center overscroll-contain bg-black/75 p-3 pb-[max(1rem,env(safe-area-inset-bottom))] backdrop-blur-sm sm:items-center"
       @click.self="closeGrowthEventsModal"
+      @touchmove.prevent
     >
       <div
         class="flex max-h-[min(88vh,640px)] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-emerald-400/30 bg-[#0b0e11] shadow-[0_28px_80px_-24px_rgba(16,185,129,0.45)] ring-1 ring-emerald-400/20"
@@ -1185,7 +1696,7 @@ onUnmounted(() => {
         <div class="flex shrink-0 items-start justify-between gap-2 border-b border-white/10 px-4 py-3">
           <div class="min-w-0">
             <p class="text-sm font-semibold text-white">{{ growthModalTitle }}</p>
-            <p v-if="growthModalPeriod.from" class="mt-0.5 text-[10px] text-slate-400">{{ growthModalPeriod.from }} — {{ growthModalPeriod.to }}</p>
+            <p v-if="growthModalPeriodLabel" class="mt-0.5 text-[10px] text-slate-400">{{ growthModalPeriodLabel }}</p>
           </div>
           <button type="button" class="guard-green-soft shrink-0 rounded-lg px-3 py-1.5 text-[11px] font-semibold" @click="closeGrowthEventsModal">{{ tt('common.close') }}</button>
         </div>
@@ -1208,11 +1719,108 @@ onUnmounted(() => {
                 {{ row.event === 'left' ? tt('cabinet_stats.growth.event_left') : tt('cabinet_stats.growth.event_joined') }}
               </span>
             </div>
-            <p class="mt-1 text-[11px] text-slate-400">{{ row.at }}</p>
+            <p class="mt-1 text-[11px] tabular-nums text-slate-400">{{ growthEventTime(row.at) }}</p>
             <p class="mt-0.5 text-[11px] text-slate-300">
               {{ growthChatKindLabel(row.chat_kind) }}: <span class="text-zinc-100">{{ row.chat_title }}</span>
             </p>
           </div>
+        </div>
+      </div>
+    </div>
+  </Teleport>
+
+  <Teleport to="body">
+    <div
+      v-if="reasonHitsModalOpen"
+      class="fixed inset-0 z-[96000] flex items-end justify-center overscroll-contain bg-black/75 p-3 pb-[max(1rem,env(safe-area-inset-bottom))] backdrop-blur-sm sm:items-center"
+      @click.self="closeReasonHitsModal"
+      @touchmove.prevent
+    >
+      <div
+        class="flex max-h-[min(88vh,640px)] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-cyan-400/30 bg-[#0b0e11] shadow-[0_28px_80px_-24px_rgba(34,211,238,0.35)] ring-1 ring-cyan-400/20"
+        @click.stop
+      >
+        <div class="flex shrink-0 items-start justify-between gap-2 border-b border-white/10 px-4 py-3">
+          <div class="min-w-0">
+            <p class="truncate text-sm font-semibold text-white">{{ reasonHitsModalLabel }}</p>
+            <p v-if="reasonHitsModalTotal > 0" class="mt-0.5 text-[10px] text-slate-400">
+              {{ tt('cabinet_stats.protection.hits_modal_count', { shown: reasonHitsModalItems.length, total: reasonHitsModalTotal }) }}
+            </p>
+          </div>
+          <button type="button" class="guard-green-soft shrink-0 rounded-lg px-3 py-1.5 text-[11px] font-semibold" @click="closeReasonHitsModal">{{ tt('common.close') }}</button>
+        </div>
+        <div v-if="reasonHitsModalLoading && !reasonHitsModalItems.length" class="px-4 py-10 text-center text-sm text-slate-400">
+          <span class="hourglass-flip mr-1 inline-block" aria-hidden="true">⏳</span>{{ tt('cabinet_stats.protection.hits_loading') }}
+        </div>
+        <div v-else class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-2">
+          <p v-if="!reasonHitsModalItems.length" class="py-6 text-center text-[12px] text-slate-500">{{ tt('cabinet_stats.protection.hits_empty') }}</p>
+          <div
+            v-for="row in reasonHitsModalItems"
+            :key="`rh-${row.id}-${row.created_at}`"
+            class="mb-2 rounded-xl border border-white/10 bg-[#11151C] px-3 py-2.5"
+          >
+            <div class="flex items-start justify-between gap-2">
+              <div class="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
+                <button
+                  v-if="moderationUsername(row)"
+                  type="button"
+                  class="text-[13px] font-semibold text-cyan-300 underline decoration-cyan-500/35 underline-offset-2 hover:text-cyan-200"
+                  @click="openModerationUserProfile(row)"
+                >
+                  @{{ moderationUsername(row) }}
+                </button>
+                <span
+                  v-if="moderationUsername(row) && moderationFirstName(row)"
+                  class="text-[12px] text-slate-600"
+                  aria-hidden="true"
+                >·</span>
+                <button
+                  v-else-if="Number(row.user_id) > 0"
+                  type="button"
+                  class="text-[13px] font-semibold text-cyan-300 underline decoration-cyan-500/35 underline-offset-2 hover:text-cyan-200"
+                  @click="openModerationUserProfile(row)"
+                >
+                  id {{ row.user_id }}
+                </button>
+                <span
+                  v-if="moderationFirstName(row)"
+                  class="text-[13px] font-semibold text-white"
+                >
+                  {{ moderationFirstName(row) }}
+                </span>
+                <span
+                  v-if="!moderationUsername(row) && !moderationFirstName(row) && !(Number(row.user_id) > 0)"
+                  class="text-[13px] text-slate-400"
+                >
+                  —
+                </span>
+              </div>
+              <span class="shrink-0 text-[10px] tabular-nums text-slate-500">{{ moderationHitTime(row.created_at) }}</span>
+            </div>
+            <p v-if="row.chat_title" class="mt-1 text-[10px] text-slate-500">{{ row.chat_title }}</p>
+            <p v-if="row.message_text" class="mt-2 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-zinc-100">{{ row.message_text }}</p>
+            <p v-else class="mt-2 text-[12px] italic text-slate-500">—</p>
+            <div class="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px]">
+              <span
+                class="inline-flex shrink-0 rounded-full px-2 py-0.5 font-semibold"
+                :class="moderationStatusClass(row)"
+              >
+                {{ moderationStatusLabel(row) }}
+              </span>
+              <span class="min-w-0 text-amber-200/90">
+                {{ tt('cabinet_stats.protection.hit_trigger', { detail: moderationTriggerText(row) }) }}
+              </span>
+            </div>
+          </div>
+          <button
+            v-if="reasonHitsModalHasMore"
+            type="button"
+            class="mb-2 w-full rounded-xl border border-white/15 bg-white/[0.04] py-2.5 text-[12px] font-semibold text-slate-200 disabled:opacity-50"
+            :disabled="reasonHitsModalLoading"
+            @click="loadMoreReasonHits"
+          >
+            {{ reasonHitsModalLoading ? tt('cabinet_stats.protection.hits_loading') : tt('cabinet_stats.protection.hits_load_more') }}
+          </button>
         </div>
       </div>
     </div>

@@ -7,6 +7,8 @@ import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import NavIcon from './NavIcon.vue'
+import { api } from '../api/client'
+import { prefetchChatsList } from '../utils/chatsListCache.js'
 
 const { t, locale } = useI18n()
 
@@ -153,6 +155,8 @@ function groupsProtectedLabel(count) {
 }
 
 function goManageChats() {
+  void prefetchChatsList(api, 'all')
+  window.dispatchEvent(new CustomEvent('guard:prefetch-chats', { detail: { mode: 'all' } }))
   router.push({ path: '/chats' })
 }
 </script>
