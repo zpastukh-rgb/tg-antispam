@@ -21,6 +21,8 @@ let checkoutWidget = null
 let backHandler = null
 let scrollResetTimer = null
 let checkoutObserver = null
+let savedToken = ''
+let savedReturnUrl = ''
 
 function loadCheckoutScript() {
   return new Promise((resolve, reject) => {
@@ -44,6 +46,27 @@ function loadCheckoutScript() {
   })
 }
 
+function widgetRootText() {
+  const root = document.getElementById('yookassa-checkout-root')
+  return String(root?.innerText || '').replace(/\s+/g, ' ').trim()
+}
+
+/** Экран выбора способа (SberPay + карта + …) — выходим в billing. Иначе шаг назад внутри виджета. */
+function isWidgetMethodListScreen() {
+  const text = widgetRootText()
+  if (!text) return true
+  if (/Отсканируйте QR|Оплатить через пуш|Войти в кошелёк|Зарегистрироваться/i.test(text)) {
+    return false
+  }
+  const markers = [
+    /Банковская карта/i.test(text),
+    /\bСБП\b/i.test(text),
+    /SberPay/i.test(text),
+    /ЮMoney|YooMoney/i.test(text),
+  ].filter(Boolean).length
+  return markers >= 2
+}
+
 function scrollCheckoutToTop() {
   try {
     window.scrollTo({ top: 0, left: 0, behavior: 'auto' })
@@ -65,7 +88,6 @@ function scheduleScrollReset() {
   if (scrollResetTimer) clearTimeout(scrollResetTimer)
   scrollResetTimer = setTimeout(scrollCheckoutToTop, 120)
   setTimeout(scrollCheckoutToTop, 420)
-  setTimeout(scrollCheckoutToTop, 900)
 }
 
 function watchCheckoutMount() {
@@ -77,19 +99,76 @@ function watchCheckoutMount() {
   checkoutObserver.observe(root, { childList: true, subtree: true })
 }
 
+function bindCheckoutEvents(widget) {
+  widget.on('success', () => {
+    finishAndReturn()
+  })
+  widget.on('complete', () => {
+    finishAndReturn()
+  })
+  widget.on('fail', () => {
+    error.value = t('errors.payment_failed')
+  })
+}
+
+function createCheckoutWidget(token, returnUrl) {
+  const widget = new window.YooMoneyCheckoutWidget({
+    confirmation_token: token,
+    return_url: returnUrl,
+    customization: {
+      modal: false,
+      colors: YK_WIDGET_COLORS,
+    },
+    error_callback: (err) => {
+      error.value = String(err?.error || err?.message || t('errors.payment_failed'))
+    },
+  })
+  bindCheckoutEvents(widget)
+  return widget
+}
+
+async function mountCheckoutWidget() {
+  if (!savedToken) return false
+  try {
+    checkoutWidget?.destroy?.()
+  } catch {
+    //
+  }
+  checkoutWidget = createCheckoutWidget(savedToken, savedReturnUrl)
+  await checkoutWidget.render('yookassa-checkout-root')
+  return true
+}
+
 function finishAndReturn() {
   clearYookassaCheckout()
   window.dispatchEvent(new CustomEvent('guard:yookassa-return'))
   void router.replace({ path: '/', query: { section: 'billing' } })
 }
 
-function goBack() {
+function exitCheckout() {
   clearYookassaCheckout()
+  try {
+    checkoutWidget?.destroy?.()
+  } catch {
+    //
+  }
+  checkoutWidget = null
   if (window.history.length > 1) {
     router.back()
     return
   }
   void router.replace({ path: '/', query: { section: 'billing' } })
+}
+
+async function goBack() {
+  if (!isWidgetMethodListScreen()) {
+    const ok = await mountCheckoutWidget()
+    if (ok) {
+      scheduleScrollReset()
+      return
+    }
+  }
+  exitCheckout()
 }
 
 onMounted(async () => {
@@ -102,7 +181,9 @@ onMounted(async () => {
     //
   }
 
-  backHandler = () => goBack()
+  backHandler = () => {
+    void goBack()
+  }
   try {
     tg?.BackButton?.show?.()
     tg?.BackButton?.onClick?.(backHandler)
@@ -111,41 +192,21 @@ onMounted(async () => {
   }
 
   const payload = readYookassaCheckout()
-  const token = String(payload?.confirmation_token || '').trim()
-  if (!token) {
+  savedToken = String(payload?.confirmation_token || '').trim()
+  if (!savedToken) {
     error.value = t('errors.payment_link_missing')
     loading.value = false
     return
   }
 
-  const returnUrl = String(payload?.return_url || '').trim()
+  savedReturnUrl = String(payload?.return_url || '').trim()
     || `${window.location.origin}${window.location.pathname.replace(/\/pay\/yookassa\/?$/, '/')}`.replace(/\/?$/, '/')
     + '?section=billing'
 
   try {
     await loadCheckoutScript()
     watchCheckoutMount()
-    checkoutWidget = new window.YooMoneyCheckoutWidget({
-      confirmation_token: token,
-      return_url: returnUrl,
-      customization: {
-        modal: false,
-        colors: YK_WIDGET_COLORS,
-      },
-      error_callback: (err) => {
-        error.value = String(err?.error || err?.message || t('errors.payment_failed'))
-      },
-    })
-    checkoutWidget.on('success', () => {
-      finishAndReturn()
-    })
-    checkoutWidget.on('complete', () => {
-      finishAndReturn()
-    })
-    checkoutWidget.on('fail', () => {
-      error.value = t('errors.payment_failed')
-    })
-    checkoutWidget.render('yookassa-checkout-root')
+    await mountCheckoutWidget()
     loading.value = false
     scheduleScrollReset()
   } catch {

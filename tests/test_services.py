@@ -292,6 +292,21 @@ async def test_trial_still_eligible_when_window_closed(db_session):
 
 
 @pytest.mark.asyncio
+async def test_insta_trial_offer_with_stale_premium_tariff(db_session):
+    """После истёкшего триала tariff может остаться premium — подарок всё ещё доступен."""
+    u = await get_or_create_user(db_session, 9108)
+    now = datetime.now(timezone.utc)
+    u.first_start_at = now - timedelta(days=30)
+    u.tariff = Tariff.PREMIUM.value
+    u.subscription_source = TRIAL_SUBSCRIPTION_SOURCE
+    u.subscription_until = now - timedelta(days=1)
+    u.trial_used = False
+    await db_session.commit()
+    assert is_insta_trial_offer_eligible(u) is True
+    assert should_show_insta_trial_button(u) is True
+
+
+@pytest.mark.asyncio
 async def test_insta_trial_button_shown_after_trial_used_expired(db_session):
     """Instagram-воронка: кнопку показываем даже если триал уже был (mini app ответит сама)."""
     u = await get_or_create_user(db_session, 9109)
