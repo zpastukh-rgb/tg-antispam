@@ -198,25 +198,56 @@ def trial_window_remaining_days(user: User, now: datetime | None = None) -> int:
     return int(remaining)
 
 
+def should_show_insta_trial_button(user: User, now: datetime | None = None) -> bool:
+    """Показать первую кнопку «Premium 7 дней» в Instagram-воронке (/start insta_*).
+
+    Кнопка видна всем, кроме тех, у кого уже идёт триал или оплаченная подписка.
+    Не скрываем из‑за trial_used — иначе владелец/тестировщик с прошлым триалом
+    не увидит воронку; mini app сама ответит, если подарок уже был.
+    """
+    now = now or datetime.now(timezone.utc)
+    if is_trial_active(user, now):
+        return False
+    sub_until = getattr(user, "subscription_until", None)
+    if sub_until is not None:
+        if sub_until.tzinfo is None:
+            sub_until = sub_until.replace(tzinfo=timezone.utc)
+        if sub_until > now:
+            src = (getattr(user, "subscription_source", None) or "").strip().lower()
+            if src in ("payment", "promo"):
+                return False
+    return True
+
+
+def is_insta_trial_offer_eligible(user: User, now: datetime | None = None) -> bool:
+    """Показать кнопку «Premium 7 дней» в Instagram-воронке (/start insta_*).
+
+    Без ограничения окна TRIAL_WINDOW_DAYS — человек мог впервые открыть бота давно,
+    а подарок активировать только после перехода из Instagram.
+    """
+    now = now or datetime.now(timezone.utc)
+    if bool(getattr(user, "trial_used", False)):
+        return False
+    if _is_paid_tariff_active(user, now):
+        return False
+    if is_trial_active(user, now):
+        return False
+    return True
+
+
 def is_trial_eligible(user: User, now: datetime | None = None) -> bool:
     """Может ли юзер активировать 7-дневный триал прямо сейчас.
 
     Условия:
     1) `trial_used == False` (триал ещё не активировался);
     2) уже было первое /start (есть `first_start_at`);
-    3) окно активации не закрылось (`trial_window_remaining_days > 0`);
-    4) сейчас нет активной платной подписки (purchase/promo).
+    3) сейчас нет активной платной/trial подписки.
+
+    `TRIAL_WINDOW_DAYS` влияет только на DM-напоминания, не на саму активацию.
     """
-    if bool(getattr(user, "trial_used", False)):
-        return False
     if getattr(user, "first_start_at", None) is None:
         return False
-    if trial_window_remaining_days(user, now) <= 0:
-        return False
-    src = (getattr(user, "subscription_source", None) or "").strip().lower()
-    if src in ("payment", "promo"):
-        return False
-    return True
+    return is_insta_trial_offer_eligible(user, now)
 
 
 def is_trial_active(user: User, now: datetime | None = None) -> bool:

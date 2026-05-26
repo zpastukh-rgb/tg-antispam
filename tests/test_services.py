@@ -17,7 +17,9 @@ from app.services.user_service import (
     ensure_user_chat_limit_synced_for_tariff,
     effective_chat_limit,
     is_trial_active,
+    is_insta_trial_offer_eligible,
     is_trial_eligible,
+    should_show_insta_trial_button,
     trial_active_remaining_days,
     trial_window_remaining_days,
     TRIAL_DAYS,
@@ -279,13 +281,52 @@ async def test_trial_not_eligible_before_first_start(db_session):
 
 
 @pytest.mark.asyncio
-async def test_trial_not_eligible_when_window_closed(db_session):
-    """Окно активации закрылось через TRIAL_WINDOW_DAYS дней с /start."""
+async def test_trial_still_eligible_when_window_closed(db_session):
+    """Окно DM-напоминаний закрылось, но активация триала всё ещё доступна."""
     u = await get_or_create_user(db_session, 9103)
     u.first_start_at = datetime.now(timezone.utc) - timedelta(days=TRIAL_WINDOW_DAYS + 1)
     await db_session.commit()
     assert trial_window_remaining_days(u) == 0
-    assert is_trial_eligible(u) is False
+    assert is_trial_eligible(u) is True
+    assert is_insta_trial_offer_eligible(u) is True
+
+
+@pytest.mark.asyncio
+async def test_insta_trial_button_shown_after_trial_used_expired(db_session):
+    """Instagram-воронка: кнопку показываем даже если триал уже был (mini app ответит сама)."""
+    u = await get_or_create_user(db_session, 9109)
+    now = datetime.now(timezone.utc)
+    u.first_start_at = now - timedelta(days=30)
+    u.trial_used = True
+    u.trial_activated_at = now - timedelta(days=20)
+    u.subscription_source = TRIAL_SUBSCRIPTION_SOURCE
+    u.subscription_until = now - timedelta(days=13)
+    u.tariff = Tariff.PREMIUM.value
+    await db_session.commit()
+    assert is_insta_trial_offer_eligible(u) is False
+    assert should_show_insta_trial_button(u) is True
+
+
+@pytest.mark.asyncio
+async def test_insta_trial_button_hidden_for_active_payment(db_session):
+    u = await get_or_create_user(db_session, 9111)
+    now = datetime.now(timezone.utc)
+    u.subscription_source = "payment"
+    u.subscription_until = now + timedelta(days=30)
+    u.tariff = Tariff.PREMIUM.value
+    await db_session.commit()
+    assert should_show_insta_trial_button(u) is False
+
+
+@pytest.mark.asyncio
+async def test_insta_trial_button_shown_for_perpetual_promo_owner(db_session):
+    """Владелец с бессрочным promo premium всё равно видит кнопку в Instagram-воронке."""
+    u = await get_or_create_user(db_session, 9112)
+    u.tariff = Tariff.PREMIUM.value
+    u.subscription_source = "promo"
+    u.subscription_until = None
+    await db_session.commit()
+    assert should_show_insta_trial_button(u) is True
 
 
 @pytest.mark.asyncio

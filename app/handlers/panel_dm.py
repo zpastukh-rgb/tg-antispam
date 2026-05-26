@@ -53,7 +53,9 @@ from app.services.user_service import (
     effective_channel_limit,
     effective_group_limit,
     ensure_user_chat_limit_synced_for_tariff,
+    is_insta_trial_offer_eligible,
     is_trial_eligible,
+    should_show_insta_trial_button,
 )
 from app.api.service import apply_promo_code, count_chat_ids_by_kind, get_activity_summary_chat_ids, get_managed_chats, miniapp_actor_has_global_antispam_access
 from app.services.admin_roles import is_full_admin_user
@@ -916,17 +918,22 @@ def _kb_main_rows(
 
 async def show_insta_trial_welcome(bot, user_id: int) -> None:
     """Первое сообщение после /start insta_*: кнопка «Premium 7 дней» первой строкой."""
+    from datetime import datetime, timezone
+
     uid = int(user_id)
     async with await get_session() as session:
         user = await get_or_create_user(session, uid)
+        if getattr(user, "first_start_at", None) is None:
+            user.first_start_at = datetime.now(timezone.utc)
+            await session.commit()
         await ensure_user_chat_limit_synced_for_tariff(session, user)
         await session.refresh(user)
         lang = await get_user_language(uid)
-        tariff_key = (user.tariff or "free").lower()
-        is_premium = tariff_key in ("premium", "pro", "business")
-        show_trial_btn = (not is_premium) and is_trial_eligible(user)
+        can_claim_gift = is_insta_trial_offer_eligible(user)
+        show_trial_btn = should_show_insta_trial_button(user)
         txt = i18n_t(lang, "panel.main.insta_welcome_body")
-        if show_trial_btn:
+        if can_claim_gift:
+            txt += "\n\n" + i18n_t(lang, "panel.main.insta_welcome_gift_cta")
             txt += "\n\n" + i18n_t(lang, "panel.main.trial_gift_hint")
         me = await bot.get_me()
         uname = getattr(me, "username", None)
@@ -1299,10 +1306,11 @@ async def render_main(bot, user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
             aurum=aurum_credits_str,
             bonus=bonus_credits_str,
         )
-        if not is_premium and is_trial_eligible(user):
+        trial_first = is_trial_eligible(user)
+        if trial_first:
             txt += "\n\n" + i18n_t(lang, "panel.main.trial_gift_hint")
         me = await bot.get_me()
-        return txt, _kb_main(getattr(me, "username", None), lang=lang)
+        return txt, _kb_main_rows(getattr(me, "username", None), lang, trial_first=trial_first)
 
 
 def _mini_app_base_url() -> Optional[str]:

@@ -1007,7 +1007,9 @@ MESSAGES: dict[str, dict] = {
             ),
             "insta_welcome_body": (
                 "Привет! 👋\n\n"
-                "🛡 *AntiSpam Guard* — защита Telegram-групп и каналов от спама, ботов и рейдов.\n\n"
+                "🛡 *AntiSpam Guard* — защита Telegram-групп и каналов от спама, ботов и рейдов."
+            ),
+            "insta_welcome_gift_cta": (
                 "Нажмите первую кнопку — *Premium на 7 дней* и *100 ✨ AURUM* на рассылки 🎁"
             ),
         },
