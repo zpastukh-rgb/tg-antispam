@@ -4,12 +4,23 @@ import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { clearYookassaCheckout, readYookassaCheckout } from '../utils/yookassaCheckout.js'
 
+const YK_WIDGET_COLORS = {
+  control_primary: '#84cc16',
+  control_primary_content: '#0a0a0a',
+  control_secondary: '#52525b',
+  background: '#27272a',
+  text: '#fafafa',
+  border: '#71717a',
+}
+
 const router = useRouter()
 const { t } = useI18n()
 const error = ref('')
 const loading = ref(true)
 let checkoutWidget = null
 let backHandler = null
+let scrollResetTimer = null
+let checkoutObserver = null
 
 function loadCheckoutScript() {
   return new Promise((resolve, reject) => {
@@ -33,6 +44,39 @@ function loadCheckoutScript() {
   })
 }
 
+function scrollCheckoutToTop() {
+  try {
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' })
+  } catch {
+    window.scrollTo(0, 0)
+  }
+  document.documentElement.scrollTop = 0
+  document.body.scrollTop = 0
+  const main = document.querySelector('main')
+  if (main) main.scrollTop = 0
+  const head = document.querySelector('.yookassa-pay-head')
+  if (head?.scrollIntoView) {
+    head.scrollIntoView({ block: 'start', behavior: 'auto' })
+  }
+}
+
+function scheduleScrollReset() {
+  scrollCheckoutToTop()
+  if (scrollResetTimer) clearTimeout(scrollResetTimer)
+  scrollResetTimer = setTimeout(scrollCheckoutToTop, 120)
+  setTimeout(scrollCheckoutToTop, 420)
+  setTimeout(scrollCheckoutToTop, 900)
+}
+
+function watchCheckoutMount() {
+  const root = document.getElementById('yookassa-checkout-root')
+  if (!root || typeof MutationObserver === 'undefined') return
+  checkoutObserver = new MutationObserver(() => {
+    scheduleScrollReset()
+  })
+  checkoutObserver.observe(root, { childList: true, subtree: true })
+}
+
 function finishAndReturn() {
   clearYookassaCheckout()
   window.dispatchEvent(new CustomEvent('guard:yookassa-return'))
@@ -49,6 +93,8 @@ function goBack() {
 }
 
 onMounted(async () => {
+  scheduleScrollReset()
+
   const tg = window.Telegram?.WebApp
   try {
     tg?.expand?.()
@@ -78,15 +124,13 @@ onMounted(async () => {
 
   try {
     await loadCheckoutScript()
+    watchCheckoutMount()
     checkoutWidget = new window.YooMoneyCheckoutWidget({
       confirmation_token: token,
       return_url: returnUrl,
       customization: {
         modal: false,
-        colors: {
-          control_primary: '#84cc16',
-          background: '#0b0b10',
-        },
+        colors: YK_WIDGET_COLORS,
       },
       error_callback: (err) => {
         error.value = String(err?.error || err?.message || t('errors.payment_failed'))
@@ -103,6 +147,7 @@ onMounted(async () => {
     })
     checkoutWidget.render('yookassa-checkout-root')
     loading.value = false
+    scheduleScrollReset()
   } catch {
     error.value = t('errors.payment_failed')
     loading.value = false
@@ -110,6 +155,13 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  if (scrollResetTimer) {
+    clearTimeout(scrollResetTimer)
+    scrollResetTimer = null
+  }
+  checkoutObserver?.disconnect?.()
+  checkoutObserver = null
+
   const tg = window.Telegram?.WebApp
   try {
     if (backHandler) tg?.BackButton?.offClick?.(backHandler)
@@ -146,9 +198,9 @@ onBeforeUnmount(() => {
   background: #0b0b10;
   color: #f4f4f5;
   padding:
-    max(12px, env(safe-area-inset-top))
+    max(8px, env(safe-area-inset-top))
     max(12px, env(safe-area-inset-right))
-    max(16px, env(safe-area-inset-bottom))
+    max(12px, env(safe-area-inset-bottom))
     max(12px, env(safe-area-inset-left));
 }
 
@@ -156,28 +208,31 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
+  scroll-margin-top: 0;
 }
 
 .yookassa-pay-back {
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.04);
-  color: #e4e4e7;
+  border: 1px solid rgba(132, 204, 22, 0.55);
+  background: rgba(132, 204, 22, 0.16);
+  color: #ecfccb;
   border-radius: 999px;
-  padding: 6px 12px;
-  font-size: 12px;
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 700;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
 .yookassa-pay-title {
   margin: 0;
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 700;
 }
 
 .yookassa-pay-status {
   margin: 0 0 12px;
   font-size: 13px;
-  color: rgba(255, 255, 255, 0.65);
+  color: rgba(255, 255, 255, 0.72);
 }
 
 .yookassa-pay-error {
@@ -187,6 +242,7 @@ onBeforeUnmount(() => {
 }
 
 .yookassa-pay-root {
-  min-height: 420px;
+  min-height: 360px;
+  scroll-margin-top: 0;
 }
 </style>

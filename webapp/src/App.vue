@@ -133,6 +133,9 @@ const suppressAdmBadges = computed(
     subscriptionScreenActive.value ||
     (route.path === '/admin' && String(route.query.admin_tab || '') === 'subscription'),
 )
+
+/** На экране оплаты — без нижнего таббара и лишнего scroll-padding. */
+const hideBottomNav = computed(() => String(route.name || '') === 'YookassaPay')
 </script>
 
 <template>
@@ -178,18 +181,23 @@ const suppressAdmBadges = computed(
       />
       <AppSidebar :open="sidebarOpen" @close="closeSidebar" />
       <main
-        class="min-h-0 flex-1 scroll-pb-[calc(6.25rem+env(safe-area-inset-bottom,0px))] bg-transparent pb-[calc(6.25rem+env(safe-area-inset-bottom,0px))] md:pb-40 md:pl-64"
-        :class="
+        class="min-h-0 flex-1 bg-transparent md:pl-64"
+        :class="[
+          hideBottomNav
+            ? 'overflow-y-auto overscroll-y-contain pb-[env(safe-area-inset-bottom,0px)] [-webkit-overflow-scrolling:touch]'
+            : 'scroll-pb-[calc(6.25rem+env(safe-area-inset-bottom,0px))] pb-[calc(6.25rem+env(safe-area-inset-bottom,0px))] md:pb-40',
           lockDashboardAccountViewport
             ? 'overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]'
-            : ''
-        "
+            : '',
+        ]"
       >
         <div
           :class="[
-            mainContentCompactTop
-              ? 'px-4 pb-4 pt-0 md:px-6 md:pb-6 md:pt-1'
-              : 'p-4 md:p-6',
+            hideBottomNav
+              ? 'p-0'
+              : mainContentCompactTop
+                ? 'px-4 pb-4 pt-0 md:px-6 md:pb-6 md:pt-1'
+                : 'p-4 md:p-6',
             lockDashboardAccountViewport ? 'min-h-0 flex-1' : '',
           ]"
         >
@@ -197,7 +205,7 @@ const suppressAdmBadges = computed(
         </div>
       </main>
 
-      <AppBottomNav />
+      <AppBottomNav v-if="!hideBottomNav" />
     </div>
     <!-- Вне z-10 колонки: иначе в Telegram WebView оверлей может оказаться под контентом -->
     <LegalConsentGate />
