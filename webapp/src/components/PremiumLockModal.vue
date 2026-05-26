@@ -139,7 +139,10 @@ async function handleTrialClick() {
     if (res?.already_active) {
       toast.showToast(t('dashboard.trial.already_active_toast'))
     } else {
-      toast.showToast(t('dashboard.trial.activated_toast', { n: Number(res?.trial_remaining_days || 7) }))
+      toast.showToast(t('dashboard.trial.activated_toast', {
+        n: Number(res?.trial_remaining_days || 7),
+        aurum: Number(res?.trial_gift_aurum || 100),
+      }))
     }
     lock.closeLock()
     // Лёгкий refresh страницы — самый простой способ обновить me и снять блоки.

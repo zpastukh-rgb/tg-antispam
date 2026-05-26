@@ -18,10 +18,10 @@ if (typeof window !== 'undefined') {
       targetPath = '/'
       nextParams.set('section', 'billing')
     } else if (rawStart === 'trial') {
-      // DM-кнопка «🚀 Попробовать 7 дней бесплатно» → лендинг биллинга с
-      // флагом trial=1, который вью обработает и автоматически вызовет активацию.
+      // Кнопка «Premium 7 дней» из Instagram /start insta_* → главная (Free),
+      // trial=1 открывает модалку активации как у баннера на главной.
       targetPath = '/'
-      nextParams.set('section', 'billing')
+      nextParams.set('section', 'account')
       nextParams.set('trial', '1')
     } else if (rawStart === 'partner' || rawStart === 'referral') {
       targetPath = '/'

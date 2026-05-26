@@ -331,6 +331,24 @@ async def test_trial_active_after_activation(db_session):
 
 
 @pytest.mark.asyncio
+async def test_trial_gift_aurum_granted_once(db_session):
+    """При активации триала — 100 AURUM один раз."""
+    from app.services.user_service import TRIAL_GIFT_AURUM, grant_trial_gift_aurum
+
+    u = await get_or_create_user(db_session, 9110)
+    ok1, amt1 = await grant_trial_gift_aurum(db_session, u)
+    await db_session.commit()
+    assert ok1 is True
+    assert amt1 == TRIAL_GIFT_AURUM
+    assert float(u.aurum_credits or 0) == TRIAL_GIFT_AURUM
+    ok2, amt2 = await grant_trial_gift_aurum(db_session, u)
+    await db_session.commit()
+    assert ok2 is False
+    assert amt2 == 0.0
+    assert float(u.aurum_credits or 0) == TRIAL_GIFT_AURUM
+
+
+@pytest.mark.asyncio
 async def test_trial_inactive_after_expiry(db_session):
     """Триал истёк: subscription_until < now → is_trial_active=False."""
     u = await get_or_create_user(db_session, 9107)

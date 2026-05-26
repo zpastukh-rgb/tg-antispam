@@ -3,8 +3,11 @@
 
 Картинка в карточке «Что умеет этот бот?» до кнопки «Начать» — это не сообщение из кода: её задаёт
 @BotFather → /mybots → твой бот → Edit Bot → Edit Description Picture (фото, рекомендуемо 640×360).
-Файл-образец в репозитории: static/welcome_banner.jpg. Текст ниже синхронизируется через setMyDescription
-при старте бота (языки в app/main._sync_bot_profile).
+Файл-образец в репозитории: static/welcome_banner.jpg.
+
+Описание и короткое описание профиля по умолчанию меняются только в BotFather.
+Константы BOT_TELEGRAM_* ниже применяются к Telegram API лишь если на сервере SYNC_BOT_PROFILE=1
+(см. app/main._sync_bot_profile).
 """
 
 from pathlib import Path

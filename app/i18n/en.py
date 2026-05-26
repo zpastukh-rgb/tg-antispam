@@ -993,8 +993,13 @@ MESSAGES: dict[str, dict] = {
                 "Everything is easy to set up in the app via the buttons below 👇🏻"
             ),
             "trial_gift_hint": (
-                "🎁 *Gift:* 7 days of Premium free — turn it on in the app, "
-                "no card, no payment."
+                "🎁 *Gift:* 7 days of Premium + *100 ✨ AURUM* for broadcasts. "
+                "Spend AURUM while Premium is active; after expiry it stays on balance."
+            ),
+            "insta_welcome_body": (
+                "Hi! 👋\n\n"
+                "🛡 *AntiSpam Guard* protects Telegram groups and channels from spam, bots and raids.\n\n"
+                "Tap the first button — *7 days Premium* and *100 ✨ AURUM* for broadcasts 🎁"
             ),
         },
         "kb": {
@@ -1003,6 +1008,7 @@ MESSAGES: dict[str, dict] = {
             "ref": "🎁 Referral program",
             "connect_group": "➕ Connect group",
             "connect_chat": "➕ Connect chat",
+            "trial_gift_7d": "🎁 Premium · 7 days",
             "back": "⬅️ Back",
             "open_protection": "🛡 Open protection",
             "connect_reports": "📊 Connect reports chat",
@@ -1141,6 +1147,7 @@ MESSAGES: dict[str, dict] = {
             "access_levels_free": "Level {levels} — direct referrals only",
             "access_levels_full": "Levels {levels} — full network",
             "premium_extra": "├ Premium days left: *{days_left}*\n└ Active until: *{active_until}*\n",
+            "premium_extra_gift": "├ Premium gift, *{days_left}* days left\n└ Active until: *{active_until}*\n",
             "premium_extra_promo": "├ Premium via promo *{code}*, *{days_left}* days left\n└ Active until: *{active_until}*\n",
             "premium_extra_forever": "└ Premium with no expiry (promo / forever access)\n",
             "premium_extra_active": "└ Premium active\n",

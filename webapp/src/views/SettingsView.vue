@@ -256,6 +256,7 @@ const pinIsSet = computed(() => {
 
 const paymentMethodLabel = computed(() => {
   const source = String(me.value?.subscription_source || '').toLowerCase()
+  if (source === 'trial') return t('subscription.payment_method.gift')
   if (source === 'promo') return t('billing.method.promo')
   const p = String(me.value?.payment_method_type || '').toLowerCase()
   if (p.includes('card')) return t('billing.method.yookassa_card')

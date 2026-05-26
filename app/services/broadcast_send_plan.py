@@ -24,6 +24,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Chat, CreditLedger, User, ChatManager
+from app.services.chat_owner_premium import user_effective_miniapp_premium
 
 DELEGATE_BROADCAST_PAYER_VALUES = frozenset({"owner", "delegate", "delegate_first"})
 DEFAULT_DELEGATE_BROADCAST_PAYER = "delegate_first"
@@ -258,6 +259,8 @@ async def debit_user_broadcast_tokens(
     """
     if full_admin or int(cost_tokens) <= 0:
         return 0.0, 0.0
+    if not user_effective_miniapp_premium(user, datetime.now(timezone.utc)):
+        raise ValueError("premium_required_for_broadcast")
     base_raw = (idempotency_key_base or "").strip()
     if base_raw:
         base = base_raw[:100]

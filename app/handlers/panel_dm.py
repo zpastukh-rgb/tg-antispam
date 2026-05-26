@@ -803,6 +803,13 @@ async def _build_referral_screen(bot, tg_user_id: int, from_user) -> tuple[str, 
                 days_left=int(access_block.get("days_left") or 0),
                 active_until=str(access_block.get("active_until") or "—"),
             )
+        elif access_block.get("premium_kind") == "trial" and access_block.get("days_left") is not None:
+            premium_extra = i18n_t(
+                lang,
+                "panel.referral.premium_extra_gift",
+                days_left=int(access_block.get("days_left") or 0),
+                active_until=str(access_block.get("active_until") or "—"),
+            )
         elif access_block.get("days_left") is not None:
             premium_extra = i18n_t(
                 lang,
@@ -869,6 +876,15 @@ def _kb_cancel(lang: str = "ru") -> InlineKeyboardMarkup:
 
 def _kb_main(bot_username: str | None = None, lang: str = "ru") -> InlineKeyboardMarkup:
     """Главное меню. startapp deep-link — стабильнее web_app с прямым URL Railway."""
+    return _kb_main_rows(bot_username, lang, trial_first=False)
+
+
+def _kb_main_rows(
+    bot_username: str | None,
+    lang: str,
+    *,
+    trial_first: bool,
+) -> InlineKeyboardMarkup:
     uname = (bot_username or "").strip().lstrip("@")
     txt_chats = i18n_t(lang, "panel.kb.chats")
     txt_plan = i18n_t(lang, "panel.kb.plan")
@@ -876,6 +892,13 @@ def _kb_main(bot_username: str | None = None, lang: str = "ru") -> InlineKeyboar
     txt_connect_group = i18n_t(lang, "panel.kb.connect_group")
     txt_connect_chat = i18n_t(lang, "panel.kb.connect_chat")
     b = InlineKeyboardBuilder()
+    if trial_first and uname:
+        b.row(
+            InlineKeyboardButton(
+                text=i18n_t(lang, "panel.kb.trial_gift_7d"),
+                url=_mini_app_startapp_link(uname, "trial"),
+            )
+        )
     if uname:
         b.row(InlineKeyboardButton(text=txt_chats, url=_mini_app_startapp_link(uname, "chats")))
         b.row(InlineKeyboardButton(text=txt_plan, url=_mini_app_startapp_link(uname, "billing")))
@@ -889,6 +912,26 @@ def _kb_main(bot_username: str | None = None, lang: str = "ru") -> InlineKeyboar
         b.button(text=txt_connect_chat, callback_data=CB_CONNECT)
     b.adjust(1)
     return b.as_markup()
+
+
+async def show_insta_trial_welcome(bot, user_id: int) -> None:
+    """Первое сообщение после /start insta_*: кнопка «Premium 7 дней» первой строкой."""
+    uid = int(user_id)
+    async with await get_session() as session:
+        user = await get_or_create_user(session, uid)
+        await ensure_user_chat_limit_synced_for_tariff(session, user)
+        await session.refresh(user)
+        lang = await get_user_language(uid)
+        tariff_key = (user.tariff or "free").lower()
+        is_premium = tariff_key in ("premium", "pro", "business")
+        show_trial_btn = (not is_premium) and is_trial_eligible(user)
+        txt = i18n_t(lang, "panel.main.insta_welcome_body")
+        if show_trial_btn:
+            txt += "\n\n" + i18n_t(lang, "panel.main.trial_gift_hint")
+        me = await bot.get_me()
+        uname = getattr(me, "username", None)
+        kb = _kb_main_rows(uname, lang, trial_first=show_trial_btn)
+    await _edit_panel(bot, uid, txt, kb)
 
 
 def _kb_protection(lang: str = "ru") -> InlineKeyboardMarkup:
@@ -1660,9 +1703,8 @@ async def reset_and_show_private_panel(
     *,
     cabinet_added_count: int = 0,
 ) -> None:
-    """/start и /panel: сброс кэша панели, принудительная выдача reply-клавы (без сброса msg_id — сначала edit)."""
+    """/start и /panel: главный экран через edit существующего сообщения + reply-клава."""
     uid = int(user_id)
-    _cache_clear(uid)
     _DM_QUICK_KB_APPLIED_VER.pop(uid, None)
     await show_panel(
         bot,
@@ -1670,7 +1712,10 @@ async def reset_and_show_private_panel(
         send_quick_reply_keyboard=False,
         cabinet_added_count=int(cabinet_added_count or 0),
     )
-    await ensure_dm_quick_reply_keyboard(bot, uid, force_refresh=True)
+    try:
+        await ensure_dm_quick_reply_keyboard(bot, uid, force_refresh=True)
+    except Exception:
+        logger.debug("ensure_dm_quick_reply_keyboard failed uid=%s", uid, exc_info=True)
 
 
 async def show_panel(

@@ -299,7 +299,18 @@ _BOT_PROFILE_LANGUAGE_CODES = ("", "ru", "uk", "en", "be")
 
 
 async def _sync_bot_profile(b: Bot) -> None:
-    """Синхронизация имени и описаний (экран «пустой чат» до /start)."""
+    """Синхронизация описаний профиля (экран «пустой чат» до /start).
+
+    По умолчанию выключено: тексты задаются в BotFather и не перезаписываются при деплое.
+    Чтобы снова пушить описания из app/texts/bot_intro.py, задайте SYNC_BOT_PROFILE=1.
+    """
+    flag = (os.getenv("SYNC_BOT_PROFILE") or "").strip().lower()
+    if flag not in ("1", "true", "yes", "on"):
+        logging.getLogger(__name__).info(
+            "bot profile sync skipped (SYNC_BOT_PROFILE not set; use BotFather Edit Description)"
+        )
+        return
+
     log = logging.getLogger(__name__)
     from app.texts.bot_intro import (
         BOT_TELEGRAM_DESCRIPTION,

@@ -2266,7 +2266,7 @@ async function consumeDashboardDeepLinks() {
     }
     if (trialEligible.value && !tariffIsPremium.value) {
       try {
-        await activateTrialClick()
+        await openTrialActivateModalAndRun()
       } catch {
         //
       }
@@ -3412,7 +3412,10 @@ async function activateTrialClick(opts = {}) {
     if (res?.already_active) {
       showToast(t('dashboard.trial.already_active_toast'))
     } else {
-      showToast(t('dashboard.trial.activated_toast', { n: Number(res?.trial_remaining_days || 7) }))
+      showToast(t('dashboard.trial.activated_toast', {
+        n: Number(res?.trial_remaining_days || 7),
+        aurum: Number(res?.trial_gift_aurum || 100),
+      }))
     }
     try {
       const fresh = await rawApi.me()

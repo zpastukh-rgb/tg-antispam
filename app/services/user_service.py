@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import User, Chat, Tariff
+from app.db.models import User, Chat, Tariff, CreditLedger
 from app.db.pii_session import PiiAsyncSessionLocal, pii_storage_enabled
 from app.services.admin_roles import is_full_admin_user
 from app.services.pii_user_store import pii_get_row, pii_upsert_profile
@@ -451,3 +451,35 @@ async def can_add_chat_by_kind(session: AsyncSession, telegram_id: int, chat_kin
     if kind == "channel":
         return await can_add_channel(session, telegram_id)
     return await can_add_chat(session, telegram_id)
+
+
+# Подарок AURUM при первой активации 7-дневного Premium-триала (баннер / insta-кнопка).
+TRIAL_GIFT_AURUM = 100.0
+
+
+async def grant_trial_gift_aurum(session: AsyncSession, user: User) -> tuple[bool, float]:
+    """Начисляет TRIAL_GIFT_AURUM один раз. Возвращает (начислено_сейчас, сумма)."""
+    uid = int(getattr(user, "id", 0) or 0)
+    if uid <= 0:
+        return False, 0.0
+    dup = await session.execute(
+        select(CreditLedger.id).where(
+            CreditLedger.user_id == uid,
+            CreditLedger.reason == "trial_gift_aurum",
+        ).limit(1)
+    )
+    if dup.scalar_one_or_none():
+        return False, 0.0
+    amount = float(TRIAL_GIFT_AURUM)
+    user.aurum_credits = round(float(getattr(user, "aurum_credits", 0.0) or 0.0) + amount, 4)
+    tg_id = int(getattr(user, "telegram_id", 0) or 0)
+    session.add(
+        CreditLedger(
+            user_id=uid,
+            delta=amount,
+            reason="trial_gift_aurum",
+            external_key=f"trial_gift_aurum:{tg_id}"[:128],
+        )
+    )
+    session.add(user)
+    return True, amount

@@ -36,7 +36,18 @@ const historySectionRef = ref(null)
 
 const isPremium = computed(() => !!props.profile?.is_premium)
 
+const isTrialGift = computed(
+  () => isPremium.value && String(props.profile?.subscription_source || '').toLowerCase() === 'trial',
+)
+
 const tariffRowLabel = computed(() => {
+  if (isTrialGift.value) {
+    const left = Number(props.profile?.trial_remaining_days || 0)
+    if (left > 0) {
+      return t('subscription.trial_plan_left', { n: left })
+    }
+    return t('subscription.plan_premium')
+  }
   const m = Number(props.profile?.subscription_paid_period_months || 0)
   if (m > 0) return _monthsLabel(m)
   const d = Number(props.profile?.subscription_paid_period_days || 0)
@@ -72,6 +83,7 @@ const paymentMethodLabel = computed(() => {
     return t('subscription.payment_method.none')
   }
   const source = String(props.profile?.subscription_source || '').toLowerCase()
+  if (source === 'trial') return t('subscription.payment_method.gift')
   if (source === 'promo') return t('billing.method.promo')
   const p = String(props.profile?.payment_method_type || '').toLowerCase()
   if (p.includes('card')) return t('billing.method.yookassa_card')
@@ -172,12 +184,22 @@ const promoDetailsLabelFull = computed(() => {
 
 const promoDetailsLabel = computed(() => {
   const code = String(props.profile?.subscription_promo_code || '').trim()
-  if (!code) return ''
+  if (!code || isTrialGift.value) return ''
   const full = promoDetailsLabelFull.value
   if (!full) return ''
   const periodPart = full.split(' · ').slice(1).join(' · ')
   const codeShort = _shortPromoCode(code)
   return `${codeShort}${periodPart ? ` · ${periodPart}` : ''}`
+})
+
+const giftDetailsLabel = computed(() => {
+  if (!isTrialGift.value) return ''
+  const total = Number(props.profile?.trial_days_total || 7)
+  const left = Number(props.profile?.trial_remaining_days || 0)
+  if (left > 0) {
+    return t('subscription.gift_trial_period', { total, left })
+  }
+  return t('subscription.gift_trial_period_short', { total })
 })
 
 const subscriptionHistoryView = computed(() =>
@@ -371,7 +393,11 @@ watch(
           <span class="text-sm text-white/70">{{ t('subscription.method_label') }}</span>
           <span class="text-sm font-semibold text-white">{{ paymentMethodLabel }}</span>
         </div>
-        <div v-if="promoDetailsLabel && isPremium" class="flex items-center justify-between px-3 py-3">
+        <div v-if="isTrialGift && giftDetailsLabel" class="flex items-center justify-between px-3 py-3">
+          <span class="text-sm text-white/70">{{ t('subscription.payment_method.gift') }}</span>
+          <span class="min-w-0 flex-1 truncate pl-2 text-right text-[12px] font-semibold leading-tight text-lime-200">{{ giftDetailsLabel }}</span>
+        </div>
+        <div v-else-if="promoDetailsLabel && isPremium" class="flex items-center justify-between px-3 py-3">
           <span class="text-sm text-white/70">{{ t('subscription.payment_method.promo') }}</span>
           <span class="min-w-0 flex-1 truncate pl-2 text-right text-[12px] font-semibold leading-tight text-lime-200" :title="promoDetailsLabelFull">{{ promoDetailsLabel }}</span>
         </div>

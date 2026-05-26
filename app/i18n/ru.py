@@ -1002,8 +1002,13 @@ MESSAGES: dict[str, dict] = {
                 "Все удобно настраивается в приложении по кнопкам ниже 👇🏻"
             ),
             "trial_gift_hint": (
-                "🎁 *Подарок:* 7 дней Premium бесплатно — включите в приложении, "
-                "без карты и оплат."
+                "🎁 *Подарок:* 7 дней Premium + *100 ✨ AURUM* на рассылки. "
+                "AURUM тратится, пока Premium активен; после — остаётся на балансе."
+            ),
+            "insta_welcome_body": (
+                "Привет! 👋\n\n"
+                "🛡 *AntiSpam Guard* — защита Telegram-групп и каналов от спама, ботов и рейдов.\n\n"
+                "Нажмите первую кнопку — *Premium на 7 дней* и *100 ✨ AURUM* на рассылки 🎁"
             ),
         },
         "kb": {
@@ -1012,6 +1017,7 @@ MESSAGES: dict[str, dict] = {
             "ref": "🎁 Реферальная программа",
             "connect_group": "➕ Подключить группу",
             "connect_chat": "➕ Подключить чат",
+            "trial_gift_7d": "🎁 Premium на 7 дней",
             "back": "⬅️ Назад",
             "open_protection": "🛡 Открыть защиту",
             "connect_reports": "📊 Подключить чат отчётов",
@@ -1151,6 +1157,7 @@ MESSAGES: dict[str, dict] = {
             "access_levels_free": "{levels} уровень — прямые рефералы",
             "access_levels_full": "{levels} уровня — полная сеть",
             "premium_extra": "├ Premium, осталось дней: *{days_left}*\n└ Активен до: *{active_until}*\n",
+            "premium_extra_gift": "├ Premium-подарок, осталось: *{days_left}* дн.\n└ Активен до: *{active_until}*\n",
             "premium_extra_promo": "├ Premium по промокоду *{code}*, осталось: *{days_left}* дн.\n└ Активен до: *{active_until}*\n",
             "premium_extra_forever": "└ Premium без срока (промокод / бессрочный доступ)\n",
             "premium_extra_active": "└ Premium активен\n",

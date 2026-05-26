@@ -1213,6 +1213,12 @@ async def _run_subscription_expired(bot, session: AsyncSession, now: datetime) -
             user.group_limit = TARIFF_GROUP_LIMITS[Tariff.FREE.value]
             user.channel_limit = TARIFF_CHANNEL_LIMITS[Tariff.FREE.value]
             await enforce_owner_active_chat_limit(session, int(uid), int(TARIFF_CHAT_LIMITS[Tariff.FREE.value]))
+            try:
+                from app.services.broadcast_lifecycle import stop_user_broadcast_automation
+
+                await stop_user_broadcast_automation(session, int(uid))
+            except Exception as stop_exc:
+                logger.warning("stop broadcasts on expiry uid=%s: %s", uid, stop_exc)
             # Промо-истечение: отдельное одноразовое уведомление, без цепочки follow-up «автосписания».
             if src == "promo":
                 user.reminder_stage = max(int(getattr(user, "reminder_stage", 0) or 0), 4)

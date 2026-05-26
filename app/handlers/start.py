@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import os
 import logging
+import asyncio
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, Tuple
@@ -101,10 +102,12 @@ CB_ADDGROUP = "st:addgroup"
 
 START_MSG_CACHE: "OrderedDict[int, Tuple[int, datetime]]" = OrderedDict()
 LAST_START_HANDLED_AT: "OrderedDict[int, datetime]" = OrderedDict()
+LAST_START_KIND: "OrderedDict[int, str]" = OrderedDict()
+_START_HANDLER_LOCKS: dict[int, asyncio.Lock] = {}
 
 CACHE_MAX = 2000
 CACHE_TTL = timedelta(days=3)
-START_DEDUP_WINDOW = timedelta(seconds=5)
+START_DEDUP_WINDOW = timedelta(seconds=8)
 
 
 def _cache_set(user_id: int, msg_id: int):
@@ -146,16 +149,35 @@ def _cache_get(user_id: int) -> Optional[int]:
     return msg_id
 
 
-def _should_skip_duplicate_start(user_id: int) -> bool:
+def _start_dedup_action(user_id: int, *, plain: bool, insta: bool) -> str:
+    """В окне START_DEDUP_WINDOW: skip повтор; insta после plain — proceed (Instagram-воронка)."""
     now = datetime.now(timezone.utc)
-    last = LAST_START_HANDLED_AT.get(user_id)
-    LAST_START_HANDLED_AT[user_id] = now
-    LAST_START_HANDLED_AT.move_to_end(user_id)
+    uid = int(user_id)
+    kind = "insta" if insta else ("plain" if plain else "other")
+    last_at = LAST_START_HANDLED_AT.get(uid)
+    last_kind = LAST_START_KIND.get(uid, "")
+    LAST_START_HANDLED_AT[uid] = now
+    LAST_START_KIND[uid] = kind
+    LAST_START_HANDLED_AT.move_to_end(uid)
+    LAST_START_KIND.move_to_end(uid)
     while len(LAST_START_HANDLED_AT) > CACHE_MAX:
         LAST_START_HANDLED_AT.popitem(last=False)
-    if not last:
-        return False
-    return (now - last) < START_DEDUP_WINDOW
+    while len(LAST_START_KIND) > CACHE_MAX:
+        LAST_START_KIND.popitem(last=False)
+    if not last_at or (now - last_at) >= START_DEDUP_WINDOW:
+        return "proceed"
+    if kind == "insta" and last_kind == "plain":
+        return "proceed"
+    return "skip"
+
+
+def _start_handler_lock(user_id: int) -> asyncio.Lock:
+    uid = int(user_id)
+    lk = _START_HANDLER_LOCKS.get(uid)
+    if lk is None:
+        lk = asyncio.Lock()
+        _START_HANDLER_LOCKS[uid] = lk
+    return lk
 
 
 # =========================================================
@@ -676,17 +698,34 @@ async def cmd_start(message: Message):
     plain_start_only = len(args) == 1 and bool(
         re.match(r"^/start(?:@[A-Za-z0-9_]+)?$", (args[0] or "").strip(), re.I)
     )
-    # До любых await: маркировка повторного голого /start и лёгкое обновление панели (см. lock в panel_dm._edit_panel).
-    if plain_start_only and _should_skip_duplicate_start(message.from_user.id):
-        try:
-            from app.handlers.panel_dm import reset_and_show_private_panel
-            await reset_and_show_private_panel(message.bot, message.from_user.id)
-        except Exception:
-            pass
-        return
+    insta_payload = ""
+    if len(args) >= 2:
+        cand = (args[1] or "").strip().lower()
+        if cand.startswith("insta_"):
+            insta_payload = cand
 
+    uid = int(message.from_user.id)
+    async with _start_handler_lock(uid):
+        # После очистки истории Telegram иногда шлёт два /start подряд — второй игнорируем.
+        if (plain_start_only or insta_payload) and _start_dedup_action(
+            uid,
+            plain=plain_start_only,
+            insta=bool(insta_payload),
+        ) == "skip":
+            return
+
+        await _handle_private_start(message, args, plain_start_only, insta_payload)
+
+
+async def _handle_private_start(
+    message: Message,
+    args: list[str],
+    plain_start_only: bool,
+    insta_payload: str,
+) -> None:
+    uid = int(message.from_user.id)
     dm_lang = await _get_user_lang(
-        int(message.from_user.id),
+        uid,
         fallback_tg_language_code=getattr(message.from_user, "language_code", None),
     )
     # Deep link «принять права делегата чата»:
@@ -851,24 +890,41 @@ async def cmd_start(message: Message):
         "yes",
     ):
         await _send_welcome_banner_if_any(message.bot, message.chat.id)
-    try:
-        from app.handlers.panel_dm import reset_and_show_private_panel
 
+    from app.handlers.panel_dm import (
+        _cache_get as panel_cache_get,
+        ensure_dm_quick_reply_keyboard,
+        reset_and_show_private_panel,
+        show_insta_trial_welcome,
+    )
+
+    if insta_payload:
+        try:
+            await show_insta_trial_welcome(message.bot, uid)
+        except Exception:
+            logger.exception("insta trial welcome failed uid=%s", uid)
+            if panel_cache_get(uid) is None:
+                await _edit_or_send(message, await _start_text_for(message), start_kb(dm_lang))
+        try:
+            await ensure_dm_quick_reply_keyboard(message.bot, uid, force_refresh=True)
+        except Exception:
+            logger.debug("ensure_dm_quick_reply_keyboard failed uid=%s", uid, exc_info=True)
+        return
+
+    try:
         await reset_and_show_private_panel(
             message.bot,
-            message.from_user.id,
+            uid,
             cabinet_added_count=int(connected_shared_cabinets or 0),
         )
     except Exception:
-        await _edit_or_send(message, await _start_text_for(message), start_kb(dm_lang))
-        try:
-            from app.handlers.panel_dm import ensure_dm_quick_reply_keyboard
-
-            await ensure_dm_quick_reply_keyboard(
-                message.bot, message.from_user.id, force_refresh=True
-            )
-        except Exception:
-            pass
+        logger.exception("reset_and_show_private_panel failed uid=%s", uid)
+        if panel_cache_get(uid) is None:
+            await _edit_or_send(message, await _start_text_for(message), start_kb(dm_lang))
+            try:
+                await ensure_dm_quick_reply_keyboard(message.bot, uid, force_refresh=True)
+            except Exception:
+                logger.debug("ensure_dm_quick_reply_keyboard failed uid=%s", uid, exc_info=True)
 
 
 # =========================================================

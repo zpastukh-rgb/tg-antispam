@@ -108,6 +108,8 @@ from app.services.user_service import (
     TARIFF_CHANNEL_LIMITS,
     TRIAL_DAYS as _TRIAL_DAYS,
     TRIAL_SUBSCRIPTION_SOURCE as _TRIAL_SUBSCRIPTION_SOURCE,
+    TRIAL_GIFT_AURUM as _TRIAL_GIFT_AURUM,
+    grant_trial_gift_aurum as _grant_trial_gift_aurum,
     Tariff,
     trial_window_remaining_days as _us_trial_window_remaining_days,
     is_trial_eligible as _us_is_trial_eligible,
@@ -891,7 +893,11 @@ async def _user_subscription_panel_dict(session: AsyncSession, user: User) -> di
             .limit(1)
         )
         row_promo = pr_promo.one_or_none()
-        if row_promo:
+        sub_src = str(getattr(user, "subscription_source", "") or "").strip().lower()
+        if sub_src == "trial":
+            promo_code = None
+            promo_days = None
+        elif row_promo:
             promo_code = str(row_promo[0] or "").strip().upper() or None
             _pd = int(row_promo[1] or 0)
             promo_days = _pd if _pd >= 0 else None
@@ -1614,6 +1620,9 @@ async def api_me_trial_activate(
             "subscription_until": (
                 user.subscription_until.isoformat() if user.subscription_until else None
             ),
+            "trial_gift_aurum": float(_TRIAL_GIFT_AURUM),
+            "aurum_granted_now": False,
+            "aurum_credits": round(float(getattr(user, "aurum_credits", 0.0) or 0.0), 2),
         }
 
     if not _us_is_trial_eligible(user, now):
@@ -1644,6 +1653,7 @@ async def api_me_trial_activate(
     user.trial_activated_at = now
     # Сброс дедупа DM-серии, чтобы in-trial напоминания начали считаться от свежей активации.
     user.trial_reminder_last_day_sent = 0
+    aurum_granted_now, _aurum_delta = await _grant_trial_gift_aurum(session, user)
     try:
         await session.commit()
     except Exception:
@@ -1658,6 +1668,9 @@ async def api_me_trial_activate(
         "trial_days_total": _TRIAL_DAYS,
         "subscription_until": until.isoformat(),
         "subscription_source": _TRIAL_SUBSCRIPTION_SOURCE,
+        "trial_gift_aurum": float(_TRIAL_GIFT_AURUM),
+        "aurum_granted_now": bool(aurum_granted_now),
+        "aurum_credits": round(float(getattr(user, "aurum_credits", 0.0) or 0.0), 2),
     }
 
 
@@ -13178,6 +13191,8 @@ async def api_admin_broadcasts_quote(
     partner_bonus = float(getattr(viewer, "bonus_credits", 0.0) or 0.0)
     spendable = round(payer_au, 2)
     can_afford = bool(full or int(cost_tokens) <= 0 or plan.can_afford)
+    if not full and int(cost_tokens) > 0 and not _is_user_premium_now(plan.payer_user, datetime.now(timezone.utc)):
+        can_afford = False
     req_n = len(body_chat_ids) if body_chat_ids else 0
     res_n = len(target_chat_ids)
     if req_n > res_n:

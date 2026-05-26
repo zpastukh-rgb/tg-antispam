@@ -723,7 +723,24 @@ async def _autopost_process_one_loaded_ap(
     """Один якорь или кампания: ap уже нормализован и содержит _state."""
     from zoneinfo import ZoneInfo
 
+    from app.services.admin_roles import is_full_admin_user
+    from app.services.chat_owner_premium import user_effective_miniapp_premium
+    from app.services.user_service import get_or_create_user
+
     if str(ap.get("runState") or "").lower() != "running":
+        return
+
+    owner = await get_or_create_user(session, int(owner_tid))
+    now_utc = datetime.now(timezone.utc)
+    if not is_full_admin_user(owner, int(owner_tid)) and not user_effective_miniapp_premium(owner, now_utc):
+        ap["runState"] = "stopped"
+        state = ap.get("_state")
+        if isinstance(state, dict):
+            state["stop_reason"] = "premium_expired"
+        else:
+            ap["_state"] = {"stop_reason": "premium_expired"}
+        persist_row.autopost_json = json.dumps(ap, ensure_ascii=False)
+        await session.commit()
         return
 
     tz_name = str(ap.get("timezone") or "Europe/Moscow")
