@@ -296,6 +296,31 @@ async def _railway_health_server() -> None:
 # Пустая строка = слой "для всех языков без отдельного описания" (см. Telegram setMyDescription).
 # ru/uk/en/be: иначе русскоязычный Telegram часто продолжает показывать старый текст из BotFather.
 _BOT_PROFILE_LANGUAGE_CODES = ("", "ru", "uk", "en", "be")
+# Языковые слои, которые раньше затирали BotFather при каждом деплое (setMyDescription language_code=…).
+_BOT_PROFILE_OVERRIDE_LANGS = ("ru", "uk", "en", "be")
+
+
+async def _clear_bot_profile_language_overrides(b: Bot) -> None:
+    """Удаляет ru/uk/en/be описания из API — Telegram снова показывает текст из BotFather."""
+    log = logging.getLogger(__name__)
+    for lang in _BOT_PROFILE_OVERRIDE_LANGS:
+        try:
+            await b.set_my_description("", language_code=lang)
+        except Exception as e:
+            log.warning("clear_my_description language_code=%r: %s", lang, e)
+        try:
+            await b.set_my_short_description("", language_code=lang)
+        except Exception as e:
+            log.warning("clear_my_short_description language_code=%r: %s", lang, e)
+    try:
+        check = await b.get_my_description(language_code="ru")
+        preview = (check.description or "")[:120].replace("\n", " ")
+        log.info(
+            "bot profile: language overrides cleared; getMyDescription(ru)=%r",
+            preview or "(empty, BotFather default)",
+        )
+    except Exception as e:
+        log.warning("get_my_description(ru) after clear: %s", e)
 
 
 async def _sync_bot_profile(b: Bot) -> None:
@@ -309,6 +334,7 @@ async def _sync_bot_profile(b: Bot) -> None:
         logging.getLogger(__name__).info(
             "bot profile sync skipped (SYNC_BOT_PROFILE not set; use BotFather Edit Description)"
         )
+        await _clear_bot_profile_language_overrides(b)
         return
 
     log = logging.getLogger(__name__)

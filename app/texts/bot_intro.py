@@ -6,8 +6,10 @@
 Файл-образец в репозитории: static/welcome_banner.jpg.
 
 Описание и короткое описание профиля по умолчанию меняются только в BotFather.
-Константы BOT_TELEGRAM_* ниже применяются к Telegram API лишь если на сервере SYNC_BOT_PROFILE=1
-(см. app/main._sync_bot_profile).
+Константы BOT_TELEGRAM_* ниже применяются к Telegram API лишь если на сервере SYNC_BOT_PROFILE=1.
+
+Раньше код также записывал отдельные описания для ru/uk/en/be — они могли перекрывать BotFather
+в русскоязычном клиенте. При выключенном SYNC_BOT_PROFILE бот при старте очищает эти слои.
 """
 
 from pathlib import Path
