@@ -1,14 +1,17 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useRouter } from 'vue-router'
 import SecurityPinGateModal from '../components/SecurityPinGateModal.vue'
 import { useApi } from '../composables/useApi'
 import { useSecurityPinGate } from '../composables/useSecurityPinGate'
 import { useToast } from '../composables/useToast'
 import { shouldAskPinForAction } from '../utils/settingsSecurity'
 import { formatDateTimeRu } from '../utils/formatDateTime'
+import { openYookassaPayment, yookassaPaymentReady } from '../utils/yookassaCheckout.js'
 
 const { t } = useI18n()
+const router = useRouter()
 const { api, error, fetchSilent, hasInitData } = useApi()
 const { showToast } = useToast()
 const meTelegramId = ref(null)
@@ -64,18 +67,13 @@ async function startPayment(months) {
   payLoadingMonths.value = months
   try {
     const r = await fetchSilent(() => api.yookassaCreatePayment(months))
-    const url = r?.confirmation_url
-    if (!url) {
+    if (!yookassaPaymentReady(r)) {
       showToast(t('errors.payment_link_missing'))
       return
     }
-    const tg = window.Telegram?.WebApp
-    if (typeof tg?.openLink === 'function') {
-      tg.openLink(url, { try_instant_view: false })
-    } else {
-      window.open(url, '_blank', 'noopener,noreferrer')
-    }
-    showToast(isEn.value ? 'Opening payment page' : 'Откроется страница оплаты')
+    const mode = openYookassaPayment(router, r)
+    if (!mode) showToast(t('errors.payment_link_missing'))
+    else showToast(isEn.value ? 'Opening payment' : 'Открываем оплату')
   } catch (e) {
     const msg = e?.body?.detail || e?.message || t('errors.payment_failed')
     showToast(typeof msg === 'string' ? msg : t('errors.payment_failed'))
@@ -94,18 +92,13 @@ async function startTestTariffPayment(months) {
   payLoadingTestMonths.value = months
   try {
     const r = await fetchSilent(() => api.yookassaCreateTestSubscriptionPayment(months))
-    const url = r?.confirmation_url
-    if (!url) {
+    if (!yookassaPaymentReady(r)) {
       showToast(t('errors.payment_link_missing'))
       return
     }
-    const tg = window.Telegram?.WebApp
-    if (typeof tg?.openLink === 'function') {
-      tg.openLink(url, { try_instant_view: false })
-    } else {
-      window.open(url, '_blank', 'noopener,noreferrer')
-    }
-    showToast(isEn.value ? 'Opening payment page' : 'Откроется страница оплаты')
+    const mode = openYookassaPayment(router, r)
+    if (!mode) showToast(t('errors.payment_link_missing'))
+    else showToast(isEn.value ? 'Opening payment' : 'Открываем оплату')
   } catch (e) {
     const msg = e?.body?.detail || e?.message || t('errors.payment_failed')
     showToast(typeof msg === 'string' ? msg : t('errors.payment_failed'))

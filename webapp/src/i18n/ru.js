@@ -902,9 +902,8 @@ export default {
       aurum_modal_title: 'AURUM и счета',
       pay_method_title_subscribe: 'Способ оплаты',
       pay_method_title_tokens: 'Купить токены',
-      pay_subtitle_subscribe: 'Вы будете перенаправлены на защищенную страницу ЮKassa',
-      pay_subtitle_tokens:
-        'Вы будете перенаправлены на защищенную страницу ЮKassa для покупки токенов',
+      pay_subtitle_subscribe: 'Оплата откроется внутри приложения',
+      pay_subtitle_tokens: 'Оплата AURUM откроется внутри приложения',
       pay_card_title: 'Банковская карта / СБП',
       pay_card_hint:
         'Visa, Mastercard, МИР · ЮKassa (СБП и др. — если включены в кассе)',
@@ -4166,6 +4165,10 @@ export default {
     get: 'Получить Premium',
     renew_failed: 'Не удалось продлить подписку',
     landing_title: 'Тариф и оплата',
+    checkout: {
+      title: 'Оплата',
+      loading: 'Загружаем форму ЮKassa…',
+    },
     method: {
       yookassa_card: 'ЮKassa (карта)',
       yookassa_sbp: 'ЮKassa (СБП)',

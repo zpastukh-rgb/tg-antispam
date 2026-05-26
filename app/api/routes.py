@@ -10274,7 +10274,7 @@ async def api_yookassa_create_payment(
     except (TypeError, ValueError):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("months_required"))
     try:
-        url = await create_yookassa_subscription_payment(
+        payload = await create_yookassa_subscription_payment(
             session,
             user_id,
             months,
@@ -10289,7 +10289,7 @@ async def api_yookassa_create_payment(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=_humanize_yookassa_error(e),
         ) from e
-    return {"confirmation_url": url}
+    return payload
 
 
 @router.post("/payments/yookassa/create-test-subscription")
@@ -10317,7 +10317,7 @@ async def api_yookassa_create_test_subscription_payment(
     except (TypeError, ValueError):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("months_required"))
     try:
-        url = await create_yookassa_subscription_payment(session, user_id, months, mode="test")
+        payload = await create_yookassa_subscription_payment(session, user_id, months, mode="test")
     except ValueError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("invalid_subscription_period"))
     except RuntimeError as e:
@@ -10326,7 +10326,7 @@ async def api_yookassa_create_test_subscription_payment(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=_humanize_yookassa_error(e),
         ) from e
-    return {"confirmation_url": url}
+    return payload
 
 
 @router.post("/payments/yookassa/create-tokens")
@@ -10352,7 +10352,7 @@ async def api_yookassa_create_tokens_payment(
     except (TypeError, ValueError):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("tokens_required"))
     try:
-        url = await create_yookassa_tokens_payment(session, user_id, tokens, mode="live")
+        payload = await create_yookassa_tokens_payment(session, user_id, tokens, mode="live")
     except ValueError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("invalid_token_pack"))
     except RuntimeError as e:
@@ -10361,7 +10361,7 @@ async def api_yookassa_create_tokens_payment(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(e) or err_detail("payment_provider_error"),
         ) from e
-    return {"confirmation_url": url}
+    return payload
 
 
 @router.post("/payments/autorenew/disable")
@@ -10422,7 +10422,7 @@ async def api_admin_test_create_subscription_payment(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("months_required"))
     target_telegram_id = int(body.get("target_telegram_id") or user_id)
     try:
-        url = await create_yookassa_subscription_payment(session, target_telegram_id, months, mode="test")
+        payload = await create_yookassa_subscription_payment(session, target_telegram_id, months, mode="test")
     except ValueError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("invalid_subscription_period"))
     except RuntimeError as e:
@@ -10431,7 +10431,7 @@ async def api_admin_test_create_subscription_payment(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=_humanize_yookassa_error(e),
         ) from e
-    return {"confirmation_url": url}
+    return payload
 
 
 @router.post("/admin/test-payments/create-tokens")
@@ -10456,7 +10456,7 @@ async def api_admin_test_create_tokens_payment(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("tokens_required"))
     target_telegram_id = int(body.get("target_telegram_id") or user_id)
     try:
-        url = await create_yookassa_tokens_payment(session, target_telegram_id, tokens, mode="test")
+        payload = await create_yookassa_tokens_payment(session, target_telegram_id, tokens, mode="test")
     except ValueError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_detail("invalid_token_pack"))
     except RuntimeError as e:
@@ -10465,7 +10465,7 @@ async def api_admin_test_create_tokens_payment(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(e) or err_detail("payment_provider_error"),
         ) from e
-    return {"confirmation_url": url}
+    return payload
 
 
 @router.post("/admin/test-payments/create-binding-probe")
@@ -10488,14 +10488,14 @@ async def api_admin_test_create_binding_probe_payment(
         )
     target_telegram_id = int((body or {}).get("target_telegram_id") or user_id)
     try:
-        url = await create_yookassa_binding_probe_payment(session, target_telegram_id, mode=mode)
+        payload = await create_yookassa_binding_probe_payment(session, target_telegram_id, mode=mode)
     except RuntimeError as e:
         _log.exception("Admin test YooKassa create binding probe failed")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=_humanize_yookassa_error(e),
         ) from e
-    return {"confirmation_url": url}
+    return payload
 
 
 @router.get("/admin/test-payments/capability")

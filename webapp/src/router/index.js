@@ -11,6 +11,7 @@ import HistoryView from '../views/HistoryView.vue'
 import ReferralView from '../views/ReferralView.vue'
 import GiftsView from '../views/GiftsView.vue'
 import CommunityView from '../views/CommunityView.vue'
+import YookassaPayView from '../views/YookassaPayView.vue'
 import { useDashboardSection } from '../composables/useDashboardSection'
 import { api } from '../api/client'
 import { prefetchReportsView } from '../utils/reportsViewCache.js'
@@ -39,6 +40,7 @@ const routes = [
   { path: '/community', name: 'Community', component: CommunityView, meta: { titleKey: 'nav.community' } },
   { path: '/connect', name: 'Connect', component: ConnectView, meta: { titleKey: 'nav.connect' } },
   { path: '/settings', name: 'Settings', component: SettingsView, meta: { titleKey: 'nav.settings' } },
+  { path: '/pay/yookassa', name: 'YookassaPay', component: YookassaPayView, meta: { titleKey: 'billing.checkout.title' } },
   { path: '/admin', name: 'Admin', component: AdminView, meta: { titleKey: 'nav.admin' } },
   { path: '/:pathMatch(.*)*', name: 'CatchAll', redirect: '/' },
 ]

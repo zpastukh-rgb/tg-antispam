@@ -33,6 +33,7 @@ import BroadcastMediaStrip from '../components/BroadcastMediaStrip.vue'
 import BroadcastRecipientsPanel from '../components/BroadcastRecipientsPanel.vue'
 import BroadcastTextLinksStrip from '../components/BroadcastTextLinksStrip.vue'
 import { BC_MAX_MEDIA_ITEMS } from '../constants/broadcastMedia.js'
+import { openYookassaPayment, yookassaPaymentReady } from '../utils/yookassaCheckout.js'
 import { normalizeHtmlForTelegram, sanitizeEditorLinksNoUnderline, telegramHtmlToEditorInnerHtml } from '../utils/telegramHtmlForTg'
 import {
   editorSplitBlockquoteAtCaret,
@@ -7723,11 +7724,8 @@ async function createAdminTestSubscription(months) {
   try {
     const targetId = resolveTestTargetTelegramId()
     const r = await fetch(() => api.adminTestCreateSubscriptionPayment(months, targetId))
-    const url = String(r?.confirmation_url || '')
-    if (!url) throw new Error(tt('admin.dlg.pay_no_url'))
-    const tg = window.Telegram?.WebApp
-    if (typeof tg?.openLink === 'function') tg.openLink(url, { try_instant_view: false })
-    else window.open(url, '_blank', 'noopener,noreferrer')
+    if (!yookassaPaymentReady(r)) throw new Error(tt('admin.dlg.pay_no_url'))
+    if (!openYookassaPayment(router, r)) throw new Error(tt('admin.dlg.pay_no_url'))
   } catch (e) {
     alert(String(e?.body?.detail || e?.message || tt('admin.dlg.test_sub_failed')))
   } finally {
@@ -7745,11 +7743,8 @@ async function createAdminTestTokens(tokens) {
   try {
     const targetId = resolveTestTargetTelegramId()
     const r = await fetch(() => api.adminTestCreateTokensPayment(tokens, targetId))
-    const url = String(r?.confirmation_url || '')
-    if (!url) throw new Error(tt('admin.dlg.pay_no_url'))
-    const tg = window.Telegram?.WebApp
-    if (typeof tg?.openLink === 'function') tg.openLink(url, { try_instant_view: false })
-    else window.open(url, '_blank', 'noopener,noreferrer')
+    if (!yookassaPaymentReady(r)) throw new Error(tt('admin.dlg.pay_no_url'))
+    if (!openYookassaPayment(router, r)) throw new Error(tt('admin.dlg.pay_no_url'))
   } catch (e) {
     alert(String(e?.body?.detail || e?.message || tt('admin.dlg.test_tokens_failed')))
   } finally {
@@ -7767,11 +7762,8 @@ async function createAdminBindingProbe(mode = 'live') {
   try {
     const targetId = resolveTestTargetTelegramId()
     const r = await fetch(() => api.adminTestCreateBindingProbePayment(targetId, mode))
-    const url = String(r?.confirmation_url || '')
-    if (!url) throw new Error(tt('admin.dlg.pay_no_url'))
-    const tg = window.Telegram?.WebApp
-    if (typeof tg?.openLink === 'function') tg.openLink(url, { try_instant_view: false })
-    else window.open(url, '_blank', 'noopener,noreferrer')
+    if (!yookassaPaymentReady(r)) throw new Error(tt('admin.dlg.pay_no_url'))
+    if (!openYookassaPayment(router, r)) throw new Error(tt('admin.dlg.pay_no_url'))
   } catch (e) {
     alert(String(e?.body?.detail || e?.message || tt('admin.dlg.test_probe_failed')))
   } finally {

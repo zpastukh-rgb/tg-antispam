@@ -2690,18 +2690,23 @@ async def cb_plan_select(cb: CallbackQuery):
     if yookassa_configured():
         try:
             async with await get_session() as session:
-                pay_url = await create_yookassa_subscription_payment(
+                pay_data = await create_yookassa_subscription_payment(
                     session,
                     cb.from_user.id,
                     months,
                     username=cb.from_user.username,
                     first_name=cb.from_user.first_name,
+                    confirmation_type="redirect",
                 )
+                pay_url = str(pay_data.get("confirmation_url") or "")
         except ValueError:
             await cb.message.answer(i18n_t(lang, "billing_panel.plan_invalid"))
             return
         except Exception:
             logger.exception("YooKassa create from bot panel")
+            await cb.message.answer(i18n_t(lang, "billing_panel.yookassa_fail"))
+            return
+        if not pay_url:
             await cb.message.answer(i18n_t(lang, "billing_panel.yookassa_fail"))
             return
         txt = i18n_t(lang, "billing_panel.pay_screen", label=plan_label)

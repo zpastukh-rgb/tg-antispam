@@ -34,6 +34,7 @@ import {
   paymentStatusLabel,
   tokenReasonLabel,
 } from '../utils/historyLabels.js'
+import { openYookassaPayment, yookassaPaymentReady } from '../utils/yookassaCheckout.js'
 
 const ACTIVITY_SUMMARY_CACHE_KEY = 'guard.activity.summary.v2'
 const ME_PREMIUM_CACHE_KEY = 'guard.me.is_premium.v1'
@@ -2062,6 +2063,10 @@ function schedulePremiumActivationCheck() {
   void runPremiumActivationCheckLoop()
 }
 
+function onYookassaReturn() {
+  schedulePremiumActivationCheck()
+}
+
 async function runPremiumActivationCheckLoop() {
   if (premiumActivationCheckRunning) return
   premiumActivationCheckRunning = true
@@ -2341,6 +2346,7 @@ onMounted(async () => {
   await tryOpenProtectionReportFromRoute()
   document.addEventListener('visibilitychange', onVisibilityPaymentCheck)
   document.addEventListener('visibilitychange', onHomeHeroDocumentVisibilityChange)
+  window.addEventListener('guard:yookassa-return', onYookassaReturn)
   if (typeof window !== 'undefined') {
     window.addEventListener('focus', onWindowFocusPremiumCheck)
   }
@@ -2627,6 +2633,7 @@ onBeforeUnmount(() => {
   stopPaymentActivationFastPolling()
   document.removeEventListener('visibilitychange', onVisibilityPaymentCheck)
   document.removeEventListener('visibilitychange', onHomeHeroDocumentVisibilityChange)
+  window.removeEventListener('guard:yookassa-return', onYookassaReturn)
   if (typeof window !== 'undefined') {
     window.removeEventListener('focus', onWindowFocusPremiumCheck)
   }
@@ -2786,11 +2793,8 @@ async function loadTokenPacksFromApi() {
 }
 
 async function openYookassaUrlFromResponse(r) {
-  const url = r?.confirmation_url
-  if (!url) return
-  const tg = window.Telegram?.WebApp
-  if (typeof tg?.openLink === 'function') tg.openLink(url, { try_instant_view: false })
-  else window.open(url, '_blank', 'noopener,noreferrer')
+  if (!yookassaPaymentReady(r)) return
+  beginYookassaCheckout(r)
 }
 
 async function startTokenPackPayment(tokens) {
@@ -2799,12 +2803,11 @@ async function startTokenPackPayment(tokens) {
   payLoadingTokenPack.value = tok
   try {
     const r = await fetchSilent(() => api.yookassaCreateTokensPayment(tok))
-    const url = r?.confirmation_url
-    if (!url) {
+    if (!yookassaPaymentReady(r)) {
       showToast(t('errors.payment_link_missing'))
       return
     }
-    beginPaymentRedirect(url)
+    beginYookassaCheckout(r)
   } finally {
     payLoadingTokenPack.value = null
   }
@@ -3664,12 +3667,11 @@ async function startPayment(months) {
   payLoadingMonths.value = months
   try {
     const r = await fetchSilent(() => api.yookassaCreatePayment(months))
-    const url = r?.confirmation_url
-    if (!url) {
+    if (!yookassaPaymentReady(r)) {
       showToast(t('errors.payment_link_missing'))
       return
     }
-    beginPaymentRedirect(url)
+    beginYookassaCheckout(r)
   } catch (e) {
     showToast(String(e?.body?.detail || e?.message || t('errors.payment_failed')))
   } finally {
@@ -3677,58 +3679,39 @@ async function startPayment(months) {
   }
 }
 
-function openPaymentUrl(url) {
-  showPaymentRedirectScreen.value = false
-  const tg = window.Telegram?.WebApp
-  try {
-    if (typeof tg?.openLink === 'function') {
-      tg.openLink(url, { try_instant_view: false })
-      schedulePremiumActivationCheck()
-      // Keep flow inside Telegram mini app context; retry openLink if first call no-ops.
-      setTimeout(() => {
-        if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
-          try {
-            tg.openLink(url, { try_instant_view: false })
-          } catch {
-            //
-          }
-        }
-      }, 900)
-      setTimeout(() => schedulePremiumActivationCheck(), 1200)
-      return
-    }
-  } catch {
-    //
-  }
-  // Desktop webviews sometimes block window.open; same-tab redirect is more reliable.
-  try {
-    window.location.assign(url)
-  } catch {
-    window.open(url, '_blank', 'noopener,noreferrer')
-  }
-}
-
-function beginPaymentRedirect(url) {
-  paymentRedirectUrl.value = String(url || '').trim()
-  if (!paymentRedirectUrl.value) return
+function beginYookassaCheckout(response) {
   paymentWaitBaselinePremium.value = !!me.value?.is_premium
   paymentWaitBaselineUntilTs.value = Date.parse(String(me.value?.subscription_until || '')) || 0
   waitPremiumActivationAfterPayment.value = true
   startPaymentActivationFastPolling()
   showPremiumPayMethodModal.value = false
-  showPaymentRedirectScreen.value = true
-  paymentRedirectCountdown.value = 3
-  if (paymentRedirectTimer) clearInterval(paymentRedirectTimer)
-  paymentRedirectTimer = setInterval(() => {
-    paymentRedirectCountdown.value = Math.max(0, paymentRedirectCountdown.value - 1)
-    if (paymentRedirectCountdown.value <= 0) {
-      if (paymentRedirectTimer) {
-        clearInterval(paymentRedirectTimer)
-        paymentRedirectTimer = null
-      }
-      openPaymentUrl(paymentRedirectUrl.value)
-    }
-  }, 1000)
+  showPaymentRedirectScreen.value = false
+  if (paymentRedirectTimer) {
+    clearInterval(paymentRedirectTimer)
+    paymentRedirectTimer = null
+  }
+
+  const mode = openYookassaPayment(router, response)
+  if (!mode) {
+    waitPremiumActivationAfterPayment.value = false
+    showToast(t('errors.payment_link_missing'))
+    return
+  }
+  if (mode === 'redirect') {
+    schedulePremiumActivationCheck()
+  }
+}
+
+function openPaymentUrl(url) {
+  beginYookassaCheckout({
+    confirmation_url: String(url || '').trim(),
+  })
+}
+
+function beginPaymentRedirect(url) {
+  beginYookassaCheckout({
+    confirmation_url: String(url || '').trim(),
+  })
 }
 
 function closePremiumActivatedModalToHome() {
@@ -3782,9 +3765,11 @@ async function startTestTariffPayment(months) {
   payLoadingTestMonths.value = months
   try {
     const r = await fetchSilent(() => api.yookassaCreateTestSubscriptionPayment(months))
-    const url = r?.confirmation_url
-    if (!url) return
-    beginPaymentRedirect(url)
+    if (!yookassaPaymentReady(r)) {
+      showToast(t('errors.payment_link_missing'))
+      return
+    }
+    beginYookassaCheckout(r)
   } finally {
     payLoadingTestMonths.value = null
   }

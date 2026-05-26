@@ -898,8 +898,8 @@ export default {
       aurum_modal_title: 'AURUM and balances',
       pay_method_title_subscribe: 'Payment method',
       pay_method_title_tokens: 'Buy tokens',
-      pay_subtitle_subscribe: 'You will be redirected to a secure YooKassa page',
-      pay_subtitle_tokens: 'You will be redirected to a secure YooKassa page to buy tokens',
+      pay_subtitle_subscribe: 'Оплата откроется внутри приложения',
+      pay_subtitle_tokens: 'Оплата AURUM откроется внутри приложения',
       pay_card_title: 'Bank card / Faster Payments (SBP)',
       pay_card_hint:
         'Visa, Mastercard, MIR · YooKassa (SBP, etc. — if enabled in your checkout)',
@@ -4168,6 +4168,10 @@ export default {
     get: 'Get Premium',
     renew_failed: "Couldn't renew the subscription",
     landing_title: 'Plan and billing',
+    checkout: {
+      title: 'Payment',
+      loading: 'Loading YooKassa checkout…',
+    },
     method: {
       yookassa_card: 'YooKassa (card)',
       yookassa_sbp: 'YooKassa (SBP)',

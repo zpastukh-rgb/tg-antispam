@@ -38,6 +38,29 @@ _TOKEN_TO_RUB = 2.0
 _YOOKASSA_API = "https://api.yookassa.ru/v3/payments"
 
 
+def yookassa_miniapp_confirmation_type() -> str:
+    """Mini App: embedded (форма внутри WebView). Бот DM: redirect."""
+    v = str(os.getenv("YOOKASSA_MINIAPP_CONFIRMATION_TYPE") or "embedded").strip().lower()
+    return "redirect" if v == "redirect" else "embedded"
+
+
+def _yookassa_confirmation_payload(data: dict[str, Any], *, return_url: str) -> dict[str, str]:
+    conf = data.get("confirmation") if isinstance(data.get("confirmation"), dict) else {}
+    ctype = str(conf.get("type") or "").strip().lower()
+    out = {
+        "confirmation_type": ctype,
+        "confirmation_url": str(conf.get("confirmation_url") or ""),
+        "confirmation_token": str(conf.get("confirmation_token") or ""),
+        "return_url": str(conf.get("return_url") or return_url or ""),
+    }
+    if ctype == "embedded":
+        if not out["confirmation_token"]:
+            raise RuntimeError("invalid_yookassa_response")
+    elif not out["confirmation_url"]:
+        raise RuntimeError("invalid_yookassa_response")
+    return out
+
+
 def _parse_yookassa_utc_dt(val: object | None) -> datetime | None:
     if val is None:
         return None
@@ -200,15 +223,25 @@ async def _yookassa_create_payment(
     *,
     mode: str = "live",
     save_payment_method: bool = False,
+    confirmation_type: str | None = None,
 ) -> dict[str, Any]:
     idem = str(uuid.uuid4())
     shop, _, _ = _yookassa_env(mode)
     shop_tail = shop[-4:] if shop else "none"
-    log.info("YooKassa create payment mode=%s shop_tail=%s amount=%s", _norm_mode(mode), shop_tail, amount_rub)
+    ctype = str(confirmation_type or yookassa_miniapp_confirmation_type()).strip().lower()
+    if ctype not in ("embedded", "redirect"):
+        ctype = "embedded"
+    log.info(
+        "YooKassa create payment mode=%s shop_tail=%s amount=%s confirmation=%s",
+        _norm_mode(mode),
+        shop_tail,
+        amount_rub,
+        ctype,
+    )
     payload: dict[str, Any] = {
         "amount": {"value": amount_rub, "currency": "RUB"},
         "capture": True,
-        "confirmation": {"type": "redirect", "return_url": return_url},
+        "confirmation": {"type": ctype, "return_url": return_url},
         "description": description[:128],
         "metadata": {str(k): str(v)[:512] for k, v in metadata.items()},
         "save_payment_method": bool(save_payment_method),
@@ -346,9 +379,11 @@ async def create_yookassa_subscription_payment(
     first_name: str | None = None,
     mode: str = "live",
     save_payment_method: bool = False,
-) -> str:
+    confirmation_type: str | None = None,
+) -> dict[str, str]:
     """
-    Создаёт запись Payment и платёж в ЮKassa. Возвращает confirmation_url для редиректа пользователя.
+    Создаёт запись Payment и платёж в ЮKassa.
+    Возвращает confirmation_url (redirect) и/или confirmation_token (embedded).
     """
     if months not in _ALLOWED_MONTHS:
         raise ValueError("invalid_months")
@@ -391,6 +426,7 @@ async def create_yookassa_subscription_payment(
                 metadata=payload_meta,
                 mode=mode,
                 save_payment_method=bool(save_payment_method),
+                confirmation_type=confirmation_type,
             )
         except RuntimeError as e:
             msg = str(e or "").lower()
@@ -405,6 +441,7 @@ async def create_yookassa_subscription_payment(
                     metadata=payload_meta,
                     mode=mode,
                     save_payment_method=False,
+                    confirmation_type=confirmation_type,
                 )
             else:
                 raise
@@ -412,16 +449,15 @@ async def create_yookassa_subscription_payment(
         await session.rollback()
         raise
 
-    conf = data.get("confirmation") if isinstance(data.get("confirmation"), dict) else {}
-    conf_url = conf.get("confirmation_url")
     yid = data.get("id")
-    if not conf_url or not yid:
+    if not yid:
         await session.rollback()
         raise RuntimeError("invalid_yookassa_response")
+    conf_payload = _yookassa_confirmation_payload(data, return_url=return_url)
 
     pay.payment_id = str(yid)
     await session.commit()
-    return str(conf_url)
+    return conf_payload
 
 
 async def create_yookassa_tokens_payment(
@@ -432,7 +468,8 @@ async def create_yookassa_tokens_payment(
     username: str | None = None,
     first_name: str | None = None,
     mode: str = "live",
-) -> str:
+    confirmation_type: str | None = None,
+) -> dict[str, str]:
     """Создаёт оплату пакета токенов (сумма из прайса пакетов; число токенов хранится в Payment.months)."""
     token_count = int(tokens)
     if token_count not in ALLOWED_TOKEN_PACKS:
@@ -471,19 +508,19 @@ async def create_yookassa_tokens_payment(
             },
             mode=mode,
             save_payment_method=False,
+            confirmation_type=confirmation_type,
         )
     except Exception:
         await session.rollback()
         raise
-    conf = data.get("confirmation") if isinstance(data.get("confirmation"), dict) else {}
-    conf_url = conf.get("confirmation_url")
     yid = data.get("id")
-    if not conf_url or not yid:
+    if not yid:
         await session.rollback()
         raise RuntimeError("invalid_yookassa_response")
+    conf_payload = _yookassa_confirmation_payload(data, return_url=return_url)
     pay.payment_id = str(yid)
     await session.commit()
-    return str(conf_url)
+    return conf_payload
 
 
 async def create_yookassa_binding_probe_payment(
@@ -493,7 +530,8 @@ async def create_yookassa_binding_probe_payment(
     username: str | None = None,
     first_name: str | None = None,
     mode: str = "live",
-) -> str:
+    confirmation_type: str | None = None,
+) -> dict[str, str]:
     """Тестовый тариф для админки: 2 дня Premium за 1 RUB, с сохранением payment_method."""
     if not yookassa_configured(mode):
         raise RuntimeError("yookassa_not_configured")
@@ -528,19 +566,19 @@ async def create_yookassa_binding_probe_payment(
             },
             mode=mode,
             save_payment_method=True,
+            confirmation_type=confirmation_type,
         )
     except Exception:
         await session.rollback()
         raise
-    conf = data.get("confirmation") if isinstance(data.get("confirmation"), dict) else {}
-    conf_url = conf.get("confirmation_url")
     yid = data.get("id")
-    if not conf_url or not yid:
+    if not yid:
         await session.rollback()
         raise RuntimeError("invalid_yookassa_response")
+    conf_payload = _yookassa_confirmation_payload(data, return_url=return_url)
     pay.payment_id = str(yid)
     await session.commit()
-    return str(conf_url)
+    return conf_payload
 
 
 async def process_yookassa_webhook(session: AsyncSession, body: dict) -> None:
